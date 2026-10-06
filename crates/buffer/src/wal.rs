@@ -336,7 +336,7 @@ pub(crate) enum Step<'a> {
     Moved,
     /// The record goes on past the bytes given; ask for the next window.
     More,
-    /// The chain ends here: this is the head of the ring.
+    /// The chain ends here.
     End,
 }
 
@@ -411,8 +411,8 @@ enum Phase {
 /// `piece` bytes. The cursor reads such a record in three parts: its first block,
 /// the rest of its body in pieces while the CRC runs, then its start again, up to
 /// [`TABLE`] bytes, for the first bytes of the body. A walk reads at most twice
-/// the live bytes, plus one block and one largest record for a torn record at the
-/// end, and holds one window at a time.
+/// the bytes it walks, plus one block and one largest record for a torn record at
+/// the end, and holds one window at a time.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     layout: Layout,
@@ -480,7 +480,8 @@ impl Cursor {
         }
     }
 
-    /// The largest window at the head: the largest record, the rest of the area,
+    /// The largest window at the read position: the largest record, the rest of the
+    /// area,
     /// or the rest of one lap.
     fn bound(&self) -> Window {
         let area = self.layout.area;
@@ -490,7 +491,7 @@ impl Cursor {
         Window { place, len }
     }
 
-    /// Bytes of the area between the head and the tail one lap later.
+    /// Bytes of the area between the read position and the tail one lap later.
     fn unread(&self) -> u64 {
         self.layout.area - (self.at.offset - self.tail)
     }
@@ -607,9 +608,7 @@ impl Cursor {
     /// Makes the writer that continues the ring after the last data record walked,
     /// or from the tail when the walk read none, with the records before the offset
     /// `tail` released, and seals its restart record with `chain`, a new random
-    /// value, as the body. The chain continues from `chain`. The restart record
-    /// goes over the restart and wrap records after the last data record, which
-    /// hold nothing.
+    /// value, as the body. The chain continues from `chain`.
     ///
     /// # Errors
     ///
@@ -619,7 +618,8 @@ impl Cursor {
     ///
     /// # Panics
     ///
-    /// Before [`Step::End`], or when `tail` is outside the records walked.
+    /// Before [`Step::End`], or when `tail` is before the tail of the walk or past
+    /// the end of its last data record.
     pub(crate) fn writer(
         &self,
         tail: u64,
@@ -687,7 +687,7 @@ mod tests {
     }
 
     /// Walks the area with the real cursor to the end of the chain. Checks that it
-    /// asks for at most twice the live bytes, one block, and one largest record.
+    /// asks for at most twice the bytes it walks, one block, and one largest record.
     fn walk(area: &[u8], tail: Position) -> Result<(Vec<Vec<u8>>, Cursor), Invalid> {
         let mut cursor = Cursor::new(layout(), tail, PIECE);
         let mut data = Vec::new();
@@ -699,10 +699,10 @@ mod tests {
                 Step::Data(body) => data.push(whole(area, place, body)),
                 Step::Moved | Step::More => {}
                 Step::End => {
-                    let live = cursor.at.offset - tail.offset;
+                    let walked = cursor.at.offset - tail.offset;
                     let window = (BODY_MAX + HEADER_LEN).next_multiple_of(ALIGN);
-                    let most = 2 * live + to_u64(ALIGN + window);
-                    assert!(asked <= most, "asked {asked} for {live} live bytes");
+                    let most = 2 * walked + to_u64(ALIGN + window);
+                    assert!(asked <= most, "asked {asked} for {walked} bytes walked");
                     return Ok((data, cursor));
                 }
             }
@@ -1277,11 +1277,22 @@ mod tests {
             assert_eq!((data, cursor.at), (vec![b"one".to_vec()], at(3, 6)));
         }
 
-        /// A ring of the smallest area holds one restart record after any number
-        /// of opens with no data, so it takes its largest record.
+        /// The writer starts before the restart records after the last data record,
+        /// so a tail past the last data record is outside its records.
+        #[test]
+        #[should_panic(
+            expected = "release to 4096 is outside the live records from 0 to 0"
+        )]
+        fn panics_on_a_tail_past_the_last_data_record() {
+            let (_, cursor) = Ring::new().walk();
+            let _writer = cursor.writer(4096, 2);
+        }
+
+        /// A ring of two blocks holds one restart record after any number of opens
+        /// with no data, so it takes its largest record.
         #[test]
         fn takes_the_largest_record_after_opens_with_no_data() {
-            let layout = Layout::new(2 * 4096, 4087).expect("the smallest area");
+            let layout = Layout::new(2 * 4096, 4087).expect("an area of two blocks");
             let mut area = vec![0; 2 * 4096];
             for chain in 1..=3 {
                 let mut cursor = Cursor::new(layout, START, PIECE);
@@ -1482,7 +1493,7 @@ mod tests {
             assert_eq!(cursor.next(&ring.area[..ALIGN]), Ok(Step::Moved));
             assert_eq!(cursor.next(&ring.area[ALIGN..2 * ALIGN]), Ok(Step::More));
             assert_eq!(cursor.next(&ring.area[2 * ALIGN..4 * ALIGN]), Ok(Step::End));
-            assert_eq!(cursor.offset(), 4096, "the head is at the torn record");
+            assert_eq!(cursor.offset(), 4096, "the walk stops at the torn record");
             let (_, cursor) = walk(&ring.area, START).expect("a valid ring");
             assert_eq!(cursor.offset(), 4096);
         }
@@ -1533,7 +1544,7 @@ mod tests {
             });
             let more = Ok(Step::More);
             assert_eq!(steps, [more, more, more, Ok(Step::End)]);
-            assert_eq!(cursor.offset(), 0, "the head is at the torn record");
+            assert_eq!(cursor.offset(), 0, "the walk stops at the torn record");
         }
 
         #[test]

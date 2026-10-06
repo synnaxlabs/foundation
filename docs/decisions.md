@@ -361,8 +361,8 @@ How to read this record:
   fsync is fatal and never retried.
   Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
   on a 4096-byte boundary so a commit never rewrites a synced block, except the
-  restart record of an open, which may go over a restart or wrap record that no data
-  record follows (#649). The CRC covers `len`, `kind`, and the body. It continues from
+  restart record of an open and the records after it, which may go over a restart or
+  wrap record that no data record follows (#649). The CRC covers `len`, `kind`, and the body. It continues from
   the record before (a chain), so bytes of an earlier chain never read as the next
   record.
   Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is

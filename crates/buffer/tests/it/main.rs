@@ -1389,19 +1389,21 @@ fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     );
 }
 
+/// Opens with no data write their restart records at the same place, each with
+/// a new chain.
 #[test]
 fn each_open_starts_a_new_chain() {
     run(20, Memory::default(), |shard| async move {
+        let mut chains = Vec::new();
         for _ in 0..2 {
             let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
             drop(buffer.expect("opens"));
+            let file = shard.memory.bytes(RING);
+            let at = to_usize(AREA_START) + 9;
+            let chain = file[at..at + 4].try_into().expect("four bytes");
+            chains.push(u32::from_le_bytes(chain));
         }
-        let file = shard.memory.bytes(RING);
-        let chain = |offset: u64| {
-            let at = to_usize(AREA_START + offset) + 9;
-            u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
-        };
-        assert_ne!(chain(0), chain(BLOCK), "both opens drew the same chain");
+        assert_ne!(chains[0], chains[1], "both opens drew the same chain");
     });
 }
 
