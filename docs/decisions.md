@@ -1173,16 +1173,14 @@ How to read this record:
   Every other message of a higher term needs a proof that fits its body (a `Vote`
   the sender's pre-votes, a `Heartbeat` or `Append` the sender's votes, a reply any
   proof of the term) whose voters are a quorum of this node's configuration in
-  force or last committed; else `Error::Unproven`, and nothing changes or is sent.
-  A node that started with no voters takes the configuration before its entries from its
-  first configuration entry: a joint entry's outgoing set, or a leave's incoming set. A
-  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of the
-  term joins the proof its candidate carries. The known gap: a voter that was down
-  through a change holds the old configuration and refuses a leader whose votes are no
-  quorum of it until an election whose grants are. When a second node fails first, the
-  group waits for an operator, who wipes the voter and starts it with no configuration
-  (a node with no voters proves anything). The chain of proofs over configuration
-  entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
+  force or last committed; else `Error::Unproven`, and nothing changes or is sent. A
+  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of
+  the term joins the proof its candidate carries. The known gap: a voter that was
+  down through a change holds the old configuration and refuses a leader whose votes
+  are no quorum of it until an election whose grants are. When a second node fails
+  first, the group waits for an operator, who wipes the voter and starts it with no
+  configuration (a node with no configuration proves anything). The chain of proofs over
+  configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
   proof in the hard state (#750, 2026-10-05). `mesh` signs and checks the signatures
@@ -1276,9 +1274,19 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
-  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  `Start.entries`. An empty `Start.voters` is a node that joins: it takes any proof
+  until it holds a `Voters` entry, and then the first one shows the configuration before
+  it, a joint entry's outgoing set or a leave's own set (#928, coordinator, 2026-10-06).
+  A leave is a stand-in: it proves as the joint phase it ends, but lacks the nodes only
+  in that phase's outgoing set, so they are not peers while it is uncommitted. Lost: an
+  empty committed set proves nothing (the new node then refuses a leader that the
+  outgoing set elects when the old leader fails before the joint entry commits); a
+  joining node starts with the group's configuration (it removes the operator's recovery
+  of a wiped voter); the founding configuration as entry 1, as in etcd (a wider change
+  that alone leaves the node open while that entry is above its commit). A `Voters`
+  entry with an empty `incoming` set, in `Start.entries` or in an `Append`, is
+  `Error::NoVoters`: a group with no voter can never commit or elect.
+  A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.

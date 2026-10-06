@@ -1,13 +1,9 @@
 //! What a message from a voter that does not lead does to another node.
 
-use std::collections::BTreeSet;
-
-use raft::{
-    Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Proof, Raft,
-    Role, Start, Term, Voters,
-};
+use raft::{Body, Data, Entry, Error, Message, Position, Raft, Role, Term, Voters};
 use types::node;
 
+use crate::change::{heartbeat, joining};
 use crate::network::{Action, ELECTION, Network};
 
 // An `Append` from `sender` in `term` that writes and commits one entry, which makes
@@ -147,87 +143,6 @@ fn a_voter_that_does_not_lead_cannot_take_the_group_over_in_a_new_term() {
     assert_eq!(network.voters(leader).count(), 5);
 }
 
-fn key(id: u128) -> node::Key {
-    node::Key::from_u128(id)
-}
-
-fn set(ids: &[u128]) -> BTreeSet<node::Key> {
-    ids.iter().map(|&id| key(id)).collect()
-}
-
-// The joint configuration that adds node 4 to voters 1, 2 and 3.
-fn joint() -> Voters {
-    Voters {
-        incoming: set(&[1, 2, 3, 4]),
-        outgoing: set(&[1, 2, 3]),
-    }
-}
-
-// A message from `from` to node 4 that claims to lead `term` with the votes of
-// `voters`.
-fn heartbeat(from: u128, term: u64, voters: &[u128]) -> Message {
-    Message {
-        from: key(from),
-        to: key(4),
-        term: Term(term),
-        body: Body::Heartbeat { commit: 0 },
-        proof: Some(Proof {
-            grant: Grant::Vote,
-            candidate: key(from),
-            voters: voters.iter().map(|&id| (key(id), None)).collect(),
-        }),
-    }
-}
-
-// Node 4, started with no voters, after the first append of leader 1 in term 1
-// gave it the joint configuration, with its commit below that entry. Also gives
-// node 4 restarted from what it wrote.
-fn joining() -> (Raft, Raft) {
-    let config = Config {
-        key: key(4),
-        election_ticks: ELECTION,
-        heartbeat_ticks: 1,
-    };
-    let start = Start {
-        hard: Hard::default(),
-        voters: Voters::default(),
-        entries: Vec::new(),
-        applied: 0,
-    };
-    let mut node = Raft::new(config, start).unwrap();
-    let at = |index| Position {
-        term: Term(1),
-        index,
-    };
-    let mut append = heartbeat(1, 1, &[1, 2]);
-    append.body = Body::Append {
-        prev: Position::default(),
-        entries: vec![
-            Entry {
-                at: at(1),
-                data: Data::Empty,
-            },
-            Entry {
-                at: at(2),
-                data: Data::Voters(joint()),
-            },
-        ],
-        commit: 1,
-    };
-    node.step(append).unwrap();
-    assert_eq!(node.voters(), &joint());
-    let ready = node.ready();
-    let start = Start {
-        hard: ready.hard.unwrap(),
-        voters: Voters::default(),
-        entries: ready.entries,
-        applied: 1,
-    };
-    let restarted = Raft::new(config, start).unwrap();
-    assert_eq!(restarted.voters(), &joint());
-    (node, restarted)
-}
-
 // A new node must not take the empty set it started with as its committed
 // configuration once it holds one.
 #[test]
@@ -237,17 +152,4 @@ fn a_voter_cannot_move_a_new_node_that_holds_the_joint_configuration() {
         check_refused(&mut node, heartbeat(2, u64::MAX, &[]), unproven);
         check_refused(&mut node, heartbeat(2, u64::MAX, &[2]), unproven);
     }
-}
-
-// The leader can fail before the joint entry commits, and a quorum of the outgoing
-// set can elect a node that lacks it. The new node must follow that leader.
-#[test]
-fn a_new_node_follows_a_leader_elected_by_the_outgoing_set() {
-    let (mut node, _) = joining();
-    check_refused(&mut node, heartbeat(2, 2, &[2, 4]), unproven);
-    node.step(heartbeat(2, 2, &[2, 3])).unwrap();
-    assert_eq!(
-        (node.role(), node.term(), node.leader()),
-        (Role::Follower, Term(2), Some(key(2)))
-    );
 }

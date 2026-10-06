@@ -15,15 +15,18 @@ pub struct Config {
     pub heartbeat_ticks: u32,
 }
 
-/// The state a [`Raft`](crate::Raft) starts from: what the node had on disk. A new
-/// node starts from `Start::default()` plus its voters.
+/// The state a [`Raft`](crate::Raft) starts from: what the node had on disk. A node
+/// that founds a group starts from `Start::default()` plus the founding voters, and
+/// a node that joins one from `Start::default()`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Start {
     /// The stored term and vote.
     pub hard: Hard,
     /// The configuration before `entries`: the last `Voters` entry in them replaces
-    /// it. A node that is not a voter never starts an election while its
-    /// configuration is committed, but it still votes and follows.
+    /// it. When it is empty, the first `Voters` entry shows it instead: a joint
+    /// entry's outgoing set, or a leave's own set. A node that is not a voter never
+    /// starts an election while its configuration is committed, but it still votes
+    /// and follows.
     pub voters: Voters,
     /// The log on disk, from index 1, in order.
     pub entries: Vec<Entry>,

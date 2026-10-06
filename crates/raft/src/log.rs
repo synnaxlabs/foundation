@@ -122,25 +122,15 @@ impl Log {
         }
     }
 
-    // The configuration before the entries. A node that starts with no voters knows
-    // none until it holds a configuration entry: a joint entry replaced its outgoing
-    // set, and a leave keeps the incoming set of the joint phase it ends.
+    // The configuration before the entries. A node that starts with no voters takes
+    // it from its first configuration entry. For a leave that is a stand-in: it
+    // proves as the joint phase would, but lacks the nodes only in its outgoing set.
     fn before_entries(&self) -> Voters {
         if !self.base.incoming.is_empty() {
             return self.base.clone();
         }
-        let Some(first) = self.entries.iter().find_map(voters_in) else {
-            return Voters::default();
-        };
-        let shown = if first.joint() {
-            &first.outgoing
-        } else {
-            &first.incoming
-        };
-        Voters {
-            incoming: shown.clone(),
-            outgoing: BTreeSet::new(),
-        }
+        let first = self.entries.iter().find_map(voters_in);
+        first.map_or_else(Voters::default, Voters::replaced)
     }
 
     // Every node in the configuration in force and, while that configuration is
