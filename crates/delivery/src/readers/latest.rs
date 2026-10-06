@@ -1,5 +1,6 @@
 //! The latest sessions of [`Readers`].
 
+use std::ops::Range;
 use std::{fmt, mem};
 
 use types::frame::Frame;
@@ -78,13 +79,17 @@ impl Readers {
         }
     }
 
-    /// Makes `frame`, which landed on the live path, the newest frame and the waiting
-    /// frame of every latest session, and drops the frame it replaces. Returns the
-    /// latest sessions that had no waiting frame, in key order: wake them.
+    /// Makes `frame`, which landed on the live path with the samples `seq`, the newest
+    /// frame and the waiting frame of every latest session, and drops the frame it
+    /// replaces. A frame with no samples changes nothing. Returns the latest sessions
+    /// that had no waiting frame, in key order: wake them.
     #[must_use]
-    pub fn put(&mut self, frame: Frame) -> &[Key] {
-        self.newest = Some(frame);
+    pub fn put(&mut self, frame: Frame, seq: Range<u64>) -> &[Key] {
         self.woken_latest.clear();
+        if seq.is_empty() {
+            return &self.woken_latest;
+        }
+        self.newest = Some(frame);
         for session in &mut self.latest {
             if !mem::replace(&mut session.waiting, true) {
                 self.woken_latest.push(session.key);
@@ -179,8 +184,10 @@ mod tests {
         readers.take(key.into()).as_ref().map(number)
     }
 
+    /// Puts frame `n`, which holds the sample at seq `n`.
     fn put(readers: &mut Readers, frame: Frame) -> Vec<Key> {
-        readers.put(frame).to_vec()
+        let n = number(&frame);
+        readers.put(frame, n..n + 1).to_vec()
     }
 
     mod open_latest {
@@ -324,6 +331,31 @@ mod tests {
             assert_eq!(put(&mut readers, frames.frame(2)), []);
             assert_eq!(taken(&mut readers, key), Some(2));
             assert_eq!(taken(&mut readers, key), None);
+        }
+
+        #[test]
+        fn changes_nothing_for_a_frame_with_no_samples() {
+            let frames = Frames::new(4);
+            let mut readers = Readers::new(0);
+            let (a, b) = (unnamed(&mut readers), unnamed(&mut readers));
+            assert_eq!(put(&mut readers, frames.frame(1)), [a, b]);
+            assert_eq!(taken(&mut readers, a), Some(1));
+            assert_eq!(readers.put(frames.frame(2), 2..2), []);
+            assert_eq!(taken(&mut readers, a), None);
+            assert_eq!(taken(&mut readers, b), Some(1));
+            let late = readers.open_latest(None, at(0));
+            assert!(late.woken);
+            assert_eq!(taken(&mut readers, late.key), Some(1));
+        }
+
+        #[test]
+        fn makes_no_newest_frame_of_a_first_frame_with_no_samples() {
+            let frames = Frames::new(4);
+            let mut readers = Readers::new(0);
+            assert_eq!(readers.put(frames.frame(1), 1..1), []);
+            let late = readers.open_latest(None, at(0));
+            assert!(!late.woken);
+            assert_eq!(taken(&mut readers, late.key), None);
         }
 
         #[test]

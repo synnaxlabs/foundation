@@ -44,7 +44,7 @@ fn latest(frame: &impl Fn() -> Frame) {
         |readers: &mut Readers| readers.open_latest(None, Stamp::from_nanos(0)).key;
     let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers)).collect();
     assert_eq!(
-        readers.put(frame()).len(),
+        readers.put(frame(), 0..1).len(),
         SESSIONS,
         "the first put wakes all"
     );
@@ -143,5 +143,5 @@ fn round(
         .iter()
         .map(|&key| usize::from(readers.take(key.into()).is_some()))
         .sum();
-    taken + readers.put(frame()).len() + readers.put(frame()).len()
+    taken + readers.put(frame(), 0..1).len() + readers.put(frame(), 0..1).len()
 }

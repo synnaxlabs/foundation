@@ -36,7 +36,7 @@ fn opened(sessions: usize) -> (Frame, Readers, Vec<Key>) {
 fn put_and_take(bencher: Bencher<'_, '_>, sessions: usize) {
     let (frame, mut readers, keys) = opened(sessions);
     bencher.bench_local(|| {
-        divan::black_box(readers.put(frame.clone()));
+        divan::black_box(readers.put(frame.clone(), 0..1));
         for &key in &keys {
             divan::black_box(readers.take(key.into()));
         }
@@ -48,6 +48,6 @@ fn put_and_take(bencher: Bencher<'_, '_>, sessions: usize) {
 fn replace(bencher: Bencher<'_, '_>, sessions: usize) {
     let (frame, mut readers, _) = opened(sessions);
     bencher.bench_local(|| {
-        divan::black_box(readers.put(frame.clone()));
+        divan::black_box(readers.put(frame.clone(), 0..1));
     });
 }

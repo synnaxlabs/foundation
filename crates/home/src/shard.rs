@@ -550,10 +550,11 @@ fn spend<'a>(
                 Outcome::Applied { slot, range }
             }
             Ok(accepted) => {
-                let range = range(&accepted.seq());
+                let seq = accepted.seq();
+                let range = range(&seq);
                 index.spend(accepted);
                 if let Some(frame) = frozen {
-                    readers.lost(claim.place, frame);
+                    readers.lost(claim.place, frame, seq);
                 }
                 Outcome::Lost { slot, range }
             }
@@ -2035,6 +2036,44 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1), seq(3, 1)]);
+            });
+        }
+
+        #[test]
+        fn keeps_the_newest_frame_with_samples_after_an_empty_live_write() {
+            run(54, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+                assert_eq!(
+                    shard.write(a, LIVE, empty, NOW, MESH),
+                    Ok(&[applied(0, 1, 0)][..])
+                );
+                let reader = latest(&mut shard, Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
+        fn keeps_the_newest_frame_with_samples_after_an_empty_live_write_is_lost() {
+            run(55, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+                let blocks = test.fill();
+                assert_eq!(
+                    shard.write(a, LIVE, empty, NOW, MESH),
+                    Ok(&[super::lost(0, 1, 0)][..])
+                );
+                drop(blocks);
+                let reader = latest(&mut shard, Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
             });
         }
 
