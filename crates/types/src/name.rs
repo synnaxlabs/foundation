@@ -663,6 +663,10 @@ mod tests {
                 Selector::new(["a", &format!("!b{body}")]),
                 Err(Error::Long { bytes: 256 })
             );
+            assert_eq!(
+                Selector::new(["a", &format!("!{}", "b".repeat(300))]),
+                Err(Error::Long { bytes: 301 })
+            );
         }
     }
 
