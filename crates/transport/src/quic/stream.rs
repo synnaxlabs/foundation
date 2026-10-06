@@ -240,7 +240,8 @@ impl Sender {
         !self.unsent.is_empty() || !self.body.is_empty()
     }
 
-    /// Writes what the sender holds to `send` until it holds nothing.
+    /// Writes what the sender holds to `send` until it holds nothing. It checks
+    /// neither the send budget nor the turn.
     ///
     /// # Errors
     ///
@@ -635,10 +636,9 @@ impl Streams {
         sender: &mut Sender,
         events: &mut VecDeque<Event>,
     ) -> Result<Poll<()>, Error> {
-        let first = self.turns.first();
         let flushed = self.push(inner, sender);
         if !matches!(flushed, Ok(Poll::Pending)) {
-            self.release(sender, first, events);
+            self.release(sender, events);
         }
         flushed
     }
@@ -717,13 +717,9 @@ impl Streams {
 
     /// Ends the message that `sender` holds or waits for: gives back its send budget
     /// and its turn. The senders that get the room get [`Event::Writable`] in
-    /// `events`, and so does the first sender in turn when `first` was not.
-    fn release(
-        &mut self,
-        sender: &mut Sender,
-        first: Option<Key>,
-        events: &mut VecDeque<Event>,
-    ) {
+    /// `events`, and so does the new first sender in turn.
+    fn release(&mut self, sender: &mut Sender, events: &mut VecDeque<Event>) {
+        let first = self.turns.first();
         let woken = |stream| events.push_back(Event::Writable { stream });
         self.sending.release(&mut sender.claim, woken);
         self.turns.leave(sender);
@@ -772,12 +768,12 @@ impl Streams {
         code: Code,
         events: &mut VecDeque<Event>,
     ) {
-        let (id, first) = (sender.key.id, self.turns.first());
+        let id = sender.key.id;
         if let Some(at) = self.senders.iter().position(|&(other, _)| other == id) {
             self.senders.swap_remove(at);
         }
         reset(inner, id, code);
-        self.release(&mut sender, first, events);
+        self.release(&mut sender, events);
     }
 
     /// Stops `receiver`'s stream of `inner` with `code`, drops the message in its
@@ -1645,6 +1641,28 @@ mod tests {
             let mut read = exchange(&mut pair, &mut senders, 50 * RUN);
             read.sort();
             assert_eq!(shapes(&read), shapes(&expected));
+        });
+    }
+
+    #[test]
+    fn a_header_that_the_window_splits_arrives_whole() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            // After the 10-byte hello, these leave 1 byte of the connection window.
+            let messages = [vec![1; MESSAGE_MAX], vec![2; 65_516]];
+            let blocks = messages.each_ref().map(|message| shard.block(message));
+            write(&mut pair.client, now, &mut first, &blocks);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let message = shard.block(&[3; 100]);
+            let written = pair.client.endpoint.write(now, &mut second, message);
+            assert_eq!(written, Ok(Poll::Pending));
+            assert_eq!(second.unsent, 1..3);
+            let id = second.key().id;
+            let read = exchange(&mut pair, &mut [first, second], 10 * RUN);
+            let read: Vec<_> = read.into_iter().filter(|&(at, _)| at == id).collect();
+            assert_eq!(read, [(id, vec![3; 100])]);
         });
     }
 
