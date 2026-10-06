@@ -24,7 +24,7 @@ fn text() -> impl Strategy<Value = String> {
 
 fn name() -> impl Strategy<Value = Kind> {
     prop_oneof![
-        4 => "[a-z_][a-z0-9_-]{0,4}(\\.[a-z_][a-z0-9_-]{0,4}){0,2}",
+        4 => "[a-z_][a-z0-9_-]{0,4}(\\.@?[a-z0-9_-]{1,4}){0,2}",
         1 => Just("for".to_owned()),
         1 => Just("for.x".to_owned()),
     ]

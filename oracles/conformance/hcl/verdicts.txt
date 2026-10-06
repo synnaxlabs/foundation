@@ -122,6 +122,16 @@ reference-bracket-lines-written accepted
 reference-bracket-lines accepted
 reference-digit-part refused
 reference-dot-end refused
+reference-index-dot-written accepted
+reference-index-dot accepted
+reference-index-empty accepted
+reference-index-name-written accepted
+reference-index-name accepted
+reference-index-number accepted hcl.index
+reference-index-reserved accepted
+reference-index-spaces-written accepted
+reference-index-spaces accepted
+reference-index accepted
 reference-keyword-first accepted hcl.index
 reference-keyword-parts accepted
 reference-line-before-dot refused

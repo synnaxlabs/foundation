@@ -262,7 +262,19 @@ impl<'a> Writer<'a> {
                 if !reference(name) {
                     self.refuse(value.span, Unwritable::Reference);
                 }
-                return self.out.push_str(name.as_str());
+                let mut segments = name.segments();
+                self.out.extend(segments.next());
+                for segment in segments {
+                    if lex::identifier(segment) {
+                        self.out.push('.');
+                        self.out.push_str(segment);
+                    } else {
+                        self.out.push('[');
+                        quoted(&mut self.out, segment);
+                        self.out.push(']');
+                    }
+                }
+                return;
             }
             Kind::List(values) => Items::List(values),
             Kind::Call(call) => Items::Call(call),
@@ -524,7 +536,7 @@ mod tests {
     /// Any name, with segments that start with a digit, `-`, or `@`, and a first
     /// segment that may be a literal.
     fn any_name() -> impl Strategy<Value = Name> {
-        "(true|null|@?[a-z0-9_-]{1,3})(\\.@?[a-z0-9_-]{1,3}){0,2}"
+        "(true|false|null|@?[a-zA-Z0-9_-]{1,3})(\\.@?[a-zA-Z0-9_-]{1,3}){0,2}"
             .prop_map(|name| name.parse().unwrap())
     }
 
@@ -536,18 +548,27 @@ mod tests {
         }
 
         #[test]
-        fn writes_a_name_exactly_when_it_reads_back(name in any_name()) {
+        fn writes_a_name_exactly_when_its_first_segment_starts_a_reference(
+            name in any_name(),
+        ) {
             let document = attributes(vec![("a", Kind::Reference(name.clone()))]);
-            let text = format!("a = {name}\n");
-            let expected = if read(Source(0), &text).as_ref() == Ok(&document) {
-                Ok(text)
-            } else {
-                Err(vec![Error::Unwritable {
-                    span: None,
-                    part: Unwritable::Reference,
-                }])
-            };
-            prop_assert_eq!(write(&document), expected);
+            let first = name.segments().next().unwrap();
+            let root = first.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && !["true", "false", "null"].contains(&first);
+            match write(&document) {
+                Ok(text) => {
+                    prop_assert!(root, "{}", text);
+                    prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
+                }
+                Err(errors) => {
+                    prop_assert!(!root, "{}", name);
+                    let refused = Error::Unwritable {
+                        span: None,
+                        part: Unwritable::Reference,
+                    };
+                    prop_assert_eq!(errors, vec![refused]);
+                }
+            }
         }
     }
 
@@ -817,8 +838,21 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_reference_that_hcl_reads_as_another_form() {
-        let names = ["@a.b", "a.@b", "a.7b", "a.-b", "true.x", "null.x"];
+    fn writes_a_later_segment_that_is_not_an_identifier_as_a_string_index() {
+        for (name, text) in [
+            ("plc.40001", "a = plc[\"40001\"]\n"),
+            ("a.-1.x", "a = a[\"-1\"].x\n"),
+            ("site_a.@changes", "a = site_a[\"@changes\"]\n"),
+            ("a.true.for", "a = a.true.for\n"),
+        ] {
+            let document = attributes(vec![("a", reference(name))]);
+            assert_eq!(written(&document), text, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_reference_whose_first_segment_hcl_reads_as_another_form() {
+        let names = ["@a.b", "7b.a", "-b", "true.x", "null.x", "false"];
         for name in names {
             let document = attributes(vec![("a", reference(name))]);
             assert_eq!(

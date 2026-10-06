@@ -338,9 +338,10 @@ pub enum Unwritable {
     Keyword,
     /// A function name that is not an identifier.
     Function,
-    /// A name that HCL does not read as a reference: a segment does not start with a
-    /// letter or `_`, or the first segment is `true`, `false`, or `null`, such as
-    /// `a.7b`, `site_a.@changes`, or `true.x`.
+    /// A name whose first segment does not start a reference in HCL: it does not
+    /// start with a letter or `_`, or it is `true`, `false`, or `null`, such as
+    /// `7a.b`, `@a.b`, or `true.x`. A later segment is never refused: it is written
+    /// as a string index, such as `plc["40001"]`.
     Reference,
     /// A list whose first item starts with the word `for`, such as the reference `for`
     /// or `for.x`, or the call `for(1)`. HCL reads `[for` as a `for` expression.
@@ -370,9 +371,9 @@ impl Unwritable {
             ),
             Self::Reference => (
                 UNWRITABLE_REFERENCE,
-                "the name does not read as a reference in HCL",
-                "Start each segment with a letter or `_`, and do not make `true`, \
-                 `false`, or `null` the first segment",
+                "a reference in HCL starts with a letter or `_`, and not with `true`, \
+                 `false`, or `null`",
+                "Write the name as a quoted string where a kind takes a name",
             ),
             Self::For => (
                 UNWRITABLE_FOR,
@@ -765,9 +766,9 @@ mod tests {
         (
             Unwritable::Reference,
             "hcl.unwritable-reference",
-            "the name does not read as a reference in HCL",
-            "Start each segment with a letter or `_`, and do not make `true`, \
-             `false`, or `null` the first segment",
+            "a reference in HCL starts with a letter or `_`, and not with `true`, \
+             `false`, or `null`",
+            "Write the name as a quoted string where a kind takes a name",
         ),
         (
             Unwritable::For,

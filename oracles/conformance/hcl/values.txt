@@ -75,6 +75,15 @@ object-written {"a" = {"b" = 1, "c" = 2}, "b" = {}}
 object {"a" = {"b" = 1, "c" = 2}, "b" = {}}
 reference-bracket-lines-written {"a" = [$x.b]}
 reference-bracket-lines {"a" = [$x.b]}
+reference-index-dot-written {"a" = $plc.a.b}
+reference-index-dot {"a" = $plc.a.b}
+reference-index-empty {"a" = $plc.}
+reference-index-name-written {"a" = $a.b}
+reference-index-name {"a" = $a.b}
+reference-index-reserved {"a" = $site_a.@changes}
+reference-index-spaces-written {"a" = $plc.1.2.x}
+reference-index-spaces {"a" = $plc.1.2.x}
+reference-index {"a" = $plc.40001}
 reference-keyword-parts {"a" = $x.true.for}
 reference-spaces-written {"a" = $x.b}
 reference-spaces {"a" = $x.b}

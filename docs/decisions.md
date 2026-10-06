@@ -1254,15 +1254,22 @@ How to read this record:
   reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
   lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
   `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `Form::Index`),
-  `*` is a splat, and any other token is a syntax error. A name with a segment that
-  starts with a digit or `-` (`plc.40001`) gets its own HCL form, such as
-  `plc["40001"]`, which HCL accepts (#536). Until then `write` refuses it. Lost: A3
-  segments that start with a letter or `_`, which shrinks the name model to fit one file
-  format. The person decided on 2026-10-05 ("a is fine"), #519. The coordinator ruled on
-  #363 that a file writes a reserved name (`site_a.@changes`) as a string; #536 decides
-  which reader turns that string into a name. Lost: a new `Expected` variant for a name
-  after `.`, a public change when the error already names what may come at the `.`.
-  #363.
+  `*` is a splat, and any other token is a syntax error. An index that is a string with
+  no template, quoted or heredoc, is one more segment: `plc["40001"]` is `plc.40001`,
+  `a["b"]` is `a.b`, and `plc["a.b"]` is `plc.a.b`. Any other index is `Form::Index`.
+  `write` gives each later segment that is not an identifier as a string index
+  (`plc["40001"]`, `site_a["@changes"]`). A first segment that does not start with a
+  letter or `_`, or that is `true`, `false`, or `null`, has no reference form, and
+  `write` refuses it with `Unwritable::Reference`. A file writes such a name as a string
+  where a kind takes a name. `export` and `discover` write such a name as a string on
+  their own and never surface `Unwritable::Reference`. This replaces the #363 ruling
+  that a file writes a reserved name only as a string. The advisor decided (names
+  delegation, 2026-10-05), #536. Lost: a reserved call `name("40001.x")`, which reserves
+  a function name and adds an error for names that a string already carries; it can be
+  added later without breaking a file. Lost: A3 segments that start with a letter or
+  `_`, which shrinks the name model to fit one file format. The person decided on
+  2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant for a name after `.`, a
+  public change when the error already names what may come at the `.`. #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -2487,7 +2494,8 @@ Parameters and later choices, recorded and not asked:
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
-- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, HCL
+  REFERENCES first segment (#536).
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
