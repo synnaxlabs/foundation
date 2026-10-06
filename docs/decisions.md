@@ -510,13 +510,19 @@ How to read this record:
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
-- **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set. A mask holds the index of each channel it holds, so the
-  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
-  mask is a sorted list, or no list when it holds every entry, so a view's cost grows
-  with the smaller of its frame's series and its mask's entries (rule 11). A view
-  borrows its frame and mask, so making one takes no reference count. Approved by the
-  coordinator (#157).
+- **M2 (revised 2026-10-06)** Readers get a view: the frame plus a mask cached per
+  key set and reader. The home routes by key set. A mask holds the index of each
+  channel it holds, so the series of a view make a frame, and `View::charge` is its
+  charge (CREDIT RULES). A mask is a sorted list of the entries it holds, or no list
+  when it holds every entry. A mask that holds more than half of its key set also
+  keeps a sorted list of the entries it leaves out. A view's walk grows with the
+  smaller of its frame's series and its mask's entries, and its charge with the
+  smaller of its frame's series and the shorter list (rule 11). A view borrows its
+  frame and mask, so making one takes no reference count. Lost: only the list of the
+  entries left out, walked as the runs of series between them, because near half
+  that walk is 20% to 74% slower than a walk of the held entries (#873). Approved by
+  the coordinator (#157). The list of entries left out (#755): approved at the gate
+  of PR #873.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -653,19 +659,19 @@ How to read this record:
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days gives an unknown measurement,
-  centered between its edges or at the nearest span, so no caller maps a failure to
-  one. It cuts no known bound, because an unknown bound votes only when no bound is
-  known. An exchange can still give a known bound from two unknown readings whose
-  centers move apart by more than the round trip, so the node that asks makes an
-  unknown answer unknown itself (CLOCK PEER ANSWER). An overlap whose readings allow
-  an error over 36500 days before drift gives `None`, as an overlap with no edge
-  does, because no caller needs an unknown device measurement yet. A device source
-  can ask for one when it calls `Overlap::at`. Decided by the `time` builder (#258),
-  and for the exchange approved by the coordinator (#903). Each function returns only
-  the errors it can give: one `Error` per module (`overlap`, `combine`), and `Option`
-  where a caller does the same for each cause (`Drift::from_ppb`, `Measurement::new`,
-  `Overlap::at`). Decided by the coordinator (#272). `Exchange::measure` has one cause
-  left, so it gives `Option` (#903).
+  centered between its edges or at the nearest span, so no caller maps a failure to one.
+  It cuts no known bound, because an unknown bound votes only when no bound is known. An
+  unknown reading (`exchange::Reading::Unknown`) gives an unknown measurement, because
+  two unknown readings sent as intervals whose centers move apart by more than the round
+  trip, or one interval clamped at the end of the stamp range, can give a known bound
+  (#930). An overlap whose readings allow an error over 36500 days before drift gives
+  `None`, as an overlap with no edge does, because no caller needs an unknown device
+  measurement yet. A device source can ask for one when it calls `Overlap::at`. Decided
+  by the `time` builder (#258), and for the exchange approved by the coordinator (#903).
+  Each function returns only the errors it can give: one `Error` per module (`overlap`,
+  `combine`), and `Option` where a caller does the same for each cause
+  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
+  (#272). `Exchange::measure` has one cause left, so it gives `Option` (#903).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -758,10 +764,17 @@ How to read this record:
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
-  the OS bound to the error of its own read, so the error is never less than the OS
-  bound. An error over 36500 days reads as unknown, the same as no bound (the
-  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` gives
+  the OS reading to the exchange as an interval, its time plus or minus its bound, so
+  the error is never less than the OS bound. An error of 36500 days or more reads as
+  unknown, the same as no bound (the coordinator, #144). So does an edge of the bound
+  past the range of a stamp, centered at the reading as with no bound: a known bound
+  with such an edge needs a reading after 2162 or before 1777, so it cannot hold a true
+  time between those years. The coordinator approved it with the advisor, #910. Lost:
+  the edge stopped at the range, because it narrows a bound of 36500 days or more into a
+  known one; edges in `i128` through a new `estimate` input, because it keeps a false
+  bound that votes (#314); `Measurement::widened`, a public item that keeps the OS
+  reading a special path. Only `clock` and `node` call `clock::source::Wall::measure`; a
   lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
   only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
   while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
@@ -770,22 +783,26 @@ How to read this record:
   unknown, because it also drops the good bound from chrony and ntpd; detecting
   timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
   on 2026-10-06 ("A is still fine"), #689.
-- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
-  OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
-  each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
-  bound (an unknown estimate, or an OS clock with no bound) says "unknown" and carries
-  its offset. The asking node pushes a `Measurement::unknown` that it builds itself,
-  so the answer cannot narrow into a known bound. A peer that never answers counts
-  against a majority, and `node` removes no source. Lost: a node with no time does
-  not answer, because then a mesh that starts cold never syncs; an answer of "no
-  time" that takes the source out of the vote, because a node with a bad OS clock then
-  syncs on itself; `node` removes a silent source after a timeout, a patch that puts
-  time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145.
-  So a node that starts while no peer answers stays unsynced, even with a good OS
-  bound. Its samples keep their local monotonic reading, and the node stamps them in
-  mesh time when the first estimate comes, with the error of that estimate at each
-  reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and a
-  node that never syncs fills it. Lost: drop the samples, a patch that loses data;
+- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its OS
+  reading and its OS bound. Cold nodes then vote with each other's OS clocks, and each
+  waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown bound
+  (an unknown estimate, or an OS clock with no bound) says "unknown" and carries its
+  offset. The asking node measures it as `exchange::Reading::Unknown`, so the answer
+  cannot narrow into a known bound (#930). A node answers from one read of its clock,
+  sent as both intervals, because two reads can straddle a sync and pair a known
+  interval with an unknown one. The read is after the request arrived and before the
+  answer left, so it bounds both ends of the exchange. An unknown answer carries
+  `Measurement::time`, because the midpoint of the interval moves after 2162 (#145). A
+  peer that never answers counts against a majority, and `node` removes no source. Lost:
+  a node with no time does not answer, because then a mesh that starts cold never syncs;
+  an answer of "no time" that takes the source out of the vote, because a node with a
+  bad OS clock then syncs on itself; `node` removes a silent source after a timeout, a
+  patch that puts time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's
+  fine"), #145. So a node that starts while no peer answers stays unsynced, even with a
+  good OS bound. Its samples keep their local monotonic reading, and the node stamps
+  them in mesh time when the first estimate comes, with the error of that estimate at
+  each reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and
+  a node that never syncs fills it. Lost: drop the samples, a patch that loses data;
   stamp them with OS time at once, a patch that writes a time the clock refused and
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
@@ -865,18 +882,18 @@ How to read this record:
   message: a kind byte, then little-endian fields of 8 bytes. A request (kind 1)
   carries `sent`, the monotonic reading of the node that asks. An answer echoes `sent`,
   so the node that asks keeps no open requests, and carries the peer's time (CLOCK
-  PEER ANSWER). Kind 2 is a known bound, with the interval when the request arrived
-  and the interval when the peer answered. Kind 3 is an unknown bound, with the
-  peer's best guess of the time when it answered. The offset of CLOCK PEER ANSWER is
-  this stamp less the asking node's own time, because the peer's offset has no
-  meaning without the peer's monotonic clock. A message has 9, 41, or 17 bytes, and
-  `decode` refuses each other length. `decode` does not check the order of an
-  interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
+  PEER ANSWER). Kind 2 is a known bound, with an interval read after the request
+  arrived and one read before the answer left. Kind 3 is an unknown bound, with the
+  peer's best guess, read after the request arrived and before the answer left. The
+  offset of CLOCK PEER ANSWER is this stamp less the asking node's own time, because the
+  peer's offset has no meaning without the peer's monotonic clock. A message has 9, 41,
+  or 17 bytes, and `decode` refuses each other length. `decode` does not check the order
+  of an interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
   Lost: a request number, because the node that asks must then keep and remove open
-  requests and still needs the send time of a late answer; each message 41 bytes, as
-  the header has one length (a request then sends 32 zero bytes); `encode` into a
-  `&mut [u8]` that returns a length (a short buffer then needs an error); a second
-  byte for the kind of time (two checks where one kind byte does the work).
+  requests and still needs the send time of a late answer; each message 41 bytes, as the
+  header has one length (a request then sends 32 zero bytes); `encode` into a
+  `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
+  for the kind of time (two checks where one kind byte does the work).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
   however many shards it runs, so each site's firewall needs one known port per
   conduit. Each QUIC connection belongs to one shard, and every connection ID a node
@@ -1641,10 +1658,12 @@ How to read this record:
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
-  default. The data directory is node-local: a start argument of `foundation`, with a
-  default, because the spec is stored in it. Node-local config for the budgets lost:
-  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
-  decided on 2026-10-05 ("Yeah mesh node"), #342.
+  default. A policy that sets no budget is a user mistake, refused as normal
+  validation with the fix in the message (#869). The data directory is node-local:
+  a start argument of `foundation`, with a default, because the spec is stored in it.
+  Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
+  change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
+  #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -1913,7 +1932,10 @@ How to read this record:
   not depend on `transport`. `transport` owns the carriers and the session model, and
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
-  session under the architecture delegation.
+  session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
+  as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
+  datagrams that arrive at it are lost, and a send still works. Approved by the
+  coordinator on #907. Built by `simulation` in #926.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -1946,11 +1968,14 @@ How to read this record:
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
   The error gives every panic, the first one first: a drop that panics is a defect of
-  its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
-  same messages after the crash ends. At a crash, the start of each thread that has
-  not run drops the same way, after the futures. A thread that a drop starts on the
-  crashing node ends in the crash and never runs. Built by `simulation` in #548 and
-  #666.
+  its own, even when an earlier panic caused the drop. A panic in the drop of a panic
+  payload is one more panic. At most 16 payloads of one chain drop, and the payload
+  past them is forgotten, so that a drop that always panics cannot hang the run. `os`
+  drops panic payloads with the same bound. `Sim::crash` panics with the same
+  messages after the crash ends. At a crash, the start of each thread that has not
+  run drops the same way, after the futures. A thread that a drop starts on the
+  crashing node ends in the crash and never runs. Built by `simulation` in #548, #666,
+  and #870.
 - **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
   segment is never lost or duplicated. It arrives after the delay and a jitter draw of
   its link, and never before an earlier segment in its direction, so each direction
@@ -2188,7 +2213,7 @@ Storage classes used in the table:
 | Time policy | Spec; selects node names; lists candidate peer nodes (default: the region's voters) | Files | `clock` | `spec`, `clock` |
 | Access policy | Spec; `{ subjects, select, allow, authority }` | Files | `access`, called by the owners (`home`, `mesh`) | `spec`, `access` |
 | Secret store policy | Spec; selects secret names | Files | The secret resolver | `spec` |
-| Connector | Files, then Spec as `spec::Connector { name, kind, node, config }` | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
+| Connector | Files, then Spec as `spec::connector::Connector { kind, node, config }`, keyed by its name | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
 | Kind config | Kind-owned: an opaque Document in the spec (canonical form, no source positions, so hashes stay stable) | Files | The kind's check at plan, `ctx.config()` at run | `connector-<kind>` |
 | Calculation | A connector of kind `calc`; program text is kind-owned; outputs on its own index | Files | `connector-calc` | `connector-calc` |
 | Open folder (A2) | Files, then Spec (mechanism: X28) | People | `hub`, `mesh` | `spec`, `mesh` |
@@ -2548,7 +2573,13 @@ Conflict: BQ2 makes `spec::resolve` "the ONE policy resolver" with most-specific
 and S12 lists access as one of those policies. C8 makes access allow-only with no
 conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
-placement, transmission, compression, reduction, time, secret store). Access is
+placement, transmission, compression, reduction, time, secret store, node settings).
+For node settings, each budget resolves on its own: a policy that leaves a budget unset
+gives that budget to a less specific policy. Two policies of equal specificity that
+both set the same budget for one node are a plan error; two that set different budgets
+do not conflict. Per-budget resolution holds only because `disk` and `pool` are
+independent. It does not extend to kinds whose fields go together (such as placement),
+where values from different policies could make a combination nobody wrote. Access is
 evaluated only in `access`, as the union of matching allows; the authority cap is the
 highest authority among matching allows that grant `write`. Both use the one selector
 matcher in `types`. Basis: C8, SRP PASS (`access` split).
@@ -2561,10 +2592,10 @@ makes placement select connectors. r3 K2 forbids a policy from selecting outside
 region; r4 lets a root policy apply inside child regions.
 Resolution: each policy kind states its target: retention, transmission, and
 compression select indexes; placement selects connectors and indexes; reduction selects
-data channels; time selects nodes; access selects names (plus subjects anywhere);
-secret store selects secret names. A policy may select only names in its own region
-and that region's descendants; a descendant applies it as of the last parent version
-it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
+data channels; time and node settings select nodes; access selects names (plus
+subjects anywhere); secret store selects secret names. A policy may select only names
+in its own region and that region's descendants; a descendant applies it as of the
+last parent version it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
 
 **X27. Built-in channels have no spec definitions.**
 Conflict: S8 puts node status under the node's name, and S9 adds the changes channel.

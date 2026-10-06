@@ -453,7 +453,9 @@ impl<'a> Tcp<'a> {
         end.read += n;
         let recv = end.options.recv_buffer_bytes;
         let edge = end.read.saturating_add(recv);
-        if !end.reset && edge - end.advertised >= mss.min(recv / 2) {
+        // As on Linux, no update goes after the peer's FIN.
+        let receiving = !end.reset && !end.peer_closed;
+        if receiving && edge - end.advertised >= mss.min(recv / 2) {
             end.advertised = edge;
             let ack = end.ack();
             self.sockets.lanes.send(self.wire, now, end.pair, ack);
@@ -788,5 +790,27 @@ mod tests {
         assert_eq!(lanes.floors.len(), 1);
         lanes.arrive(local, peer);
         assert!(lanes.floors.is_empty());
+    }
+
+    #[test]
+    fn a_read_from_a_reset_end_sends_nothing() {
+        let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
+        let mut sockets = Sockets::default();
+        let [local, peer] = [0, 1].map(|node| SocketAddr::new(addresses(node)[0], 1));
+        let options = tcp::Options {
+            send_buffer_bytes: 1 << 20,
+            recv_buffer_bytes: 1 << 20,
+            unsent_bytes_max: 1 << 14,
+            delayed: false,
+        };
+        let mut end = End::new(Pair { local, peer }, Phase::Open, options, 0);
+        end.reset = true;
+        end.inbox.extend([0; 4_096]);
+        let key = sockets.insert(end);
+        let mut buffer = [0; 4_096];
+        let mut tcp = Tcp::new(&mut sockets, &mut wire);
+        let (poll, _) = tcp.read(Monotonic(0), key, Waker::noop(), &mut buffer);
+        assert!(matches!(poll, Poll::Ready(Ok(4_096))));
+        assert!(sockets.lanes.floors.is_empty());
     }
 }
