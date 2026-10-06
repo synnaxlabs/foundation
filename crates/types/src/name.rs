@@ -231,24 +231,40 @@ impl Selector {
     /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
     /// includes names.
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
-        let texts = patterns
-            .into_iter()
-            .map(Box::from)
-            .collect::<Box<[Box<str>]>>();
+        Self::from_written(patterns.into_iter().map(written))
+    }
+
+    /// Reads a selector from its patterns, each by what it does. It keeps the texts
+    /// that [`Selector::new`] reads for the same patterns, so equality, hashing, and
+    /// `Debug` do not depend on which of the two made it.
+    ///
+    /// # Errors
+    ///
+    /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
+    /// includes names. An include that starts with `!` gives [`Error::Segment`],
+    /// because `!` is not a segment character.
+    pub fn from_written<'a>(
+        patterns: impl IntoIterator<Item = Written<'a>>,
+    ) -> Result<Self, Error> {
+        let mut texts = Vec::new();
         let mut include = Vec::new();
         let mut exclude = Vec::new();
-        for (position, text) in texts.iter().enumerate() {
-            let text = &**text;
-            match written(text) {
-                Written::Exclude("") => {
-                    return Err(Error::Segment {
-                        input: text.into(),
-                        segment: String::new(),
-                    });
-                }
-                Written::Exclude(body) => exclude.push(Pattern::read(text, body)?),
+        for pattern in patterns {
+            match pattern {
                 Written::Include(body) => {
-                    include.push((position, Pattern::read(text, body)?));
+                    include.push((texts.len(), Pattern::read(body, body)?));
+                    texts.push(body.into());
+                }
+                Written::Exclude(body) => {
+                    let text = ["!", body].concat();
+                    if body.is_empty() {
+                        return Err(Error::Segment {
+                            input: text,
+                            segment: String::new(),
+                        });
+                    }
+                    exclude.push(Pattern::read(&text, body)?);
+                    texts.push(text.into());
                 }
             }
         }
@@ -256,7 +272,7 @@ impl Selector {
             return Err(Error::NoInclude);
         }
         Ok(Self {
-            texts,
+            texts: texts.into(),
             include,
             exclude,
         })
@@ -835,6 +851,44 @@ mod tests {
             assert_eq!(hash(&a), hash(&read(&["a", "!a.b"])));
             assert_ne!(hash(&read(&["a", "b"])), hash(&read(&["b", "a"])));
             assert_ne!(hash(&read(&["a.**.**"])), hash(&read(&["a.**"])));
+        }
+
+        #[test]
+        fn refuses_an_include_that_starts_with_an_exclamation_mark() {
+            let error = Selector::from_written([Written::Include("!a")]).unwrap_err();
+            assert_eq!(error, segment_error("!a", "!a"));
+            assert_eq!(
+                error.to_string(),
+                r#""!a" has a segment that is not valid: "!a""#
+            );
+            assert_eq!(
+                Selector::from_written([Written::Include("a"), Written::Exclude("")]),
+                Selector::new(["a", "!"])
+            );
+        }
+
+        proptest! {
+            #[test]
+            fn reads_back_from_its_written_patterns(texts in selector_texts()) {
+                let selector = Selector::new(texts.iter().map(String::as_str)).unwrap();
+                let read = Selector::from_written(selector.written()).unwrap();
+                prop_assert_eq!(format!("{read:?}"), format!("{selector:?}"));
+                prop_assert_eq!(&read, &selector);
+                for n in ["a", "a.b", "b.a", "c"] {
+                    prop_assert_eq!(read.matches(&name(n)), selector.matches(&name(n)));
+                }
+            }
+        }
+
+        /// The texts of a selector with at least one include, some of them exclusions.
+        fn selector_texts() -> impl Strategy<Value = Vec<String>> {
+            let text = (any::<bool>(), patterns()).prop_map(|(excluded, segments)| {
+                let body = segments.join(".");
+                if excluded { format!("!{body}") } else { body }
+            });
+            (patterns(), prop::collection::vec(text, 0..4)).prop_map(|(first, rest)| {
+                std::iter::once(first.join(".")).chain(rest).collect()
+            })
         }
 
         mod outside {
