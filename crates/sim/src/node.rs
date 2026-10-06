@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::task::Waker;
 
 use types::time::{Monotonic, Span, Stamp};
 
@@ -108,6 +109,25 @@ impl Node {
     #[must_use]
     pub fn serial(&self) -> env::serial::Serial {
         env::serial::Serial::new(self.0.clone())
+    }
+
+    /// Makes the port at `path` of the node fail, as when its USB adapter is pulled
+    /// out: the open port, or else the next one to open. Each read and write of it
+    /// then gives `Error::Io` with code 5 (`EIO`), also one that waits. The bytes it
+    /// has not read, the bytes it sent that have not arrived, and the bytes that
+    /// arrive at it are lost. The next port to open after it drops works.
+    ///
+    /// # Panics
+    ///
+    /// When no line joins `path` of the node.
+    pub fn fail_serial(&self, path: &Path) {
+        let node = self.0.node;
+        let wakers = lock(&self.0.shared).serial().fail(node, path);
+        let Some(wakers) = wakers else {
+            let path = path.display();
+            panic!("no line joins port {path} of node {node}");
+        };
+        wakers.into_iter().flatten().for_each(Waker::wake);
     }
 
     /// The node's disk: [`Config::disk_bytes`] bytes, with an empty data directory.

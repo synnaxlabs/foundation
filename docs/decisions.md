@@ -1662,8 +1662,9 @@ How to read this record:
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
   from its own stream as each byte is sent, so a change of the line acts only on the
   bytes sent after it. A flip with parity on is lost. Each port holds 4 KiB to send
-  and 4 KiB to read, as a Linux TTY does. An open ends at once. Built by `simulation`
-  in #431.
+  and 4 KiB to read, as a Linux TTY does. An open ends at once. `Node::fail_serial`
+  makes a port fail as a pulled USB adapter does: each read and write gives `EIO`
+  until the port drops. Built by `simulation` in #431 and #690.
 - **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.

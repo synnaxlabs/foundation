@@ -2,13 +2,15 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
+use std::mem;
+use std::path::{Path, PathBuf};
 use std::task::{Poll, Waker};
 
 use env::rng::Rng;
 use env::serial::{Config, Error, Settings};
 use types::time::{Monotonic, Rate};
 
+use crate::EIO;
 use crate::chance::roll;
 use crate::line;
 
@@ -41,7 +43,7 @@ impl End {
 enum Fate {
     /// The line lost it, or the receiver found a parity error.
     Lost,
-    /// It arrived at an end that is not open, or at a full queue.
+    /// It arrived at an end that is not open, at a failed port, or at a full queue.
     Dropped,
     /// It arrived in the queue of the end.
     Queued,
@@ -49,6 +51,10 @@ enum Fate {
 
 /// An open end of a line.
 struct Open {
+    /// The path of the port, for its error.
+    path: PathBuf,
+    /// Each read and write gives `EIO`.
+    failed: bool,
     settings: Settings,
     /// The rate of `settings`.
     rate: Rate,
@@ -65,6 +71,13 @@ struct Open {
 }
 
 impl Open {
+    fn error(&self) -> Error {
+        Error::Io {
+            path: self.path.clone(),
+            code: EIO,
+        }
+    }
+
     /// Adds a character sent at true time `now` to the run, or starts a new run when
     /// the last character arrived by `now`. Gives the true time it arrives, or
     /// `None` past the end of true time.
@@ -88,6 +101,8 @@ struct Line {
     config: line::Config,
     rng: Rng,
     ends: [Option<Open>; 2],
+    /// Whether the next open of each end fails.
+    failing: [bool; 2],
 }
 
 /// A fault of the line, drawn as a byte is sent.
@@ -153,6 +168,7 @@ impl Serial {
                     config,
                     rng: Rng::from_seed(self.rng.next_u64()),
                     ends: [None, None],
+                    failing: [false, false],
                 });
                 self.ends.insert(a, End { line, side: 0 });
                 self.ends.insert(b, End { line, side: 1 });
@@ -173,11 +189,13 @@ impl Serial {
         let Some(&end) = self.ends.get(&port) else {
             return Err(Error::NotFound { path: port.1 });
         };
-        let slot = &mut self.lines[end.line].ends[end.side];
-        if slot.is_some() {
+        let line = &mut self.lines[end.line];
+        if line.ends[end.side].is_some() {
             return Err(Error::Busy { path: port.1 });
         }
-        *slot = Some(Open {
+        line.ends[end.side] = Some(Open {
+            path: port.1,
+            failed: mem::take(&mut line.failing[end.side]),
             settings: config.settings,
             rate: config.settings.rate(),
             queue: VecDeque::new(),
@@ -198,6 +216,26 @@ impl Serial {
         [open.reader, open.writer]
     }
 
+    /// Makes the open port at `path` of `node` fail and loses its bytes in flight,
+    /// or else makes the next open of it fail. Returns the wakers of the port, for
+    /// the caller to wake after it releases the lock, or `None` when no line joins
+    /// the port.
+    pub(crate) fn fail(
+        &mut self,
+        node: usize,
+        path: &Path,
+    ) -> Option<[Option<Waker>; 2]> {
+        let &end = self.ends.get(&(node, path.to_path_buf()))?;
+        let line = &mut self.lines[end.line];
+        let Some(open) = &mut line.ends[end.side] else {
+            line.failing[end.side] = true;
+            return Some([None, None]);
+        };
+        open.failed = true;
+        self.flights.retain(|_, byte| byte.from != end);
+        Some([open.reader.take(), open.writer.take()])
+    }
+
     /// Reads into `buffer` from the queue of `end`, or keeps `waker` when it is
     /// empty. Returns a waker for the caller to drop after it releases the lock.
     pub(crate) fn read(
@@ -205,8 +243,11 @@ impl Serial {
         end: End,
         waker: Waker,
         buffer: &mut [u8],
-    ) -> (Poll<usize>, Option<Waker>) {
+    ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
         let open = self.lines[end.line].ends[end.side].as_mut().expect(OPEN);
+        if open.failed {
+            return (Poll::Ready(Err(open.error())), Some(waker));
+        }
         if open.queue.is_empty() {
             return (Poll::Pending, open.reader.replace(waker));
         }
@@ -214,7 +255,7 @@ impl Serial {
         for (slot, byte) in buffer.iter_mut().zip(open.queue.drain(..count)) {
             *slot = byte;
         }
-        (Poll::Ready(count), Some(waker))
+        (Poll::Ready(Ok(count)), Some(waker))
     }
 
     /// Sends from `bytes` on `end` at true time `now` while its queue has room, or
@@ -226,9 +267,14 @@ impl Serial {
         end: End,
         waker: Waker,
         bytes: &[u8],
-    ) -> (Poll<usize>, Option<Waker>) {
-        let Line { config, rng, ends } = &mut self.lines[end.line];
+    ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
+        let Line {
+            config, rng, ends, ..
+        } = &mut self.lines[end.line];
         let open = ends[end.side].as_mut().expect(OPEN);
+        if open.failed {
+            return (Poll::Ready(Err(open.error())), Some(waker));
+        }
         let count = bytes.len().min(QUEUE - open.unsent);
         if count == 0 {
             return (Poll::Pending, open.writer.replace(waker));
@@ -255,7 +301,7 @@ impl Serial {
             };
             self.flights.insert((at, self.next), byte);
         }
-        (Poll::Ready(count), Some(waker))
+        (Poll::Ready(Ok(count)), Some(waker))
     }
 
     /// The true time of the first arrival.
@@ -280,7 +326,7 @@ impl Serial {
             wakers.extend(sender.writer.take());
             let to = byte.from.other();
             let fate = match (&mut ends[to.side], byte.fault) {
-                (None, _) => Fate::Dropped,
+                (None | Some(Open { failed: true, .. }), _) => Fate::Dropped,
                 (Some(_), Some(Fault::Lost)) => Fate::Lost,
                 (Some(open), _) if open.settings != byte.settings => {
                     push(open, byte.noise, &mut wakers)
