@@ -5,12 +5,16 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Role,
-    Start, Term, Voters,
+    Answer, Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft,
+    Role, Start, Term, Voters,
 };
 use types::node;
 
 const ELECTION: u32 = 10;
+
+const REFUSED: Body = Body::PreVoteReply {
+    answer: Answer::Refused,
+};
 
 fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
@@ -517,12 +521,11 @@ fn leased_voters_refuse_a_removed_node_that_missed_a_new_term() {
     // Each refusal carries the proof of term 2: node 1 holds the votes of the
     // heartbeat that moved it, nodes 2 and 3 the pre-votes of the election.
     let refuse = |id, grant| {
-        let mut refusal =
-            sent(ELECTION, id, 4, 2, Body::PreVoteReply { granted: false });
+        let mut refusal = sent(ELECTION, id, 4, 2, REFUSED);
         refusal.1.proof = Some(Proof {
             grant,
             candidate: key(2),
-            voters: set(&[2, 3]),
+            voters: [2, 3].map(|id| (key(id), None)).into(),
         });
         refusal
     };

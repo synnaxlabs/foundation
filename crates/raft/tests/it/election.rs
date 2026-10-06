@@ -3,10 +3,23 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::{Body, Grant, Message, Position, Proof, Role, Term};
+use raft::{Answer, Body, Claim, Grant, Message, Position, Proof, Role, Term};
 use types::node;
 
 use crate::network::{Action, ELECTION, Network, run, run_of_many};
+
+// The signed pre-vote that node `voter` grants to node `candidate` in `term`.
+fn grant(voter: usize, candidate: usize, term: Term) -> Body {
+    let signature = Network::signature(&Claim {
+        voter: Network::key(voter),
+        grant: Grant::PreVote,
+        term,
+        candidate: Network::key(candidate),
+    });
+    Body::PreVoteReply {
+        answer: Answer::Granted(Some(signature)),
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
@@ -92,7 +105,7 @@ proptest! {
             from: Network::key(other),
             to: Network::key(cut),
             term: Term(term.0 + 1),
-            body: Body::PreVoteReply { granted: true },
+            body: grant(other, cut, Term(term.0 + 1)),
             proof: None,
         });
         prop_assert_eq!(network.nodes[cut].role(), Role::Candidate);
@@ -138,7 +151,18 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
         proof: Some(Proof {
             grant: Grant::Vote,
             candidate: from,
-            voters: (0..3).map(Network::key).collect(),
+            voters: (0..3)
+                .map(Network::key)
+                .map(|voter| {
+                    let signature = Network::signature(&Claim {
+                        voter,
+                        grant: Grant::Vote,
+                        term: Term(u64::MAX),
+                        candidate: from,
+                    });
+                    (voter, Some(signature))
+                })
+                .collect(),
         }),
     });
     for _ in 0..10 * ELECTION {
@@ -171,7 +195,7 @@ fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
         from: Network::key(other),
         to: Network::key(cut),
         term: agreed.1,
-        body: Body::PreVoteReply { granted: true },
+        body: grant(other, cut, agreed.1),
         proof: None,
     });
     assert_eq!(network.nodes[cut].role(), Role::PreCandidate);
