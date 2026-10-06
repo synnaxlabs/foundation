@@ -142,6 +142,16 @@ impl Pattern {
         specificity
     }
 
+    /// Reports whether every name the pattern matches starts with `prefix`: the
+    /// pattern starts with the segments of `prefix`, as literals.
+    fn within(&self, prefix: &Name) -> bool {
+        let mut segments = self.segments.iter();
+        prefix.segments().all(|want| match segments.next() {
+            Some(Segment::Literal(literal)) => **literal == *want,
+            _ => false,
+        })
+    }
+
     /// Reads `body`, reporting errors against `input`, the text the user wrote.
     ///
     /// Each run of wildcards becomes its `*`s and then at most one `**`, so patterns
@@ -240,6 +250,14 @@ impl Selector {
             .filter(|p| p.matches(name))
             .map(Pattern::specificity)
             .max()
+    }
+
+    /// Reports whether every name that an include pattern matches starts with
+    /// `prefix`, by whole segments, as [`Name::starts_with`] reads it. Exclusions are
+    /// not read.
+    #[must_use]
+    pub fn within(&self, prefix: &Name) -> bool {
+        self.include.iter().all(|p| p.within(prefix))
     }
 }
 
@@ -657,6 +675,106 @@ mod tests {
             );
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
+        }
+
+        mod within {
+            use super::*;
+
+            fn selector(patterns: &[&str]) -> Selector {
+                Selector::new(patterns.iter().copied()).unwrap()
+            }
+
+            #[test]
+            fn holds_patterns_that_start_with_the_prefix() {
+                let prefix = name("site_a");
+                for pattern in
+                    ["site_a", "site_a.*", "site_a.**", "site_a.**.*", "site_a.b"]
+                {
+                    assert!(selector(&[pattern]).within(&prefix), "{pattern}");
+                }
+            }
+
+            #[test]
+            fn refuses_patterns_that_reach_past_the_prefix() {
+                for (pattern, prefix) in [
+                    ("**", "site_a"),
+                    ("*.gw", "site_a"),
+                    ("site_a_b.*", "site_a"),
+                    ("**.site_a", "site_a"),
+                    ("site_a", "site_a.b"),
+                    ("site_a.**", "site_a.b"),
+                ] {
+                    let within = selector(&[pattern]).within(&name(prefix));
+                    assert!(!within, "{pattern} within {prefix}");
+                }
+            }
+
+            #[test]
+            fn needs_every_include_and_reads_no_exclusion() {
+                let prefix = name("a");
+                assert!(selector(&["a.b", "a.c.**"]).within(&prefix));
+                assert!(!selector(&["a.b", "b"]).within(&prefix));
+                assert!(selector(&["a.**", "!a.b"]).within(&prefix));
+                assert!(!selector(&["**", "!b.**"]).within(&prefix));
+            }
+
+            proptest! {
+                #[test]
+                fn every_match_starts_with_the_prefix(
+                    p in patterns(),
+                    prefix in prefixes(),
+                    fill in fills(),
+                ) {
+                    let segments: Vec<&str> = p
+                        .iter()
+                        .zip(&fill)
+                        .flat_map(|(segment, fill)| match *segment {
+                            "*" => &fill[..1],
+                            "**" => &fill[1..],
+                            _ => std::slice::from_ref(segment),
+                        })
+                        .copied()
+                        .collect();
+                    prop_assume!(!segments.is_empty());
+                    let selector = selector(&[&p.join(".")]);
+                    let n = name(&segments.join("."));
+                    let prefix = name(&prefix.join("."));
+                    prop_assert!(selector.matches(&n).is_some());
+                    if selector.within(&prefix) {
+                        prop_assert!(n.starts_with(&prefix), "{n} outside {prefix}");
+                    }
+                }
+
+                #[test]
+                fn a_pattern_not_within_matches_a_name_outside(
+                    p in patterns(),
+                    prefix in prefixes(),
+                ) {
+                    let selector = selector(&[&p.join(".")]);
+                    let prefix = name(&prefix.join("."));
+                    // `c` is never a segment of `prefix`.
+                    let outside: Vec<_> = p
+                        .iter()
+                        .map(|s| if s.starts_with('*') { "c" } else { s })
+                        .collect();
+                    let outside = name(&outside.join("."));
+                    if !selector.within(&prefix) {
+                        prop_assert!(selector.matches(&outside).is_some());
+                        prop_assert!(!outside.starts_with(&prefix), "{outside}");
+                    }
+                }
+            }
+
+            fn prefixes() -> impl Strategy<Value = Vec<&'static str>> {
+                prop::collection::vec(prop::sample::select(vec!["a", "b"]), 1..4)
+            }
+
+            /// For each pattern segment, the one segment a `*` takes and then the
+            /// segments a `**` takes.
+            fn fills() -> impl Strategy<Value = Vec<Vec<&'static str>>> {
+                let segment = prop::sample::select(vec!["a", "b", "c"]);
+                prop::collection::vec(prop::collection::vec(segment, 1..4), 7)
+            }
         }
     }
 
