@@ -1,0 +1,372 @@
+//! `os::files` on the real disk, through `env::files`.
+
+use std::future::poll_fn;
+use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::task::Poll;
+
+use block::{Block, Pool};
+use env::files::{Error, File, Files, Mode, Operation};
+
+const KIB: u64 = 1 << 10;
+
+/// A directory of its own for the test on this thread, removed when it drops.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        let thread = std::thread::current();
+        let test = thread.name().expect("invariant: libtest names the thread");
+        let name = format!("foundation-os-{}-{test}", std::process::id());
+        let dir = std::env::temp_dir().join(name.replace("::", "-"));
+        std::fs::create_dir(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+}
+
+/// The files of `dir`, on an I/O thread named `name`, and the handle of the thread.
+fn files(dir: &Path, name: &str) -> (Files, env::thread::Handle) {
+    let (disk, thread) = os::files(dir, &os::threads().unwrap(), name).unwrap();
+    (Files::new(disk), thread)
+}
+
+/// Runs `body` with the files of a scratch directory of its own and the path of
+/// their data directory.
+fn run<F: Future<Output = ()>>(body: impl FnOnce(Files, PathBuf) -> F) {
+    let scratch = Scratch::new();
+    let (files, thread) = files(&scratch.0, "files");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(body(files, scratch.0.join("data")));
+    thread.join().unwrap();
+}
+
+fn pool() -> Pool {
+    let config = block::Config { budget: 1 << 20 };
+    let memory = block::Heap::new(config.reservation());
+    Pool::new(config, memory)
+}
+
+fn block(pool: &Pool, bytes: &[u8]) -> Block {
+    let mut unique = pool.alloc(bytes.len()).unwrap();
+    unique.copy_from_slice(bytes);
+    unique.freeze()
+}
+
+/// The `len` bytes of `file` at `offset`.
+async fn read(file: &File, pool: &Pool, offset: u64, len: usize) -> Vec<u8> {
+    let into = pool.alloc(len).unwrap();
+    file.read_at(offset, into).await.unwrap().to_vec()
+}
+
+async fn create(files: &Files, path: &str, len: u64) -> File {
+    let mode = Mode::Create { len };
+    files.open(Path::new(path), mode).await.unwrap()
+}
+
+fn io(path: &str, operation: Operation, code: i32) -> Error {
+    Error::Io {
+        path: path.into(),
+        operation,
+        code,
+    }
+}
+
+#[test]
+fn a_read_sees_the_parts_of_a_write_back_to_back() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        let parts = [block(&pool, b"abc"), block(&pool, b"defgh")];
+        file.write_at(1_000, &parts).await.unwrap();
+        assert_eq!(read(&file, &pool, 999, 10).await, b"\0abcdefgh\0");
+    });
+}
+
+#[test]
+fn a_write_of_more_parts_than_one_call_takes_keeps_their_order() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 8 * KIB).await;
+        let bytes: Vec<[u8; 4]> = (0..1_500_u32).map(u32::to_le_bytes).collect();
+        let parts: Vec<Block> = bytes.iter().map(|bytes| block(&pool, bytes)).collect();
+        file.write_at(0, &parts).await.unwrap();
+        assert_eq!(read(&file, &pool, 0, 6_000).await, bytes.concat());
+    });
+}
+
+#[test]
+fn a_dropped_write_ends_before_a_later_read() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        {
+            let parts = [block(&pool, b"kept")];
+            let mut write = pin!(file.write_at(8, &parts));
+            poll_fn(|context| {
+                if let Poll::Ready(result) = write.as_mut().poll(context) {
+                    result.unwrap();
+                }
+                Poll::Ready(())
+            })
+            .await;
+        }
+        assert_eq!(read(&file, &pool, 8, 4).await, b"kept");
+    });
+}
+
+#[test]
+fn create_makes_a_zeroed_file_of_its_length_in_the_data_directory() {
+    run(|files, data| async move {
+        let pool = pool();
+        files.create_dir(Path::new("ring")).await.unwrap();
+        let file = create(&files, "ring/0", 12 * KIB).await;
+        assert_eq!(file.len(), 12 * KIB);
+        assert_eq!(read(&file, &pool, 0, 12 * 1_024).await, vec![0; 12 * 1_024]);
+        let found = std::fs::metadata(data.join("ring/0")).unwrap();
+        assert_eq!(found.len(), 12 * KIB);
+    });
+}
+
+#[test]
+fn create_keeps_the_bytes_of_a_file_that_is_there() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        file.write_at(0, &[block(&pool, b"old")]).await.unwrap();
+        file.close().await;
+        let file = create(&files, "a", 4 * KIB).await;
+        assert_eq!(read(&file, &pool, 0, 3).await, b"old");
+    });
+}
+
+#[test]
+fn create_allocates_an_empty_file_that_is_there() {
+    run(|files, data| async move {
+        std::fs::write(data.join("a"), b"").unwrap();
+        let file = create(&files, "a", 4 * KIB).await;
+        assert_eq!(file.len(), 4 * KIB);
+    });
+}
+
+#[test]
+fn create_of_no_bytes_makes_an_empty_file() {
+    run(|files, data| async move {
+        let file = create(&files, "a", 0).await;
+        assert_eq!(file.len(), 0);
+        assert_eq!(std::fs::metadata(data.join("a")).unwrap().len(), 0);
+    });
+}
+
+#[test]
+fn create_of_another_length_gives_length() {
+    run(|files, _| async move {
+        create(&files, "a", 4 * KIB).await.close().await;
+        let mode = Mode::Create { len: 8 * KIB };
+        let found = files.open(Path::new("a"), mode).await.unwrap_err();
+        let expected = Error::Length {
+            path: "a".into(),
+            expected: 8 * KIB,
+            found: 4 * KIB,
+        };
+        assert_eq!(found, expected);
+    });
+}
+
+#[test]
+fn an_open_of_a_missing_file_gives_not_found() {
+    run(|files, _| async move {
+        for mode in [Mode::Read, Mode::Write] {
+            let found = files.open(Path::new("a"), mode).await.unwrap_err();
+            assert_eq!(found, Error::NotFound { path: "a".into() });
+        }
+        let found = files.open(Path::new("b/a"), Mode::Create { len: KIB });
+        let expected = Error::NotFound { path: "b/a".into() };
+        assert_eq!(found.await.unwrap_err(), expected);
+    });
+}
+
+#[test]
+fn a_write_open_of_a_held_file_gives_busy_and_a_read_open_does_not() {
+    run(|files, data| async move {
+        let held = create(&files, "a", 4 * KIB).await;
+        let (other, thread) = self::files(data.parent().unwrap(), "other");
+        for files in [&files, &other] {
+            for mode in [Mode::Write, Mode::Create { len: 4 * KIB }] {
+                let found = files.open(Path::new("a"), mode).await.unwrap_err();
+                assert_eq!(found, Error::Busy { path: "a".into() });
+            }
+            files.open(Path::new("a"), Mode::Read).await.unwrap();
+        }
+        drop((held, other));
+        thread.join().unwrap();
+    });
+}
+
+#[test]
+fn a_write_open_after_a_close_or_a_drop_of_the_holder_succeeds() {
+    run(|files, _| async move {
+        create(&files, "a", 4 * KIB).await.close().await;
+        let file = files.open(Path::new("a"), Mode::Write).await.unwrap();
+        drop(file);
+        files.open(Path::new("a"), Mode::Write).await.unwrap();
+    });
+}
+
+#[test]
+fn a_read_past_the_end_of_a_file_cut_short_gives_eio() {
+    run(|files, data| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        std::fs::write(data.join("a"), [7; 3_000]).unwrap();
+        let found = file.read_at(2_000, pool.alloc(2_000).unwrap()).await;
+        assert_eq!(found.unwrap_err(), io("a", Operation::ReadAt, 5));
+    });
+}
+
+#[test]
+fn an_open_of_a_directory_gives_eisdir() {
+    run(|files, _| async move {
+        files.create_dir(Path::new("d")).await.unwrap();
+        for mode in [Mode::Read, Mode::Write, Mode::Create { len: KIB }] {
+            let found = files.open(Path::new("d"), mode).await.unwrap_err();
+            assert_eq!(found, io("d", Operation::Open, 21));
+        }
+    });
+}
+
+#[test]
+fn list_gives_the_names_in_a_directory() {
+    run(|files, _| async move {
+        files.create_dir(Path::new("d")).await.unwrap();
+        create(&files, "d/b", KIB).await;
+        create(&files, "d/a", KIB).await;
+        files.create_dir(Path::new("d/c")).await.unwrap();
+        create(&files, "d/c/x", KIB).await;
+        let names = files.list(Path::new("d")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a"), "b".into(), "c".into()]);
+        assert_eq!(
+            files.list(Path::new("")).await.unwrap(),
+            [PathBuf::from("d")]
+        );
+        let found = files.list(Path::new("e")).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "e".into() });
+    });
+}
+
+#[test]
+fn create_dir_of_a_directory_that_is_there_succeeds() {
+    run(|files, _| async move {
+        files.create_dir(Path::new("d")).await.unwrap();
+        files.create_dir(Path::new("d")).await.unwrap();
+        assert_eq!(
+            files.list(Path::new("")).await.unwrap(),
+            [PathBuf::from("d")]
+        );
+    });
+}
+
+#[test]
+fn create_dir_over_a_file_or_in_a_missing_parent_fails() {
+    run(|files, _| async move {
+        create(&files, "a", KIB).await;
+        let found = files.create_dir(Path::new("a")).await.unwrap_err();
+        assert_eq!(found, io("a", Operation::CreateDir, 17));
+        let found = files.create_dir(Path::new("b/c")).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "b/c".into() });
+    });
+}
+
+#[test]
+fn remove_removes_a_file() {
+    run(|files, _| async move {
+        create(&files, "a", KIB).await.close().await;
+        files.remove(Path::new("a")).await.unwrap();
+        assert!(files.list(Path::new("")).await.unwrap().is_empty());
+        files.remove(Path::new("a")).await.unwrap();
+    });
+}
+
+#[test]
+fn sync_dir_syncs_a_directory_that_is_there() {
+    run(|files, _| async move {
+        files.create_dir(Path::new("d")).await.unwrap();
+        files.sync_dir(Path::new("d")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        let found = files.sync_dir(Path::new("e")).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "e".into() });
+    });
+}
+
+#[test]
+fn a_sync_after_a_write_succeeds() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        file.write_at(0, &[block(&pool, b"x")]).await.unwrap();
+        file.sync().await.unwrap();
+    });
+}
+
+#[test]
+fn free_drops_by_the_bytes_of_a_synced_write() {
+    const LEN: u64 = 64 << 20;
+    run(|files, _| async move {
+        let pool = pool();
+        let part = block(&pool, &vec![1; 512 << 10]);
+        let before = files.free().await.unwrap();
+        let file = create(&files, "a", LEN).await;
+        file.write_at(0, &vec![part; 128]).await.unwrap();
+        file.sync().await.unwrap();
+        let taken = before.saturating_sub(files.free().await.unwrap());
+        assert!(taken.abs_diff(LEN) < LEN / 4, "{taken} is not {LEN}");
+    });
+}
+
+/// The error of `os::files` on `dir`.
+#[test]
+fn a_disk_shows_as_disk() {
+    let scratch = Scratch::new();
+    let (disk, thread) =
+        os::files(&scratch.0, &os::threads().unwrap(), "files").unwrap();
+    assert_eq!(format!("{disk:?}"), "Disk { .. }");
+    drop(disk);
+    thread.join().unwrap();
+}
+
+fn dir_error(dir: &Path) -> os::Error {
+    os::files(dir, &os::threads().unwrap(), "files").unwrap_err()
+}
+
+#[test]
+fn files_of_a_missing_dir_gives_dir_and_makes_nothing() {
+    let scratch = Scratch::new();
+    let found = dir_error(&scratch.0.join("a"));
+    assert_eq!(
+        found.to_string(),
+        "cannot open the data directory: No such file or directory (os error 2)"
+    );
+    assert!(matches!(found, os::Error::Dir(_)));
+    assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
+}
+
+#[test]
+fn files_in_a_directory_under_a_file_gives_dir() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.0.join("a"), b"").unwrap();
+    let found = dir_error(&scratch.0.join("a"));
+    assert_eq!(
+        found.to_string(),
+        "cannot open the data directory: Not a directory (os error 20)"
+    );
+    assert!(matches!(found, os::Error::Dir(_)));
+}
