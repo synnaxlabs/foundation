@@ -1,16 +1,17 @@
-//! The cores this process may run on, and pinning a thread to one of them.
+//! The cores a thread may run on, and pinning a thread to one of them.
 
 use std::io;
 use std::num::NonZeroUsize;
 
-/// The CPUs of the affinity set of this process, read once.
+/// The CPUs of the affinity set of the thread that read it.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) struct Cores(Vec<usize>);
 
 #[cfg(target_os = "linux")]
 impl Cores {
-    /// Reads the affinity set of the calling thread.
+    /// Reads the affinity set of the calling thread. Fails with `EINVAL` on a kernel
+    /// with more than 1024 possible CPUs, the size of a `CpuSet`.
     pub(crate) fn read() -> io::Result<Self> {
         use rustix::thread::{CpuSet, sched_getaffinity};
 

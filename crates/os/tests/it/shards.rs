@@ -187,6 +187,40 @@ fn a_panic_in_the_drop_of_the_main_future_after_a_panic_in_a_task_ends_the_shard
     assert_joins(handle, panicked("shard-5"));
 }
 
+#[test]
+fn a_task_queued_behind_a_panic_does_not_run() {
+    let ran = flag();
+    let late = Arc::clone(&ran);
+    let main = move |tasks: Tasks| async move {
+        tasks.spawn(async { panic!("task") });
+        tasks.spawn(async move { late.store(true, Ordering::SeqCst) });
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-1"), main).unwrap();
+    assert_joins(handle, panicked("shard-1"));
+    assert!(!raised(&ran), "a task after the panic ran");
+}
+
+#[test]
+#[expect(clippy::disallowed_methods, reason = "the test bounds the start")]
+fn start_returns_while_the_shard_runs() {
+    let go = flag();
+    let wait = Arc::clone(&go);
+    let main = move |_: Tasks| async move {
+        while !raised(&wait) {
+            yield_now().await;
+        }
+    };
+    let (done, started) = mpsc::channel();
+    std::thread::spawn(move || done.send(shards().start(config("shard-8"), main)));
+    let started = started.recv_timeout(Duration::from_secs(10));
+    go.store(true, Ordering::SeqCst);
+    let handle = started
+        .expect("start returns while the shard runs")
+        .unwrap();
+    assert_joins(handle, Ok(()));
+}
+
 /// Spawns a task when it drops.
 struct Spawns {
     tasks: Tasks,
@@ -312,6 +346,21 @@ mod other {
             core: 0,
         };
         assert_eq!(e, pin);
+    }
+
+    #[test]
+    #[should_panic(expected = "bomb")]
+    fn a_panic_in_the_drop_of_main_before_the_start_reaches_start() {
+        let config = Config {
+            name: "shard-0".into(),
+            core: Some(0),
+        };
+        let bomb = Bomb;
+        let main = move |_: Tasks| {
+            let _bomb = &bomb;
+            async {}
+        };
+        drop(shards().start(config, main));
     }
 
     #[test]
