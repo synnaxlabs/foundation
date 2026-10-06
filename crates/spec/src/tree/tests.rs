@@ -287,6 +287,52 @@ fn a_child_with_another_last_key_is_named() {
 }
 
 #[test]
+fn a_child_with_a_key_not_above_its_sibling_is_named() {
+    for first in ["a", "b"] {
+        let mut chunks = Chunks::default();
+        let left = raw(&mut chunks, 0, &[("b", b"v")]);
+        let right = raw(&mut chunks, 0, &[(first, b"v"), ("c", b"v")]);
+        let root = raw(&mut chunks, 1, &[("b", &left.0), ("c", &right.0)]);
+        let corrupt = Error::Corrupt(right);
+        assert_eq!(diff(&chunks, empty(), root), Err(corrupt), "{first}");
+        let c = "c".parse().unwrap();
+        assert_eq!(get(&chunks, root, &c), Err(corrupt), "{first}");
+        let change = [Change::Set(c, vec![1])];
+        assert_eq!(apply(&mut chunks, root, change), Err(corrupt), "{first}");
+    }
+}
+
+#[test]
+fn a_first_child_with_a_key_not_above_its_parents_sibling_is_named() {
+    let mut chunks = Chunks::default();
+    let b = raw(&mut chunks, 0, &[("b", b"v")]);
+    let long = vec![7; 17_000];
+    let ac = raw(&mut chunks, 0, &[("a", b"v"), ("c", &long)]);
+    let d = raw(&mut chunks, 0, &[("d", b"v")]);
+    let left = raw(&mut chunks, 1, &[("b", &b.0)]);
+    let right = raw(&mut chunks, 1, &[("c", &ac.0), ("d", &d.0)]);
+    let root = raw(&mut chunks, 2, &[("b", &left.0), ("d", &right.0)]);
+    let corrupt = Error::Corrupt(ac);
+    assert_eq!(diff(&chunks, empty(), root), Err(corrupt));
+    let c = "c".parse().unwrap();
+    assert_eq!(get(&chunks, root, &c), Err(corrupt));
+    let change = [Change::Set("a".parse().unwrap(), vec![1])];
+    assert_eq!(apply(&mut chunks, root, change), Err(corrupt));
+}
+
+#[test]
+fn a_child_that_becomes_the_root_is_checked() {
+    let mut chunks = Chunks::default();
+    let b = raw(&mut chunks, 0, &[("b", b"v")]);
+    let wrong = raw(&mut chunks, 1, &[("b", &b.0)]);
+    let c = raw(&mut chunks, 0, &[("c", b"v")]);
+    let right = raw(&mut chunks, 1, &[("c", &c.0)]);
+    let root = raw(&mut chunks, 2, &[("a", &wrong.0), ("c", &right.0)]);
+    let change = [Change::Delete("c".parse().unwrap())];
+    assert_eq!(apply(&mut chunks, root, change), Err(Error::Corrupt(wrong)));
+}
+
+#[test]
 fn a_value_longer_than_four_scales_is_alone_in_its_leaf() {
     let mut chunks = Chunks::default();
     let mut model: Model = (1..200).map(|id| (id, vec![1; 8])).collect();
