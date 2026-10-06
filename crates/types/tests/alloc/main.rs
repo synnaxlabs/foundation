@@ -66,7 +66,7 @@ fn main() {
         assert_eq!(body.len(), 32, "the body views both series");
         assert_eq!(frame::check(&body, frame.ends()), Ok(()), "the ends fit");
         assert_eq!(
-            frame::series(&body, frame.ends())
+            frame::split(&body, frame.ends())
                 .map(|(_, bytes)| bytes.len())
                 .sum::<usize>(),
             32,

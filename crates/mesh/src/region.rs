@@ -5,6 +5,8 @@ use std::fmt;
 
 use types::{channel, node};
 
+use crate::bytes::put_key;
+
 /// The region state that this node applied.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct State {
@@ -43,15 +45,15 @@ pub(crate) enum Change {
 const HOME: u8 = 1;
 
 impl Change {
-    /// The one byte form of the change: a kind byte, then each key as 16
-    /// little-endian bytes.
-    pub(crate) fn encode(self) -> Vec<u8> {
+    /// Adds the one byte form of the change to `out`: a kind byte, then each key as
+    /// 16 little-endian bytes.
+    pub(crate) fn encode(self, out: &mut Vec<u8>) {
         match self {
-            Self::Home { index, home } => [HOME]
-                .into_iter()
-                .chain(index.as_u128().to_le_bytes())
-                .chain(home.as_u128().to_le_bytes())
-                .collect(),
+            Self::Home { index, home } => {
+                out.push(HOME);
+                out.extend(index.as_u128().to_le_bytes());
+                put_key(home, out);
+            }
         }
     }
 
@@ -155,6 +157,12 @@ mod tests {
         assert_eq!(state.home(index(7)), Some(node(2)));
     }
 
+    fn encoded(change: Change) -> Vec<u8> {
+        let mut out = Vec::new();
+        change.encode(&mut out);
+        out
+    }
+
     #[test]
     fn a_home_change_has_a_fixed_byte_form() {
         let change = Change::Home {
@@ -165,16 +173,15 @@ mod tests {
         expected.extend([0; 14]);
         expected.extend([0x0b, 0x0a]);
         expected.extend([0; 14]);
-        assert_eq!(change.encode(), expected);
+        assert_eq!(encoded(change), expected);
     }
 
     #[test]
     fn decode_refuses_an_unknown_kind() {
-        let mut bytes = Change::Home {
+        let mut bytes = encoded(Change::Home {
             index: index(1),
             home: node(2),
-        }
-        .encode();
+        });
         bytes[0] = 2;
         let error = Change::decode(&bytes).unwrap_err();
         assert_eq!(error, Malformed::Kind { kind: 2 });
@@ -183,11 +190,10 @@ mod tests {
 
     #[test]
     fn decode_refuses_bytes_of_another_length() {
-        let bytes = Change::Home {
+        let bytes = encoded(Change::Home {
             index: index(1),
             home: node(2),
-        }
-        .encode();
+        });
         for found in [0, 1, 17, 32, 34] {
             let mut cut = bytes.clone();
             cut.resize(found, 0);
@@ -203,7 +209,7 @@ mod tests {
     proptest! {
         #[test]
         fn a_change_round_trips(change in change()) {
-            prop_assert_eq!(Change::decode(&change.encode()), Ok(change));
+            prop_assert_eq!(Change::decode(&encoded(change)), Ok(change));
         }
 
         // Every byte form that decodes is the one that its change encodes to.
@@ -212,7 +218,7 @@ mod tests {
             bytes in prop::collection::vec(any::<u8>(), 0..40),
         ) {
             if let Ok(change) = Change::decode(&bytes) {
-                prop_assert_eq!(change.encode(), bytes);
+                prop_assert_eq!(encoded(change), bytes);
             }
         }
 
