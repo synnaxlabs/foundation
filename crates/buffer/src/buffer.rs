@@ -651,6 +651,7 @@ impl Future for Commit<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
+        // Before `failed`: a commit that synced stays well after a later sync fails.
         if state.commits > self.since {
             return Poll::Ready(Ok(()));
         }
