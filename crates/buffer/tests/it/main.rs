@@ -5,11 +5,14 @@
 
 mod memory;
 
+use std::future::poll_fn;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use block::{Block, Heap, Pool};
 use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Parts, Tail, Unfit};
@@ -665,6 +668,83 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
         assert_eq!(buffer.committed().await, failed);
         assert_eq!(shard.memory.syncs(), 2, "the task ended at the failed sync");
+    });
+}
+
+/// `commits` counts the commits that ended: each one that a `committed` future
+/// waited on, and one with nothing to write. A failed commit does not count.
+#[test]
+fn commits_counts_the_commits_that_ended() {
+    run(29, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        assert_eq!(buffer.commits(), 0);
+        for (count, first, last) in [(1, 0, 30), (2, 3, 60)] {
+            buffer
+                .append([entry(
+                    1,
+                    a,
+                    Path::Live,
+                    first,
+                    3,
+                    Some(last),
+                    Parts::default(),
+                )])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            assert_eq!(buffer.commits(), count);
+        }
+        let syncs = shard.memory.syncs();
+        buffer.committed().await.expect("commits nothing");
+        assert_eq!(buffer.commits(), 3, "a commit with nothing to write ended");
+        assert_eq!(shard.memory.syncs(), syncs, "it synced nothing");
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 6, 1, None, Parts::default())])
+            .expect("queues");
+        let failed = Err(Error::Files(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        }));
+        assert_eq!(buffer.committed().await, failed);
+        assert_eq!(buffer.commits(), 3, "the failed commit did not count");
+    });
+}
+
+/// A move of `commits` does not make every entry durable: an entry appended while
+/// a commit runs goes in the next one, and so does a `committed` future made then.
+#[test]
+fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
+    run(30, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(buffer.commits(), 0, "the first sync runs");
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues during the sync");
+        let mut commit = pin!(buffer.committed());
+        let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "the future waits for the next commit");
+        shard.clock.sleep(tenths(4)).await;
+        assert_eq!(buffer.commits(), 1);
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "the future still waits");
     });
 }
 
