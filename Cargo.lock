@@ -302,6 +302,11 @@ checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 [[package]]
 name = "config"
 version = "0.0.0"
+dependencies = [
+ "document",
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "config-hcl"

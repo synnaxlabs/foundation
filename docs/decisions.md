@@ -1518,7 +1518,8 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
+  that selects node names: `node_settings "<name>" { select, disk, pool }`, such as
+  `select = "site_a.*"` and `disk = "200GiB"`. Each budget is optional and above zero.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
@@ -1526,6 +1527,16 @@ How to read this record:
   default, because the spec is stored in it. Node-local config for the budgets lost:
   `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
   decided on 2026-10-05 ("Yeah mesh node"), #342.
+- **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
+  policies of its kind. A policy name can equal a channel name. A policy belongs to the
+  region that governs its name (X2: the longest region prefix that contains it), and it
+  may select only names in that region and its descendants (X26). When a `region` block
+  is added or removed, `plan` checks X26 again for each policy whose region changes,
+  lists each policy that moves to other voters, and refuses one whose reach fails. Lost:
+  the region from the selector (a wider pattern would move the policy to other voters
+  silently, and X26 could never fail), and the region from the directory (K2 makes the
+  layout a default only; r3 rejected a `region =` attribute). The advisor approved it on
+  2026-10-05, #474.
 
 ### 1.12 Access, identity, and secrets
 
@@ -2738,8 +2749,8 @@ conclusion together". Each one is listed below.
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
   voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
-  tree key `<label>.@<kind>` of a policy (#729), and `frame::split`, which cuts a
-  frame body at its ends and gives each part (#632).
+  tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
+  body at its ends and gives each part (#632), POLICY NAMES (#474).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
   the STREAM WIRE hello (#55).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
