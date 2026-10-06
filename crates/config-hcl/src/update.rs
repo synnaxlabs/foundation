@@ -112,34 +112,26 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(source: Source, text: &'a str) -> Self {
-        let mut tokens =
-            Tokens::new(source, text).expect("invariant: `read` took the text");
-        let mut marks = Vec::new();
-        // Each pass takes a token or returns.
-        for _ in 0..=text.len() {
-            let token = tokens.next();
-            marks.push(Mark {
+        let marks = Tokens::new(source, text)
+            .expect("invariant: `read` took the text")
+            .map(|token| Mark {
                 start: offset(token.span.start()),
                 end: offset(token.span.end()),
                 newline: token.kind == lex::Kind::Newline,
-            });
-            if token.kind != lex::Kind::End {
-                continue;
-            }
-            // Not from the tokens: a heredoc or a comment can hold the first line end.
-            let crlf = text
-                .split_once('\n')
-                .is_some_and(|(line, _)| line.ends_with('\r'));
-            return Self {
-                text,
-                marks,
-                floor: text
-                    .strip_prefix('\u{feff}')
-                    .map_or(0, |_| '\u{feff}'.len_utf8()),
-                crlf,
-            };
+            })
+            .collect();
+        // Not from the tokens: a heredoc or a comment can hold the first line end.
+        let crlf = text
+            .split_once('\n')
+            .is_some_and(|(line, _)| line.ends_with('\r'));
+        Self {
+            text,
+            marks,
+            floor: text
+                .strip_prefix('\u{feff}')
+                .map_or(0, |_| '\u{feff}'.len_utf8()),
+            crlf,
         }
-        unreachable!("invariant: each token but the last covers a byte")
     }
 
     /// The lines of an item from the start of `first` to the end of `last`, with
@@ -628,17 +620,12 @@ mod tests {
     /// Adds blank lines and comments to `text`, which `write` gave, and maybe a byte
     /// order mark, `\r\n` line ends, or no final new line.
     fn annotate(text: &str, picks: &mut Picks) -> String {
-        let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
         let mut ends_at_closer = false;
-        loop {
-            let token = tokens.next();
+        for token in Tokens::new(Source(0), text).unwrap() {
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
-            if token.kind == lex::Kind::End {
-                break;
-            }
             if token.kind != lex::Kind::Newline {
                 heredoc = matches!(token.kind, lex::Kind::Heredoc(_));
                 continue;
@@ -671,17 +658,11 @@ mod tests {
 
     /// Each heredoc of `text` as written, through the first error.
     fn heredocs(text: &str) -> Vec<&str> {
-        let mut tokens = Tokens::new(Source(0), text).unwrap();
-        let mut out = Vec::new();
-        for _ in 0..=text.len() {
-            let token = tokens.next();
-            match token.kind {
-                lex::Kind::End | lex::Kind::Error(_) => return out,
-                lex::Kind::Heredoc(_) => out.push(token.text),
-                _ => {}
-            }
-        }
-        panic!("more tokens than bytes in {text:?}")
+        Tokens::new(Source(0), text)
+            .unwrap()
+            .filter(|token| matches!(token.kind, lex::Kind::Heredoc(_)))
+            .map(|token| token.text)
+            .collect()
     }
 
     /// Mixes `b` into `a`: keeps, cuts, or changes each attribute of `a` to a value of

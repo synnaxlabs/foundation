@@ -19,7 +19,7 @@ use crate::{Error, Expected, Form, Number};
 /// past the limit stops reading, so it is the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
-    let token = tokens.next();
+    let token = next(&mut tokens, false);
     let mut parser = Parser {
         tokens,
         token,
@@ -401,9 +401,9 @@ impl<'a> Parser<'a> {
             return false;
         }
         let mut ahead = self.tokens.clone();
-        match ahead.next_past_lines().kind {
+        match next(&mut ahead, true).kind {
             lex::Kind::String(_) | lex::Kind::Heredoc(_) => {
-                ahead.next_past_lines().kind == lex::Kind::CloseBracket
+                next(&mut ahead, true).kind == lex::Kind::CloseBracket
             }
             lex::Kind::Error(Error::Form {
                 form: Form::Template,
@@ -703,7 +703,7 @@ impl<'a> Parser<'a> {
 
     /// The first token after the next one that is not a new line.
     fn second_past_lines(&self) -> Token<'a> {
-        self.tokens.clone().next_past_lines()
+        next(&mut self.tokens.clone(), true)
     }
 
     /// The problem at the next token: the lexer's error, or `expected`.
@@ -719,12 +719,14 @@ impl<'a> Parser<'a> {
 }
 
 /// The next token of `tokens`, past new lines when `newlines_skipped` holds.
+///
+/// # Panics
+///
+/// Panics after the tokens end, which no rule reads past.
 fn next<'a>(tokens: &mut Tokens<'a>, newlines_skipped: bool) -> Token<'a> {
-    if newlines_skipped {
-        tokens.next_past_lines()
-    } else {
-        tokens.next()
-    }
+    tokens
+        .find(|token| !newlines_skipped || token.kind != lex::Kind::Newline)
+        .expect("invariant: no rule reads past the end or an error")
 }
 
 /// An identifier that reads as a value, not as a reference.

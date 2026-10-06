@@ -51,12 +51,14 @@ pub(crate) enum Kind {
     Error(Error),
 }
 
-/// Splits text into tokens, skipping spaces, tabs, and comments.
+/// Splits text into tokens, skipping spaces, tabs, and comments. The tokens end after
+/// [`Kind::End`] or the first [`Kind::Error`].
 #[derive(Clone)]
 pub(crate) struct Tokens<'a> {
     source: Source,
     rest: &'a str,
     at: Position,
+    ended: bool,
 }
 
 impl<'a> Tokens<'a> {
@@ -81,29 +83,8 @@ impl<'a> Tokens<'a> {
                 line: 0,
                 column: 0,
             },
+            ended: false,
         })
-    }
-
-    /// Reads the next token. Each token but [`Kind::End`] and [`Kind::Error`] covers
-    /// one byte or more. Call it no more after `End` or `Error`.
-    pub(crate) fn next(&mut self) -> Token<'a> {
-        self.read().unwrap_or_else(|error| Token {
-            kind: Kind::Error(error),
-            text: "",
-            span: self.span(self.at),
-        })
-    }
-
-    /// Reads the next token that is not a new line.
-    pub(crate) fn next_past_lines(&mut self) -> Token<'a> {
-        // Each pass moves past a new line or returns.
-        for _ in 0..=self.rest.len() {
-            let token = self.next();
-            if token.kind != Kind::Newline {
-                return token;
-            }
-        }
-        unreachable!("invariant: each pass moves past a new line")
     }
 
     fn read(&mut self) -> Result<Token<'a>, Error> {
@@ -514,6 +495,25 @@ impl<'a> Tokens<'a> {
     }
 }
 
+impl<'a> Iterator for Tokens<'a> {
+    type Item = Token<'a>;
+
+    /// Reads the next token. Each token but [`Kind::End`] and [`Kind::Error`] covers
+    /// one byte or more.
+    fn next(&mut self) -> Option<Token<'a>> {
+        if self.ended {
+            return None;
+        }
+        let token = self.read().unwrap_or_else(|error| Token {
+            kind: Kind::Error(error),
+            text: "",
+            span: self.span(self.at),
+        });
+        self.ended = matches!(token.kind, Kind::End | Kind::Error(_));
+        Some(token)
+    }
+}
+
 /// Reports whether all of `text` reads as one [`Kind::Identifier`].
 pub(crate) fn identifier(text: &str) -> bool {
     let mut chars = text.chars();
@@ -585,35 +585,54 @@ mod tests {
         fn each_token_but_the_last_has_a_byte(
             text in "[a-z0-9 \t\r\n\"\\\\\\{}\\[\\]().,:=<>!&|+*/%?#@$-]{0,40}|\\PC{0,20}"
         ) {
-            let mut tokens = Tokens::new(Source(0), &text).unwrap();
-            for _ in 0..=text.len() {
-                let token = tokens.next();
-                if matches!(token.kind, Kind::End | Kind::Error(_)) {
-                    return Ok(());
-                }
+            let tokens = Tokens::new(Source(0), &text).unwrap();
+            let most = text.len().saturating_add(1);
+            let tokens: Vec<_> = tokens.take(most.saturating_add(1)).collect();
+            prop_assert!(tokens.len() <= most, "more tokens than bytes");
+            let (last, before) = tokens.split_last().unwrap();
+            prop_assert!(matches!(last.kind, Kind::End | Kind::Error(_)), "{last:?}");
+            for token in before {
                 prop_assert!(!token.text.is_empty(), "{:?} has no text", token.kind);
             }
-            prop_assert!(false, "more tokens than bytes in {text:?}");
         }
     }
 
     /// The kind and text of each token of `text` before the end, through the first
     /// error.
     fn tokens(text: &str) -> Vec<(Kind, &str)> {
-        let mut tokens = Tokens::new(Source(0), text).unwrap();
-        let mut found = Vec::new();
-        for _ in 0..=text.len() {
-            let token = tokens.next();
-            match token.kind {
-                Kind::End => return found,
-                Kind::Error(_) => {
-                    found.push((token.kind, token.text));
-                    return found;
-                }
-                kind => found.push((kind, token.text)),
-            }
-        }
-        panic!("more tokens than bytes in {text:?}")
+        Tokens::new(Source(0), text)
+            .unwrap()
+            .filter(|token| token.kind != Kind::End)
+            .map(|token| (token.kind, token.text))
+            .collect()
+    }
+
+    #[test]
+    fn ends_after_the_end() {
+        let mut tokens = Tokens::new(Source(0), "a").unwrap();
+        assert_eq!(
+            tokens.next().map(|token| token.kind),
+            Some(Kind::Identifier)
+        );
+        assert_eq!(tokens.next().map(|token| token.kind), Some(Kind::End));
+        assert!(tokens.next().is_none());
+        assert!(tokens.next().is_none());
+    }
+
+    #[test]
+    fn ends_after_the_first_error() {
+        // Two, so that tokens that do not end fail and do not hang.
+        let kinds: Vec<_> = Tokens::new(Source(0), "\"a\n\"b")
+            .unwrap()
+            .take(2)
+            .map(|token| token.kind)
+            .collect();
+        let [Kind::Error(error @ Error::Unclosed { .. })] = kinds.as_slice() else {
+            panic!("{kinds:?}");
+        };
+        let message = "the file needs `\"` to end the string here. Write it here, or \
+                       correct the text here or before it";
+        assert_eq!(error.to_string(), message);
     }
 
     #[test]
