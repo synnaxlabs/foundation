@@ -61,7 +61,7 @@ impl Voters {
     }
 
     // Every node in either set, once.
-    pub(crate) fn peers(&self) -> impl Iterator<Item = node::Key> + '_ {
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = node::Key> + '_ {
         self.incoming.union(&self.outgoing).copied()
     }
 
@@ -147,13 +147,13 @@ mod tests {
     }
 
     #[test]
-    fn peers_names_a_node_in_both_sets_once() {
+    fn nodes_names_a_node_in_both_sets_once() {
         let voters = Voters {
             incoming: BTreeSet::from([key(2), key(1)]),
             outgoing: BTreeSet::from([key(2), key(3)]),
         };
-        let peers: Vec<node::Key> = voters.peers().collect();
-        assert_eq!(peers, [key(1), key(2), key(3)]);
+        let nodes: Vec<node::Key> = voters.nodes().collect();
+        assert_eq!(nodes, [key(1), key(2), key(3)]);
     }
 
     #[test]

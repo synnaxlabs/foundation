@@ -91,7 +91,8 @@ How to read this record:
   non-ASCII device tags to ASCII names.
 - **NAME LENGTH (2026-10-04)** A name or pattern holds at most 255 bytes. The person
   chose "255 bytes": it fits a one-byte length prefix, and raising it later stays
-  backward compatible.
+  backward compatible. The `!` of an exclusion is syntax: the exclusion's pattern is
+  the text after it. Decided by the advisor on 2026-10-06, #762.
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
@@ -354,24 +355,37 @@ How to read this record:
   that do not hold `count` samples, and `validate` refuses encoded bytes that do not
   parse as `count` samples. The bytes do not carry the count, so a wrong count passes
   when the vectors also parse at it: a vector with bit width 0 holds any count up to
-  1024.
+  1024. A fixed array is the series of its `count * len` elements. A `String`,
+  `Bytes`, or `List` series is the `u32` series of its ends, then the series of its
+  elements (`u8` for `String` and `Bytes`). An end counts elements from the first, so
+  ends never decrease, and a `List` sample holds at most `max` elements. In the raw
+  form, zeros pad the ends to a multiple of the element width or 8, whichever is less
+  (R9-D3). A frame series starts on 8 bytes, so the elements are then aligned. The
+  encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
+  and a view of a raw variable series relies on it. `codec` does not check UTF-8 (the
+  owner is #556). Vector numbers in errors count across the ends and the elements.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
   Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
-  on a 4096-byte boundary so a commit never rewrites a synced block. The CRC covers
-  `len`, `kind`, and the body. It continues from the record before (a chain), so
-  bytes of an earlier chain never read as the next record.
+  on a 4096-byte boundary so a commit never rewrites a synced block, except the
+  restart record of an open and the records after it, which may go over a restart or
+  wrap record that no data record follows (#649). The CRC covers `len`, `kind`, and
+  the body. It continues from the record before (a chain), so bytes of an earlier
+  chain never read as the next record.
   Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
-  not used and the next record is at its start; restart (3), written at each open,
+  not used and the next record is at its start; restart (3), written at each open
+  right after the last data record the walk reads, or at the tail when it reads none,
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
   is the offset modulo the area length. The area is at least twice the largest
   record, so a ring that holds only its restart record takes any record (#637). A
   ring whose head reaches the end of the offsets is full for good. A body is at most
-  `u32::MAX` bytes and at least the table of one entry.
+  `u32::MAX` bytes and at least one block less the record header (4087 bytes): a
+  record takes whole blocks, so a smaller one saves no disk and only holds less per
+  commit.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -415,9 +429,9 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. `Layout::entry_max` is the most bytes of parts that `append` takes in a
-  batch of one entry; a batch of more entries holds less. A user that appends an
-  entry alone checks at open that its largest one fits (#627). An entry has no
+  records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
+  `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
+  one entry, at least 4032; a batch of more entries holds less. An entry has no
   part, one, or two; `append` takes them owned and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
@@ -745,7 +759,18 @@ How to read this record:
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
   suspend lost: mesh time would fall behind by the time asleep, outside its bound.
-  Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
+  Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144. On
+  Linux the read is `CLOCK_MONOTONIC_RAW` plus the time asleep (`CLOCK_BOOTTIME` minus
+  `CLOCK_MONOTONIC`), because time daemons slew `CLOCK_BOOTTIME` faster than 200 ppm
+  (chrony up to 83,333 ppm), and a bound that grows at 200 ppm then misses the true
+  time. The driver in `os` keeps the largest time asleep it has read, so reads never go
+  back (#117). Cost, Amazon Linux 2023: 73 ns against 24 to 29 ns for one
+  `CLOCK_BOOTTIME` read on c7i.large (x86-64), and about 100 ns against 30 ns on
+  c7g.medium (arm64, a noisy run); the shared maximum adds about 1 ns (M3 Max). macOS
+  is not hit: no daemon slews `mach_continuous_time`. Lost: `CLOCK_BOOTTIME` with a
+  rule that the daemon slews within a limit, because a node cannot check it;
+  `CLOCK_BOOTTIME` with a bound that can fail in a fast slew. The person decided on
+  2026-10-06 ("yes"), #688.
 - **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
   sources of one clock in one task on the clock's shard. `node` builds the source table
   and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
@@ -1070,6 +1095,32 @@ How to read this record:
   sends the commit and steps down. A node outside an uncommitted configuration still
   campaigns: the entry may be truncated, and a removed leader that lost its lead before
   the leave reached a peer is the only node that can win the election that commits it.
+- **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
+  files `log-0`, `log-1`, and so on of one directory; any other file there is
+  `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
+  is an 8-byte check of the rest of the header (the first bytes of
+  `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
+  body length, and an 8-byte check of the body. The body holds the hard state, when it
+  changed, and the entries, so one sync makes both durable; two slots for the hard state
+  lost, because they need a second sync and a second torn-write rule. A later record
+  replaces the entries from its first index. A file is 1 MiB, or the length of its first
+  record when that is more, and a record that does not fit starts the next file. In a
+  file with no record, it makes that file again, larger, so each file but the last
+  holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
+  header never crosses a `SECTOR`: a record whose header would cross one starts at the
+  next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
+  header is whole or absent. At a restart, zeros where a record should start, or a good
+  header with a torn body, are the end of the log. Anything else, or a record after a
+  torn one, is `Error::Corrupt`, and the node does not start. Open zeroes the bytes
+  after the end, so a torn record leaves nothing that a later open reads as a header.
+  Then it syncs the end file, the directory, and its parent, because `raft` acts on
+  what open gives and a crash can leave any of them with no sync. One check over the
+  whole record lost: a damaged length then reads as a torn end, and the log drops the
+  good records after it. Zeros over the header of a durable record, which only a disk
+  fault makes, read as the end, and open drops the records after it in that file. A
+  search past the end for a record lost: a body can hold the bytes of a record, so a
+  power cut could then stop the node. Nothing trims the log until snapshots (#253).
+  `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1080,23 +1131,23 @@ How to read this record:
   above the leaves holds at least two entries, unless it is the last of its level, so
   a key of any size fits. The rule uses integers only. A chunk with one child is
   never a root, so the tree is a function of its entries. The empty tree has the root
-  `tree::empty()` and no stored chunk. Chunks come from peers, so a reader checks
-  each chunk that it reads: keys in order, each length in its shortest form, and a
-  child at the level below with the last key that its parent gives. A chunk that
-  fails gives `Error::Corrupt(hash)`. A reader does not check the boundaries, and
-  only `diff` checks that a leaf key is a name, so "a function of its entries" holds
-  for trees that `apply` made. The tree does no I/O: the caller fills a
-  `tree::Chunks`, and `get`, `apply`, and `diff` return `Error::Missing(hash)` for a
-  chunk that is not there, so the caller fetches it and runs the operation again.
-  Each run names one chunk, because a change record lists the chunks that it made
-  and a caller fetches those first. `apply` takes a batch of `tree::Change` values,
-  adds the new chunks to the `Chunks`, and returns the new root and their hashes.
-  `diff` returns each changed entry with its old and new value, and the chunks that
-  only the new tree has. A read of all entries below one name is a later function
-  of `spec::tree`; it replaces the `spec::Tree::region` of X12. A chunk has no
-  maximum size: one value is in one chunk, and the limit on a value belongs to the
-  code that encodes definitions. A chunk's address is a `types::digest::Digest`, the
-  same type that `wire` and `blob` carry. To change the chunk format or the boundary
+  `tree::empty()` and no stored chunk. Chunks come from peers, so a reader checks each
+  chunk that it reads: keys in order, each length in its shortest form, and a child at
+  the level below with the last key that its parent gives and a first key above each key
+  that comes before it in the chunks above (#684). A chunk that fails gives
+  `Error::Corrupt(hash)`. A reader does not check the boundaries, and only `diff` checks
+  that a leaf key is a name, so "a function of its entries" holds for trees that `apply`
+  made. The tree does no I/O: the caller fills a `tree::Chunks`, and `get`, `apply`, and
+  `diff` return `Error::Missing(hash)` for a chunk that is not there, so the caller
+  fetches it and runs the operation again. Each run names one chunk, because a change
+  record lists the chunks that it made and a caller fetches those first. `apply` takes a
+  batch of `tree::Change` values, adds the new chunks to the `Chunks`, and returns the
+  new root and their hashes. `diff` returns each changed entry with its old and new
+  value, and the chunks that only the new tree has. A read of all entries below one name
+  is a later function of `spec::tree`; it replaces the `spec::Tree::region` of X12. A
+  chunk has no maximum size: one value is in one chunk, and the limit on a value belongs
+  to the code that encodes definitions. A chunk's address is a `types::digest::Digest`,
+  the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
@@ -1470,6 +1521,13 @@ How to read this record:
 - **BQ11b** `node` pulls each crate's values and writes status channels through `hub`.
   Rebalancing is an outside controller that reads status channels and acts through
   plan and apply.
+- **STATUS CHANNELS (2026-10-06)** `node::status::TABLE` is the fixed set of a node's
+  status channels: `clock.status` (`U8`: 0 unsynced, 1 synced, 2 holdover),
+  `clock.offset` (`Span`), and `clock.error` (`Span`; an unknown error is the bound of
+  `estimate::Measurement::unknown`). An unsynced clock gives no offset or error. Each
+  table entry maps the pulled status to its value. A pure `Collector` pulls each value
+  from a reader that its crate gives; no crate calls `node`. Lost: each crate pushes
+  status events to a sink (BQ11b locks pull). Decided in #728.
 - **OWN REPO (revises C9a)** Foundation lives in its own private repository,
   `synnaxlabs/foundation`, with one Cargo workspace: `crates/` (crate list in section
   4), `xtask/`, `oracles/`, and later `sdk/` and `bench/`. Every PR runs the layer
@@ -1652,15 +1710,15 @@ How to read this record:
   device at run time lost (#569).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
-  crash keeps each file call that ended, and ends each call in flight at the crash, so
-  a restart finds no file held (#392). A `Power` crash keeps, for each 512-byte
-  sector, its durable bytes or the bytes of any one write since then, a write in flight
-  too. A `sync` makes durable the writes that ended before it started. A failed `sync`
-  makes each sector keep its durable bytes or those of one such write, at random. A
-  `sync_dir` makes durable the entries at its end. A removed file takes space until the
-  removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
-  thread that a crash ended panics, because no process joins its own threads after it
-  dies. Built by `simulation` in #114.
+  crash keeps each file call that ended, and ends each call in flight at the crash, so a
+  restart finds no file held (#392), not even by a leaked handle (#535). A `Power` crash
+  keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
+  then, a write in flight too. A `sync` makes durable the writes that ended before it
+  started. A failed `sync` makes each sector keep its durable bytes or those of one such
+  write, at random. A `sync_dir` makes durable the entries at its end. A removed file
+  takes space until the removal is durable. The monotonic clock starts again and the
+  wall runs on. `join` on a thread that a crash ended panics, because no process joins
+  its own threads after it dies. Built by `simulation` in #114 and #535.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -1677,6 +1735,12 @@ How to read this record:
   not run drops the same way, after the futures. A thread that a drop starts on the
   crashing node ends in the crash and never runs. Built by `simulation` in #548 and
   #666.
+- **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
+  `catch_unwind`. If any panicked, it then panics once with every message, the first
+  one first, but only when the thread is not already panicking. This is the one
+  exception to the rust.md rule "`Drop` never panics": to print the messages and not
+  fail would hide a defect. The person said: "An exception for the simualtor is fine"
+  (#555).
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
@@ -1686,10 +1750,21 @@ How to read this record:
   are usable from the start: they hold the pool's header, so `Pool::new` makes no
   commit that can fail. A purged page stops counting against the memory the system
   can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
-  charge, so `os` purges with a `MAP_FIXED` remap (#475). `block::testing::{Scarce,
-  Switch}`, behind the `sim` feature, is heap memory whose commits a test makes
-  refuse, so a crate above `block` tests a refused commit through its production
-  path (#591).
+  charge, so `os` purges with a `MAP_FIXED` remap (#475). `os::memory::Memory`
+  reserves `PROT_NONE` pages, which take no charge, and commits with `mprotect`;
+  `ENOMEM` gives `Refused`, and a refused commit can leave part of its range
+  committed and charged until a purge or the drop. A failed purge remap panics, and
+  the drop then leaks the reserve: on Linux the remap can leave a hole that another
+  mapping fills, and an unmap would remove that mapping. `os::memory` builds on Linux
+  and macOS only; Windows waits for #477, and `node` adds no cfg for it. On Linux each
+  reserved or purged page has no huge pages (`MADV_NOHUGEPAGE`): the first touch of
+  a huge page takes 2 MiB, and a purge of part of one gives memory back only later.
+  A read and write `MAP_NORESERVE` reserve with a commit that does nothing lost: strict
+  overcommit and Windows charge it in full, and it never refuses (#66). The person
+  approved `unsafe` in `os::memory`, checked by tests on the real OS and not by Miri, on
+  2026-10-05 ("Yeah taht's fine"), #461. `block::testing::{Scarce, Switch}`, behind
+  the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
+  above `block` tests a refused commit through its production path (#591).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -1720,7 +1795,14 @@ How to read this record:
   machine?" ARM skips docs-only changes. The coordinator owns it. On 2026-10-05 the
   host ran at 80 to 86% CPU with 14 runs queued, so a second host, an m7g.4xlarge (16
   vCPU, 300 GB) with six runners (`foundation-arm-d` to `-i`), joined it. The person
-  chose "m7g.4xlarge, 6 runners".
+  chose "m7g.4xlarge, 6 runners". On 2026-10-06, with 55 runs queued, a third host
+  joined with three runners (`foundation-arm-j` to `-l`): one spot machine from an EC2
+  Fleet over six Graviton types and six zones (launch template `foundation-arm-spot`),
+  because AWS took back a single-type spot machine after 30 minutes. Limits: a spot
+  price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
+  hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
+  "Once you are sure of costs provision and set strict limits on whatever you need
+  please".
 - **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
   No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
   still be a valid build, so OS-specific code goes only in `os`. The person said: "As
@@ -2485,13 +2567,13 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
 | 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network, serial lines) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
-| 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
+| 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `block`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
 | 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
@@ -2543,7 +2625,8 @@ Parameters and later choices, recorded and not asked:
 - Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
   R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
-  S4 disk format starting point and its ring sizing (#637), r12 I4 (`buffer`
+  S4 disk format starting point and its ring sizing (#637), `Layout::new` refuses a
+  `body_max` under one block less the record header (#627), r12 I4 (`buffer`
   driven, not self-running), `ring` holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send

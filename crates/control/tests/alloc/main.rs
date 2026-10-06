@@ -1,5 +1,5 @@
-//! A write from the holder and a read of the handoff make no heap allocation, and a
-//! record makes one. This binary has no test harness: the count covers each thread, and
+//! A write from the holder, a read of the handoff, and a record make no heap
+//! allocation. This binary has no test harness: the count covers each thread, and
 //! a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -34,7 +34,7 @@ fn main() {
     assert_eq!(waiting, FRAMES, "the handoff waits until recorded");
 
     let ((), allocations) = ALLOCATOR.count(|| gate.recorded());
-    assert_eq!(allocations, 1, "a record clones the holder once");
+    assert_eq!(allocations, 0, "a record allocated");
 
     let (waiting, allocations) = ALLOCATOR.count(|| frames(&mut gate, key, FRAMES));
     assert_eq!(allocations, 0, "a frame allocated after the record");
