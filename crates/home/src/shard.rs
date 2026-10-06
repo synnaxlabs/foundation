@@ -1,9 +1,10 @@
 //! The indexes one shard carries: their writers, each frame from split to one buffer
 //! append, and their readers.
 
+use std::fmt;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::{fmt, mem};
 
 use buffer::{Buffer, Entry};
 use types::channel::Slot;
@@ -32,21 +33,8 @@ pub(crate) struct Shard {
     writers: hash::Map<writer::Key, Session>,
     next: u64,
     scratch: Scratch,
-    wake: Wake,
-}
-
-/// The readers to wake, and the indexes whose live frames wait for a commit.
-#[derive(Debug, Default)]
-struct Wake {
-    /// The slot and place of each index whose readers may be
-    /// [pending](delivery::Readers::pending), each once.
-    pending: Vec<(Slot, usize)>,
-    /// Whether `pending` holds the index, by place. A place past the end is not.
-    listed: Vec<bool>,
-    /// Each reader to wake, with a frame to take. A key can repeat.
-    keys: Vec<reader::Key>,
-    /// The commits the buffer had ended at the last settle.
-    commits: u64,
+    /// The readers of each index, by the same place as `indexes`.
+    readers: reader::Set,
 }
 
 /// The shard's state for an open writer.
@@ -69,8 +57,9 @@ struct Claim {
 #[derive(Debug, Default)]
 struct Scratch {
     split: split::Scratch,
-    /// The check of each present group, in group order.
-    checks: Vec<(u32, Result<Accepted, Refusal>)>,
+    /// The check of each present group, in group order, with its index frame once
+    /// frozen.
+    checks: Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     /// The stored entry of each accepted group, in group order. Empty between
     /// appends.
     entries: Vec<Entry>,
@@ -150,7 +139,7 @@ impl Shard {
             writers: hash::Map::default(),
             next: 0,
             scratch: Scratch::default(),
-            wake: Wake::default(),
+            readers: reader::Set::default(),
         }
     }
 
@@ -168,10 +157,13 @@ impl Shard {
                 seq: tail.seq,
             }
         };
-        let index = Index::new(self.limits, tail(Path::Live), tail(Path::Backfill));
-        let carried = self.places.insert(slot, self.indexes.len());
+        let live = tail(Path::Live);
+        let index = Index::new(self.limits, live, tail(Path::Backfill));
+        let place = self.indexes.len();
+        let carried = self.places.insert(slot, place);
         assert!(carried.is_none(), "the shard carries {slot:?} already");
         self.indexes.push(index);
+        self.readers.carry(place, slot, live.seq);
     }
 
     /// Opens `writer` on each index of its key set at monotonic time `now`, and
@@ -262,13 +254,13 @@ impl Shard {
         };
         let scratch = &mut self.scratch;
         let mut split = scratch.split.split(&session.set, frame);
-        for (group, stamps) in split.groups() {
+        while let Some((group, stamps)) = split.next() {
             let (claim, _) = session.claim(group);
             let index = &mut self.indexes[claim.place];
             let checked = index.check(claim.key, path, stamps, now, mesh);
-            scratch.checks.push((group, checked));
+            scratch.checks.push((group, checked, None));
         }
-        let groups = scratch.checks.iter().map(|&(group, _)| group);
+        let groups = scratch.checks.iter().map(|&(group, ..)| group);
         let recorded = record(
             &self.buffer,
             &self.pool,
@@ -313,7 +305,7 @@ impl Shard {
                 &mut self.indexes,
                 session,
                 room,
-                &mut self.wake,
+                &mut self.readers,
                 &mut scratch.outcomes,
             )),
             Err(error) => {
@@ -328,7 +320,7 @@ impl Shard {
     /// Gives the error that ended the buffer when it ended before they were on disk.
     /// Commits run without this future, so a caller may drop it. Call
     /// [`woken`](Self::woken) after it resolves.
-    pub(crate) fn committed(&self) -> buffer::Commit<'_> {
+    pub(crate) fn committed(&self) -> buffer::Commit {
         self.buffer.committed()
     }
 
@@ -349,7 +341,9 @@ impl Shard {
         slot: Slot,
         limit_bytes: u64,
     ) -> delivery::complete::Key {
-        self.index(slot).open_complete(limit_bytes)
+        let place = self.place(slot);
+        let live = self.indexes[place].live_tail();
+        self.readers.open_complete(place, live, limit_bytes)
     }
 
     /// Opens an unnamed latest reader on the index at `slot`, at mesh time `mesh`. It
@@ -363,11 +357,7 @@ impl Shard {
         slot: Slot,
         mesh: Interval,
     ) -> delivery::latest::Key {
-        let opened = self.index(slot).readers.open_latest(None, mesh.latest);
-        if opened.woken {
-            self.wake.add(slot, &[opened.key]);
-        }
-        opened.key
+        self.readers.open_latest(self.place(slot), mesh.latest)
     }
 
     /// Raises the credit of the complete reader `session` on the index at `slot` to
@@ -384,7 +374,7 @@ impl Shard {
         session: delivery::complete::Key,
         limit_bytes: u64,
     ) {
-        self.index(slot).readers.grant(session, limit_bytes);
+        self.readers.grant(self.place(slot), session, limit_bytes);
     }
 
     /// Takes the next frame of the reader `session` on the index at `slot`, or `None`
@@ -394,7 +384,7 @@ impl Shard {
     ///
     /// If the reader is not open.
     pub(crate) fn take(&mut self, slot: Slot, session: delivery::Key) -> Option<Frame> {
-        self.index(slot).readers.take(session)
+        self.readers.take(self.place(slot), session)
     }
 
     /// Closes the reader `session` on the index at `slot` at mesh time `mesh`. Its
@@ -409,9 +399,7 @@ impl Shard {
         session: delivery::Key,
         mesh: Interval,
     ) {
-        self.index(slot).readers.close(session, mesh.latest);
-        let key = reader::Key { slot, session };
-        self.wake.keys.retain(|&woken| woken != key);
+        self.readers.close(self.place(slot), session, mesh.latest);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
@@ -419,18 +407,11 @@ impl Shard {
     /// the live frames now on disk. A key is a hint: take from each until
     /// [`take`](Self::take) gives `None`. Call it after each write and each commit.
     /// When a commit ended since the last call, it reads each index with live frames
-    /// queued for complete readers; else it reads none.
+    /// queued for complete readers; else it reads none. Pass the same `keys` each
+    /// time: the shard swaps it for its own, so neither allocates once both are large
+    /// enough.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
-        self.wake.settle(&self.buffer, &mut self.indexes);
-        keys.clear();
-        mem::swap(keys, &mut self.wake.keys);
-        keys.sort_unstable();
-        keys.dedup();
-    }
-
-    fn index(&mut self, slot: Slot) -> &mut Index {
-        let place = self.place(slot);
-        &mut self.indexes[place]
+        self.readers.woken(&self.buffer, keys);
     }
 
     /// The place in `indexes` of the index at `slot`.
@@ -462,47 +443,6 @@ impl Shard {
     }
 }
 
-impl Wake {
-    /// Adds the `sessions` of the index at `slot` to wake.
-    fn add<K: Copy + Into<delivery::Key>>(&mut self, slot: Slot, sessions: &[K]) {
-        if sessions.is_empty() {
-            return;
-        }
-        let keys = sessions.iter().map(|&session| reader::Key {
-            slot,
-            session: session.into(),
-        });
-        self.keys.extend(keys);
-    }
-
-    /// Lists the index at `slot` and `place`, whose readers are pending, once.
-    fn list(&mut self, slot: Slot, place: usize) {
-        if place >= self.listed.len() {
-            self.listed.resize(place + 1, false);
-        }
-        if !mem::replace(&mut self.listed[place], true) {
-            self.pending.push((slot, place));
-        }
-    }
-
-    /// Gives complete readers the live frames on disk. Reads no index when no commit
-    /// ended since the last settle, as only a commit moves `durable`.
-    fn settle(&mut self, buffer: &Buffer, indexes: &mut [Index]) {
-        let commits = buffer.commits();
-        if mem::replace(&mut self.commits, commits) == commits {
-            return;
-        }
-        let mut pending = mem::take(&mut self.pending);
-        pending.retain(|&(slot, place)| {
-            let readers = &mut indexes[place].readers;
-            self.add(slot, readers.release(buffer.durable(slot, Path::Live).seq));
-            self.listed[place] = readers.pending();
-            self.listed[place]
-        });
-        self.pending = pending;
-    }
-}
-
 impl Session {
     /// The writer's claim on the index of `group`, and the index's entry in the key
     /// set.
@@ -513,8 +453,9 @@ impl Session {
     }
 }
 
-/// Freezes the index frame from `split` of each accepted group of `checks`, and pushes
-/// its stored entry onto `entries`, in group order, at mesh time `stored_at`.
+/// Freezes the index frame from `split` of each accepted group of `checks` into its
+/// check, and pushes its stored entry onto `entries`, in group order, at mesh time
+/// `stored_at`.
 ///
 /// # Errors
 ///
@@ -524,14 +465,14 @@ fn freeze(
     pool: &block::Pool,
     split: &mut Split<'_>,
     set: &KeySet,
-    checks: &mut [(u32, Result<Accepted, Refusal>)],
+    checks: &mut [(u32, Result<Accepted, Refusal>, Option<Frame>)],
     stored_at: Stamp,
 ) -> Result<(), block::Error> {
-    for (group, checked) in checks {
+    for (group, checked, frozen) in checks {
         if let Ok(accepted) = checked {
             let draft = split.frame(pool, *group)?;
+            let frame = frozen.insert(accepted.freeze(draft, *group));
             let last = accepted.last();
-            let frame = accepted.freeze(draft, *group);
             entries.push(stored::entry(pool, frame, set, last, stored_at)?);
         }
     }
@@ -584,33 +525,36 @@ fn record(
 }
 
 /// Spends the seq of each accepted group of `checks`, and makes the outcome of each
-/// present group into `out`: applied when the append found `room`, else lost. The
-/// readers to wake and each index that queued a live frame go into `wake`.
+/// present group into `out`: applied when the append found `room`, else lost. Each
+/// frame goes to `readers`.
 fn spend<'a>(
-    checks: &mut Vec<(u32, Result<Accepted, Refusal>)>,
+    checks: &mut Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     indexes: &mut [Index],
     session: &Session,
     room: bool,
-    wake: &mut Wake,
+    readers: &mut reader::Set,
     out: &'a mut Vec<Outcome>,
 ) -> &'a [Outcome] {
     out.clear();
-    for (group, checked) in checks.drain(..) {
+    for (group, checked, frozen) in checks.drain(..) {
         let (claim, entry) = session.claim(group);
         let slot = entry.slot;
         let index = &mut indexes[claim.place];
         out.push(match checked {
             Ok(accepted) if room => {
-                let range = range(&accepted);
-                wake.add(slot, index.advance(accepted));
-                if index.readers.pending() {
-                    wake.list(slot, claim.place);
-                }
+                let seq = accepted.seq();
+                let range = range(&seq);
+                index.spend(accepted);
+                let frame = frozen.expect("invariant: a stored frame was frozen");
+                readers.applied(claim.place, frame, seq);
                 Outcome::Applied { slot, range }
             }
             Ok(accepted) => {
-                let range = range(&accepted);
-                wake.add(slot, index.lose(accepted));
+                let range = range(&accepted.seq());
+                index.spend(accepted);
+                if let Some(frame) = frozen {
+                    readers.lost(claim.place, frame);
+                }
                 Outcome::Lost { slot, range }
             }
             Err(refusal) => Outcome::Refused { slot, refusal },
@@ -619,9 +563,8 @@ fn spend<'a>(
     out
 }
 
-/// The seq range of an accepted group.
-fn range(accepted: &Accepted) -> frame::Range {
-    let seq = accepted.seq();
+/// The seq range of an accepted group at `seq`.
+fn range(seq: &Range<u64>) -> frame::Range {
     let count = u32::try_from(seq.end - seq.start)
         .expect("invariant: a group holds at most u32::MAX samples");
     frame::Range {
@@ -876,6 +819,18 @@ mod tests {
         draft
     }
 
+    /// `stamps` encoded as an index series.
+    fn encoded(stamps: &[i64]) -> Vec<u8> {
+        let values: Vec<u8> = stamps.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut out =
+            vec![0; codec::max_len(Type::Scalar(Scalar::Stamp), values.len())];
+        let len = codec::Encoder::new(Type::Scalar(Scalar::Stamp))
+            .encode(stamps.len(), &values, &mut out)
+            .expect("stamps");
+        out.truncate(len);
+        out
+    }
+
     fn applied(slot: u32, seq: u64, count: u32) -> Outcome {
         Outcome::Applied {
             slot: Slot::new(slot),
@@ -1079,6 +1034,103 @@ mod tests {
             assert_eq!(
                 shard.write(a, LIVE, write, NOW, MESH),
                 Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 1, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_a_backwards_stamp_in_a_later_vector_of_its_index() {
+        run(46, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[2100] = 5;
+            let data = vec![0; stamps.len()];
+            let series = [(0, &stamps[..]), (1, &data[..]), (2, &[10][..])];
+            let write = frame(&test.pool, &set, &series);
+            let backwards = order::Error::Backwards {
+                path: Path::Live,
+                before: Stamp::from_nanos(2109),
+                stamp: Stamp::from_nanos(5),
+            };
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_whose_later_vector_is_not_valid() {
+        run(47, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let stamps: Vec<i64> = (10..2510).collect();
+            let mut index = encoded(&stamps);
+            index[encoded(&stamps[..1024]).len()] = 9;
+            let other = encoded(&[10]);
+            let lens = [(0, index.len()), (2, other.len())];
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Encoded, &lens).expect("a frame");
+            write
+                .series_mut(0)
+                .expect("index 0")
+                .copy_from_slice(&index);
+            write
+                .series_mut(2)
+                .expect("index 2")
+                .copy_from_slice(&other);
+            write.set_count(0, 2500);
+            write.set_count(1, 1);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 1, tag: 9 },
+            });
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
+            );
+            let write = frame(&test.pool, &set, &[(0, &[11])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[applied(0, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_that_is_not_valid_before_its_order() {
+        run(48, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[5] = 1;
+            let mut index = encoded(&stamps);
+            index[encoded(&stamps[..1024]).len()] = 9;
+            let other = encoded(&[10]);
+            let lens = [(0, index.len()), (2, other.len())];
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Encoded, &lens).expect("a frame");
+            write
+                .series_mut(0)
+                .expect("index 0")
+                .copy_from_slice(&index);
+            write
+                .series_mut(2)
+                .expect("index 2")
+                .copy_from_slice(&other);
+            write.set_count(0, 2500);
+            write.set_count(1, 1);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 1, tag: 9 },
+            });
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
             );
         });
     }
@@ -2179,10 +2231,10 @@ mod tests {
                 let place = shard.place(Slot::new(0));
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                assert_eq!(shard.wake.pending, [(Slot::new(0), place)]);
+                assert_eq!(shard.readers.listed(), [place]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert_eq!(shard.wake.pending, Vec::new());
+                assert_eq!(shard.readers.listed(), []);
             });
         }
 
@@ -2218,7 +2270,7 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                assert_eq!(shard.wake.pending, Vec::new());
+                assert_eq!(shard.readers.listed(), []);
                 write(&test, &mut shard, a, &[20]);
                 assert_eq!(woken(&mut shard), []);
                 shard.committed().await.expect("the commit ends");
@@ -2234,11 +2286,11 @@ mod tests {
                 let mut shard = test.shard(AREA).await;
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
-                assert_eq!(shard.wake.pending, Vec::new());
+                assert_eq!(shard.readers.listed(), []);
                 let reader = complete(&mut shard, Slot::new(0));
                 write(&test, &mut shard, a, &[20]);
                 let place = shard.place(Slot::new(0));
-                assert_eq!(shard.wake.pending, [(Slot::new(0), place)]);
+                assert_eq!(shard.readers.listed(), [place]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
@@ -2260,11 +2312,10 @@ mod tests {
                 write(&test, &mut shard, a, &[30]);
                 let place = shard.place(Slot::new(0));
                 assert_eq!(woken(&mut shard), []);
-                let listed = [(Slot::new(0), place)];
-                assert_eq!(shard.wake.pending, listed, "no commit ended");
+                assert_eq!(shard.readers.listed(), [place], "no commit ended");
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(shard.wake.pending, Vec::new());
+                assert_eq!(shard.readers.listed(), []);
             });
         }
 

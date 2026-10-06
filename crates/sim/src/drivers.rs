@@ -132,11 +132,12 @@ impl env::clock::Driver for Node {
     }
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
-        self.running("a sleep");
+        let thread = self.running("a sleep");
         let key = lock(&self.shared).key();
         Box::pin(Timer {
             shared: Arc::clone(&self.shared),
             node: self.node,
+            thread,
             key,
             due: None,
         })
@@ -214,8 +215,10 @@ impl env::threads::Driver for Node {
 struct Timer {
     shared: Shared,
     node: usize,
+    /// The thread that made it, the only one that can poll it: a sleep is not `Send`.
+    thread: u64,
     key: u64,
-    /// The true deadline of its entry, while it has one.
+    /// The true deadline it armed last, until it disarms.
     due: Option<Monotonic>,
 }
 
@@ -232,9 +235,9 @@ impl env::clock::Timer for Timer {
         let (poll, unused) = match state.due(this.node, deadline) {
             Due::Passed => (Poll::Ready(()), Some(waker)),
             Due::At(at) => {
-                state.arm(at, this.key, waker);
-                this.due = Some(at);
-                (Poll::Pending, None)
+                let unused = state.arm(this.thread, at, this.key, waker);
+                this.due = unused.is_none().then_some(at);
+                (Poll::Pending, unused)
             }
             Due::Never => (Poll::Pending, Some(waker)),
         };

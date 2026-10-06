@@ -317,9 +317,23 @@ impl Vector<'_> {
                     *sample = *value;
                 }
             }
+            Plan::Ffor { reference, bits: 0 } => {
+                samples.into_slice().fill(word::store(reference));
+            }
             Plan::Ffor { reference, bits } => {
                 for (sample, residual) in samples.zip(bits::unpack(body, bits)) {
                     *sample = word::store(reference.wrapping_add(residual));
+                }
+            }
+            Plan::Delta {
+                first,
+                base,
+                bits: 0,
+            } => {
+                let mut value = first;
+                for sample in samples {
+                    *sample = word::store(value);
+                    value = value.wrapping_add(base);
                 }
             }
             Plan::Delta { first, base, bits } => {
