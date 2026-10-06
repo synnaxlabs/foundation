@@ -134,10 +134,10 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
             )
         }
         Shape::Variable { element, max } => {
-            let (_, start) = element.front(count)?;
+            let front = element.front(count)?;
             let (elements, rest) = ends(count, bytes, max, None)?;
             (
-                element.total(start, elements)?,
+                front.raw_len(elements)?,
                 element.check(elements, rest, vectors(count))?,
             )
         }
@@ -195,14 +195,14 @@ fn decode_shape(
             element.fill(elements, bytes, 0, out)?
         }
         Shape::Variable { element, max } => {
-            let (ends_len, start) = element.front(count)?;
-            let Some((front, out)) = out.split_at_mut_checked(start) else {
+            let front = element.front(count)?;
+            let Some((front_out, out)) = out.split_at_mut_checked(front.start) else {
                 return misfit(data_type, count, bytes, held);
             };
-            let (ends_out, padding) = front.split_at_mut(ends_len);
+            let (ends_out, padding) = front_out.split_at_mut(front.ends);
             padding.fill(0);
             let (elements, rest) = ends(count, bytes, max, Some(ends_out))?;
-            if held != element.total(start, elements)? {
+            if out.len() != element.raw_len(elements)? {
                 return misfit(data_type, count, bytes, held);
             }
             element.fill(elements, rest, vectors(count), out)?
@@ -400,16 +400,17 @@ impl Shape {
                 Ok((&[], values))
             }
             Self::Variable { element, max } => {
-                let (ends_len, start) = element.front(count)?;
-                let (ends, _) =
-                    values.split_at_checked(ends_len).ok_or(length(ends_len))?;
+                let front = element.front(count)?;
+                let (ends, _) = values
+                    .split_at_checked(front.ends)
+                    .ok_or(length(front.ends))?;
                 let mut check = Ends::new(max);
                 check.check(ends)?;
-                let expected = element.total(start, check.elements())?;
+                let expected = front.raw_len(check.elements())?;
                 if values.len() != expected {
                     return Err(length(expected));
                 }
-                Ok((ends, values.split_at(start).1))
+                Ok((ends, values.split_at(front.start).1))
             }
         }
     }
@@ -497,6 +498,27 @@ enum Layout {
     },
 }
 
+/// The raw bytes of variable samples before their elements: the ends, then padding.
+#[derive(Clone, Copy, Debug)]
+struct Front {
+    element: Layout,
+    /// The bytes of the ends.
+    ends: usize,
+    /// Where the elements start: after the ends, padded to a multiple of the element
+    /// width or 8, whichever is less. A frame starts each series on 8 bytes, so the
+    /// elements are then aligned.
+    start: usize,
+}
+
+impl Front {
+    /// The raw bytes of the samples when they hold `elements` elements.
+    fn raw_len(self, elements: usize) -> Result<usize, Error> {
+        self.start
+            .checked_add(self.element.raw_len(elements)?)
+            .ok_or(Error::Overflow)
+    }
+}
+
 impl Layout {
     /// The layout of the ends of a variable series.
     const END: Self = Self::Int32 { signed: false };
@@ -532,23 +554,17 @@ impl Layout {
         count.checked_mul(self.width()).ok_or(Error::Overflow)
     }
 
-    /// The bytes of the ends of `count` variable samples, and where their elements start
-    /// in their raw bytes: after the ends, padded to a multiple of the element width or
-    /// 8, whichever is less. A frame starts each series on 8 bytes, so the elements are
-    /// then aligned.
-    fn front(self, count: usize) -> Result<(usize, usize), Error> {
+    /// The ends and padding of `count` variable samples of elements of this layout.
+    fn front(self, count: usize) -> Result<Front, Error> {
         let ends = Self::END.raw_len(count)?;
         let start = ends
             .checked_next_multiple_of(self.width().min(8))
             .ok_or(Error::Overflow)?;
-        Ok((ends, start))
-    }
-
-    /// The raw bytes of variable samples whose `elements` elements start at `start`.
-    fn total(self, start: usize, elements: usize) -> Result<usize, Error> {
-        start
-            .checked_add(self.raw_len(elements)?)
-            .ok_or(Error::Overflow)
+        Ok(Front {
+            element: self,
+            ends,
+            start,
+        })
     }
 
     /// The bytes of the raw headers of the vectors of `len` bytes of values.
