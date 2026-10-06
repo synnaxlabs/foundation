@@ -1670,3 +1670,32 @@ fn one_entry_of_the_entry_max_commits_and_is_recovered() {
         assert_eq!(tails, Ok(tail(2, Some(1))));
     });
 }
+
+/// A commit future whose group commit synced resolves well, also when a later
+/// commit failed before its first poll: every entry appended before the call is
+/// durable.
+#[test]
+fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
+    run(120, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let first = buffer.committed();
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(shard.memory.syncs(), 3, "the second commit failed its sync");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
+        assert_eq!(first.await, Ok(()), "its entries are durable");
+    });
+}
