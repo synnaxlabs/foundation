@@ -1750,7 +1750,8 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
+  that selects node names: `node_settings "<name>" { select, disk, pool }`, such as
+  `select = "site_a.*"` and `disk = "200GiB"`. Each budget is optional and above zero.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
@@ -1759,7 +1760,18 @@ How to read this record:
   a start argument of `foundation`, with a default, because the spec is stored in it.
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
-  #342.
+  #342. The `config` builder added the label and the bound above zero (#474).
+- **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
+  policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
+  at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
+  channel name. A policy belongs to the region that governs its name (X2: the longest
+  region prefix that contains it), and it may select only names in that region and its
+  descendants (X26). When a `region` block is added or removed, `plan` checks X26 again
+  for each policy whose region changes, lists each policy that moves to other voters,
+  and refuses one whose reach fails. Lost: the region from the selector (a wider pattern
+  would move the policy to other voters silently, and X26 could never fail), and the
+  region from the directory (K2 makes the layout a default only; r3 rejected a
+  `region =` attribute). The advisor approved it on 2026-10-05, #474.
 
 ### 1.12 Access, identity, and secrets
 
@@ -2321,7 +2333,7 @@ Storage classes used in the table:
 | Control channel | Spec: `Index.control` pointer, placed with its index | Values: only the home, one sample per handoff (a published copy) | People, agents, auditors, new subscribers | `spec`; values through `home` |
 | Region | Files: `region "<prefix>" { voters }`. The parent's spec holds the delegation record `{ prefix, epoch, initial voters }`; the region's own Raft config holds current voters (X3) | Parent voters create, remove, or force takeover; the region changes its own voters | `mesh`, `plan`, every node | `spec` (definition), `mesh` (groups) |
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
-| Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `access` |
+| Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
 | Retention policy | Spec; selects indexes | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
 | Placement policy | Spec; selects connectors and indexes: `{ select, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
@@ -3046,7 +3058,7 @@ conclusion together". Each one is listed below.
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
-  and generated names as strings (#701).
+  generated names as strings (#701), and POLICY NAMES (#474).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
   the STREAM WIRE hello (#55), a reader session key type per mode (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
