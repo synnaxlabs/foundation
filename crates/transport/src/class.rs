@@ -18,7 +18,8 @@ pub enum Class {
     /// Second, with a small send buffer, so a message that a newer one replaces does
     /// not wait behind much.
     Latest,
-    /// Third, for ordered bulk that must arrive whole.
+    /// Third, for ordered bulk that must arrive whole. While `Latest` also has
+    /// messages to send, `Complete` gets 3 bytes of each 4 that the carrier takes.
     Complete,
     /// The lowest, for bulk that waits for spare capacity.
     CatchUp,
