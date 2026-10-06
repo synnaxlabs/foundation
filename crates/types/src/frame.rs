@@ -215,10 +215,9 @@ impl<'a> Layout<'a> {
     /// Checks `series` for a frame of `set`: each present entry and the byte length
     /// of its series, in increasing entry order. Each data entry needs the index of
     /// its group in `series`. A group is present when its index is. Takes no block.
-    /// Time is linear in `series` when it holds every entry of `set`, or when the data
-    /// of each group follow its index, alternate among at most 16 groups, or take
-    /// turns in index order. Each other data series costs a search logarithmic in its
-    /// distance from the last index passed or found.
+    /// Time is linear in `series` when each group's data come right after its index,
+    /// and O(n log(m + 1)) at worst, for n series and the m entries of `set` that
+    /// `series` lacks.
     ///
     /// # Errors
     ///
@@ -227,13 +226,13 @@ impl<'a> Layout<'a> {
     pub fn new(set: &'a KeySet, series: &'a [(usize, usize)]) -> Result<Self, Error> {
         let entries = set.entries().len();
         let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
-        // Ordered, a full frame holds each index. Other data look at `series[near]`,
-        // the last index passed or found, then at `found`, then search out from
-        // `near`. An absent index waits for the order checks, without which the search
-        // means nothing.
-        let full = series.len() == entries;
-        let (mut near, mut found, mut absent) = (0, [usize::MAX; 16], None);
-        for (at, &(entry, len)) in series.iter().enumerate() {
+        // An index usually comes just before its data. Other data search `series`, once
+        // per group while `found` holds its index. In a valid `series`, entry e is at a
+        // position from e - `lacks` to e, so a search looks only there. An absent index
+        // waits for the order checks, without which the search means nothing.
+        let lacks = entries.saturating_sub(series.len());
+        let (mut last_index, mut found, mut absent) = (None, [usize::MAX; 16], None);
+        for &(entry, len) in series {
             if entry >= entries {
                 return Err(Error::OutOfRange { entry, entries });
             }
@@ -247,13 +246,17 @@ impl<'a> Layout<'a> {
             let index = set.groups()[group];
             if index == entry {
                 groups += 1;
-                near = at;
-            } else if !full && series[near].0 != index && absent.is_none() {
+                last_index = Some(index);
+            } else if last_index != Some(index) && absent.is_none() {
                 let memo = &mut found[group % found.len()];
                 if *memo != index {
-                    match gallop(series, near, index) {
-                        Some(at) => near = at,
-                        None => absent = Some(Error::IndexAbsent { entry, index }),
+                    let window =
+                        index.saturating_sub(lacks)..series.len().min(index + 1);
+                    if series[window]
+                        .binary_search_by_key(&index, |&(entry, _)| entry)
+                        .is_err()
+                    {
+                        absent = Some(Error::IndexAbsent { entry, index });
                     }
                     *memo = index;
                 }
@@ -657,26 +660,6 @@ fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
 fn next_end(last: usize, len: usize) -> usize {
     last.checked_next_multiple_of(SERIES_ALIGN)
         .map_or(usize::MAX, |start| start.saturating_add(len))
-}
-
-/// The position of `entry` in `series`, by steps that double out from position
-/// `near` and then halve, in time logarithmic in the distance, or `None`. The answer
-/// means nothing unless `series` is in increasing entry order.
-fn gallop(series: &[(usize, usize)], near: usize, entry: usize) -> Option<usize> {
-    let mut step = 1;
-    let (start, end) = if series[near].0 < entry {
-        while near + step < series.len() && series[near + step].0 < entry {
-            step *= 2;
-        }
-        (near + step / 2 + 1, series.len().min(near + step + 1))
-    } else {
-        while step <= near && series[near - step].0 > entry {
-            step *= 2;
-        }
-        (near.saturating_sub(step), near - step / 2 + 1)
-    };
-    let at = series[start..end].binary_search_by_key(&entry, |&(entry, _)| entry);
-    at.ok().map(|at| start + at)
 }
 
 /// The charge of a frame of `len` bytes (CREDIT RULES).
@@ -1801,7 +1784,7 @@ mod tests {
             keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
             kept in vec(any::<bool>(), 200),
         ) {
-            let set = spread(&sizes, keys);
+            let set = key_set(&sizes, keys);
             let series: Vec<(usize, usize)> = (0..set.entries().len())
                 .filter(|&entry| kept[entry])
                 .map(|entry| (entry, 1))
@@ -1818,10 +1801,10 @@ mod tests {
             sizes in vec(0_usize..10, 17..65),
             keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
             kept in vec(any::<bool>(), 640),
-            dropped in proptest::option::of(0_usize..64),
+            group in proptest::option::of(0_usize..64),
         ) {
-            let set = spread(&sizes, keys);
-            let dropped = dropped.map(|group| set.groups()[group % set.groups().len()]);
+            let set = key_set(&sizes, keys);
+            let dropped = group.map(|group| set.groups()[group % set.groups().len()]);
             let series: Vec<(usize, usize)> = (0..set.entries().len())
                 .filter(|&entry| {
                     if set.index(entry) == entry {
@@ -1839,7 +1822,7 @@ mod tests {
 
     /// A key set with a group of `sizes[g]` data for each `g`, keyed from `keys` in
     /// turn: each group's data, then its index.
-    fn spread(sizes: &[usize], keys: Vec<u32>) -> std::sync::Arc<KeySet> {
+    fn key_set(sizes: &[usize], keys: Vec<u32>) -> std::sync::Arc<KeySet> {
         let mut keys = keys.into_iter().map(key);
         let data: Vec<Vec<(channel::Key, Type)>> = sizes
             .iter()

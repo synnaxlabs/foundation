@@ -8,6 +8,7 @@
 
 use std::fmt;
 use std::hint::black_box;
+use std::iter;
 use std::sync::Arc;
 
 use divan::Bencher;
@@ -74,7 +75,7 @@ fn cases() -> Vec<Case> {
     let wide = interner.intern(&one(&wide));
     let private = interner.intern(&private);
     let tenth = |n: usize| (0..10).map(move |k| k * n / 10);
-    vec![
+    let mut cases = vec![
         case(
             "16 of 16, 1024 samples",
             interner.intern(&one(&dense)),
@@ -101,19 +102,58 @@ fn cases() -> Vec<Case> {
             (0..100_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
+            "100k of 100k private indexes",
+            private,
+            (0..100_000).map(|entry| (entry, 8)).collect(),
+        ),
+    ];
+    cases.extend(turns(&mut interner));
+    cases
+}
+
+/// Frames whose data take turns among groups.
+fn turns(interner: &mut Interner) -> Vec<Case> {
+    let (spread, apart) = (spread(interner), apart(interner));
+    vec![
+        case(
             "100k of 100k in two groups, data in turn",
-            in_turn(&mut interner, 2),
+            in_turn(interner, 2),
             (0..100_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
             "50k of 100k in 32 groups, data in turn",
-            in_turn(&mut interner, 32),
+            in_turn(interner, 32),
             (0..50_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
-            "100k of 100k private indexes",
-            private,
-            (0..100_000).map(|entry| (entry, 8)).collect(),
+            "99,999 of 100k in 32 groups, data in turn, indexes spread",
+            Arc::clone(&spread),
+            (0..99_999).map(|entry| (entry, 8)).collect(),
+        ),
+        case(
+            "half of 100k in 32 groups, data in turn, indexes spread",
+            Arc::clone(&spread),
+            (0..100_000)
+                .filter(|entry| entry % 2 == 0 || entry % 3_125 == 0)
+                .map(|entry| (entry, 8))
+                .collect(),
+        ),
+        case(
+            "groups 0 and 16 in turn, indexes apart",
+            Arc::clone(&apart),
+            iter::once(0)
+                .chain(16..apart.entries().len())
+                .map(|entry| (entry, 8))
+                .collect(),
+        ),
+        case(
+            "groups 0 and 16 in turn, indexes apart, index of group 1 last passed",
+            Arc::clone(&apart),
+            [0, 1]
+                .into_iter()
+                .chain(16..apart.entries().len())
+                .map(|entry| (entry, 8))
+                .collect(),
         ),
     ]
 }
@@ -130,16 +170,16 @@ fn index_last(interner: &mut Interner) -> Arc<KeySet> {
     }])
 }
 
-/// `groups` groups of 100,000 entries in all: each index slot first, then the data
+/// `count` groups of 100,000 entries in all: each index slot first, then the data
 /// slots of the groups in turn.
-fn in_turn(interner: &mut Interner, groups: usize) -> Arc<KeySet> {
+fn in_turn(interner: &mut Interner, count: usize) -> Arc<KeySet> {
     for n in 300_000..400_000 {
         interner.slots().assign(key(n));
     }
-    let data: Vec<Vec<_>> = (0..groups)
+    let data: Vec<Vec<_>> = (0..count)
         .map(|group| {
-            (300_000 + groups + group..400_000)
-                .step_by(groups)
+            (300_000 + count + group..400_000)
+                .step_by(count)
                 .map(|n| (key(n), F64))
                 .collect()
         })
@@ -150,6 +190,58 @@ fn in_turn(interner: &mut Interner, groups: usize) -> Arc<KeySet> {
         .map(|(group, data)| Group {
             index: key(300_000 + group),
             data,
+        })
+        .collect();
+    interner.intern(&groups)
+}
+
+/// 32 groups of 100,000 entries in all: the data slots of the groups in turn, with
+/// each index slot 3,125 slots after the one before.
+fn spread(interner: &mut Interner) -> Arc<KeySet> {
+    let mut data = vec![Vec::new(); 32];
+    let mut turn = 0;
+    for n in 500_000..600_000 {
+        interner.slots().assign(key(n));
+        if (n - 500_000) % 3_125 != 0 {
+            data[turn % 32].push((key(n), F64));
+            turn += 1;
+        }
+    }
+    let groups: Vec<_> = data
+        .iter()
+        .enumerate()
+        .map(|(group, data)| Group {
+            index: key(500_000 + group * 3_125),
+            data,
+        })
+        .collect();
+    interner.intern(&groups)
+}
+
+/// 17 groups. The index slots of groups 0 to 15 come first and the index slot of group
+/// 16 last. Between them, the data slots of groups 0 and 16 take turns.
+fn apart(interner: &mut Interner) -> Arc<KeySet> {
+    for n in 700_000..=800_000 {
+        interner.slots().assign(key(n));
+    }
+    let data = |first| -> Vec<_> {
+        (first..800_000).step_by(2).map(|n| (key(n), F64)).collect()
+    };
+    let (first, last) = (data(700_016), data(700_017));
+    let groups: Vec<_> = (0..17)
+        .map(|group| match group {
+            0 => Group {
+                index: key(700_000),
+                data: &first,
+            },
+            16 => Group {
+                index: key(800_000),
+                data: &last,
+            },
+            _ => Group {
+                index: key(700_000 + group),
+                data: &[],
+            },
         })
         .collect();
     interner.intern(&groups)
