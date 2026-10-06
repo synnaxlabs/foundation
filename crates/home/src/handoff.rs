@@ -6,9 +6,13 @@ use std::str;
 use block::Block;
 use control::{Handoff, Writer};
 use types::authority::Authority;
+use types::name::Name;
 
 /// The buffer tag of a handoff entry.
 pub(crate) const TAG: u8 = 1;
+
+/// The most bytes in the body of a handoff: the authority and the longest subject.
+pub(crate) const LARGEST: usize = 1 + Name::MAX_BYTES;
 
 /// The parts of the buffer entry that records `handoff`: a block from `pool`, or `None`
 /// when no writer holds control.
@@ -76,6 +80,17 @@ mod tests {
                 .expect("a holder");
 
             assert_eq!(&body[..], b"\x07plant.pump-1");
+        }
+
+        #[test]
+        fn writes_the_largest_body_for_the_longest_subject() {
+            let holder = writer(&"b".repeat(Name::MAX_BYTES), 7);
+
+            let body = body(&pool(4096), Handoff { to: Some(&holder) })
+                .expect("room")
+                .expect("a holder");
+
+            assert_eq!(body.len(), LARGEST);
         }
 
         #[test]
