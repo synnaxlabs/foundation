@@ -1,6 +1,7 @@
 //! Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh
 //! time as an interval.
 
+mod cell;
 mod mesh;
 #[cfg_attr(not(test), expect(dead_code, reason = "the peer source is #145"))]
 mod peer;
