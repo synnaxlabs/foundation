@@ -402,9 +402,9 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
-        shard.clock.sleep(commits(1)).await;
+        shard.clock.sleep(tenths(9)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(0, None));
-        shard.clock.sleep(commits(2)).await;
+        shard.clock.sleep(tenths(2)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
         assert_eq!(shard.memory.syncs(), 3, "the append alone woke the task");
     });
@@ -466,7 +466,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
 /// before the first entry, as after an open.
 #[test]
 fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
-    for (tenths, seed) in [(10, 45), (11, 46)] {
+    for (tenths, seed) in [(10, 45), (11, 46), (30, 140)] {
         run(seed, Memory::default(), move |shard| async move {
             let mut slots = Slots::new();
             let buffer = shard

@@ -49,8 +49,8 @@ pub struct Config {
     /// The sizes of a new ring. An existing ring keeps the sizes in its header; a
     /// change takes effect at the next create.
     pub layout: Layout,
-    /// The longest time an entry waits for its group commit to start, or until the
-    /// sync in progress ends when that is later.
+    /// The longest time an entry waits for its group commit to start. An entry
+    /// queued during a commit longer than `commit` waits until that commit ends.
     pub commit: Span,
 }
 
