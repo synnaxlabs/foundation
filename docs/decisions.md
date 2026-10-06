@@ -843,6 +843,9 @@ How to read this record:
   a node that never syncs fills it. Lost: drop the samples, a patch that loses data;
   stamp them with OS time at once, a patch that writes a time the clock refused and
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
+  `clock::Reader::first` gives that stamp: the first estimate at a reading. Later
+  estimates never change it, so the stamps keep the order of their readings and are
+  never after mesh time (#523).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
