@@ -394,6 +394,27 @@ fn a_power_cut_with_a_sync_in_flight_keeps_any_write_in_each_sector() {
 }
 
 #[test]
+fn a_failed_sync_in_flight_at_a_process_crash_takes_its_effect_or_none() {
+    let outcomes: BTreeSet<Vec<u8>> = (0..64)
+        .map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Process, |node| async move {
+                let file = create_synced(&node).await;
+                file.write_at(0, &[block(&pool(), &[2; 1_024])])
+                    .await
+                    .unwrap();
+                until_crash(&node).await;
+                node.fail_file(Path::new("a"), Operation::Sync);
+                hang(file.sync()).await;
+            });
+            sectors_of(&mut sim, &node)
+        })
+        .collect();
+    let all = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
+    assert_eq!(outcomes, all);
+}
+
+#[test]
 fn a_power_cut_frees_a_file_that_a_call_in_flight_held() {
     let (mut sim, node) = sync_at_cut(0);
     let free = sim
