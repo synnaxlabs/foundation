@@ -42,7 +42,7 @@ fn main() {
         for (entry, bytes) in draft.iter_mut() {
             bytes.fill(u8::try_from(entry).expect("entries are small"));
         }
-        draft.series(0).expect("entry 0 is present").fill(1);
+        draft.series_mut(0).expect("entry 0 is present").fill(1);
         draft.set_count(0, 2);
         draft.set_seq(0, 9);
         let drafted: usize = draft.iter().map(|(_, bytes)| bytes.len()).sum();
@@ -66,7 +66,7 @@ fn main() {
         assert_eq!(body.len(), 32, "the body views both series");
         assert_eq!(frame::check(&body, frame.ends()), Ok(()), "the ends fit");
         assert_eq!(
-            frame::series(&body, frame.ends())
+            frame::split(&body, frame.ends())
                 .map(|(_, bytes)| bytes.len())
                 .sum::<usize>(),
             32,

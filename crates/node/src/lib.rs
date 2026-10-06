@@ -2,6 +2,11 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the publish task waits on hub writer sessions")
+)]
+mod status;
 mod stop;
 #[cfg(test)]
 #[cfg(not(loom))]

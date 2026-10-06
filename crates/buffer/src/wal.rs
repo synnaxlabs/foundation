@@ -23,6 +23,15 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
+/// Bytes of the whole blocks that hold a restart record: one block.
+const RESTART: usize = ALIGN;
+const _: () = assert!(HEADER_LEN + RESTART_LEN <= RESTART, "a restart record fits");
+
+/// The smallest body a layout allows: the rest of a block after the record header.
+/// A record takes whole blocks, so a smaller body saves no disk.
+const BODY_MIN: usize = ALIGN - HEADER_LEN;
+const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry");
+
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 
@@ -91,23 +100,26 @@ impl Layout {
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under the table of one entry or over `u32::MAX`, when `area` is less than
-    /// twice the largest record less one block, or when the ring file (two header
-    /// blocks and the area) does not fit in a `u64`. An empty ring of that length
-    /// takes any record, wherever its head is.
+    /// under 4087 bytes (one block less the record header) or over `u32::MAX`,
+    /// when `area` is less than twice the largest record (a 9-byte header and
+    /// `body_max`, in whole 4096-byte blocks), or when the ring file (two header
+    /// blocks and the area) does not fit in a `u64`. A ring of that length that
+    /// holds only its restart record takes any record, wherever the restart record
+    /// is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
             .and_then(|len| len.checked_next_multiple_of(ALIGN))
             .map(to_u64);
-        let body =
-            entry::table_len(1)..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
         match window {
             Some(window)
                 if body.contains(&body_max)
                     && area.is_multiple_of(BLOCK)
                     && area <= u64::MAX - AREA_START
-                    && window.saturating_mul(2) - BLOCK <= area =>
+                    // The restart record, the skip of less than a record before
+                    // the end of the area, then the record.
+                    && to_u64(RESTART) + (window - BLOCK) + window <= area =>
             {
                 Ok(Self {
                     area,
@@ -129,6 +141,17 @@ impl Layout {
     #[must_use]
     pub fn body_max(self) -> usize {
         self.body_max
+    }
+
+    /// The most bytes of parts in a batch of one entry that
+    /// [`Buffer::append`](crate::Buffer::append) takes, at least 4032: one byte more
+    /// gives [`Error::Large`](crate::Error::Large) with
+    /// [`Limit::Body`](crate::Limit::Body).
+    /// Each entry of a larger batch adds to the record's table, so its entries hold
+    /// less in all.
+    #[must_use]
+    pub fn entry_max(self) -> usize {
+        self.body_max - entry::table_len(1)
     }
 
     /// The length of the ring file: the two header blocks and the area.
@@ -164,6 +187,8 @@ pub(crate) struct Plan {
     pub(crate) wrap: Option<u64>,
     /// The place of the record.
     pub(crate) place: u64,
+    /// The offset of the record.
+    pub(crate) offset: u64,
     /// The offset after the record.
     pub(crate) next: u64,
     /// The length of the body the record was placed for.
@@ -256,6 +281,7 @@ impl Writer {
         Ok(Plan {
             wrap,
             place: start % area,
+            offset: start,
             next: self.head,
             len,
         })
@@ -333,7 +359,7 @@ pub(crate) enum Step<'a> {
     Moved,
     /// The record goes on past the bytes given; ask for the next window.
     More,
-    /// The chain ends here: this is the head of the ring.
+    /// The chain ends here.
     End,
 }
 
@@ -408,13 +434,15 @@ enum Phase {
 /// `piece` bytes. The cursor reads such a record in three parts: its first block,
 /// the rest of its body in pieces while the CRC runs, then its start again, up to
 /// [`TABLE`] bytes, for the first bytes of the body. A walk reads at most twice
-/// the live bytes, plus one block and one largest record for a torn record at the
-/// end, and holds one window at a time.
+/// the bytes it walks, plus one block and one largest record for a torn record at
+/// the end, and holds one window at a time.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     layout: Layout,
     tail: u64,
     at: Position,
+    /// The boundary after the last data record read, or the tail.
+    head: Position,
     piece: usize,
     phase: Phase,
     ended: bool,
@@ -438,6 +466,7 @@ impl Cursor {
             layout,
             tail: tail.offset,
             at: tail,
+            head: tail,
             piece,
             phase: Phase::Head,
             ended: false,
@@ -474,7 +503,8 @@ impl Cursor {
         }
     }
 
-    /// The largest window at the head: the largest record, the rest of the area,
+    /// The largest window at the read position: the largest record, the rest of the
+    /// area,
     /// or the rest of one lap.
     fn bound(&self) -> Window {
         let area = self.layout.area;
@@ -484,7 +514,7 @@ impl Cursor {
         Window { place, len }
     }
 
-    /// Bytes of the area between the head and the tail one lap later.
+    /// Bytes of the area between the read position and the tail one lap later.
     fn unread(&self) -> u64 {
         self.layout.area - (self.at.offset - self.tail)
     }
@@ -592,12 +622,16 @@ impl Cursor {
             offset: next,
             chain,
         };
+        if let Step::Data(_) = step {
+            self.head = self.at;
+        }
         Ok(step)
     }
 
-    /// Makes the writer that continues the ring from the head, with the records
-    /// before the offset `tail` released, and seals its restart record with
-    /// `chain`, a new random value, as the body. The chain continues from `chain`.
+    /// Makes the writer that continues the ring after the last data record walked,
+    /// or from the tail when the walk read none, with the records before the offset
+    /// `tail` released, and seals its restart record with `chain`, a new random
+    /// value, as the body. The chain continues from `chain`.
     ///
     /// # Errors
     ///
@@ -607,7 +641,8 @@ impl Cursor {
     ///
     /// # Panics
     ///
-    /// Before [`Step::End`], or when `tail` is outside the records walked.
+    /// Before [`Step::End`], or when `tail` is before the tail of the walk or past
+    /// the end of its last data record.
     pub(crate) fn writer(
         &self,
         tail: u64,
@@ -617,12 +652,12 @@ impl Cursor {
         let mut writer = Writer {
             layout: self.layout,
             tail: self.tail,
-            head: self.at.offset,
+            head: self.head.offset,
         };
         writer.release(tail);
         let plan = writer.append(RESTART_LEN)?;
         let body = chain.to_le_bytes();
-        let (sealed, _) = plan.headers(self.at.chain, Kind::Restart, [&body[..]]);
+        let (sealed, _) = plan.headers(self.head.chain, Kind::Restart, [&body[..]]);
         Ok((writer, sealed))
     }
 }
@@ -675,7 +710,7 @@ mod tests {
     }
 
     /// Walks the area with the real cursor to the end of the chain. Checks that it
-    /// asks for at most twice the live bytes, one block, and one largest record.
+    /// asks for at most twice the bytes it walks, one block, and one largest record.
     fn walk(area: &[u8], tail: Position) -> Result<(Vec<Vec<u8>>, Cursor), Invalid> {
         let mut cursor = Cursor::new(layout(), tail, PIECE);
         let mut data = Vec::new();
@@ -687,10 +722,10 @@ mod tests {
                 Step::Data(body) => data.push(whole(area, place, body)),
                 Step::Moved | Step::More => {}
                 Step::End => {
-                    let live = cursor.at.offset - tail.offset;
+                    let walked = cursor.at.offset - tail.offset;
                     let window = (BODY_MAX + HEADER_LEN).next_multiple_of(ALIGN);
-                    let most = 2 * live + to_u64(ALIGN + window);
-                    assert!(asked <= most, "asked {asked} for {live} live bytes");
+                    let most = 2 * walked + to_u64(ALIGN + window);
+                    assert!(asked <= most, "asked {asked} for {walked} bytes walked");
                     return Ok((data, cursor));
                 }
             }
@@ -774,6 +809,11 @@ mod tests {
 
         fn append(&mut self, body: &[u8]) -> Result<Plan, Full> {
             let plan = self.writer.append(body.len())?;
+            assert_eq!(plan.offset % AREA, plan.place, "the offset is at the place");
+            assert!(
+                plan.offset >= self.head.offset,
+                "the offset is at or past the head"
+            );
             let (sealed, chain) = plan.seal(self.head.chain, [body]);
             self.apply(&sealed, body, true);
             self.head = Position {
@@ -794,17 +834,28 @@ mod tests {
             data.filter_map(|live| live.data.clone()).collect()
         }
 
+        /// The boundary after the last live data record: the start of the restart
+        /// records after it, or the head.
+        fn after_data(&self) -> Position {
+            let restarts = self.live.iter().rev().take_while(|l| l.data.is_none());
+            restarts.last().map_or(self.head, |live| live.start)
+        }
+
         fn walk(&self) -> (Vec<Vec<u8>>, Cursor) {
             walk(&self.area, self.tail).expect("a valid ring")
         }
 
         /// Drops the writer, as a crash does, walks the area, and continues with a
-        /// new writer. Gives the data that the walk found.
+        /// new writer. Its restart record goes over the restart records after the
+        /// last data record. Gives the data that the walk found.
         fn reopen(&mut self, chain: u32) -> Result<Vec<Vec<u8>>, Full> {
             let (data, cursor) = self.walk();
             let (writer, sealed) = cursor.writer(self.tail.offset, chain)?;
+            while self.live.back().is_some_and(|live| live.data.is_none()) {
+                self.live.pop_back();
+            }
             self.writer = writer;
-            self.head = cursor.at;
+            self.head = cursor.head;
             self.restart(&sealed, chain);
             Ok(data)
         }
@@ -833,16 +884,23 @@ mod tests {
         prop::collection::vec(op, 0..40)
     }
 
-    /// Runs `ops` and checks each refusal and each reopen against the model.
+    /// Runs `ops` and checks each refusal and each reopen against the model. A
+    /// ring with no live data takes any record.
     fn run(ring: &mut Ring, ops: &[Op]) {
         for op in ops {
             let head = ring.writer.head();
-            let free = AREA - (head - ring.tail.offset);
+            let after = ring.after_data();
+            let free = match op {
+                Op::Reopen(_) => AREA - (after.offset - ring.tail.offset),
+                _ => AREA - (head - ring.tail.offset),
+            };
             let live = ring.data();
             let result = match op {
                 Op::Append(body) => ring.append(body).map(drop),
                 Op::Reopen(chain) => ring.reopen(*chain).map(|data| {
                     assert_eq!(data, live, "data found at a reopen");
+                    let restart = ring.live.back().map(|live| live.start);
+                    assert_eq!(restart, Some(after), "the restart record's place");
                 }),
                 Op::Release(count) => {
                     ring.release(*count);
@@ -853,6 +911,7 @@ mod tests {
                 assert_eq!(full.free, free, "free bytes at {op:?}");
                 assert!(full.needed > free, "a record that fits was refused");
                 assert_eq!(ring.writer.head(), head, "a refusal moved the head");
+                assert!(!live.is_empty(), "a ring with no data refused {op:?}");
             }
         }
     }
@@ -876,12 +935,10 @@ mod tests {
             let block = 4096;
             let cases = [
                 ("an area of part blocks", 7 * block + 1, 4087),
-                (
-                    "a body under one entry table",
-                    8 * block,
-                    entry::table_len(1) - 1,
-                ),
-                ("an area under two records less a block", 2 * block, 4088),
+                ("a body under one block less the header", 8 * block, 4086),
+                ("an area of one record of two blocks", 2 * block, 4088),
+                ("an area of one record of one block", block, 4087),
+                ("an area of two records less a block", 3 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
                 ("a file over u64", u64::MAX - 4095, 4087),
@@ -903,35 +960,39 @@ mod tests {
         }
 
         #[test]
-        fn takes_a_body_of_one_entry_table() {
-            let window = Layout::new(4096, entry::table_len(1)).map(|l| l.window);
-            assert_eq!(window, Ok(4096));
+        fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
+            assert_eq!(Layout::new(2 * 4096, 4087).map(Layout::entry_max), Ok(4032));
         }
 
         #[test]
-        fn takes_an_area_of_two_records_less_a_block() {
+        fn takes_an_area_of_two_records() {
             assert_eq!(
-                Layout::new(4096, 4087).map(|layout| layout.window),
+                Layout::new(2 * 4096, 4087).map(|layout| layout.window),
                 Ok(4096)
             );
-            assert_eq!(Layout::new(3 * 4096, 4088).map(|l| l.window), Ok(8192));
+            assert_eq!(Layout::new(4 * 4096, 4088).map(|l| l.window), Ok(8192));
         }
 
         proptest! {
+            /// The smallest area is twice the largest record. A ring of that area
+            /// that holds only its restart record takes its largest record,
+            /// wherever the restart record is.
             #[test]
-            fn lets_an_empty_ring_take_the_largest_record_at_any_head(
-                blocks in 1..4u64,
-                head in 0..64u64,
+            fn takes_the_largest_record_after_the_restart_record_at_any_tail(
+                body_max in BODY_MIN..=3 * ALIGN - HEADER_LEN,
+                tail in 0..64u64,
             ) {
-                let body_max = index(blocks * 4096) - HEADER_LEN;
-                let area = (2 * blocks - 1) * 4096;
-                let layout = Layout::new(area, body_max).expect("the smallest area");
-                let mut cursor = Cursor::new(layout, at(head, 0), PIECE);
+                let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
+                let under = 2 * record - 4096;
+                let unfit = Unfit { area: under, body_max };
+                prop_assert_eq!(Layout::new(under, body_max), Err(unfit));
+                let layout =
+                    Layout::new(2 * record, body_max).expect("the smallest area");
+                let mut cursor = Cursor::new(layout, at(tail, 0), PIECE);
                 let zeros = vec![0; cursor.window().len];
                 prop_assert_eq!(cursor.next(&zeros), Ok(Step::End));
                 let (mut writer, _) =
-                    cursor.writer(head * 4096, 1).expect("the ring is empty");
-                writer.release(writer.head());
+                    cursor.writer(tail * 4096, 1).expect("the ring is empty");
                 prop_assert_eq!(writer.append(body_max).map(drop), Ok(()));
             }
         }
@@ -974,14 +1035,15 @@ mod tests {
             let mut writer = writer(0, 1);
             let first = writer.append(1).expect("the ring has room");
             let second = writer.append(ALIGN).expect("the ring has room");
-            let plan = |wrap, place, next, len| Plan {
+            let plan = |wrap, place, offset, next, len| Plan {
                 wrap,
                 place,
+                offset,
                 next,
                 len,
             };
-            assert_eq!(first, plan(None, 4096, 2 * 4096, 1));
-            assert_eq!(second, plan(None, 2 * 4096, 4 * 4096, ALIGN));
+            assert_eq!(first, plan(None, 4096, 4096, 2 * 4096, 1));
+            assert_eq!(second, plan(None, 2 * 4096, 2 * 4096, 4 * 4096, ALIGN));
             assert_eq!(writer.head(), second.next);
         }
 
@@ -1083,7 +1145,7 @@ mod tests {
 
         #[test]
         fn is_full_when_the_wrap_passes_the_end_of_the_offsets() {
-            let small = Layout::new(3 * 4096, 4088).expect("the sizes make a ring");
+            let small = Layout::new(5 * 4096, 4088).expect("the sizes make a ring");
             let mut writer = opened(small, u64::MAX - 12287);
             let full = Full {
                 needed: 3 * 4096,
@@ -1147,13 +1209,13 @@ mod tests {
 
         /// A ring that holds the long record and its restart record.
         fn long_layout() -> Layout {
-            let area = to_u64(2 * LONG - ALIGN);
-            Layout::new(area, LONG - HEADER_LEN).expect("the long sizes make a ring")
+            Layout::new(to_u64(2 * LONG), LONG - HEADER_LEN)
+                .expect("the long sizes make a ring")
         }
 
         /// The area of [`long_layout`] with one long data record at its start.
         fn long_area() -> Vec<u8> {
-            let mut area = vec![0; 2 * LONG - ALIGN];
+            let mut area = vec![0; 2 * LONG];
             let body = vec![7; LONG - HEADER_LEN];
             put(&mut area, 0, START.chain, Kind::Data.byte(), &body);
             area
@@ -1224,6 +1286,57 @@ mod tests {
             assert_eq!(cursor.writer(0, 1).map(drop), Err(full));
             let (writer, sealed) = cursor.writer(4096, 1).expect("one block is free");
             assert_eq!((sealed.record.place, writer.head()), (0, 9 * 4096));
+        }
+
+        /// Each open writes its restart record right after the last data record,
+        /// over the restart record of the open before it.
+        #[test]
+        fn starts_a_writer_after_the_last_data_record() {
+            let mut ring = Ring::new();
+            ring.append(b"one").expect("the ring has room");
+            for chain in [5, 6] {
+                assert_eq!(ring.reopen(chain), Ok(vec![b"one".to_vec()]));
+                assert_eq!(ring.writer.head(), 3 * 4096, "the open of {chain}");
+            }
+            let (data, cursor) = walk(&ring.area, START).expect("a valid ring");
+            assert_eq!((data, cursor.at), (vec![b"one".to_vec()], at(3, 6)));
+        }
+
+        /// The writer starts before the restart records after the last data record,
+        /// so a tail past the last data record is outside its records.
+        #[test]
+        #[should_panic(
+            expected = "release to 4096 is outside the live records from 0 to 0"
+        )]
+        fn panics_on_a_tail_past_the_last_data_record() {
+            let (_, cursor) = Ring::new().walk();
+            let _writer = cursor.writer(4096, 2);
+        }
+
+        /// A ring of two blocks holds one restart record after any number of opens
+        /// with no data, so it takes its largest record.
+        #[test]
+        fn takes_the_largest_record_after_opens_with_no_data() {
+            let layout = Layout::new(2 * 4096, 4087).expect("an area of two blocks");
+            let mut area = vec![0; 2 * 4096];
+            for chain in 1..=3 {
+                let mut cursor = Cursor::new(layout, START, PIECE);
+                loop {
+                    let Window { place, len } = cursor.window();
+                    match cursor.next(&area[index(place)..index(place) + len]) {
+                        Ok(Step::Moved) => {}
+                        Ok(Step::End) => break,
+                        other => panic!("the open of {chain} read {other:?}"),
+                    }
+                }
+                let (mut writer, sealed) = cursor.writer(0, chain).expect("it fits");
+                let place = index(sealed.record.place);
+                area[place..place + HEADER_LEN].copy_from_slice(&sealed.record.header);
+                area[place + HEADER_LEN..place + HEADER_LEN + RESTART_LEN]
+                    .copy_from_slice(&chain.to_le_bytes());
+                let appended = writer.append(4087).map(drop);
+                assert_eq!(appended, Ok(()), "the open of {chain}");
+            }
         }
 
         /// The log is cut at a damaged record and reopened. A new record with the
@@ -1405,7 +1518,7 @@ mod tests {
             assert_eq!(cursor.next(&ring.area[..ALIGN]), Ok(Step::Moved));
             assert_eq!(cursor.next(&ring.area[ALIGN..2 * ALIGN]), Ok(Step::More));
             assert_eq!(cursor.next(&ring.area[2 * ALIGN..4 * ALIGN]), Ok(Step::End));
-            assert_eq!(cursor.offset(), 4096, "the head is at the torn record");
+            assert_eq!(cursor.offset(), 4096, "the walk stops at the torn record");
             let (_, cursor) = walk(&ring.area, START).expect("a valid ring");
             assert_eq!(cursor.offset(), 4096);
         }
@@ -1456,7 +1569,7 @@ mod tests {
             });
             let more = Ok(Step::More);
             assert_eq!(steps, [more, more, more, Ok(Step::End)]);
-            assert_eq!(cursor.offset(), 0, "the head is at the torn record");
+            assert_eq!(cursor.offset(), 0, "the walk stops at the torn record");
         }
 
         #[test]

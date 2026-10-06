@@ -5,8 +5,9 @@ use types::time::{Interval, Monotonic, Span};
 
 use crate::{DRIFT, source};
 
-/// The words of the cell: 1 once readers have time, then a [`Slew`].
-const WORDS: usize = 6;
+/// The words of the cell that [`Reader`]s read: a [`State`] as its kind, a [`Slew`],
+/// and a [`combine::Error`].
+const WORDS: usize = 9;
 
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
@@ -15,7 +16,7 @@ pub struct Clock {
     monotonic: env::clock::Clock,
     sources: Map<source::Key, Filter>,
     next: u64,
-    slew: Option<Slew>,
+    state: State,
     cell: ring::latest::Writer<WORDS>,
 }
 
@@ -25,26 +26,29 @@ impl Clock {
     /// of the sources first agree.
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
-        let (cell, reader) = ring::latest::new([0; WORDS]);
+        let state = State::Unsynced(combine::Error::NoSources);
+        let (cell, cell_reader) = ring::latest::new(encode(state));
         let reader = Reader {
             monotonic: monotonic.clone(),
-            cell: reader,
+            cell: cell_reader,
         };
         let clock = Self {
             monotonic,
             sources: Map::default(),
             next: 0,
-            slew: None,
+            state,
             cell,
         };
         (clock, reader)
     }
 
-    /// Adds a source with no measurements and returns its key.
+    /// Adds a source with no measurements, then moves mesh time toward the sources,
+    /// and returns its key. The source counts against a majority until it pushes.
     pub fn add(&mut self) -> source::Key {
         let key = source::Key(self.next);
         self.next += 1;
         self.sources.insert(key, Filter::default());
+        self.steer();
         key
     }
 
@@ -54,10 +58,10 @@ impl Clock {
     /// # Panics
     ///
     /// When `source` was removed already.
-    pub fn remove(&mut self, source: source::Key) -> Status {
+    pub fn remove(&mut self, source: source::Key) {
         let removed = self.sources.remove(&source);
         assert!(removed.is_some(), "{source:?} was removed");
-        self.steer()
+        self.steer();
     }
 
     /// Records a measurement of the monotonic clock from `source`, then moves mesh
@@ -66,12 +70,12 @@ impl Clock {
     /// # Panics
     ///
     /// When `source` was removed.
-    pub fn push(&mut self, source: source::Key, measurement: Measurement) -> Status {
+    pub fn push(&mut self, source: source::Key, measurement: Measurement) {
         let Some(filter) = self.sources.get_mut(&source) else {
             panic!("{source:?} was removed");
         };
         filter.push(measurement);
-        self.steer()
+        self.steer();
     }
 
     /// Feeds the clock from the node's time sources, today the OS clock `wall`. Each
@@ -93,30 +97,59 @@ impl Clock {
         }
     }
 
-    fn steer(&mut self) -> Status {
-        let now = self.monotonic.now();
-        let estimate = combine(now, DRIFT, self.sources.values());
-        let (old, estimate) = match (self.slew, estimate) {
-            (None, Err(e)) => return Status::Unsynced(e),
-            (Some(slew), Err(e)) => return Status::Holdover(slew.at(now, DRIFT), e),
-            (old, Ok(estimate)) => (old, estimate),
-        };
-        // Before the first estimate, readers have no time that could go back.
-        let mut slew = Slew::new(estimate);
-        self.cell.update(|_| {
+    fn steer(&mut self) {
+        let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
+        let state = match (self.state.slew(), estimate) {
+            (None, Err(e)) => State::Unsynced(e),
+            (Some(slew), Err(e)) => State::Holdover(slew, e),
+            // Before the first estimate, readers have no time that could go back.
+            (None, Ok(estimate)) => State::Synced(Slew::new(estimate)),
             // `toward` keeps mesh time from going back only against reads before its
             // `now`, so the clock reads inside the update.
-            if let Some(old) = old {
-                slew = old.toward(self.monotonic.now(), DRIFT, estimate);
+            (Some(old), Ok(estimate)) => {
+                self.cell.update(|_| {
+                    let slew = old.toward(self.monotonic.now(), DRIFT, estimate);
+                    self.state = State::Synced(slew);
+                    encode(self.state)
+                });
+                self.state
             }
-            encode(slew)
-        });
-        self.slew = Some(slew);
-        Status::Synced(slew.at(self.monotonic.now(), DRIFT))
+        };
+        // A write that changes nothing makes the reads that overlap it run again.
+        if state != self.state {
+            self.state = state;
+            self.cell.update(|_| encode(state));
+        }
     }
 }
 
-/// What a clock follows after a change to its sources.
+/// A [`Status`] with the slew in place of mesh time at one reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Unsynced(combine::Error),
+    Synced(Slew),
+    Holdover(Slew, combine::Error),
+}
+
+impl State {
+    fn slew(self) -> Option<Slew> {
+        match self {
+            Self::Unsynced(_) => None,
+            Self::Synced(slew) | Self::Holdover(slew, _) => Some(slew),
+        }
+    }
+
+    fn at(self, now: Monotonic) -> Status {
+        match self {
+            Self::Unsynced(e) => Status::Unsynced(e),
+            Self::Synced(slew) => Status::Synced(slew.at(now, DRIFT)),
+            Self::Holdover(slew, e) => Status::Holdover(slew.at(now, DRIFT), e),
+        }
+    }
+}
+
+/// What a clock follows after its last [`Clock::add`], [`Clock::remove`], or
+/// [`Clock::push`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     /// No majority of the sources has agreed yet, so readers have no time. A source
@@ -146,17 +179,79 @@ impl Reader {
     #[must_use]
     pub fn now(&self) -> Option<Interval> {
         self.cell.read(|words| {
-            let slew = decode(words)?;
+            let slew = decode(words).slew()?;
             Some(slew.at(self.monotonic.now(), DRIFT).interval())
         })
     }
+
+    /// What the clock follows now, with mesh time at the call. It holds the result of
+    /// the last [`Clock::add`], [`Clock::remove`], or [`Clock::push`] to return. That
+    /// mesh time is the one [`Reader::now`] gives, so it never goes back.
+    /// [`Status::Unsynced`] until a majority of the sources first agree.
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.cell
+            .read(|words| decode(words).at(self.monotonic.now()))
+    }
 }
 
-fn encode(slew: Slew) -> [u64; WORDS] {
+fn encode(state: State) -> [u64; WORDS] {
+    let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
+    let (kind, cause) = match state {
+        State::Unsynced(cause) => (0, Some(cause)),
+        State::Synced(_) => (1, None),
+        State::Holdover(_, cause) => (2, Some(cause)),
+    };
+    let [start, from, at, offset, error] = state.slew().map_or([0; 5], encode_slew);
+    let [sources, agreeing, empty] = match cause {
+        Some(combine::Error::NoMajority {
+            sources,
+            agreeing,
+            empty,
+        }) => [count(sources), count(agreeing), count(empty)],
+        Some(combine::Error::NoSources) | None => [0; 3],
+    };
+    [
+        kind, start, from, at, offset, error, sources, agreeing, empty,
+    ]
+}
+
+fn decode(words: [u64; WORDS]) -> State {
+    let [
+        kind,
+        start,
+        from,
+        at,
+        offset,
+        error,
+        sources,
+        agreeing,
+        empty,
+    ] = words;
+    let slew = || decode_slew([start, from, at, offset, error]);
+    let count =
+        |word: u64| usize::try_from(word).expect("invariant: a count from a usize");
+    // `NoMajority` has at least 1 source.
+    let cause = || match sources {
+        0 => combine::Error::NoSources,
+        _ => combine::Error::NoMajority {
+            sources: count(sources),
+            agreeing: count(agreeing),
+            empty: count(empty),
+        },
+    };
+    match kind {
+        0 => State::Unsynced(cause()),
+        1 => State::Synced(slew()),
+        2 => State::Holdover(slew(), cause()),
+        _ => panic!("invariant: the cell holds state {kind}"),
+    }
+}
+
+fn encode_slew(slew: Slew) -> [u64; 5] {
     let span = |span: Span| span.nanos().cast_unsigned();
     let target = slew.target;
     [
-        1,
         slew.start.0,
         span(slew.from),
         target.at().0,
@@ -165,56 +260,76 @@ fn encode(slew: Slew) -> [u64; WORDS] {
     ]
 }
 
-fn decode(words: [u64; WORDS]) -> Option<Slew> {
-    let [time, start, from, at, offset, error] = words;
-    if time == 0 {
-        return None;
-    }
+fn decode_slew(words: [u64; 5]) -> Slew {
+    let [start, from, at, offset, error] = words;
     let span = |word: u64| Span::from_nanos(word.cast_signed());
     let Some(target) = Measurement::new(Monotonic(at), span(offset), span(error))
     else {
         panic!("invariant: the cell holds a measurement");
     };
-    Some(Slew {
+    Slew {
         start: Monotonic(start),
         from: span(from),
         target,
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use estimate::combine::Error;
     use estimate::{Measurement, Slew};
     use proptest::prelude::*;
     use types::time::{Monotonic, Span};
 
-    use super::{decode, encode};
+    use super::{State, decode, encode};
 
-    proptest! {
-        #[test]
-        fn a_slew_round_trips_through_the_cell(
-            start in any::<u64>(),
-            from in any::<i64>(),
-            at in any::<u64>(),
-            offset in any::<i64>(),
-            error in 0..=36_500 * Span::DAY.nanos(),
-        ) {
+    fn slew() -> impl Strategy<Value = Slew> {
+        let error = 0..=36_500 * Span::DAY.nanos();
+        let words = (
+            any::<u64>(),
+            any::<i64>(),
+            any::<u64>(),
+            any::<i64>(),
+            error,
+        );
+        words.prop_map(|(start, from, at, offset, error)| {
             let target = Measurement::new(
                 Monotonic(at),
                 Span::from_nanos(offset),
                 Span::from_nanos(error),
             );
-            let slew = Slew {
+            Slew {
                 start: Monotonic(start),
                 from: Span::from_nanos(from),
                 target: target.expect("at most 36500 days"),
-            };
-            prop_assert_eq!(decode(encode(slew)), Some(slew));
-        }
+            }
+        })
     }
 
-    #[test]
-    fn an_empty_cell_has_no_time() {
-        assert_eq!(decode([0; 6]), None);
+    fn cause() -> impl Strategy<Value = Error> {
+        let counts = (1..=usize::MAX, any::<usize>(), any::<usize>());
+        prop_oneof![
+            Just(Error::NoSources),
+            counts.prop_map(|(sources, agreeing, empty)| Error::NoMajority {
+                sources,
+                agreeing,
+                empty,
+            }),
+        ]
+    }
+
+    fn state() -> impl Strategy<Value = State> {
+        prop_oneof![
+            cause().prop_map(State::Unsynced),
+            slew().prop_map(State::Synced),
+            (slew(), cause()).prop_map(|(slew, cause)| State::Holdover(slew, cause)),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn a_state_round_trips_through_the_cell(state in state()) {
+            prop_assert_eq!(decode(encode(state)), state);
+        }
     }
 }

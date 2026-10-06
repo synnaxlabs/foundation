@@ -78,7 +78,8 @@ pub enum Label {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Form {
     /// As a connector writes them: fixed-width values back to back, or for strings,
-    /// bytes, and lists, `u32` end offsets and then the data.
+    /// bytes, and lists, the `u32` end of each sample, in elements, then zeros up to a
+    /// multiple of the element width or 8, whichever is less, then the elements.
     Raw,
     /// As `codec` encodes them, in tagged vectors.
     Encoded,
@@ -113,7 +114,7 @@ pub struct Range {
 impl Range {
     /// The range of `group` in the frame `bytes`, or `None` when it is absent.
     fn find(bytes: &[u8], group: u32) -> Option<Self> {
-        let (ranges, ..) = split(bytes);
+        let (ranges, ..) = parts(bytes);
         let range = &ranges[search(ranges, group)?];
         Some(Self {
             seq: u64::from_le_bytes(get(range, at::range::SEQ)),
@@ -194,13 +195,15 @@ pub struct Draft(block::Unique);
 impl Draft {
     /// Takes a block from `pool` for a frame of `set`, and writes its header, ranges,
     /// and descriptors. `series` holds each present entry and the byte length of its
-    /// series, in increasing entry order. A group is present when its index is. Each
-    /// range starts at zero, and series bytes are not cleared.
+    /// series, in increasing entry order. Each data entry needs the index of its group
+    /// in `series`. A group is present when its index is. Each range starts at zero,
+    /// and series bytes are not cleared.
     ///
     /// # Errors
     ///
-    /// [`Error::Pool`] when the pool has no block that large, and the other variants
-    /// when `series` breaks a rule above.
+    /// [`Error::OutOfRange`], [`Error::Unordered`], or [`Error::IndexAbsent`] when
+    /// `series` breaks a rule above. [`Error::Pool`] only when `series` keeps every
+    /// rule and the pool cannot give a block for the frame.
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
@@ -216,7 +219,7 @@ impl Draft {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        let (ranges, descriptors, body) = split_mut(&mut block);
+        let (ranges, descriptors, body) = parts_mut(&mut block);
         let indexes = series
             .iter()
             .map(|&(entry, _)| entry)
@@ -224,12 +227,6 @@ impl Draft {
         for (range, index) in ranges.iter_mut().zip(indexes) {
             put(range, 0, &set.entries()[index].group.to_le_bytes());
             range[at::range::COUNT..].fill(0);
-        }
-        for &(entry, _) in series {
-            if search(ranges, set.entries()[entry].group).is_none() {
-                let index = set.index(entry);
-                return Err(Error::IndexAbsent { entry, index });
-            }
         }
         let mut end = 0_usize;
         for (descriptor, &(entry, len)) in descriptors.iter_mut().zip(series) {
@@ -244,8 +241,8 @@ impl Draft {
 
     /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Time is
     /// logarithmic in the number of present series.
-    pub fn series(&mut self, entry: usize) -> Option<&mut [u8]> {
-        let (_, descriptors, body) = split_mut(&mut self.0);
+    pub fn series_mut(&mut self, entry: usize) -> Option<&mut [u8]> {
+        let (_, descriptors, body) = parts_mut(&mut self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
         Some(&mut body[start..end])
@@ -253,7 +250,7 @@ impl Draft {
 
     /// Each present entry and its series bytes, to fill, in entry order.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
-        let (_, descriptors, mut body) = split_mut(&mut self.0);
+        let (_, descriptors, mut body) = parts_mut(&mut self.0);
         let mut offset = 0_usize;
         spans(ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
@@ -265,8 +262,8 @@ impl Draft {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, descriptors, body) = split(&self.0);
-        series(body, ends(descriptors))
+        let (_, descriptors, body) = parts(&self.0);
+        split(body, ends(descriptors))
     }
 
     /// The key set the draft's entries number into.
@@ -312,7 +309,7 @@ impl Draft {
     }
 
     fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
-        let (ranges, ..) = split_mut(&mut self.0);
+        let (ranges, ..) = parts_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
         };
@@ -361,7 +358,7 @@ impl Frame {
     /// in the number of present series.
     #[must_use]
     pub fn series(&self, entry: usize) -> Option<&[u8]> {
-        let (_, descriptors, body) = split(&self.0);
+        let (_, descriptors, body) = parts(&self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
         Some(&body[start..end])
@@ -369,8 +366,8 @@ impl Frame {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, _, body) = split(&self.0);
-        series(body, self.ends())
+        let (_, _, body) = parts(&self.0);
+        split(body, self.ends())
     }
 
     /// The credit that sending the frame to a reader spends: the bytes a block of the
@@ -393,9 +390,9 @@ impl Frame {
 
     /// Each present entry and the end of its series, as `(entry, end)`, in the order
     /// of [`Frame::iter`]. `end` counts from the start of [`Frame::body`], and
-    /// [`series`] reads each series back from the body and these ends.
+    /// [`split`] cuts the body at these ends.
     pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
-        let (_, descriptors, _) = split(&self.0);
+        let (_, descriptors, _) = parts(&self.0);
         ends(descriptors)
     }
 }
@@ -405,10 +402,11 @@ impl Frame {
 ///
 /// # Panics
 ///
-/// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
-/// one frame never panic. Run [`check`] once on a body and ends from another node
-/// before the first read.
-pub fn series<T>(
+/// The iterator panics at the first end that [`check`] refuses. When the body runs past
+/// the last end, it panics only once it runs out. The body and ends of one frame never
+/// panic. Run [`check`] once on a body and ends from another node before the first
+/// [`split`].
+pub fn split<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
 ) -> impl Iterator<Item = (T, &[u8])> {
@@ -426,7 +424,7 @@ pub fn series<T>(
     })
 }
 
-/// Checks that `ends` fit `body`, so that [`series`] reads them without a panic.
+/// Checks that `ends` fit `body`, so that [`split`] cuts at them without a panic.
 ///
 /// # Errors
 ///
@@ -532,11 +530,16 @@ fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
     })
 }
 
-/// The present groups of a frame of `series`, and the bytes of its series with the
-/// padding between them. The bytes saturate at `usize::MAX`, which no pool holds.
+/// Checks `series` against each rule of [`Draft::new`], before a block is taken, and
+/// gives the present groups and the bytes of the series with the padding between
+/// them. The bytes saturate at `usize::MAX`, which no pool holds.
 fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Error> {
     let entries = set.entries().len();
     let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
+    // An index usually comes just before its data. Other data search `series`, once
+    // per group while `found` holds its index. An absent index waits for the order
+    // checks, without which the search means nothing.
+    let (mut last_index, mut found, mut absent) = (None, [usize::MAX; 16], None);
     for &(entry, len) in series {
         if entry >= entries {
             return Err(Error::OutOfRange { entry, entries });
@@ -547,23 +550,39 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
             return Err(Error::Unordered { entry, last });
         }
         last = Some(entry);
-        groups += usize::from(set.index(entry) == entry);
+        let group = to_usize(set.entries()[entry].group);
+        let index = set.groups()[group];
+        if index == entry {
+            groups += 1;
+            last_index = Some(index);
+        } else if last_index != Some(index) && absent.is_none() {
+            let memo = &mut found[group % found.len()];
+            if *memo != index {
+                if series
+                    .binary_search_by_key(&index, |&(entry, _)| entry)
+                    .is_err()
+                {
+                    absent = Some(Error::IndexAbsent { entry, index });
+                }
+                *memo = index;
+            }
+        }
         bytes = bytes
             .checked_next_multiple_of(SERIES_ALIGN)
             .map_or(usize::MAX, |start| start.saturating_add(len));
     }
-    Ok((groups, bytes))
+    absent.map_or(Ok((groups, bytes)), Err)
 }
 
 /// A frame's ranges, its descriptors, and its series bytes.
-fn split(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
+fn parts(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
     let (ranges, series) = counts(bytes);
     let (head, body) = bytes.split_at(body_start(ranges, series));
     let (ranges, descriptors) = head[HEAD..].split_at(RANGE * ranges);
     (ranges.as_chunks().0, descriptors.as_chunks().0, body)
 }
 
-fn split_mut(
+fn parts_mut(
     bytes: &mut [u8],
 ) -> (&mut [[u8; RANGE]], &mut [[u8; DESCRIPTOR]], &mut [u8]) {
     let (ranges, series) = counts(bytes);
@@ -715,8 +734,8 @@ mod tests {
         drop(dirty);
         let series = [(0, 3), (2, 2)];
         let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
-        draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
-        draft.series(2).unwrap().copy_from_slice(&[1, 2]);
+        draft.series_mut(0).unwrap().copy_from_slice(&[0xaa; 3]);
+        draft.series_mut(2).unwrap().copy_from_slice(&[1, 2]);
         draft.set_count(0, 2);
         draft.set_seq(0, 7);
         let frame = draft.freeze(Path::Backfill);
@@ -781,7 +800,8 @@ mod tests {
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
-        let draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        assert_eq!(draft.series_mut(usize::MAX), None, "an entry past u32");
         let frame = draft.freeze(Path::Backfill);
         assert_eq!(frame.key_set(), set.key());
         assert_eq!(frame.path(), Path::Backfill);
@@ -829,8 +849,8 @@ mod tests {
         let pool = pool(1 << 16);
         let series = [(0, 3), (1, 0), (2, 9)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
-        draft.series(0).unwrap().fill(1);
-        draft.series(2).unwrap().fill(2);
+        draft.series_mut(0).unwrap().fill(1);
+        draft.series_mut(2).unwrap().fill(2);
         let frame = draft.freeze(Path::Live);
         let expected = [[1, 1, 1, 0, 0, 0, 0, 0].as_slice(), &[2; 9]].concat();
         assert_eq!(&*frame.body(), expected.as_slice());
@@ -844,20 +864,20 @@ mod tests {
         let pool = pool(1 << 16);
         let lens = [(0, 3), (1, 0), (2, 9)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &lens).unwrap();
-        draft.series(0).unwrap().fill(1);
-        draft.series(2).unwrap().fill(2);
+        draft.series_mut(0).unwrap().fill(1);
+        draft.series_mut(2).unwrap().fill(2);
         let frame = draft.freeze(Path::Live);
         let ends: Vec<_> = frame.ends().collect();
         assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
         let body = frame.body();
         assert_eq!(check(&body, ends.iter().copied()), Ok(()));
-        let read: Vec<_> = series(&body, ends).collect();
+        let read: Vec<_> = split(&body, ends).collect();
         assert_eq!(read, [(0, [1; 3].as_slice()), (1, &[]), (2, &[2; 9])]);
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         let empty = empty.freeze(Path::Live);
         assert_eq!(empty.ends().count(), 0);
         assert_eq!(check(&empty.body(), empty.ends()), Ok(()));
-        assert_eq!(series(&empty.body(), empty.ends()).count(), 0);
+        assert_eq!(split(&empty.body(), empty.ends()).count(), 0);
     }
 
     /// Tags `ends` with their positions.
@@ -909,19 +929,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "the end 5 is past the body of 4 bytes")]
     fn panics_on_an_end_past_the_body() {
-        series(&[0; 4], tagged(&[5])).for_each(drop);
+        split(&[0; 4], tagged(&[5])).for_each(drop);
     }
 
     #[test]
     #[should_panic(expected = "the end 2 is before 8, the start of its series")]
     fn panics_on_an_end_before_the_start_of_its_series() {
-        series(&[0; 16], tagged(&[3, 2])).for_each(drop);
+        split(&[0; 16], tagged(&[3, 2])).for_each(drop);
     }
 
     #[test]
     #[should_panic(expected = "the last end 8 is not the end of the body of 17 bytes")]
     fn panics_when_the_ends_stop_before_the_body() {
-        series(&[1; 17], tagged(&[3, 8])).for_each(drop);
+        split(&[1; 17], tagged(&[3, 8])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 0 is not the end of the body of 16 bytes")]
+    fn panics_on_a_body_with_no_ends() {
+        split(&[1; 16], tagged(&[])).for_each(drop);
     }
 
     #[test]
@@ -960,7 +986,7 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
         for (seq, &(entry, _)) in (1..).zip(&series) {
             draft
-                .series(entry)
+                .series_mut(entry)
                 .unwrap()
                 .fill(u8::try_from(seq).unwrap());
             let group = u32::try_from(entry).unwrap();
@@ -1071,6 +1097,143 @@ mod tests {
             Draft::new(&pool(1 << 16), &two_groups(), Form::Raw, &[(0, 1), (3, 1)])
                 .unwrap_err();
         assert_eq!(error, Error::IndexAbsent { entry: 3, index: 2 });
+    }
+
+    #[test]
+    fn finds_an_index_that_is_not_just_before_its_data() {
+        // Key n has slot n, so both indexes sort before both data channels.
+        let set = interner().intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(3), F64)],
+            },
+            Group {
+                index: key(2),
+                data: &[(key(4), F64)],
+            },
+        ]);
+        let pool = pool(1 << 16);
+        Draft::new(&pool, &set, Form::Raw, &[(0, 1), (1, 1), (2, 1), (3, 1)]).unwrap();
+        let error = Draft::new(&pool, &set, Form::Raw, &[(1, 1), (2, 1)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+    }
+
+    #[test]
+    fn refuses_the_first_data_without_its_index_among_many_searched() {
+        // Entries 0 to 2 are the indexes of groups 0 to 2, and 3 to 5 their data.
+        let set = interner().intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(4), F64)],
+            },
+            Group {
+                index: key(2),
+                data: &[(key(5), F64)],
+            },
+            Group {
+                index: key(3),
+                data: &[(key(6), F64)],
+            },
+        ]);
+        let pool = pool(1 << 16);
+        let refuse = |series: &[(usize, usize)]| {
+            Draft::new(&pool, &set, Form::Raw, series).unwrap_err()
+        };
+        assert_eq!(
+            refuse(&[(1, 1), (3, 1), (5, 1)]),
+            Error::IndexAbsent { entry: 3, index: 0 }
+        );
+        assert_eq!(
+            refuse(&[(0, 1), (1, 1), (3, 1), (5, 1)]),
+            Error::IndexAbsent { entry: 5, index: 2 }
+        );
+    }
+
+    #[test]
+    fn finds_the_index_of_data_among_hundreds_of_groups() {
+        // Entries 0 to 256 are the indexes of groups 0 to 256, and 257 to 513 their
+        // data. More groups than search memos share each memo.
+        let data: Vec<_> = (1..=257).map(|n| [(key(n + 300), F64)]).collect();
+        let groups: Vec<_> = (1..=257)
+            .zip(&data)
+            .map(|(n, data)| Group {
+                index: key(n),
+                data,
+            })
+            .collect();
+        let set = interner().intern(&groups);
+        let pool = pool(1 << 20);
+        let all: Vec<_> = (0..514).map(|entry| (entry, 1)).collect();
+        Draft::new(&pool, &set, Form::Raw, &all).unwrap();
+        let mut series = all.clone();
+        series.remove(256);
+        let error = Draft::new(&pool, &set, Form::Raw, &series).unwrap_err();
+        assert_eq!(
+            error,
+            Error::IndexAbsent {
+                entry: 513,
+                index: 256
+            }
+        );
+    }
+
+    #[test]
+    fn finds_the_index_of_data_that_alternate_groups() {
+        // Entries 0 and 1 are the indexes, and the data of groups 0 and 1 alternate.
+        let set = interner().intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(3), F64), (key(5), F64)],
+            },
+            Group {
+                index: key(2),
+                data: &[(key(4), F64), (key(6), F64)],
+            },
+        ]);
+        let pool = pool(1 << 16);
+        let all: Vec<_> = (0..6).map(|entry| (entry, 1)).collect();
+        Draft::new(&pool, &set, Form::Raw, &all).unwrap();
+        let error = Draft::new(&pool, &set, Form::Raw, &all[1..]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+        let error =
+            Draft::new(&pool, &set, Form::Raw, &[(0, 1), (2, 1), (3, 1), (4, 1)])
+                .unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 3, index: 1 });
+    }
+
+    #[test]
+    fn refuses_data_whose_index_sorts_after_it() {
+        let set = interner().intern(&[Group {
+            index: key(3),
+            data: &[(key(2), F64)],
+        }]);
+        let error = Draft::new(&pool(1 << 16), &set, Form::Raw, &[(0, 8)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 0, index: 1 });
+    }
+
+    #[test]
+    fn refuses_data_without_its_index_when_the_pool_is_full() {
+        let set = one_group(&mut interner());
+        let pool = pool(256);
+        let _held = [pool.alloc(1).unwrap(), pool.alloc(1).unwrap()];
+        assert_eq!(
+            pool.alloc(1).unwrap_err(),
+            block::Error::Exhausted {
+                requested: 1,
+                available: 0
+            }
+        );
+        let error = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+    }
+
+    #[test]
+    fn a_refused_draft_takes_no_budget() {
+        let set = one_group(&mut interner());
+        let pool = pool(1 << 16);
+        let error = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+        assert_eq!(pool.committed(), 0);
     }
 
     #[test]
@@ -1214,7 +1377,7 @@ mod tests {
                 .iter()
                 .find(|&&(e, _)| e == entry)
                 .map(|&(_, len)| len);
-            match (draft.series(entry), len) {
+            match (draft.series_mut(entry), len) {
                 (Some(bytes), Some(len)) => bytes.copy_from_slice(&pattern(entry, len)),
                 (None, None) => {}
                 (bytes, len) => {
@@ -1290,7 +1453,7 @@ mod tests {
         prop_assert_eq!(&*frame.body(), body.as_slice());
         let view = frame.body();
         prop_assert_eq!(check(&view, frame.ends()), Ok(()));
-        let from_ends: Vec<(usize, Vec<u8>)> = super::series(&view, frame.ends())
+        let from_ends: Vec<(usize, Vec<u8>)> = super::split(&view, frame.ends())
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
         prop_assert_eq!(&from_ends, &written);
@@ -1302,6 +1465,41 @@ mod tests {
         #[test]
         fn reads_back_what_a_draft_wrote(case in cases()) {
             round_trip(&case)?;
+        }
+
+        /// Key n has slot n, so shuffled keys give any slot order, and more groups
+        /// than `measure` remembers.
+        #[test]
+        fn refuses_the_first_entry_whose_index_is_absent(
+            sizes in vec(0_usize..10, 1..20),
+            keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
+            kept in vec(any::<bool>(), 200),
+        ) {
+            let mut keys = keys.into_iter().map(key);
+            let data: Vec<Vec<(channel::Key, Type)>> = sizes
+                .iter()
+                .map(|&size| keys.by_ref().take(size).map(|key| (key, F64)).collect())
+                .collect();
+            let groups: Vec<Group<'_>> = data
+                .iter()
+                .map(|data| Group {
+                    index: keys.next().unwrap(),
+                    data,
+                })
+                .collect();
+            let set = interner().intern(&groups);
+            let series: Vec<(usize, usize)> = (0..set.entries().len())
+                .filter(|&entry| kept[entry])
+                .map(|entry| (entry, 1))
+                .collect();
+            let present = |index| series.iter().any(|&(entry, _)| entry == index);
+            let expected = series
+                .iter()
+                .map(|&(entry, _)| (entry, set.index(entry)))
+                .find(|&(_, index)| !present(index))
+                .map(|(entry, index)| Error::IndexAbsent { entry, index });
+            let result = Draft::new(&pool(1 << 20), &set, Form::Raw, &series);
+            prop_assert_eq!(result.err(), expected);
         }
     }
 }

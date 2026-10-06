@@ -47,13 +47,16 @@ pub struct Readers {
     /// The complete sessions, sorted by key.
     complete: Vec<Session>,
     /// The flow of each complete session, at its index in `complete`. Apart so that a
-    /// `Session` stays 64 bytes, which `find` indexes with a shift, not a multiply.
+    /// `Session` stays 64 bytes, which a search by key indexes with a shift, not a
+    /// multiply.
     flows: Vec<Flow>,
     /// The live frames not yet on disk, with their seq, oldest first. Empty when no
     /// complete session is open.
     queue: VecDeque<(Frame, Range<u64>)>,
-    /// The end of the newest live frame released, or dropped with no complete session
-    /// open. Memory holds no frame below it.
+    /// The end of the last live frame queued, or the live seq at start.
+    queued: u64,
+    /// The end of the newest live frame with samples that was released, or dropped
+    /// with no complete session open. Memory holds no frame below it.
     released: u64,
     /// Named readers that still hold after their session closed.
     closed: Vec<Closed>,
@@ -115,6 +118,7 @@ impl Readers {
             complete: Vec::new(),
             flows: Vec::new(),
             queue: VecDeque::new(),
+            queued: live,
             released: live,
             closed: Vec::new(),
             latest: Vec::new(),
@@ -232,14 +236,19 @@ impl Readers {
     }
 
     /// Raises the session's credit to `limit_bytes` since it opened. A limit that is
-    /// not higher than the current one changes nothing.
+    /// not higher than the current one changes nothing, and so does a grant to a key
+    /// that is not an open complete session: a grant can arrive after its session
+    /// closes.
     ///
     /// # Panics
     ///
-    /// If the complete session is not open.
+    /// If this `Readers` never gave `key`.
     pub fn grant(&mut self, key: Key, limit_bytes: u64) {
-        let i = self.find(key);
-        self.flows[i].credit.grant(limit_bytes);
+        if let Ok(i) = self.complete.binary_search_by_key(&key, |s| s.key) {
+            self.flows[i].credit.grant(limit_bytes);
+        } else {
+            assert!(key.0 < self.next, "session {key} was never open");
+        }
     }
 
     /// Queues `frame`, stored on the live path with the samples `seq`, for the
@@ -258,16 +267,20 @@ impl Readers {
             seq.start,
             seq.end
         );
-        let end = self.queue.back().map_or(self.released, |(_, seq)| seq.end);
         assert!(
-            end <= seq.start,
-            "live frame at seq {}..{} queued after seq {end}",
+            self.queued <= seq.start,
+            "live frame at seq {}..{} queued after seq {}",
             seq.start,
-            seq.end
+            seq.end,
+            self.queued
         );
+        self.queued = seq.end;
+        if seq.is_empty() {
+            return;
+        }
         if self.complete.is_empty() {
             self.released = seq.end;
-        } else if !seq.is_empty() {
+        } else {
             self.queue.push_back((frame.clone(), seq));
         }
     }
@@ -566,7 +579,7 @@ pub(super) mod tests {
         pub(super) fn make(&self, n: u64) -> Result<Frame, types::frame::Error> {
             let series = [(0, 8)];
             let mut draft = Draft::new(&self.pool, &self.set, Form::Raw, &series)?;
-            let bytes = draft.series(0).expect("the index is present");
+            let bytes = draft.series_mut(0).expect("the index is present");
             bytes.copy_from_slice(&n.to_le_bytes());
             Ok(draft.freeze(Path::Live))
         }
@@ -1173,12 +1186,19 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "session 0 is not open")]
-        fn grant_panics_on_a_closed_session() {
+        #[should_panic(expected = "session 1 was never open")]
+        fn grant_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
-            let key = readers.open(Reader::Unnamed, Start::At(live(0))).key;
-            readers.close(key, at(0));
-            readers.grant(key, 10);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)));
+            readers.grant(Key(1), 10);
+        }
+
+        #[test]
+        #[should_panic(expected = "session 2 was never open")]
+        fn grant_panics_on_a_key_past_the_next() {
+            let mut readers = Readers::new(0);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)));
+            readers.grant(Key(2), 10);
         }
     }
 
@@ -1261,6 +1281,18 @@ pub(super) mod tests {
             readers.queue(&frames.frame(3), 2..3);
             assert_eq!(released(&mut readers, 3), [key]);
             assert_eq!(taken(&mut readers, key), [1, 3]);
+        }
+
+        #[test]
+        fn marks_no_session_behind_for_a_frame_with_no_samples_and_none_open() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            readers.queue(&frames.frame(1), 1..1);
+            let key = opened(&mut readers, 0, 10);
+            readers.queue(&frames.frame(2), 1..2);
+            readers.queue(&frames.frame(3), 2..4);
+            assert_eq!(released(&mut readers, 4), [key]);
+            assert_eq!(taken(&mut readers, key), [2, 3]);
         }
 
         #[test]
@@ -1361,6 +1393,43 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), []);
             assert_eq!(taken(&mut readers, new), []);
+        }
+
+        #[test]
+        fn drops_a_grant_to_a_closed_session() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let closed = opened(&mut readers, 0, 0);
+            let open = opened(&mut readers, 0, 1);
+            readers.close(closed, at(0));
+            readers.grant(closed, 10 * CHARGE);
+            readers.queue(&frames.frame(1), 0..1);
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [open]);
+            assert_eq!(taken(&mut readers, open), [1]);
+        }
+
+        #[test]
+        fn drops_a_grant_to_a_session_a_takeover_closed() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0))).key;
+            let new = readers.open(named("a", 10), resume(live(0))).key;
+            readers.grant(old, 10 * CHARGE);
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(taken(&mut readers, new), []);
+        }
+
+        #[test]
+        fn drops_a_grant_to_a_session_a_latest_takeover_closed() {
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0))).key;
+            let name = "a".parse().expect("a valid name");
+            let latest = readers.open_latest(Some(name), at(1));
+            assert_eq!(latest.replaced, Some(old));
+            readers.grant(old, 10 * CHARGE);
+            assert_eq!(taken(&mut readers, latest.key), []);
         }
 
         #[test]
@@ -1493,6 +1562,24 @@ pub(super) mod tests {
         fn queue_panics_on_a_seq_below_the_live_seq() {
             let frames = Frames::new(1);
             Readers::new(10).queue(&frames.frame(1), 5..6);
+        }
+
+        #[test]
+        #[should_panic(expected = "live frame at seq 3..3 queued after seq 4")]
+        fn queue_panics_on_a_frame_with_no_samples_below_the_last_frame() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            readers.queue(&frames.frame(1), 0..4);
+            readers.queue(&frames.frame(2), 3..3);
+        }
+
+        #[test]
+        #[should_panic(expected = "live frame at seq 2..3 queued after seq 5")]
+        fn queue_panics_on_a_seq_below_a_frame_with_no_samples() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            readers.queue(&frames.frame(1), 5..5);
+            readers.queue(&frames.frame(2), 2..3);
         }
 
         #[test]
@@ -1852,13 +1939,25 @@ pub(super) mod tests {
             taken: usize,
         }
 
-        /// The live path stated a second way: open sessions by key, and the frames on
-        /// their way to disk by number.
+        /// The live path stated a second way: open sessions by key, and each queued
+        /// frame.
         #[derive(Default)]
         struct Flows {
             open: BTreeMap<Key, Got>,
-            queued: VecDeque<(u64, Range<u64>)>,
-            released: u64,
+            queued: Vec<Queued>,
+        }
+
+        /// A queued frame of the model: its number, its seq, and whether memory holds
+        /// it.
+        struct Queued {
+            n: u64,
+            seq: Range<u64>,
+            held: bool,
+        }
+
+        /// Whether `seq` holds a sample at or past `position`.
+        fn holds(seq: &Range<u64>, position: u64) -> bool {
+            position.max(seq.start) < seq.end
         }
 
         impl Flows {
@@ -1872,21 +1971,31 @@ pub(super) mod tests {
             }
 
             fn queue(&mut self, n: u64, seq: Range<u64>) {
-                if self.open.is_empty() {
-                    self.released = seq.end;
-                } else if !seq.is_empty() {
-                    self.queued.push_back((n, seq));
-                }
+                let held = !self.open.is_empty();
+                self.queued.push(Queued { n, seq, held });
             }
 
             fn close(&mut self, key: Key) {
                 self.open.remove(&key);
-                if self.open.is_empty()
-                    && let Some((_, seq)) = self.queued.back()
-                {
-                    self.released = seq.end;
-                    self.queued.clear();
+                if self.open.is_empty() {
+                    for queued in &mut self.queued {
+                        queued.held = false;
+                    }
                 }
+            }
+
+            /// Whether memory no longer holds a frame with a sample at or past `start`.
+            fn behind(&self, start: u64) -> bool {
+                let mut queued = self.queued.iter();
+                queued.any(|queued| !queued.held && holds(&queued.seq, start))
+            }
+
+            /// The end of the newest frame with samples that memory no longer holds, or
+            /// 0. Sessions open near it, where `behind` changes.
+            fn gone(&self) -> u64 {
+                let gone = self.queued.iter().filter(|queued| !queued.held);
+                let ends = gone.filter(|queued| !queued.seq.is_empty());
+                ends.map(|queued| queued.seq.end).max().unwrap_or(0)
             }
 
             /// Returns the sessions woken, sorted.
@@ -1897,11 +2006,11 @@ pub(super) mod tests {
                     .filter(|(_, got)| got.taken == got.frames.len())
                     .map(|(&key, _)| key)
                     .collect();
-                while let Some((n, seq)) =
-                    self.queued.pop_front_if(|(_, seq)| seq.end <= durable)
-                {
+                let held = self.queued.iter_mut().filter(|queued| queued.held);
+                for queued in held.filter(|queued| queued.seq.end <= durable) {
+                    queued.held = false;
                     for got in self.open.values_mut() {
-                        if got.behind || seq.end <= got.position {
+                        if got.behind || !holds(&queued.seq, got.position) {
                             continue;
                         }
                         if got.spent >= got.limit {
@@ -1909,9 +2018,8 @@ pub(super) mod tests {
                             continue;
                         }
                         got.spent += CHARGE;
-                        got.frames.push(n);
+                        got.frames.push(queued.n);
                     }
-                    self.released = seq.end;
                 }
                 self.open
                     .iter()
@@ -1943,10 +2051,10 @@ pub(super) mod tests {
         }
 
         /// Checks the live path against a model of the rules: a session gets each
-        /// released frame that ends past its position, in seq order, while it has
-        /// credit, and none after the first it has no credit for. A session that starts
-        /// below a frame no longer in memory gets none, and nothing is kept with no
-        /// session open. A release wakes each session that had no frame waiting and now
+        /// released frame with a sample at or past its position, in seq order, while it
+        /// has credit, and none after the first it has no credit for. A session that
+        /// starts at or below a sample no longer in memory gets none, and nothing is
+        /// kept with no session open. A release wakes each session that had no frame waiting and now
         /// has one.
         fn check_live(steps: Vec<Live>) {
             let frames = Frames::new(steps.len());
@@ -1957,11 +2065,11 @@ pub(super) mod tests {
             for step in steps {
                 match step {
                     Live::Open(back) => {
-                        let start = (model.released + 4).saturating_sub(back);
+                        let start = (model.gone() + 4).saturating_sub(back);
                         let key = readers.open(Reader::Unnamed, Start::At(live(start)));
                         let got = Got {
                             position: start,
-                            behind: start < model.released,
+                            behind: model.behind(start),
                             ..Got::default()
                         };
                         model.open.insert(key.key, got);

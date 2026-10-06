@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::task::Waker;
 
 use types::time::{Monotonic, Span, Stamp};
 
@@ -51,12 +52,18 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// When `core` is not below [`Config::cores`].
+    /// When `core` is not below [`Config::cores`], or the node is
+    /// [`Config::unpinnable`]: no start on it has a core.
     pub fn fail_shard(&self, core: usize, fault: shard::Fault) {
         let cores = lock(&self.0.shared).cores(self.0.node);
         assert!(
             core < cores.get(),
             "a shard fault aims at core {core} of {cores}"
+        );
+        let pinnable = lock(&self.0.shared).pinnable(self.0.node);
+        assert!(
+            pinnable,
+            "a shard fault aims at core {core} of a node that cannot pin"
         );
         lock(&self.0.shared).shards(self.0.node).fail(core, fault);
     }
@@ -93,6 +100,41 @@ impl Node {
     #[must_use]
     pub fn net(&self) -> env::net::Net {
         env::net::Net::new(self.0.clone())
+    }
+
+    /// The node's serial ports: one at each end of a line that
+    /// [`Sim::line`](crate::Sim::line) joins to the node.
+    ///
+    /// - An open ends at once.
+    /// - Each port holds at most 4 KiB of bytes written that have not arrived: a
+    ///   write queues up to that and then waits for room. Each port also holds at
+    ///   most 4 KiB of bytes not read, and loses the bytes past that.
+    /// - A byte that arrives at an end that is not open is lost, and so are the
+    ///   bytes in flight from a port that drops.
+    /// - A port panics when it polls outside the node's threads.
+    #[must_use]
+    pub fn serial(&self) -> env::serial::Serial {
+        env::serial::Serial::new(self.0.clone())
+    }
+
+    /// Makes the port at `path` of the node fail, as when its USB adapter is pulled
+    /// out: the open port, or else the next one to open. Each read and write of it
+    /// then gives `Error::Io` with code 5 (`EIO`), also one that waits. The bytes it
+    /// has not read, the bytes it sent that have not arrived, and the bytes that
+    /// arrive at it are lost. The next port to open after it drops works. A fault
+    /// on a port that already failed does nothing.
+    ///
+    /// # Panics
+    ///
+    /// When no line joins `path` of the node.
+    pub fn fail_serial(&self, path: &Path) {
+        let node = self.0.node;
+        let wakers = lock(&self.0.shared).serial().fail(node, path);
+        let Some(wakers) = wakers else {
+            let path = path.display();
+            panic!("no line joins port {path} of node {node}");
+        };
+        wakers.into_iter().flatten().for_each(Waker::wake);
     }
 
     /// The node's disk: [`Config::disk_bytes`] bytes, with an empty data directory.
@@ -198,6 +240,9 @@ impl fmt::Debug for Node {
 pub struct Config {
     /// The core count that [`env::shards::Shards::cores`] reports.
     pub cores: NonZeroUsize,
+    /// The node cannot pin a shard to a core: [`env::shards::Shards::pinnable`] is
+    /// `false`.
+    pub unpinnable: bool,
     /// The monotonic reading when the node is added.
     pub monotonic: Monotonic,
     /// The wall time when the node is added.
@@ -211,11 +256,12 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
-    /// of 10 ms and a disk of 64 GiB.
+    /// Four cores that can pin, one hour after boot, at 2026-01-01T00:00:00Z, with a
+    /// wall error of 10 ms and a disk of 64 GiB.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
+            unpinnable: false,
             monotonic: Monotonic::default() + Span::HOUR,
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
             wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),

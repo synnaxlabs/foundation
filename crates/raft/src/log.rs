@@ -47,12 +47,11 @@ impl Log {
         applied: u64,
     ) -> Result<Self, Error> {
         base.check()?;
-        let before = check(&entries, Position::default())?;
-        if applied > before.index {
-            return Err(Error::AppliedPastLog {
-                applied,
-                last: before.index,
-            });
+        let run = check(Position::default(), entries)?;
+        let last = run.last().map_or(0, |at| at.index);
+        let Run { entries, .. } = run;
+        if applied > last {
+            return Err(Error::AppliedPastLog { applied, last });
         }
         Ok(Self {
             voters: last_voters(&entries),
@@ -60,7 +59,7 @@ impl Log {
             entries,
             committed: applied,
             applied,
-            stable: before.index,
+            stable: last,
         })
     }
 
@@ -68,6 +67,15 @@ impl Log {
         self.entries
             .last()
             .map_or_else(Position::default, |entry| entry.at)
+    }
+
+    // `index` as an index that the log holds.
+    pub(crate) fn held(&self, index: u64) -> Result<Held, Error> {
+        let last = self.last().index;
+        if index > last {
+            return Err(Error::IndexPastLog { index, last });
+        }
+        Ok(Held(index))
     }
 
     pub(crate) fn committed(&self) -> u64 {
@@ -107,10 +115,10 @@ impl Log {
     pub(crate) fn nodes(&self) -> BTreeSet<node::Key> {
         let (at, voters) = self.voters();
         let before = (!self.settled())
-            .then(|| self.voters_before(at.index).peers())
+            .then(|| self.voters_before(at.index).nodes())
             .into_iter()
             .flatten();
-        voters.peers().chain(before).collect()
+        voters.nodes().chain(before).collect()
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
@@ -156,17 +164,13 @@ impl Log {
         at
     }
 
-    // Appends the leader's entries after `prev` as a follower. The caller checked
-    // that they follow `prev`. Entries already in the log stay; the first entry that
-    // differs replaces it and all after it. Returns the index of the last entry the
-    // leader sent, or the commit index when `prev` is below it, or an error with the
-    // follower's hint for the next `prev`: its last index, or the index before a
-    // `prev` it does not have.
-    pub(crate) fn append(
-        &mut self,
-        prev: Position,
-        entries: Vec<Entry>,
-    ) -> Result<u64, u64> {
+    // Appends the leader's entries as a follower. Entries already in the log stay;
+    // the first entry that differs replaces it and all after it. Returns the index of
+    // the last entry the leader sent, or the commit index when the run's `prev` is
+    // below it, or an error with the follower's hint for the next `prev`: its last
+    // index, or the index before a `prev` it does not have.
+    pub(crate) fn append(&mut self, run: Run) -> Result<u64, u64> {
+        let Run { prev, entries } = run;
         if prev.index < self.committed {
             return Ok(self.committed);
         }
@@ -236,14 +240,37 @@ fn last_voters(entries: &[Entry]) -> u64 {
         .map_or(0, |entry| entry.at.index)
 }
 
-// Checks that `entries` follow `before`: indexes in sequence, terms non-decreasing
-// and not zero, and each configuration with a voter. Returns the last position, or
-// `before` with no entries.
-pub(crate) fn check(
-    entries: &[Entry],
-    mut before: Position,
-) -> Result<Position, Error> {
-    for entry in entries {
+// Entries that follow `prev`: indexes in sequence, terms non-decreasing and not
+// zero, and each configuration with a voter. Only `check` makes one.
+#[derive(Debug)]
+pub(crate) struct Run {
+    prev: Position,
+    entries: Vec<Entry>,
+}
+
+impl Run {
+    // The position of the last entry. `None`, not `prev`, with no entries: the run
+    // writes no entry at `prev`.
+    pub(crate) fn last(&self) -> Option<Position> {
+        self.entries.last().map(|entry| entry.at)
+    }
+}
+
+// An index at most the last index of the log that made it. Only `Log::held` makes
+// one, and a caller uses it before the log changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Held(u64);
+
+impl Held {
+    pub(crate) fn index(self) -> u64 {
+        self.0
+    }
+}
+
+// Checks that `entries` follow `prev`.
+pub(crate) fn check(prev: Position, entries: Vec<Entry>) -> Result<Run, Error> {
+    let mut before = prev;
+    for entry in &entries {
         let term = entry.at.term;
         if Some(entry.at.index) != before.index.checked_add(1)
             || term < before.term
@@ -259,7 +286,7 @@ pub(crate) fn check(
         }
         before = entry.at;
     }
-    Ok(before)
+    Ok(Run { prev, entries })
 }
 
 #[cfg(test)]
@@ -291,6 +318,10 @@ mod tests {
 
     fn terms(log: &Log) -> Vec<u64> {
         log.entries.iter().map(|entry| entry.at.term.0).collect()
+    }
+
+    fn run(prev: Position, entries: Vec<Entry>) -> Run {
+        check(prev, entries).unwrap()
     }
 
     fn out_of_order(at: &Entry, before: Position) -> Error {
@@ -333,6 +364,12 @@ mod tests {
         let err =
             Log::new(Voters::default(), vec![entry(2, 1), entry(1, 2)], 0).unwrap_err();
         assert_eq!(err, out_of_order(&entry(1, 2), entry(2, 1).at));
+    }
+
+    #[test]
+    fn rejects_entries_that_do_not_follow_prev() {
+        let err = check(position(1, 3), vec![entry(2, 2)]).unwrap_err();
+        assert_eq!(err, out_of_order(&entry(2, 2), position(1, 3)));
     }
 
     #[test]
@@ -433,13 +470,16 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(log.append(position(1, 3), vec![entry(2, 4)]), Ok(4));
+        assert_eq!(log.append(run(position(1, 3), vec![entry(2, 4)])), Ok(4));
         assert_eq!(log.voters(), (position(1, 3), &voters(2)));
-        assert_eq!(log.append(position(1, 2), vec![entry(3, 3)]), Ok(3));
+        assert_eq!(log.append(run(position(1, 2), vec![entry(3, 3)])), Ok(3));
         assert_eq!(log.voters(), (position(1, 2), &voters(1)));
-        assert_eq!(log.append(position(3, 3), vec![config(3, 4, 4)]), Ok(4));
+        assert_eq!(
+            log.append(run(position(3, 3), vec![config(3, 4, 4)])),
+            Ok(4)
+        );
         assert_eq!(log.voters(), (position(3, 4), &voters(4)));
-        assert_eq!(log.append(position(1, 1), vec![entry(4, 2)]), Ok(2));
+        assert_eq!(log.append(run(position(1, 1), vec![entry(4, 2)])), Ok(2));
         assert_eq!(log.voters(), (Position::default(), &Voters::default()));
     }
 
@@ -479,7 +519,7 @@ mod tests {
     fn appends_after_a_matching_prev() {
         let mut log = log(&[1, 2]);
         log.take_unstable();
-        let result = log.append(position(2, 2), vec![entry(3, 3)]);
+        let result = log.append(run(position(2, 2), vec![entry(3, 3)]));
         assert_eq!(result, Ok(3));
         assert_eq!(terms(&log), [1, 2, 3]);
         assert_eq!(log.take_unstable(), vec![entry(3, 3)]);
@@ -489,7 +529,7 @@ mod tests {
     fn replaces_the_first_entry_that_differs_and_all_after_it() {
         let mut log = log(&[1, 2, 2, 2]);
         log.take_unstable();
-        let result = log.append(position(1, 1), vec![entry(3, 2), entry(4, 3)]);
+        let result = log.append(run(position(1, 1), vec![entry(3, 2), entry(4, 3)]));
         assert_eq!(result, Ok(3));
         assert_eq!(terms(&log), [1, 3, 4]);
         assert_eq!(log.take_unstable(), vec![entry(3, 2), entry(4, 3)]);
@@ -499,7 +539,7 @@ mod tests {
     fn keeps_entries_it_already_has() {
         let mut log = log(&[1, 2]);
         log.take_unstable();
-        let result = log.append(Position::default(), vec![entry(1, 1)]);
+        let result = log.append(run(Position::default(), vec![entry(1, 1)]));
         assert_eq!(result, Ok(1));
         assert_eq!(terms(&log), [1, 2]);
         assert_eq!(log.take_unstable(), vec![]);
@@ -508,29 +548,29 @@ mod tests {
     #[test]
     fn a_probe_with_no_entries_matches_or_not() {
         let mut log = log(&[1, 2]);
-        assert_eq!(log.append(position(2, 2), vec![]), Ok(2));
-        assert_eq!(log.append(position(1, 2), vec![]), Err(1));
+        assert_eq!(log.append(run(position(2, 2), vec![])), Ok(2));
+        assert_eq!(log.append(run(position(1, 2), vec![])), Err(1));
     }
 
     #[test]
     fn hints_its_last_index_for_a_prev_it_does_not_have() {
         let mut log = log(&[1, 2]);
-        assert_eq!(log.append(position(3, 5), vec![entry(3, 6)]), Err(2));
+        assert_eq!(log.append(run(position(3, 5), vec![entry(3, 6)])), Err(2));
         assert_eq!(terms(&log), [1, 2]);
     }
 
     #[test]
     fn hints_the_index_before_a_prev_that_differs() {
         let mut log = log(&[1, 2, 2]);
-        assert_eq!(log.append(position(1, 3), vec![]), Err(2));
+        assert_eq!(log.append(run(position(1, 3), vec![])), Err(2));
     }
 
     #[test]
     fn answers_an_append_below_its_commit_index_with_that_index() {
         let mut log = log(&[1, 1, 2]);
         log.commit_to(2);
-        assert_eq!(log.append(position(1, 1), vec![entry(2, 2)]), Ok(2));
-        assert_eq!(log.append(Position::default(), vec![]), Ok(2));
+        assert_eq!(log.append(run(position(1, 1), vec![entry(2, 2)])), Ok(2));
+        assert_eq!(log.append(run(Position::default(), vec![])), Ok(2));
         assert_eq!(terms(&log), [1, 1, 2]);
     }
 

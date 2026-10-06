@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 0b9c293016d40bb5a90c50f136329878fa272af642a5adabd3758ae503e9a050
+cc a83461b33b1af2495462ab6c1f956061e39fd6c27242d4a6504f8d04b7e994f9 # #649
+cc 3321f13c4c195a5d2c40c3032976ce37c407f30edb4fabad0ac0e139fda55d70 # #649

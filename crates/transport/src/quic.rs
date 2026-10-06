@@ -2,10 +2,12 @@
 
 mod cid;
 pub(crate) mod connection;
-mod settings;
-pub(crate) mod stream;
+mod datagram;
 #[cfg(test)]
-mod testing;
+mod pair;
+mod settings;
+mod stateless;
+pub(crate) mod stream;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -15,10 +17,12 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use block::{Block, Pool};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
-use noq_proto::{ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple};
+use noq_proto::{
+    ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
+};
 use types::node::PublicKey;
 use types::time::Monotonic;
 
@@ -59,6 +63,8 @@ pub(crate) struct Endpoint {
     /// stateless reset. At most one for each datagram of a batch, because the caller
     /// takes them all with [`Endpoint::transmit`] after each [`Endpoint::receive`].
     responses: VecDeque<(noq_proto::Transmit, Vec<u8>)>,
+    /// The limit on stateless resets to each address.
+    resets: stateless::Limit,
     /// The buffer that each received batch is copied into and split from. noq-proto
     /// decrypts in place and keeps parts of it.
     received: BytesMut,
@@ -83,6 +89,9 @@ pub(crate) enum Event {
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
     /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
+    /// [`Endpoint::datagrams`] has a datagram of `key` to take. It comes when one
+    /// arrives and none waited, so take them all after it.
+    Datagram { key: connection::Key },
 }
 
 impl Endpoint {
@@ -92,15 +101,11 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive, or `config.window_bytes` is below
-    /// `config.message_bytes_max`. `Transport::new` refuses both first.
+    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
-        assert!(
-            config.window_bytes >= config.message_bytes_max.get(),
-            "a window of {} bytes is below the largest message, {} bytes",
-            config.window_bytes,
-            config.message_bytes_max
-        );
+        if let Err(error) = config.check() {
+            panic!("{error}");
+        }
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
             epoch: config.clock.epoch(),
@@ -115,6 +120,7 @@ impl Endpoint {
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
+            resets: stateless::Limit::new(&config.entropy),
             received: BytesMut::new(),
         }
     }
@@ -172,7 +178,7 @@ impl Endpoint {
 
     /// The next datagrams to send, all to one destination, written into `buffer`.
     /// `None` when nothing is due. Call it until `None` after each other call but
-    /// [`Endpoint::deadline`] and [`Endpoint::poll`].
+    /// [`Endpoint::deadline`] and [`Endpoint::poll`], and after [`Datagrams::send`].
     pub(crate) fn transmit<'a>(
         &mut self,
         now: Monotonic,
@@ -253,7 +259,7 @@ impl Endpoint {
         class: Class,
     ) -> Option<(Sender, Receiver)> {
         let stream = self.start(now, key, Dir::Bi)?;
-        let receiver = Receiver::new(stream, self.message_bytes_max);
+        let receiver = Receiver::new(stream, class, self.message_bytes_max);
         Some((Sender::new(stream, class), receiver))
     }
 
@@ -296,14 +302,41 @@ impl Endpoint {
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        assert!(
-            message.len() <= self.message_bytes_max,
-            "a message of {} bytes is over the largest message, {} bytes",
-            message.len(),
-            self.message_bytes_max
-        );
+        self.check_size(&message);
         sender.load(message);
         self.flush(now, sender)
+    }
+
+    /// Puts `message` on the stream after the messages before it when the stream
+    /// can take it now. Else gives it back with nothing of it sent: when `sender`
+    /// still holds part of an earlier message after a flush, when the send budget
+    /// has no room for it or a stream of its class or a higher class waits for room,
+    /// or when the connection ended. The stream does not wait for room for a message
+    /// it gives back. Once taken, `sender` may hold the rest of it: call
+    /// [`Endpoint::flush`] after [`Event::Writable`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Stopped`] when the peer stopped the stream.
+    ///
+    /// # Panics
+    ///
+    /// After [`Endpoint::finish`], or when `message` is over the largest message
+    /// (this side's own until the hello).
+    pub(crate) fn try_write(
+        &mut self,
+        now: Monotonic,
+        sender: &mut Sender,
+        message: Block,
+    ) -> Result<Option<Block>, Error> {
+        self.check_size(&message);
+        sender.check_unfinished();
+        let key = sender.key().connection;
+        let mut message = Some(message);
+        self.streams(now, key, (), |streams, inner, _, events| {
+            streams.try_write(inner, sender, &mut message, events)
+        })?;
+        Ok(message)
     }
 
     /// Writes the rest of the message that `sender` holds. `Ready` when it holds
@@ -406,9 +439,43 @@ impl Endpoint {
         self.drive(key.handle, self.instant(now));
     }
 
+    /// Ends a read of `receiver` that waits for room in the receive budget, and gives
+    /// back room that the read got and has not taken, for a caller that gives up the
+    /// read and keeps the stream. The next read waits again, behind the reads that
+    /// wait then. Does nothing when no read waits for room, or when the connection
+    /// ended.
+    pub(crate) fn end_wait(&mut self, receiver: &mut Receiver) {
+        let key = receiver.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        connection.streams.end_wait(receiver, &mut self.events);
+    }
+
+    /// The datagrams of `key`'s connection. `None` until it connects, and after it
+    /// ends.
+    pub(crate) fn datagrams(&mut self, key: connection::Key) -> Option<Datagrams<'_>> {
+        let connection = find(&mut self.connections, key).filter(|c| c.connected())?;
+        let ready = &mut self.ready;
+        Some(Datagrams { connection, ready })
+    }
+
     /// The next event, in the order they happened.
     pub(crate) fn poll(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    /// # Panics
+    ///
+    /// When `message` is over the largest message.
+    fn check_size(&self, message: &Block) {
+        assert!(
+            message.len() <= self.message_bytes_max,
+            "a message of {} bytes is over the largest message, {} bytes",
+            message.len(),
+            self.message_bytes_max
+        );
     }
 
     fn instant(&self, now: Monotonic) -> Instant {
@@ -497,6 +564,8 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
+        // noq-proto answers a short header only with a stateless reset.
+        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -521,7 +590,11 @@ impl Endpoint {
                     Err(error) => error.response,
                 }
             }
-            Some(DatagramEvent::Response(response)) => Some(response),
+            Some(DatagramEvent::Response(response)) => {
+                let admitted =
+                    !short || self.resets.admit(now, response.destination.ip());
+                admitted.then_some(response)
+            }
         };
         if let Some(response) = response {
             self.responses.push_back((response, reply));
@@ -529,16 +602,65 @@ impl Endpoint {
     }
 
     /// Drives `handle`'s connection at `now`. Frees it once it drained, and else
-    /// queues it for [`Endpoint::transmit`]: each call that can give it a datagram to
-    /// send ends here.
+    /// queues it for [`Endpoint::transmit`]. Each call that can give it a datagram to
+    /// send ends here, but [`Datagrams::send`], which queues it itself.
     fn drive(&mut self, handle: ConnectionHandle, now: Instant) {
         let entry = &mut self.connections[handle.0];
         let connection = entry.as_mut().expect("invariant: a live handle");
-        if connection.drive(now, &mut self.inner, &mut self.events) {
+        if connection.drive(now, &mut self.inner, &self.pool, &mut self.events) {
             *entry = None;
         } else {
             queue(&mut self.ready, connection);
         }
+    }
+}
+
+/// The datagrams of one connected connection: whole messages, each in one QUIC
+/// DATAGRAM frame, that may be lost.
+pub(crate) struct Datagrams<'a> {
+    connection: &'a mut Connection,
+    /// The endpoint's queue for [`Endpoint::transmit`].
+    ready: &'a mut VecDeque<connection::Key>,
+}
+
+impl Datagrams<'_> {
+    /// Queues `message` as one datagram. It never waits: when the queue is full, the
+    /// oldest unsent datagram drops.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] when `message` is over [`Datagrams::bytes_max`], or the
+    /// peer takes no datagrams.
+    pub(crate) fn send(&mut self, message: Block) -> Result<(), Error> {
+        let bytes = message.len();
+        let mut datagrams = self.connection.inner.datagrams();
+        match datagrams.send(Bytes::from_owner(Body(message)), true) {
+            Ok(()) => {}
+            Err(SendDatagramError::TooLarge | SendDatagramError::UnsupportedByPeer) => {
+                let bytes_max = datagrams.max_size().unwrap_or(0);
+                return Err(Error::TooLarge { bytes, bytes_max });
+            }
+            Err(
+                error @ (SendDatagramError::Disabled | SendDatagramError::Blocked(_)),
+            ) => {
+                panic!(
+                    "invariant: datagrams are on, and a send that drops never blocks: {error}"
+                )
+            }
+        }
+        queue(self.ready, self.connection);
+        Ok(())
+    }
+
+    /// The oldest datagram that arrived and was not taken.
+    pub(crate) fn receive(&mut self) -> Option<Block> {
+        self.connection.datagrams.pop()
+    }
+
+    /// The largest datagram [`Datagrams::send`] takes now. It changes with the path,
+    /// and is 0 when the peer takes no datagrams.
+    pub(crate) fn bytes_max(&mut self) -> usize {
+        self.connection.inner.datagrams().max_size().unwrap_or(0)
     }
 }
 
@@ -575,6 +697,15 @@ fn find(
 ) -> Option<&mut Connection> {
     let connection = connections.get_mut(key.handle.0)?.as_mut()?;
     (connection.key == key).then_some(connection)
+}
+
+/// A message that noq-proto holds until it needs the bytes no more.
+struct Body(Block);
+
+impl AsRef<[u8]> for Body {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 fn outgoing<'a>(transmit: &noq_proto::Transmit, buffer: &'a [u8]) -> Transmit<'a> {
@@ -616,7 +747,8 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::quic::testing::{self, Pair, Side};
+    use crate::quic::pair::{self, Pair, Side};
+    use crate::testing;
     use crate::tls;
 
     /// The link delay each way in [`dial`].
@@ -631,7 +763,7 @@ mod tests {
     }
 
     fn server() -> PublicKey {
-        tls::public(&testing::SERVER_KEY)
+        tls::public(&pair::SERVER_KEY)
     }
 
     fn events(side: &Side) -> Vec<&Event> {
@@ -651,7 +783,7 @@ mod tests {
             let meta = Meta {
                 destination,
                 ecn,
-                ..testing::meta(testing::CLIENT, transmit.contents)
+                ..pair::meta(pair::CLIENT, transmit.contents)
             };
             pair.server.endpoint.receive(now, &meta, transmit.contents);
         }
@@ -676,9 +808,9 @@ mod tests {
                     key: side.key.expect("a connection"),
                     peer: Peer::Node(tls::public(key)),
                 };
-                let client = connected(&pair.client, &testing::SERVER_KEY);
+                let client = connected(&pair.client, &pair::SERVER_KEY);
                 assert_eq!(events(&pair.client), [&client]);
-                let server = connected(&pair.server, &testing::CLIENT_KEY);
+                let server = connected(&pair.server, &pair::CLIENT_KEY);
                 assert_eq!(events(&pair.server), [&server]);
             });
         }
@@ -702,9 +834,9 @@ mod tests {
         )]
         fn to_port_zero_panics() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::CLIENT_SHARD, NonZeroUsize::MIN);
+                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
                 endpoint.connect(Monotonic(0), server(), remote);
             });
@@ -825,15 +957,15 @@ mod tests {
         #[test]
         fn stays_at_the_earliest_timer_when_a_later_dial_starts() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::CLIENT_SHARD, NonZeroUsize::MIN);
+                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
                 let mut buffer = Vec::new();
-                endpoint.connect(Monotonic(0), server(), testing::SERVER);
+                endpoint.connect(Monotonic(0), server(), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
                 let earliest = endpoint.deadline().expect("a deadline");
-                let later = testing::at(Duration::from_millis(500));
-                endpoint.connect(later, server(), testing::SERVER);
+                let later = pair::at(Duration::from_millis(500));
+                endpoint.connect(later, server(), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
             });
@@ -851,11 +983,11 @@ mod tests {
         #[test]
         fn writes_a_response_into_the_callers_buffer() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let initial = testing::draft_29();
-                let meta = testing::meta(testing::CLIENT, &initial);
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let initial = pair::draft_29();
+                let meta = pair::meta(pair::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
                 let mut buffer = Vec::with_capacity(1 << 16);
                 let start = buffer.as_ptr();
@@ -899,8 +1031,7 @@ mod tests {
                 let second = pair.client.key.expect("a key");
                 pair.run(Duration::from_millis(100));
                 for key in [first, second] {
-                    let connection =
-                        testing::connection(&mut pair.client.endpoint, key);
+                    let connection = pair::connection(&mut pair.client.endpoint, key);
                     let stream = connection.streams().open(Dir::Uni).expect("a stream");
                     let mut send = connection.send_stream(stream);
                     send.write(&[0; 10_000]).expect("written");
@@ -960,21 +1091,21 @@ mod tests {
         #[test]
         fn answers_a_refused_first_initial_with_a_close() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut server =
-                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
-                let (_, mut client) = Settings::new(&config, testing::CLIENT_SHARD);
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
+                let (_, mut client) = Settings::new(&config, pair::CLIENT_SHARD);
                 let now = server.instant(Monotonic(0));
                 let dial =
-                    client.connect(now, other_protocol(), testing::SERVER, SERVER_NAME);
+                    client.connect(now, other_protocol(), pair::SERVER, SERVER_NAME);
                 let (_, mut connection) = dial.expect("a dial");
                 let mut buffer = Vec::new();
                 let initial =
                     connection.poll_transmit(now, NonZeroUsize::MIN, &mut buffer);
                 let len = initial.expect("an Initial").size;
                 let meta = Meta {
-                    source: testing::CLIENT,
+                    source: pair::CLIENT,
                     destination: None,
                     ecn: None,
                     len,
@@ -983,9 +1114,9 @@ mod tests {
                 server.receive(Monotonic(0), &meta, &buffer);
                 let close =
                     server.transmit(Monotonic(0), &mut buffer).expect("a close");
-                assert_eq!(close.destination, testing::CLIENT);
+                assert_eq!(close.destination, pair::CLIENT);
                 let datagram = BytesMut::from(close.contents);
-                let path = FourTuple::new(testing::SERVER, None);
+                let path = FourTuple::new(pair::SERVER, None);
                 let event = client.handle(now, path, None, datagram, &mut Vec::new());
                 let Some(DatagramEvent::ConnectionEvent(_, event)) = event else {
                     panic!("no event for the dial");
@@ -1021,14 +1152,14 @@ mod tests {
         #[should_panic(expected = "invariant: a batch of 10 bytes has a stride")]
         fn with_no_stride_panics() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let initial = testing::draft_29();
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let initial = pair::draft_29();
                 let meta = Meta {
                     len: 10,
                     stride: 0,
-                    ..testing::meta(testing::CLIENT, &initial)
+                    ..pair::meta(pair::CLIENT, &initial)
                 };
                 endpoint.receive(Monotonic(0), &meta, &initial);
             });
@@ -1038,10 +1169,10 @@ mod tests {
         fn splits_a_batch_into_its_datagrams() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(10).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, testing::CLIENT_SHARD, batch);
+                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(20_000).collect();

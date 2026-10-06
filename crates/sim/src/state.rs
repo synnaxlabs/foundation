@@ -17,6 +17,7 @@ use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Files, Held};
 use crate::net::Network;
+use crate::serial::Serial;
 use crate::{Crash, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
@@ -50,8 +51,9 @@ pub(crate) struct State {
     next: u64,
     net: Network,
     files: Files,
-    /// A hash of every pick, in order, with the network and file digests at the pick,
-    /// so that it holds where their events fall between the picks.
+    serial: Serial,
+    /// A hash of every pick, in order, with the network, file, and serial digests at
+    /// the pick, so that it holds where their events fall between the picks.
     digest: DefaultHasher,
 }
 
@@ -65,10 +67,14 @@ struct Node {
     /// pause never ends.
     resumes: Option<Monotonic>,
     cores: NonZeroUsize,
+    unpinnable: bool,
     entropy: Rng,
     shards: shard::Starts,
     /// The monotonic reading at boot.
     boot: Monotonic,
+    /// Set from the stop of a crash to the cut, while the sim drops what the crash
+    /// ended.
+    crashing: bool,
 }
 
 impl Node {
@@ -122,7 +128,12 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant, net: Network, files: Files) -> Self {
+    pub(crate) fn new(
+        epoch: Instant,
+        net: Network,
+        files: Files,
+        serial: Serial,
+    ) -> Self {
         Self {
             now: Monotonic::default(),
             nodes: Vec::new(),
@@ -136,6 +147,7 @@ impl State {
             next: 0,
             net,
             files,
+            serial,
             digest: DefaultHasher::new(),
         }
     }
@@ -160,9 +172,11 @@ impl State {
             wall_error: config.wall_error,
             resumes: Some(self.now),
             cores: config.cores,
+            unpinnable: config.unpinnable,
             entropy,
             shards: shard::Starts::default(),
             boot: config.monotonic,
+            crashing: false,
         };
         self.nodes.push(node);
         self.files.add(config.disk_bytes);
@@ -206,6 +220,10 @@ impl State {
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
         self.nodes[node].cores
+    }
+
+    pub(crate) fn pinnable(&self, node: usize) -> bool {
+        !self.nodes[node].unpinnable
     }
 
     pub(crate) fn shards(&mut self, node: usize) -> &mut shard::Starts {
@@ -289,18 +307,35 @@ impl State {
         &mut self.files
     }
 
-    /// A hash of the picks, the network, and the files.
+    pub(crate) fn serial(&mut self) -> &mut Serial {
+        &mut self.serial
+    }
+
+    /// A hash of the picks, the network, the files, and the serial lines.
     pub(crate) fn digest(&self) -> u64 {
         let mut digest = self.digest.clone();
-        (self.net.digest(), self.files.digest()).hash(&mut digest);
+        self.parts().hash(&mut digest);
         digest.finish()
     }
 
-    /// Adds a thread whose first task is ready, and returns the thread's key.
-    pub(crate) fn start(&mut self, node: usize, name: String, start: Start) -> u64 {
+    /// The digests of the network, the files, and the serial lines.
+    fn parts(&self) -> [u64; 3] {
+        [self.net.digest(), self.files.digest(), self.serial.digest()]
+    }
+
+    /// Adds a thread whose first task is ready, and returns the thread's key. On a
+    /// crashing node the thread is born ended in the crash, and `start` comes back
+    /// for the caller to drop after it releases the lock.
+    pub(crate) fn start(
+        &mut self,
+        node: usize,
+        name: String,
+        start: Start,
+    ) -> (u64, Option<Start>) {
         let thread = self.key();
         let main = self.key();
-        let outcome = None;
+        let crashing = self.nodes[node].crashing;
+        let outcome = crashing.then_some(Outcome::Crashed);
         self.threads.insert(
             thread,
             Thread {
@@ -310,10 +345,13 @@ impl State {
                 outcome,
             },
         );
+        if crashing {
+            return (thread, Some(start));
+        }
         self.tasks.insert(main, thread);
         self.ready.insert(main);
         self.starts.insert(main, start);
-        thread
+        (thread, None)
     }
 
     pub(crate) fn name(&self, thread: u64) -> String {
@@ -349,6 +387,7 @@ impl State {
         let at = timer
             .into_iter()
             .chain(self.net.first())
+            .chain(self.serial.first())
             .chain(self.files.first())
             .chain(pauses)
             .filter(|&at| at <= last)
@@ -377,7 +416,7 @@ impl State {
         let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
         let task = runnable[nth];
-        (task, self.net.digest(), self.files.digest()).hash(&mut self.digest);
+        (task, self.parts()).hash(&mut self.digest);
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);
@@ -418,11 +457,11 @@ impl State {
         tasks
     }
 
-    /// Moves true time to `at`, delivers the datagrams that arrive by then, and ends
-    /// the file calls due by then. Returns the wakers of the timers due, of the
-    /// sockets that receive, and of the file calls that end, and the blocks of the
-    /// file calls whose futures dropped, for the caller to drop after it releases
-    /// the lock.
+    /// Moves true time to `at`, delivers the datagrams and bytes that arrive by then,
+    /// and ends the file calls due by then. Returns the wakers of the timers due, of
+    /// the sockets and ports that the arrivals wake, and of the file calls that end,
+    /// and the blocks of the file calls whose futures dropped, for the caller to drop
+    /// after it releases the lock.
     pub(crate) fn advance(&mut self, at: Monotonic) -> (Vec<Waker>, Vec<Held>) {
         self.now = at;
         let mut wakers = Vec::new();
@@ -433,15 +472,18 @@ impl State {
             wakers.push(timer.remove());
         }
         wakers.extend(self.net.deliver(at));
+        wakers.extend(self.serial.deliver(at));
         let (ended, orphans) = self.files.end(at);
         wakers.extend(ended);
         (wakers, orphans)
     }
 
-    /// Ends each live thread of `node` in a crash. Returns the tasks whose futures
-    /// the caller drops, and the starts of the threads that had not run, for the
-    /// caller to drop after it releases the lock.
+    /// Ends each live thread of `node` in a crash, and makes the node crashing until
+    /// [`State::crash`]. Returns the tasks whose futures the caller drops, and the
+    /// starts of the threads that had not run, for the caller to drop after it
+    /// releases the lock.
     pub(crate) fn stop(&mut self, node: usize) -> (Vec<u64>, Vec<Start>) {
+        self.nodes[node].crashing = true;
         let live: Vec<(u64, u64)> = (self.threads.iter())
             .filter(|(_, thread)| thread.node == node && thread.outcome.is_none())
             .map(|(&key, thread)| (key, thread.main))
@@ -454,11 +496,12 @@ impl State {
         (tasks, starts)
     }
 
-    /// Ends the file calls in flight of `node`, whose threads a crash ended. After a
-    /// `Power` crash, its monotonic clock reads its boot value again, and its disk
-    /// keeps what is durable. Returns the blocks of the calls, for the caller to drop
-    /// after it releases the lock.
+    /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
+    /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
+    /// value again, and its disk keeps what is durable. Returns the blocks of the
+    /// calls, for the caller to drop after it releases the lock.
     pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+        self.nodes[node].crashing = false;
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;

@@ -292,12 +292,7 @@ impl Closed {
             header.copy_from_slice(&write.header);
             (write.place, wrap.freeze().skip(start))
         });
-        let sealed = Sealed {
-            group,
-            place: plan.place,
-            next: plan.next,
-            wrap,
-        };
+        let sealed = Sealed { group, plan, wrap };
         (sealed, next)
     }
 }
@@ -307,8 +302,7 @@ impl Closed {
 #[derive(Debug)]
 pub(crate) struct Sealed {
     group: Group,
-    place: u64,
-    next: u64,
+    plan: Plan,
     wrap: Option<(u64, Block)>,
 }
 
@@ -321,13 +315,18 @@ impl Sealed {
             .as_ref()
             .map(|(place, block)| (*place, slice::from_ref(block)));
         wrap.into_iter()
-            .chain(iter::once((self.place, &*self.group.writes)))
+            .chain(iter::once((self.plan.place, &*self.group.writes)))
+    }
+
+    /// The offset of the record.
+    pub(crate) fn offset(&self) -> u64 {
+        self.plan.offset
     }
 
     /// The offset after the record.
     #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn next(&self) -> u64 {
-        self.next
+        self.plan.next
     }
 
     /// The headers, for the durable tails once the record is synced.
@@ -436,11 +435,11 @@ mod tests {
         usize::try_from(value).expect("an offset in the test area fits in usize")
     }
 
-    /// The smallest body a header can open holds one entry of no bytes.
+    /// The smallest body a header can open holds one entry of 4032 bytes.
     #[test]
-    fn a_ring_that_a_header_opens_holds_one_entry() {
+    fn a_ring_that_a_header_opens_holds_one_entry_of_4032_bytes() {
         use crate::header;
-        let small = Layout::new(AREA, table_len(1)).expect("the sizes make a ring");
+        let small = Layout::new(AREA, 4087).expect("the sizes make a ring");
         let block = header::Header::new(small, CHAIN).encode();
         let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
         let bytes = vec![0; index(AREA)];
@@ -451,8 +450,10 @@ mod tests {
         let (writer, _) = cursor
             .writer(opened.tail.offset(), 1)
             .expect("the ring is empty");
-        let entry = entry(header(1, Path::Live, 0), Parts::default());
-        let pushed = Group::default().push(&pool(1 << 20), &writer, &mut vec![entry]);
+        let memory = pool(1 << 20);
+        let parts = parts(&memory, &[&[7; 4032]]);
+        let entry = entry(header(1, Path::Live, 0), parts);
+        let pushed = Group::default().push(&memory, &writer, &mut vec![entry]);
         assert_eq!(pushed, Ok(0..1));
     }
 
@@ -754,6 +755,8 @@ mod tests {
             [(31 * 4096, 1), (0, 2)],
             "the wrap, then the record"
         );
+        assert_eq!(sealed.offset(), 32 * 4096, "the offset is past the wrap");
+        assert_eq!(sealed.next(), 34 * 4096);
         let bodies = area.walk_from(tail);
         assert_eq!(bodies.len(), 10);
         assert_eq!(bodies[9].len(), table_len(1) + 4096);
@@ -1041,6 +1044,25 @@ mod tests {
             let mut group = Group::default();
             prop_assert_eq!(group.push(&area.pool, &area.writer, &mut batch), expected.clone());
             prop_assert_eq!(group.is_empty(), expected.is_err());
+        }
+
+        /// One entry alone takes `entry_max` bytes of parts, and is large with one
+        /// byte more.
+        #[test]
+        fn one_entry_alone_takes_the_entry_max(
+            body_max in prop_oneof![Just(4087), 4087..=60_000usize],
+        ) {
+            let area = Area::with_body_max(body_max);
+            let max = area.layout.entry_max();
+            let push = |len: usize| {
+                let bytes = vec![7; len];
+                let parts = parts(&area.pool, &[&bytes]);
+                let mut batch = vec![entry(header(1, Path::Live, 0), parts)];
+                Group::default().push(&area.pool, &area.writer, &mut batch)
+            };
+            prop_assert_eq!(push(max), Ok(0..1));
+            let limit = Limit::Body { len: body_max + 1, max: body_max };
+            prop_assert_eq!(push(max + 1), Err(Rejected::Large(limit)));
         }
     }
 

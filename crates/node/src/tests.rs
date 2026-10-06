@@ -142,10 +142,14 @@ fn a_shard_that_cannot_pin_stops_the_node() {
         e,
         Error::Start(thread::Error::Pin {
             name: "shard-0".into(),
-            core: 0
+            core: 0,
+            reason: "injected".into()
         })
     );
-    assert_eq!(e.to_string(), "cannot pin thread shard-0 to core 0");
+    assert_eq!(
+        e.to_string(),
+        "cannot pin thread shard-0 to core 0: injected"
+    );
 }
 
 /// Runs the sim until it ends, and returns the thread of each panic in order.

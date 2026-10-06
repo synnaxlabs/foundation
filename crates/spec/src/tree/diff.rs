@@ -112,8 +112,8 @@ pub(super) fn children<'a>(
 ) -> Result<Vec<Node<'a>>, Error> {
     let mut children = Vec::new();
     for node in nodes {
-        for entry in &node.entries {
-            children.push(chunks.child(node, entry)?);
+        for index in 0..node.entries.len() {
+            children.push(chunks.child(node, index)?);
         }
     }
     Ok(children)

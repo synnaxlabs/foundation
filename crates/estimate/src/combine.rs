@@ -9,21 +9,20 @@ use crate::{Drift, Filter, Measurement};
 
 /// Combines the best measurement of each source into one estimate at `now`.
 ///
-/// It widens each bound to `now` by `drift`, then finds the offsets inside the most
-/// bounds (Marzullo's intersection). The estimate covers all of them, so a tie between
-/// groups that disagree gives a wide bound, not a guess. When all sources agree, the
-/// bound is not wider than the narrowest one. The estimate holds the true offset when
-/// the bounds that hold it are a majority of the sources that vote, and every other
-/// bound that votes misses them all. A falseticker that overlaps some of them can move
-/// it, as in NTP.
+/// It widens each bound to `now` by `drift`, then gives the hull of the offsets inside
+/// more than half of the bounds that vote. So a known estimate holds the true offset
+/// when more than half of the bounds that vote hold it, whatever the other bounds are.
+/// It can be wider than the narrowest bound, but not wider than the widest.
 ///
 /// A filter with no measurement votes and agrees with no offset, so a source with no
-/// measurement yet counts against a majority. It votes beside the known bounds, or
-/// beside the unknown bounds when no bound is known.
+/// measurement yet counts against a majority, but it does not change the hull. It votes
+/// beside the known bounds, or beside the unknown bounds when no bound is known.
 ///
 /// A bound of 36500 days at `now` is unknown. It votes only when no bound is known, so
 /// it never turns a split into an estimate. An estimate from unknown bounds alone is
-/// unknown too.
+/// unknown too. When drift grows unknown bounds so that the hull spans more than 73000
+/// days, which no estimate holds, it gives the hull of the offsets inside the most
+/// bounds.
 ///
 /// # Errors
 ///
@@ -77,13 +76,19 @@ pub fn combine<'a>(
     // A low edge sorts before a high edge at the same offset, so bounds that only
     // touch still share that offset.
     edges.sort_unstable();
-    let (agreeing, low, high) = most_covered(&edges);
+    let agreeing = most(&edges);
     if 2 * agreeing <= sources {
         return Err(Error::NoMajority {
             sources,
             agreeing,
             empty,
         });
+    }
+    let bounds = edges.len() / 2;
+    let (mut low, mut high) = hull(&edges, bounds / 2 + 1);
+    // Only unknown bounds that drift grew span this far.
+    if high - low > 2 * i128::from(MAX_ERROR.nanos()) {
+        (low, high) = hull(&edges, agreeing);
     }
     let estimate = Measurement::between(now, low, high);
     Ok(if unknown_only {
@@ -100,7 +105,7 @@ pub enum Error {
     NoSources,
     /// No offset is inside the bounds of more than half of the sources that vote.
     NoMajority {
-        /// The number of sources that vote.
+        /// The number of sources that vote, at least 1.
         sources: usize,
         /// The most sources whose bounds share an offset.
         agreeing: usize,
@@ -134,27 +139,47 @@ enum Edge {
     High,
 }
 
-/// The most bounds that share one offset, and the lowest and highest offsets inside
-/// that many bounds.
-fn most_covered(edges: &[(i128, Edge)]) -> (usize, i128, i128) {
-    let (mut covered, mut most, mut low, mut high) = (0, 0, 0, 0);
+/// The most bounds that share one offset.
+fn most(edges: &[(i128, Edge)]) -> usize {
+    let (mut covered, mut most) = (0, 0);
+    for &(_, edge) in edges {
+        match edge {
+            Edge::Low => {
+                covered += 1;
+                most = most.max(covered);
+            }
+            Edge::High => covered -= 1,
+        }
+    }
+    most
+}
+
+/// The lowest and highest offsets inside at least `needed` bounds.
+///
+/// # Panics
+///
+/// When no offset is inside `needed` bounds.
+fn hull(edges: &[(i128, Edge)], needed: usize) -> (i128, i128) {
+    let (mut covered, mut low, mut high) = (0, None, 0);
     for &(offset, edge) in edges {
         match edge {
             Edge::Low => {
                 covered += 1;
-                if covered > most {
-                    (most, low) = (covered, offset);
+                if covered == needed {
+                    low.get_or_insert(offset);
                 }
             }
             Edge::High => {
-                if covered == most {
+                if covered >= needed {
                     high = offset;
                 }
                 covered -= 1;
             }
         }
     }
-    (most, low, high)
+    let low =
+        low.unwrap_or_else(|| panic!("invariant: no offset is inside {needed} bounds"));
+    (low, high)
 }
 
 #[cfg(test)]
@@ -256,13 +281,28 @@ mod tests {
             assert_eq!(check(&sources), Ok((5, 5)));
         }
 
-        /// Three of five bounds hold 0, but two falsetickers overlap two of them, so
-        /// four bounds share 4 to 6. Marzullo has this limit.
+        /// Three of five bounds hold 0, and two falsetickers overlap two of them, so
+        /// four bounds share 4 to 6. Three or more bounds hold -1 to 1 and 4 to 6.
         #[test]
-        fn follows_falsetickers_that_overlap_truechimers() {
+        fn holds_the_truth_beside_falsetickers_that_overlap_truechimers() {
             let truechimers = [source(4, 5), source(4, 5), source(0, 1)];
             let sources = [truechimers.as_slice(), &[source(5, 1), source(5, 1)]];
-            assert_eq!(check(&sources.concat()), Ok((5, 1)));
+            assert_eq!(check(&sources.concat()), Ok((2, 4)));
+        }
+
+        /// The true offset is 9. Two honest sources hold it, each with a bound of
+        /// -5 to 15. One source lies with a bound of 0 to 2.
+        #[test]
+        fn holds_the_truth_with_one_falseticker_of_three() {
+            let sources = [source(5, 10), source(1, 1), source(5, 10)];
+            let (offset, error) = check(&sources).expect("a majority");
+            assert!(
+                (offset - error..=offset + error).contains(&9),
+                "{} to {} misses the true offset 9",
+                offset - error,
+                offset + error
+            );
+            assert_eq!((offset, error), (5, 10));
         }
 
         #[test]
@@ -336,6 +376,15 @@ mod tests {
             let sources = with_empty(&[source(10, 10), source(20, 10)], 1);
             let m = combine(Monotonic(0), drift(0), &sources).expect("two of three");
             assert_eq!((m.offset().nanos(), m.error().nanos()), (15, 5));
+        }
+
+        /// The bounds are those of `holds_the_truth_with_one_falseticker_of_three`.
+        #[test]
+        fn leaves_an_empty_one_out_of_the_hull() {
+            let sources = [source(5, 10), source(1, 1), source(5, 10)];
+            let m = combine(Monotonic(0), drift(0), &with_empty(&sources, 2));
+            let m = m.expect("three of five share 0 to 2");
+            assert_eq!((m.offset().nanos(), m.error().nanos()), (5, 10));
         }
 
         #[test]
@@ -478,6 +527,45 @@ mod tests {
             assert_eq!(check(&sources), Ok((widest - 1, widest)));
         }
 
+        /// Two of three bounds hold every offset from -36500 days to 36500 days.
+        #[test]
+        fn holds_the_truth_beside_an_unknown_falseticker() {
+            let widest = MAX_ERROR.nanos();
+            let sources = [unknown(0), unknown(widest), unknown(0)];
+            assert_eq!(check(&sources), Ok((0, widest)));
+        }
+
+        /// Every bound holds the true offset of zero at `now`, and all three share 0 to
+        /// 36500 days. The two grown bounds alone share 0 to 73000 days and 2 us.
+        #[test]
+        fn holds_the_truth_when_every_unknown_bound_does() {
+            let widest = MAX_ERROR.nanos();
+            let now = Monotonic(1_000_000_000);
+            let offset = Span::from_nanos(widest + 1_000);
+            let grown = Measurement::unknown(Monotonic(0), offset);
+            let fresh = Measurement::unknown(now, Span::ZERO);
+            let sources = filters(&[fresh, grown, grown]);
+            let m = combine(now, drift(1_000), &sources).expect("every bound holds 0");
+            assert_eq!(
+                (m.offset().nanos(), m.error().nanos()),
+                (widest / 2, widest)
+            );
+        }
+
+        /// The true offset moves from 0 to 1 us in a second, and every bound holds it.
+        /// All three share only 1 us. The two grown bounds share 73000 days and 2 us.
+        #[test]
+        fn holds_the_truth_where_grown_unknown_bounds_meet() {
+            let widest = MAX_ERROR.nanos();
+            let now = Monotonic(1_000_000_000);
+            let grown = Measurement::unknown(Monotonic(0), Span::from_nanos(-widest));
+            let fresh = Measurement::unknown(now, Span::from_nanos(1_000 + widest));
+            let sources = filters(&[grown, grown, fresh]);
+            let m =
+                combine(now, drift(1_000), &sources).expect("every bound holds 1 us");
+            assert_eq!((m.offset().nanos(), m.error().nanos()), (1_000, widest));
+        }
+
         /// A peer that reads the estimate at both ends of an exchange gets no known
         /// bound, so it cannot vote with it.
         #[test]
@@ -514,32 +602,24 @@ mod tests {
             }
         }
 
-        /// A source at `now` whose bound misses every offset from `low` to `high`.
-        fn falseticker(
-            now: u64,
-            low: i128,
-            high: i128,
-        ) -> impl Strategy<Value = Measurement> {
-            (any::<bool>(), 1..ERROR_NS, 0..ERROR_NS).prop_map(
-                move |(above, gap, error)| {
-                    let reach = i128::from(gap) + i128::from(error);
-                    let offset = nanos(if above { high + reach } else { low - reach });
+        /// A source whose bound may hold the true offset, overlap the bounds that
+        /// hold it, or miss them all.
+        fn nearby(w: World) -> impl Strategy<Value = Measurement> {
+            let reach = 3 * ERROR_NS;
+            (0..TIME_NS, -reach..=reach, 0..ERROR_NS).prop_map(
+                move |(at, miss, error)| {
+                    let offset = nanos(w.truth(at) + i128::from(miss));
                     let error = Span::from_nanos(error);
-                    Measurement::new(Monotonic(now), offset, error).expect("valid")
+                    Measurement::new(Monotonic(at), offset, error).expect("valid")
                 },
             )
         }
 
-        /// Truechimers and fewer falsetickers, each disjoint from every truechimer.
-        fn disagreeing() -> impl Strategy<Value = (World, Vec<Measurement>)> {
+        /// Truechimers and fewer sources of any bound.
+        fn honest_majority() -> impl Strategy<Value = (World, Vec<Measurement>)> {
             agreeing()
                 .prop_flat_map(|(w, chimers)| {
-                    let now = Monotonic(w.now);
-                    let bounds = chimers.iter().map(|m| m.bounds_at(now, w.drift));
-                    let (low, high) = bounds
-                        .reduce(|(l, h), (l2, h2)| (l.min(l2), h.max(h2)))
-                        .expect("at least one truechimer");
-                    let liars = vec(falseticker(w.now, low, high), 0..chimers.len());
+                    let liars = vec(nearby(w), 0..chimers.len());
                     (Just(w), Just(chimers), liars)
                 })
                 .prop_flat_map(|(w, mut sources, liars)| {
@@ -566,15 +646,16 @@ mod tests {
             })
         }
 
-        /// Unknown sources that hold the true offset at their own time.
+        /// Unknown sources that hold the true offset at their own time, often at an
+        /// edge.
         fn unknown_truechimers() -> impl Strategy<Value = (World, Vec<Measurement>)> {
             world().prop_flat_map(|w| {
                 let widest = MAX_ERROR.nanos();
-                let one =
-                    (0..TIME_NS, -widest..=widest).prop_map(move |(at, slack)| {
-                        let offset = nanos(w.truth(at) + i128::from(slack));
-                        Measurement::unknown(Monotonic(at), offset)
-                    });
+                let slack = prop_oneof![-widest..=widest, Just(-widest), Just(widest)];
+                let one = (0..TIME_NS, slack).prop_map(move |(at, slack)| {
+                    let offset = nanos(w.truth(at) + i128::from(slack));
+                    Measurement::unknown(Monotonic(at), offset)
+                });
                 (Just(w), vec(one, 1..10))
             })
         }
@@ -588,15 +669,17 @@ mod tests {
             }
 
             #[test]
-            fn is_no_wider_than_the_narrowest_source((w, sources) in agreeing()) {
-                let m = w.combine(&sources).expect("sources agree");
+            fn is_no_wider_than_the_widest_source((w, sources) in honest_majority()) {
+                let m = w.combine(&sources).expect("truechimers are a majority");
                 let now = Monotonic(w.now);
-                let narrowest = sources.iter().map(|s| s.error_at(now, w.drift)).min();
-                prop_assert!(Some(m.error()) <= narrowest, "{m:?} vs {narrowest:?}");
+                let widest = sources.iter().map(|s| s.error_at(now, w.drift)).max();
+                prop_assert!(Some(m.error()) <= widest, "{m:?} vs {widest:?}");
             }
 
             #[test]
-            fn holds_the_truth_despite_falsetickers((w, sources) in disagreeing()) {
+            fn holds_the_truth_with_an_honest_majority(
+                (w, sources) in honest_majority()
+            ) {
                 let m = w.combine(&sources).expect("truechimers are a majority");
                 let truth = w.truth(w.now);
                 prop_assert!(w.holds_truth_at(m, w.now), "{m:?} misses {truth}");
