@@ -1,4 +1,4 @@
-use clock::Clock;
+use clock::{Clock, Status};
 use estimate::Measurement;
 use proptest::prelude::*;
 use sim::node::Node;
@@ -21,7 +21,7 @@ fn ms(n: i64) -> Span {
     Span::from_nanos(n * 1_000_000)
 }
 
-fn kind(value: Value) -> Type {
+fn data_type(value: Value) -> Type {
     match value {
         Value::U8(_) => Type::Scalar(Scalar::U8),
         Value::Span(_) => Type::Scalar(Scalar::Span),
@@ -32,14 +32,14 @@ fn kind(value: Value) -> Type {
 fn typed(sample: [Option<Value>; TABLE.len()]) -> [Option<Value>; TABLE.len()] {
     for (channel, value) in TABLE.iter().zip(sample) {
         if let Some(value) = value {
-            assert_eq!(kind(value), channel.kind, "{}", channel.name);
+            assert_eq!(data_type(value), channel.data_type, "{}", channel.name);
         }
     }
     sample
 }
 
 #[test]
-fn names_each_channel_once() {
+fn lists_the_clock_channels() {
     let names: Vec<&str> = TABLE.iter().map(|c| c.name).collect();
     assert_eq!(names, ["clock.status", "clock.offset", "clock.error"]);
 }
@@ -70,7 +70,7 @@ fn a_synced_clock_gives_its_offset_and_error() {
 }
 
 #[test]
-fn a_clock_in_holdover_keeps_its_offset_and_error() {
+fn a_clock_in_holdover_keeps_its_offset() {
     let (_sim, host) = host();
     let (mut clock, reader) = Clock::new(host.clock());
     let source = clock.add();
@@ -86,6 +86,22 @@ fn a_clock_in_holdover_keeps_its_offset_and_error() {
             Some(Value::Span(ms(2))),
         ]
     );
+}
+
+#[test]
+fn the_error_of_a_clock_in_holdover_grows_by_drift() {
+    let (mut sim, host) = host();
+    let (mut clock, reader) = Clock::new(host.clock());
+    let source = clock.add();
+    clock.push(source, measure(&host, Span::HOUR, ms(2)));
+    clock.add();
+    assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+    let Status::Holdover(m, _) = reader.status() else {
+        panic!("a clock with no majority holds over");
+    };
+    assert!(m.error() > ms(2), "{:?}", m.error());
+    let [_, _, error] = typed(Collector::new(reader).collect());
+    assert_eq!(error, Some(Value::Span(m.error())));
 }
 
 proptest! {

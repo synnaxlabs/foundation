@@ -12,11 +12,11 @@ path = "src/main.rs"
 [dependencies]
 clock = { path = "../clock" }
 env = { path = "../env" }
+estimate = { path = "../estimate" }
 ops = { path = "../ops" }
 types = { path = "../types" }
 
 [dev-dependencies]
-estimate = { path = "../estimate" }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
