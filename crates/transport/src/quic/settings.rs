@@ -110,7 +110,7 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
         .rng_seed(Some(rng))
         .supported_versions(VERSIONS.to_vec())
         .grease_quic_bit(true)
-        // `Endpoint` limits resets for each group of IDs: one shared limit lets one
+        // `Endpoint` limits resets for each address: one shared limit lets one
         // address take every reset.
         .min_reset_interval(Duration::ZERO);
     endpoint
@@ -226,7 +226,7 @@ impl TimeSource for Epoch {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use std::num::NonZeroUsize;
     use std::task::Poll;
@@ -667,7 +667,11 @@ mod tests {
 
     mod restart {
         use super::*;
-        use crate::quic::stateless::INTERVAL;
+        use crate::quic::stateless::WINDOW;
+
+        /// An address on another host than [`testing::CLIENT`].
+        const OTHER: SocketAddr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)), 9);
 
         #[test]
         fn resets_the_old_connection_at_its_next_datagram() {
@@ -738,7 +742,7 @@ mod tests {
         }
 
         #[test]
-        fn sends_a_stranger_one_reset_for_an_id_from_many_addresses_at_once() {
+        fn sends_a_stranger_one_reset_for_many_ports_of_one_ip_at_once() {
             let resets = testing::run(1, |shard| {
                 let (forged, mut endpoint) = stranger(shard);
                 let now = testing::at(Duration::from_millis(1));
@@ -754,16 +758,39 @@ mod tests {
         }
 
         #[test]
-        fn resets_each_stale_datagram_while_a_stranger_sends_an_issued_id() {
+        fn sends_a_stranger_fifty_resets_a_second_for_many_ports_of_one_ip() {
             let resets = testing::run(1, |shard| {
-                let (stale, _) = stale(shard);
                 let (forged, mut endpoint) = stranger(shard);
-                assert_ne!(cid::group(&stale), cid::group(&forged));
-                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
+                (0..1_000u16)
+                    .filter(|&ms| {
+                        let now = testing::at(Duration::from_millis(u64::from(ms)));
+                        let victim = SocketAddr::new(testing::CLIENT.ip(), 1_000 + ms);
+                        reply(&mut endpoint, now, victim, &forged).is_some()
+                    })
+                    .count()
+            });
+            assert_eq!(resets, 50);
+        }
+
+        #[test]
+        fn resets_a_stale_datagram_that_another_address_sent_at_the_same_time() {
+            let resets = testing::run(1, |shard| {
+                let (stale, mut endpoint) = stale(shard);
+                let now = testing::at(Duration::from_millis(1));
+                [OTHER, testing::CLIENT]
+                    .map(|source| reply(&mut endpoint, now, source, &stale).is_some())
+            });
+            assert_eq!(resets, [true, true]);
+        }
+
+        #[test]
+        fn resets_each_stale_datagram_while_another_address_sends_its_id() {
+            let resets = testing::run(1, |shard| {
+                let (stale, mut endpoint) = stale(shard);
                 let mut resets = 0;
                 for ms in 0..1_000 {
                     let now = testing::at(Duration::from_millis(ms));
-                    reply(&mut endpoint, now, attacker, &forged);
+                    reply(&mut endpoint, now, OTHER, &stale);
                     if ms % 100 == 5 {
                         let reset = reply(&mut endpoint, now, testing::CLIENT, &stale);
                         resets += usize::from(reset.is_some());
@@ -775,11 +802,11 @@ mod tests {
         }
 
         #[test]
-        fn resets_one_id_again_after_the_interval() {
+        fn resets_one_address_again_after_a_window() {
             let resets = testing::run(1, |shard| {
                 let (stale, mut endpoint) = stale(shard);
                 let (start, nano) = (Duration::from_millis(1), Duration::from_nanos(1));
-                let at = [start + nano, start + INTERVAL, start + INTERVAL + nano];
+                let at = [start + nano, start + WINDOW, start + WINDOW + nano];
                 at.map(|at| {
                     let now = testing::at(at);
                     reply(&mut endpoint, now, testing::CLIENT, &stale).is_some()

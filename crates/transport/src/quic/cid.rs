@@ -15,15 +15,6 @@ pub(super) const LEN: usize = 8;
 /// The bytes of the tag that ends an issued ID.
 const TAG: usize = 3;
 
-/// The group of the destination ID of `datagram` when it has a short header: the
-/// ID's first random byte. `None` for a long header.
-pub(super) fn group(datagram: &[u8]) -> Option<u8> {
-    match *datagram {
-        [form, _shard, random, ..] if form & 0x80 == 0 => Some(random),
-        _ => None,
-    }
-}
-
 /// A connection ID of random bytes from `entropy`.
 pub(super) fn random(entropy: &Entropy) -> ConnectionId {
     let mut id = [0; LEN];
@@ -114,16 +105,6 @@ mod tests {
             let id = ConnectionId::new(&id);
             prop_assert!(issuer([1; 32], value).validate(id).is_err());
         }
-    }
-
-    #[test]
-    fn groups_a_short_header_by_the_first_random_byte_of_its_id() {
-        let id = issuer([1; 32], 9).generate_cid();
-        let short = [[0x40].as_slice(), &id].concat();
-        let long = [[0xc0].as_slice(), &id].concat();
-        let groups =
-            [short.as_slice(), &short[..3], &short[..2], &long, &[]].map(group);
-        assert_eq!(groups, [Some(9), Some(9), None, None, None]);
     }
 
     #[test]
