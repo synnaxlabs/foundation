@@ -317,9 +317,10 @@ impl Endpoint {
     /// Puts `message` on the stream after the messages before it when the stream
     /// can take it now. Else gives it back with nothing of it sent: when `sender`
     /// still holds part of an earlier message after a flush, when the send budget
-    /// has no room for it, or when the connection ended. The stream does not wait
-    /// for room for a message it gives back. Once taken, `sender` may hold the rest
-    /// of it: call [`Endpoint::flush`] after [`Event::Writable`].
+    /// has no room for it or a stream of its class or a higher class waits for room,
+    /// or when the connection ended. The stream does not wait for room for a message
+    /// it gives back. Once taken, `sender` may hold the rest of it: call
+    /// [`Endpoint::flush`] after [`Event::Writable`].
     ///
     /// # Errors
     ///
@@ -443,6 +444,20 @@ impl Endpoint {
         let Connection { inner, streams, .. } = connection;
         streams.stop(inner, receiver, code, &mut self.events);
         self.drive(key.handle, self.instant(now));
+    }
+
+    /// Ends a read of `receiver` that waits for room in the receive budget, and gives
+    /// back room that the read got and has not taken, for a caller that gives up the
+    /// read and keeps the stream. The next read waits again, behind the reads that
+    /// wait then. Does nothing when no read waits for room, or when the connection
+    /// ended.
+    pub(crate) fn end_wait(&mut self, receiver: &mut Receiver) {
+        let key = receiver.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        connection.streams.end_wait(receiver, &mut self.events);
     }
 
     /// The datagrams of `key`'s connection. `None` until it connects, and after it

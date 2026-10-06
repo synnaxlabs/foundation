@@ -834,14 +834,13 @@ How to read this record:
   that does not wait (`try_send`) starts a message only by the same rule and when, after
   a flush, the stream holds no part of an earlier one; else it gives the message back
   with no byte of it sent, and the stream does not wait for room (#597). A receiver
-  takes a block only when the messages that hold one stay within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable`. Its budget gives room in the
-  same order (#611). So bytes
-  that wait for a block never use up the credit that a started message needs, and a peer
-  that breaks the send rule holds at most the receive budget and stops only its own
-  connection. Until the hello carries the peer's window, a sender uses its own. Proposed
-  by `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
-  `network` in #228. The room order: approved by the advisor on #611.
+  takes a block by the same rule, within `window_bytes` plus `message_bytes_max`; else
+  the read waits for `Readable` (#611). So bytes that wait for a block never use up the
+  credit that a started message needs, and a peer that breaks the send rule holds at
+  most the receive budget and stops only its own connection. Until the hello carries the
+  peer's window, a sender uses its own. Proposed by `network` in #55; approved by the
+  coordinator on PR #407. The budgets: proposed by `network` in #228. The room order:
+  approved by the advisor on #611.
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
