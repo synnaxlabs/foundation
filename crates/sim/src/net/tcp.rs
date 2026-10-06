@@ -155,23 +155,12 @@ impl End {
     }
 
     /// Whether the stream has ended: an RST arrived or answered its SYN, or each FIN
-    /// arrived and its own is acked. As on Linux, a SYN to its pair then opens a new
-    /// stream, and a drop of it sends nothing.
+    /// arrived and its own is acked. As on Linux, the end then leaves its pair and
+    /// frees its port, and a drop of it sends nothing.
     fn done(&self) -> bool {
         self.reset
             || self.phase == Phase::Refused
             || (self.fin == Fin::Acked && self.peer_closed)
-    }
-
-    /// Whether an orphan has nothing left to do.
-    fn finished(&self) -> bool {
-        self.phase == Phase::Orphan && self.done()
-    }
-
-    /// Whether the end takes a segment other than a SYN. One that does not answers
-    /// with an RST, as a closed port does.
-    fn live(&self) -> bool {
-        !self.reset && !matches!(self.phase, Phase::Connecting | Phase::Refused)
     }
 }
 
@@ -242,7 +231,7 @@ impl Lanes {
 #[derive(Default)]
 pub(super) struct Sockets {
     ends: BTreeMap<u64, End>,
-    /// The key of the end that takes the segments to each pair.
+    /// The key of the end that takes the segments to each pair. No end in it is done.
     routes: BTreeMap<Pair, u64>,
     listeners: BTreeMap<u64, Listening>,
     /// The port of the last connect of each node.
@@ -264,31 +253,36 @@ impl Sockets {
         self.last
     }
 
-    /// Adds `end`, which takes the segments to its pair from an end that is done,
-    /// and gives its key.
+    /// Adds `end`, which takes the segments to its pair, and gives its key.
     fn insert(&mut self, end: End) -> u64 {
         let key = self.key();
-        let old = self.routes.insert(end.pair, key);
-        let done = old.is_none_or(|old| self.ends[&old].done());
-        assert!(done, "invariant: a pair has one end that is not done");
+        let routed = self.routes.insert(end.pair, key);
+        assert!(
+            routed.is_none(),
+            "invariant: a pair has one end that is not done"
+        );
         self.ends.insert(key, end);
         key
     }
 
-    /// Removes end `key`, and the route of its pair when a newer end does not have
-    /// it.
+    /// Removes end `key`.
     fn remove(&mut self, key: u64) -> End {
         let end = (self.ends.remove(&key)).expect("invariant: the end lives");
-        match self.routes.entry(end.pair) {
-            Entry::Occupied(route) if *route.get() == key => {
-                route.remove();
-            }
-            _ => assert!(
-                end.done(),
-                "invariant: only an end that is done loses its pair"
-            ),
-        }
+        let routed = self.unroute(end.pair, key);
+        assert!(
+            routed || end.done(),
+            "invariant: an end that is not done has its pair"
+        );
         end
+    }
+
+    /// Takes the segments to `pair` from end `key`, and gives whether it had them.
+    fn unroute(&mut self, pair: Pair, key: u64) -> bool {
+        let routed = self.routes.get(&pair) == Some(&key);
+        if routed {
+            self.routes.remove(&pair);
+        }
+        routed
     }
 }
 
@@ -392,7 +386,7 @@ impl<'a> Tcp<'a> {
             let own = |local: SocketAddr| {
                 local.port() == port && addresses(node).contains(&local.ip())
             };
-            sockets.ends.values().any(|end| own(end.pair.local))
+            sockets.routes.keys().any(|pair| own(pair.local))
                 || (sockets.listeners.values()).any(|listening| {
                     listening.node == node && listening.local.port() == port
                 })
@@ -575,6 +569,7 @@ impl<'a> Tcp<'a> {
             }
             end.reset = true;
             (end.inbox, end.outbox) = (VecDeque::new(), VecDeque::new());
+            self.reap(key);
         }
         self.sockets.listeners.retain(|_, listening| {
             let kept = listening.node != node;
@@ -603,7 +598,8 @@ impl<'a> Tcp<'a> {
             peer: source,
         };
         let route = self.sockets.routes.get(&pair).copied();
-        let receiver = route.filter(|&key| self.end(key).live());
+        // A connecting end takes only its SYN-ACK and an RST.
+        let receiver = route.filter(|&key| self.end(key).phase != Phase::Connecting);
         match (kind, receiver) {
             (Kind::Syn { edge }, _) => {
                 self.syn(at, pair, route, edge);
@@ -629,10 +625,9 @@ impl<'a> Tcp<'a> {
     }
 
     /// Takes a SYN to `pair` from its peer, which `route` has: a listener that
-    /// receives it answers, and otherwise an RST does. An end that is done on the
-    /// pair does not take it.
+    /// receives it answers, and otherwise an RST does.
     fn syn(&mut self, at: Monotonic, pair: Pair, route: Option<u64>, edge: usize) {
-        if route.is_some_and(|key| !self.end(key).done()) {
+        if route.is_some() {
             self.sockets.lanes.yet.get_or_insert(REOPENED);
             return;
         }
@@ -681,7 +676,7 @@ impl<'a> Tcp<'a> {
     /// Takes an RST to `key`. An RST never gets an answer.
     fn rst(&mut self, key: u64) -> Vec<Waker> {
         let end = self.end(key);
-        match end.phase {
+        let wakers = match end.phase {
             Phase::Connecting => {
                 end.phase = Phase::Refused;
                 end.writing.take().into_iter().collect()
@@ -691,13 +686,10 @@ impl<'a> Tcp<'a> {
                 let listening = (self.sockets.listeners.get_mut(&listener))
                     .expect("invariant: an accepting end has its listener");
                 listening.queue.retain(|&queued| queued != key);
-                Vec::new()
+                return Vec::new();
             }
-            Phase::Orphan => {
-                self.sockets.remove(key);
-                Vec::new()
-            }
-            Phase::Refused | Phase::Queued(_) | Phase::Open => {
+            Phase::Refused => unreachable!("invariant: a refused end has no pair"),
+            Phase::Queued(_) | Phase::Open | Phase::Orphan => {
                 end.reset = true;
                 end.outbox.clear();
                 [end.reading.take(), end.writing.take()]
@@ -705,10 +697,12 @@ impl<'a> Tcp<'a> {
                     .flatten()
                     .collect()
             }
-        }
+        };
+        self.reap(key);
+        wakers
     }
 
-    /// Takes an ACK to `key`, a live end.
+    /// Takes an ACK to `key`, a receiver.
     fn ack(
         &mut self,
         at: Monotonic,
@@ -736,7 +730,7 @@ impl<'a> Tcp<'a> {
         wakers
     }
 
-    /// Takes bytes to `key`, a live end. An orphan reads no more, so it resets.
+    /// Takes bytes to `key`, a receiver. An orphan reads no more, so it resets.
     fn data(&mut self, at: Monotonic, key: u64, bytes: Vec<u8>) -> Vec<Waker> {
         let end = self.end(key);
         if end.phase == Phase::Orphan {
@@ -750,7 +744,7 @@ impl<'a> Tcp<'a> {
         waker.into_iter().collect()
     }
 
-    /// Takes the FIN to `key`, a live end.
+    /// Takes the FIN to `key`, a receiver.
     fn fin(&mut self, at: Monotonic, key: u64) -> Vec<Waker> {
         let end = self.end(key);
         end.peer_closed = true;
@@ -779,10 +773,18 @@ impl<'a> Tcp<'a> {
         }
     }
 
-    /// Removes `key` when it is an orphan with nothing left to do.
+    /// Takes the segments to its pair from `key` once its stream is done, and removes
+    /// it when it is also an orphan.
     fn reap(&mut self, key: u64) {
-        if self.end(key).finished() {
+        let end = self.end(key);
+        if !end.done() {
+            return;
+        }
+        if end.phase == Phase::Orphan {
             self.sockets.remove(key);
+        } else {
+            let pair = end.pair;
+            self.sockets.unroute(pair, key);
         }
     }
 
@@ -824,11 +826,11 @@ mod tests {
             delayed: false,
         };
         let mut end = End::new(Pair { local, peer }, Phase::Open, options, 0);
-        end.reset = true;
         end.inbox.extend([0; 4_096]);
         let key = sockets.insert(end);
         let mut buffer = [0; 4_096];
         let mut tcp = Tcp::new(&mut sockets, &mut wire);
+        tcp.rst(key);
         let (poll, _) = tcp.read(Monotonic(0), key, Waker::noop(), &mut buffer);
         assert!(matches!(poll, Poll::Ready(Ok(4_096))));
         assert!(sockets.lanes.floors.is_empty());
@@ -844,9 +846,10 @@ mod tests {
             unsent_bytes_max: 1,
             delayed: false,
         };
+        let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
         let mut sockets = Sockets::default();
         let old = sockets.insert(End::new(pair, Phase::Open, options, 1));
-        sockets.ends.get_mut(&old).unwrap().reset = true;
+        Tcp::new(&mut sockets, &mut wire).rst(old);
         let new = sockets.insert(End::new(pair, Phase::Open, options, 1));
         sockets.remove(old);
         assert_eq!(sockets.routes.get(&pair), Some(&new));
