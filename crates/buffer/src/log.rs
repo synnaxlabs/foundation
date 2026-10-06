@@ -452,9 +452,13 @@ mod tests {
                     prop_assert_eq!(logs.durable(slot(index), path), tail(&fed, slot(index), path));
                     let key = channel::Key::from_u128(u128::from(index));
                     let mut end = Mark::at(0);
-                    for ((_, header, offset), before) in on_fed(&fed, slot(index), path).zip(&marks) {
-                        let run = runs.iter().rev().find(|run| run.offset == *offset).copied();
-                        let found = run.map(|run| (key, run));
+                    let fed_on = on_fed(&fed, slot(index), path);
+                    for ((_, header, offset), before) in fed_on.zip(&marks) {
+                        let found = runs
+                            .iter()
+                            .rev()
+                            .find(|run| run.offset == *offset)
+                            .map(|run| (key, *run));
                         prop_assert_eq!(logs.run(slot(index), path, *before), found);
                         end = before.after(header.first, header.len);
                     }
