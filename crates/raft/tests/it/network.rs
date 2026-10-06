@@ -627,13 +627,17 @@ impl Network {
         }
         if matches!(message.body, Body::PreVote { .. } | Body::Vote { .. }) {
             let node = &self.nodes[at];
-            let voters = node.voters();
             let key = node.key();
+            let voter = |voters: &Voters| {
+                voters.incoming.contains(&key) || voters.outgoing.contains(&key)
+            };
+            // Every configuration entry before the last is committed, so the one
+            // before a pending entry is the committed one.
             assert!(
-                voters.incoming.contains(&key)
-                    || voters.outgoing.contains(&key)
-                    || self.pending(at).is_some(),
-                "node {at} campaigns outside its committed configuration"
+                voter(node.voters())
+                    || (self.pending(at).is_some()
+                        && voter(&self.committed_voters(at))),
+                "node {at} campaigns outside its configuration"
             );
         }
         let prevote = match message.body {

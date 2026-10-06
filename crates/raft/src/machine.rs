@@ -89,6 +89,8 @@ pub struct Raft {
     voters: Voters,
     // Where the log holds `voters`: the zero position for `Start.voters`.
     in_force: Position,
+    // Whether this node is a voter of the configuration before `voters`.
+    voter_before: bool,
     // The other voters in force, plus the nodes that the configuration in force
     // removed, until a release, a quorum check, or the next configuration drops them.
     // Never this node.
@@ -157,6 +159,7 @@ impl Raft {
         let last = log.last();
         let (in_force, voters) = log.voters();
         let voters = voters.clone();
+        let voter_before = log.voters_before(in_force.index).contains(key);
         let peers = others(&log, key)
             .into_iter()
             .map(|key| (key, Peer::new(last.index)))
@@ -170,6 +173,7 @@ impl Raft {
             key,
             voters,
             in_force,
+            voter_before,
             peers,
             answers: BTreeMap::new(),
             votes: None,
@@ -335,8 +339,9 @@ impl Raft {
     }
 
     /// Starts an election now, without a wait for the election timeout. A leader, a
-    /// node that is not in its own voter list while that list is committed, and a
-    /// node in the last term (`u64::MAX`) do nothing.
+    /// node that is not a voter of its configuration in force (nor, while that one is
+    /// not committed, of the one before it), and a node in the last term
+    /// (`u64::MAX`) do nothing.
     pub fn campaign(&mut self) {
         if self.role != Role::Leader && self.promotable() {
             self.pre_campaign();
@@ -663,6 +668,7 @@ impl Raft {
             return;
         }
         self.in_force = at;
+        self.voter_before = self.log.voters_before(at.index).contains(self.key);
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
         let keep = others(&self.log, self.key);
@@ -1069,12 +1075,12 @@ impl Raft {
         self.leader.is_some() && self.election_elapsed < self.election_ticks
     }
 
-    // Whether this node may campaign: it is in the configuration in force, or that
-    // configuration is not committed yet. An uncommitted configuration may still be
-    // truncated, and a removed leader whose leave is not committed must be able to
-    // win the election that commits it.
+    // Whether this node may campaign: it is a voter of the configuration in force,
+    // or, while that configuration is not committed, of the one before it. An
+    // uncommitted configuration may still be truncated, and a removed leader whose
+    // leave is not committed must be able to win the election that commits it.
     fn promotable(&self) -> bool {
-        self.voters.contains(self.key) || !self.log.settled()
+        self.voters.contains(self.key) || (!self.log.settled() && self.voter_before)
     }
 
     fn peer(&self, key: node::Key) -> &Peer {
@@ -3755,23 +3761,66 @@ mod tests {
         }
 
         // Node 1 is in neither `Start.voters` nor the change, which is not committed.
-        // It campaigns and needs a quorum of the others. #659 asks whether it should.
         #[test]
-        fn a_node_outside_both_configurations_campaigns_without_its_own_vote() {
+        fn a_node_outside_both_configurations_does_not_campaign() {
             let mut raft = raft(&[2, 3], Hard::default());
             let joint = voters(&[2, 3, 4], &[2, 3]);
             let change = append(Position::default(), vec![config(1, 1, joint)], 0);
             raft.step(message(2, 1, change)).unwrap();
             sent(&mut raft);
             raft.campaign();
+            tick_times(&mut raft, 20);
+            assert_eq!(raft.role(), Role::Follower);
+            assert_eq!(sent(&mut raft), []);
+        }
+
+        // Node 1 holds the joint entry and the leave that removes it. While the
+        // leave is not committed, it may campaign as a voter of the configuration
+        // before the leave. Once the leave commits, it may not.
+        #[test]
+        fn a_voter_of_the_configuration_before_an_uncommitted_leave_campaigns() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let joint = voters(&[2, 3], &[1, 2, 3]);
+            let new = voters(&[2, 3], &[]);
+            let entries = vec![config(1, 1, joint), config(1, 2, new)];
+            raft.step(message(2, 1, append(Position::default(), entries, 1)))
+                .unwrap();
+            sent(&mut raft);
+            raft.campaign();
             assert_eq!(raft.role(), Role::PreCandidate);
-            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4)]);
-            let granted = Body::PreVoteReply { granted: true };
-            raft.step(message(2, 2, granted.clone())).unwrap();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+            raft.step(message(2, 2, Body::Heartbeat { commit: 2 }))
+                .unwrap();
+            assert_eq!(raft.role(), Role::Follower);
+            sent(&mut raft);
+            raft.campaign();
+            tick_times(&mut raft, 20);
+            assert_eq!(raft.role(), Role::Follower);
+            assert_eq!(sent(&mut raft), []);
+        }
+
+        // Node 1 holds three uncommitted configuration entries: the joint entry and
+        // the leave that remove it, and a joint entry that adds it back. A new leader
+        // replaces the last. The leave is in force again, and node 1 is a voter of
+        // the configuration before it, so it may campaign.
+        #[test]
+        fn a_truncated_entry_gives_the_configuration_before_it_back() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let changes = vec![
+                config(1, 1, voters(&[2, 3], &[1, 2, 3])),
+                config(1, 2, voters(&[2, 3], &[])),
+                config(1, 3, voters(&[1, 2, 3], &[2, 3])),
+            ];
+            raft.step(message(2, 1, append(Position::default(), changes, 0)))
+                .unwrap();
+            sent(&mut raft);
+            let replace = append(position(1, 2), entries(&[(2, 3)]), 0);
+            raft.step(message(3, 2, replace)).unwrap();
+            sent(&mut raft);
+            assert_eq!(raft.voters(), &voters(&[2, 3], &[]));
+            raft.campaign();
             assert_eq!(raft.role(), Role::PreCandidate);
-            raft.step(message(3, 2, granted)).unwrap();
-            assert_eq!(raft.role(), Role::Candidate);
-            assert!(!raft.peers.contains_key(&key(1)));
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
         }
 
         // Node 1 restarts with the leave of node 4 applied: the leave is committed
