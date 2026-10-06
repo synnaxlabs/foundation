@@ -347,7 +347,8 @@ impl Raft {
         Ok(())
     }
 
-    // Applies a checked message of this term, or a PreVote for the next one.
+    // Applies a message that `check` and `meet` passed: one of this term, a PreVote
+    // for a later one, or a granted PreVoteReply for a later one.
     fn handle(&mut self, from: node::Key, term: Term, body: Body) {
         match body {
             Body::PreVote { last } => {
@@ -667,8 +668,9 @@ impl Raft {
         }
     }
 
-    // Steps down for a message of a higher term. Returns whether the message still
-    // needs its normal handling.
+    // Steps down for a message of a higher term that `check` passed, except a PreVote
+    // or its grant. Returns false, so the message is dropped, only for a PreVote or
+    // Vote of a higher term while this node has a lease.
     fn meet(&mut self, from: node::Key, term: Term, body: &Body) -> bool {
         if term > self.term {
             match body {
@@ -747,7 +749,10 @@ impl Raft {
     // Handles a heartbeat or an append from the leader of the node's own term.
     fn follow(&mut self, leader: node::Key) {
         match self.role {
-            Role::Leader => unreachable!("`check` refuses a second leader of a term"),
+            Role::Leader => unreachable!(
+                "invariant: `check` refuses a second leader of term {}",
+                self.term
+            ),
             Role::Follower => {
                 self.election_elapsed = 0;
                 self.leader = Some(leader);
@@ -914,6 +919,21 @@ mod tests {
         heartbeat_ticks: 1,
     };
 
+    fn position(term: u64, index: u64) -> Position {
+        Position {
+            term: Term(term),
+            index,
+        }
+    }
+
+    fn append(prev: Position, entries: Vec<Entry>, commit: u64) -> Body {
+        Body::Append {
+            prev,
+            entries,
+            commit,
+        }
+    }
+
     fn start(voters: &[u8], hard: Hard) -> Start {
         Start {
             hard,
@@ -928,10 +948,7 @@ mod tests {
 
     fn entries(positions: &[(u64, u64)]) -> Vec<Entry> {
         let entry = |&(term, index)| Entry {
-            at: Position {
-                term: Term(term),
-                index,
-            },
+            at: position(term, index),
             data: Data::Empty,
         };
         positions.iter().map(entry).collect()
@@ -1072,10 +1089,6 @@ mod tests {
                 ..start(&[1], at_term(1))
             };
             let err = Raft::new(CONFIG, start).unwrap_err();
-            let position = |term, index| Position {
-                term: Term(term),
-                index,
-            };
             let out_of_order = Error::EntryOutOfOrder {
                 at: position(1, 3),
                 before: position(1, 1),
@@ -1337,6 +1350,27 @@ mod tests {
         }
 
         #[test]
+        fn rejects_an_append_for_a_term_it_leads() {
+            let mut raft = raft(&[1], Hard::default());
+            raft.campaign();
+            let body = append(position(1, 1), vec![], 0);
+            let err = raft.step(message(2, 1, body)).unwrap_err();
+            assert_eq!(
+                err,
+                Error::SecondLeader {
+                    term: Term(1),
+                    from: key(2)
+                }
+            );
+            assert_eq!(
+                err.to_string(),
+                "node 00000000000000000000000000000002 also claims to lead term 1"
+            );
+            assert_eq!((raft.role(), raft.leader()), (Role::Leader, Some(key(1))));
+            assert_eq!(sent(&mut raft), []);
+        }
+
+        #[test]
         fn does_not_campaign_past_the_last_term() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.step(message(9, u64::MAX, Body::Heartbeat { commit: 0 }))
@@ -1453,21 +1487,6 @@ mod tests {
     // `step` checks a message against the log before it changes any state.
     mod check {
         use super::*;
-
-        fn position(term: u64, index: u64) -> Position {
-            Position {
-                term: Term(term),
-                index,
-            }
-        }
-
-        fn append(prev: Position, entries: Vec<Entry>, commit: u64) -> Body {
-            Body::Append {
-                prev,
-                entries,
-                commit,
-            }
-        }
 
         // The state a refused message leaves as it was. `ready` drains what the node
         // made before, so the message must add nothing to it.
@@ -1874,21 +1893,6 @@ mod tests {
     mod replication {
         use super::*;
 
-        fn position(term: u64, index: u64) -> Position {
-            Position {
-                term: Term(term),
-                index,
-            }
-        }
-
-        fn append(prev: Position, entries: Vec<Entry>, commit: u64) -> Body {
-            Body::Append {
-                prev,
-                entries,
-                commit,
-            }
-        }
-
         fn accepted(last: u64) -> Body {
             Body::AppendReply { last }
         }
@@ -2195,10 +2199,7 @@ mod tests {
 
         fn config(term: u64, index: u64, voters: Voters) -> Entry {
             Entry {
-                at: Position {
-                    term: Term(term),
-                    index,
-                },
+                at: position(term, index),
                 data: Data::Voters(voters),
             }
         }
@@ -2367,10 +2368,7 @@ mod tests {
 
         fn config(term: u64, index: u64, voters: Voters) -> Entry {
             Entry {
-                at: Position {
-                    term: Term(term),
-                    index,
-                },
+                at: position(term, index),
                 data: Data::Voters(voters),
             }
         }
@@ -2911,10 +2909,7 @@ mod tests {
             };
             let start = Start {
                 entries: vec![Entry {
-                    at: Position {
-                        term: Term(1),
-                        index: 1,
-                    },
+                    at: position(1, 1),
                     data: Data::Voters(joint.clone()),
                 }],
                 ..start(outgoing, at_term(1))

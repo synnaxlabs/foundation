@@ -244,7 +244,7 @@ impl Draft {
 
     /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Time is
     /// logarithmic in the number of present series.
-    pub fn series(&mut self, entry: usize) -> Option<&mut [u8]> {
+    pub fn series_mut(&mut self, entry: usize) -> Option<&mut [u8]> {
         let (_, descriptors, body) = split_mut(&mut self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
@@ -715,8 +715,8 @@ mod tests {
         drop(dirty);
         let series = [(0, 3), (2, 2)];
         let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
-        draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
-        draft.series(2).unwrap().copy_from_slice(&[1, 2]);
+        draft.series_mut(0).unwrap().copy_from_slice(&[0xaa; 3]);
+        draft.series_mut(2).unwrap().copy_from_slice(&[1, 2]);
         draft.set_count(0, 2);
         draft.set_seq(0, 7);
         let frame = draft.freeze(Path::Backfill);
@@ -781,7 +781,8 @@ mod tests {
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
-        let draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        assert_eq!(draft.series_mut(usize::MAX), None, "an entry past u32");
         let frame = draft.freeze(Path::Backfill);
         assert_eq!(frame.key_set(), set.key());
         assert_eq!(frame.path(), Path::Backfill);
@@ -829,8 +830,8 @@ mod tests {
         let pool = pool(1 << 16);
         let series = [(0, 3), (1, 0), (2, 9)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
-        draft.series(0).unwrap().fill(1);
-        draft.series(2).unwrap().fill(2);
+        draft.series_mut(0).unwrap().fill(1);
+        draft.series_mut(2).unwrap().fill(2);
         let frame = draft.freeze(Path::Live);
         let expected = [[1, 1, 1, 0, 0, 0, 0, 0].as_slice(), &[2; 9]].concat();
         assert_eq!(&*frame.body(), expected.as_slice());
@@ -844,8 +845,8 @@ mod tests {
         let pool = pool(1 << 16);
         let lens = [(0, 3), (1, 0), (2, 9)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &lens).unwrap();
-        draft.series(0).unwrap().fill(1);
-        draft.series(2).unwrap().fill(2);
+        draft.series_mut(0).unwrap().fill(1);
+        draft.series_mut(2).unwrap().fill(2);
         let frame = draft.freeze(Path::Live);
         let ends: Vec<_> = frame.ends().collect();
         assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
@@ -960,7 +961,7 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
         for (seq, &(entry, _)) in (1..).zip(&series) {
             draft
-                .series(entry)
+                .series_mut(entry)
                 .unwrap()
                 .fill(u8::try_from(seq).unwrap());
             let group = u32::try_from(entry).unwrap();
@@ -1214,7 +1215,7 @@ mod tests {
                 .iter()
                 .find(|&&(e, _)| e == entry)
                 .map(|&(_, len)| len);
-            match (draft.series(entry), len) {
+            match (draft.series_mut(entry), len) {
                 (Some(bytes), Some(len)) => bytes.copy_from_slice(&pattern(entry, len)),
                 (None, None) => {}
                 (bytes, len) => {
