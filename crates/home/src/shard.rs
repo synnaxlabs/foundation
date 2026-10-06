@@ -1139,6 +1139,41 @@ mod tests {
     }
 
     #[test]
+    fn refuses_an_encoded_index_that_is_not_valid_before_its_order() {
+        run(48, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[5] = 1;
+            let mut index = encoded(&stamps);
+            index[encoded(&stamps[..1024]).len()] = 9;
+            let other = encoded(&[10]);
+            let lens = [(0, index.len()), (2, other.len())];
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Encoded, &lens).expect("a frame");
+            write
+                .series_mut(0)
+                .expect("index 0")
+                .copy_from_slice(&index);
+            write
+                .series_mut(2)
+                .expect("index 2")
+                .copy_from_slice(&other);
+            write.set_count(0, 2500);
+            write.set_count(1, 1);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 1, tag: 9 },
+            });
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
     fn refuses_a_series_that_does_not_fit_its_count_and_names_its_channel() {
         run(5, |test| async move {
             let set = two_indexes();

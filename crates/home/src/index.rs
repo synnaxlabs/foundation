@@ -91,7 +91,6 @@ impl Index {
         let mut stamps = stamps.map_err(Refusal::Codec)?;
         let mut order = self.order.check(path, mesh);
         while let Some(vector) = stamps.next() {
-            let vector = vector.map_err(Refusal::Codec)?;
             order = order.push(vector).map_err(Refusal::Order)?;
         }
         Ok(Accepted {
