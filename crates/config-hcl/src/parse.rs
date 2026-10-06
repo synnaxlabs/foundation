@@ -1433,7 +1433,6 @@ c = "°C # not a comment"
                     "<<EOT\nEOT x\nxEOT\nEOTX\neot\nEOT\n",
                     "EOT x\nxEOT\nEOTX\neot\n",
                 ),
-                ("<<EOT\nx\nEOT", "x\n"),
                 ("<<END-1_a\nx\nEND-1_a\n", "x\n"),
                 ("<<_\nx\n_\n", "x\n"),
                 ("<<ÉOT\nx\nÉOT\n", "x\n"),
@@ -1573,6 +1572,19 @@ c = "°C # not a comment"
                     part: Unclosed::Heredoc,
                 };
                 check(text, &[(unclosed, &needs(END))]);
+            }
+        }
+
+        #[test]
+        fn needs_a_line_end_after_a_heredoc_at_the_end_of_the_text() {
+            let cases = [
+                ("a = <<EOT\nx\nEOT", at(15, 2, 3)),
+                ("a = <<EOT\nx\nEOT  ", at(17, 2, 5)),
+                ("a = <<-EOT\n  x\n  EOT", at(20, 2, 5)),
+            ];
+            for (text, end) in cases {
+                let newline = syntax(span(end, end), Expected::Newline);
+                check(text, &[(newline, &needs(Expected::Newline))]);
             }
         }
 
