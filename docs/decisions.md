@@ -391,8 +391,9 @@ How to read this record:
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
-  durable: a killed process may have written records that it never synced (#657). The restart record needs one free block: an open
-  of a full ring first moves records at the tail to a segment.
+  durable: a killed process may have written records that it never synced (#657). The
+  restart record needs one free block: an open of a full ring first moves records at
+  the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
