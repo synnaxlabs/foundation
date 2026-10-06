@@ -4,7 +4,7 @@ use std::ops::RangeBounds;
 use types::node;
 
 use crate::log;
-use crate::log::Log;
+use crate::log::{Held, Log, Run};
 use crate::progress::Progress;
 use crate::voters::Tally;
 use crate::{
@@ -45,6 +45,19 @@ impl Peer {
             active: false,
         }
     }
+}
+
+// A message body that `check` passed.
+enum Checked {
+    PreVote { last: Position },
+    PreVoteReply { granted: bool },
+    Vote { last: Position },
+    VoteReply { granted: bool },
+    Heartbeat { commit: Held },
+    HeartbeatReply,
+    Append { run: Run, commit: u64 },
+    AppendReply { last: Held },
+    AppendReject { hint: Held },
 }
 
 /// What the caller must do after an input, in this order: write `hard` and `entries`
@@ -346,7 +359,7 @@ impl Raft {
             self.answer_stale(from, &body);
             return Ok(());
         }
-        self.check(from, term, &body)?;
+        let body = self.check(from, term, body)?;
         if self.meet(from, term, &body) {
             self.handle(from, term, body);
         }
@@ -355,15 +368,15 @@ impl Raft {
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote
     // for a later one, or a granted PreVoteReply for a later one.
-    fn handle(&mut self, from: node::Key, term: Term, body: Body) {
+    fn handle(&mut self, from: node::Key, term: Term, body: Checked) {
         match body {
-            Body::PreVote { last } => {
+            Checked::PreVote { last } => {
                 let granted = (term > self.term || self.free_for(from))
                     && last >= self.log.last();
                 let reply = if granted { term } else { self.term };
                 self.send(from, reply, Body::PreVoteReply { granted });
             }
-            Body::Vote { last } => {
+            Checked::Vote { last } => {
                 let granted = self.free_for(from) && last >= self.log.last();
                 if granted {
                     self.election_elapsed = 0;
@@ -371,18 +384,18 @@ impl Raft {
                 }
                 self.send(from, self.term, Body::VoteReply { granted });
             }
-            Body::PreVoteReply { granted } => {
+            Checked::PreVoteReply { granted } => {
                 if self.role == Role::PreCandidate {
                     self.poll(from, granted);
                 }
             }
-            Body::VoteReply { granted } => {
+            Checked::VoteReply { granted } => {
                 if self.role == Role::Candidate {
                     self.poll(from, granted);
                 }
             }
-            Body::Heartbeat { commit } => self.heartbeat(from, commit),
-            Body::HeartbeatReply => {
+            Checked::Heartbeat { commit } => self.heartbeat(from, commit),
+            Checked::HeartbeatReply => {
                 let last = self.log.last().index;
                 let behind = self.heard_from(from).is_some_and(|peer| {
                     peer.progress.heard();
@@ -394,18 +407,14 @@ impl Raft {
                     self.send_appends(from..=from);
                 }
             }
-            Body::Append {
-                prev,
-                entries,
-                commit,
-            } => {
+            Checked::Append { run, commit } => {
                 self.follow(from);
-                self.append(from, prev, entries, commit);
+                self.append(from, run, commit);
             }
-            Body::AppendReply { last } => self.accepted(from, last),
-            Body::AppendReject { hint } => {
+            Checked::AppendReply { last } => self.accepted(from, last),
+            Checked::AppendReject { hint } => {
                 if let Some(peer) = self.heard_from(from) {
-                    peer.progress.rejected(hint);
+                    peer.progress.rejected(hint.index());
                     self.catch_up(from);
                 }
             }
@@ -413,51 +422,47 @@ impl Raft {
     }
 
     // Checks a message of this term or a later one against the node's state and its
-    // log. The index of a heartbeat, an append reply, or an append reject is then at
-    // most the last log index. An append and a vote can name one past it, because
-    // this node can be behind.
-    fn check(&self, from: node::Key, term: Term, body: &Body) -> Result<(), Error> {
-        let last = self.log.last();
-        let within = |index: u64| {
-            if index > last.index {
-                return Err(Error::IndexPastLog {
-                    index,
-                    last: last.index,
-                });
-            }
-            Ok(())
-        };
-        match body {
+    // log. An append and a vote can name an index past the last one, because this
+    // node can be behind.
+    fn check(&self, from: node::Key, term: Term, body: Body) -> Result<Checked, Error> {
+        Ok(match body {
             Body::Heartbeat { .. } | Body::Append { .. }
                 if term == self.term && self.led.is_some_and(|led| led != from) =>
             {
-                Err(Error::SecondLeader { term, from })
+                return Err(Error::SecondLeader { term, from });
             }
-            Body::Heartbeat { commit } => within(*commit),
-            Body::Append { prev, entries, .. } => {
-                log::check(entries, *prev)?;
-                match entries.last() {
-                    Some(entry) if entry.at.term > term => Err(Error::TermBehindLog {
-                        term,
-                        last: entry.at,
-                    }),
-                    _ => Ok(()),
+            Body::PreVote { last } => Checked::PreVote { last },
+            Body::PreVoteReply { granted } => Checked::PreVoteReply { granted },
+            Body::Vote { last } => Checked::Vote { last },
+            Body::VoteReply { granted } => Checked::VoteReply { granted },
+            Body::Heartbeat { commit } => Checked::Heartbeat {
+                commit: self.log.held(commit)?,
+            },
+            Body::HeartbeatReply => Checked::HeartbeatReply,
+            Body::Append {
+                prev,
+                entries,
+                commit,
+            } => {
+                let run = log::check(prev, entries)?;
+                if let Some(last) = run.last().filter(|last| last.term > term) {
+                    return Err(Error::TermBehindLog { term, last });
                 }
+                Checked::Append { run, commit }
             }
-            Body::AppendReply { last } => within(*last),
-            Body::AppendReject { hint } => within(*hint),
-            Body::PreVote { .. }
-            | Body::Vote { .. }
-            | Body::PreVoteReply { .. }
-            | Body::VoteReply { .. }
-            | Body::HeartbeatReply => Ok(()),
-        }
+            Body::AppendReply { last } => Checked::AppendReply {
+                last: self.log.held(last)?,
+            },
+            Body::AppendReject { hint } => Checked::AppendReject {
+                hint: self.log.held(hint)?,
+            },
+        })
     }
 
     // Commits what the leader's heartbeat says and answers it.
-    fn heartbeat(&mut self, leader: node::Key, commit: u64) {
+    fn heartbeat(&mut self, leader: node::Key, commit: Held) {
         self.follow(leader);
-        self.log.commit_to(commit);
+        self.log.commit_to(commit.index());
         self.release_removed();
         self.send(leader, self.term, Body::HeartbeatReply);
     }
@@ -504,14 +509,8 @@ impl Raft {
     }
 
     // Appends the leader's entries as a follower and answers.
-    fn append(
-        &mut self,
-        leader: node::Key,
-        prev: Position,
-        entries: Vec<Entry>,
-        commit: u64,
-    ) {
-        let reply = match self.log.append(prev, entries) {
+    fn append(&mut self, leader: node::Key, run: Run, commit: u64) {
+        let reply = match self.log.append(run) {
             Ok(last) => {
                 self.sync_voters();
                 self.log.commit_to(commit.min(last));
@@ -524,10 +523,10 @@ impl Raft {
     }
 
     // Records that a follower holds the leader's log up to `last`, as the leader.
-    fn accepted(&mut self, from: node::Key, last: u64) {
+    fn accepted(&mut self, from: node::Key, last: Held) {
         let accepted = self
             .heard_from(from)
-            .is_some_and(|peer| peer.progress.accepted(last));
+            .is_some_and(|peer| peer.progress.accepted(last.index()));
         if !accepted || self.advance() {
             return;
         }
@@ -677,25 +676,25 @@ impl Raft {
     // Steps down for a message of a higher term that `check` passed, except a PreVote
     // or its grant. Returns false, so the message is dropped, only for a PreVote or
     // Vote of a higher term while this node has a lease.
-    fn meet(&mut self, from: node::Key, term: Term, body: &Body) -> bool {
+    fn meet(&mut self, from: node::Key, term: Term, body: &Checked) -> bool {
         if term > self.term {
             match body {
                 // A voter that heard from a leader within the election timeout does
                 // not help to replace it.
-                Body::PreVote { .. } | Body::Vote { .. } if self.leased() => {
+                Checked::PreVote { .. } | Checked::Vote { .. } if self.leased() => {
                     return false;
                 }
                 // A PreVote, or its grant, carries a term that no node is in yet.
-                Body::PreVote { .. } | Body::PreVoteReply { granted: true } => {}
-                Body::Heartbeat { .. } | Body::Append { .. } => {
+                Checked::PreVote { .. } | Checked::PreVoteReply { granted: true } => {}
+                Checked::Heartbeat { .. } | Checked::Append { .. } => {
                     self.become_follower(term, Some(from));
                 }
-                Body::Vote { .. }
-                | Body::PreVoteReply { granted: false }
-                | Body::VoteReply { .. }
-                | Body::HeartbeatReply
-                | Body::AppendReply { .. }
-                | Body::AppendReject { .. } => self.become_follower(term, None),
+                Checked::Vote { .. }
+                | Checked::PreVoteReply { granted: false }
+                | Checked::VoteReply { .. }
+                | Checked::HeartbeatReply
+                | Checked::AppendReply { .. }
+                | Checked::AppendReject { .. } => self.become_follower(term, None),
             }
         }
         true
