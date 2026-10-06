@@ -27,8 +27,10 @@ const RESTART_LEN: usize = 4;
 const RESTART: usize = ALIGN;
 const _: () = assert!(HEADER_LEN + RESTART_LEN <= RESTART, "a restart record fits");
 
-/// The smallest body a layout allows: the table of one entry.
-const BODY_MIN: usize = entry::table_len(1);
+/// The smallest body a layout allows: the rest of a block after the record header.
+/// A record takes whole blocks, so a smaller body saves no disk.
+const BODY_MIN: usize = ALIGN - HEADER_LEN;
+const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry");
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
@@ -98,11 +100,12 @@ impl Layout {
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under the table of one entry or over `u32::MAX`, when `area` is less than
-    /// twice the largest record (a 9-byte header and `body_max`, in whole 4096-byte
-    /// blocks), or when the ring file (two header blocks and the area) does not fit
-    /// in a `u64`. A ring of that length that holds only its restart record takes
-    /// any record, wherever the restart record is.
+    /// under 4087 bytes (one block less the record header) or over `u32::MAX`,
+    /// when `area` is less than twice the largest record (a 9-byte header and
+    /// `body_max`, in whole 4096-byte blocks), or when the ring file (two header
+    /// blocks and the area) does not fit in a `u64`. A ring of that length that
+    /// holds only its restart record takes any record, wherever the restart record
+    /// is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
@@ -141,13 +144,14 @@ impl Layout {
     }
 
     /// The most bytes of parts in a batch of one entry that
-    /// [`Buffer::append`](crate::Buffer::append) takes: one byte more gives
-    /// [`Error::Large`](crate::Error::Large) with [`Limit::Body`](crate::Limit::Body).
+    /// [`Buffer::append`](crate::Buffer::append) takes, at least 4032: one byte more
+    /// gives [`Error::Large`](crate::Error::Large) with
+    /// [`Limit::Body`](crate::Limit::Body).
     /// Each entry of a larger batch adds to the record's table, so its entries hold
     /// less in all.
     #[must_use]
     pub fn entry_max(self) -> usize {
-        self.body_max - BODY_MIN
+        self.body_max - entry::table_len(1)
     }
 
     /// The length of the ring file: the two header blocks and the area.
@@ -931,11 +935,7 @@ mod tests {
             let block = 4096;
             let cases = [
                 ("an area of part blocks", 7 * block + 1, 4087),
-                (
-                    "a body under one entry table",
-                    8 * block,
-                    entry::table_len(1) - 1,
-                ),
+                ("a body under one block less the header", 8 * block, 4086),
                 ("an area of one record of two blocks", 2 * block, 4088),
                 ("an area of one record of one block", block, 4087),
                 ("an area of two records less a block", 3 * block, 4088),
@@ -960,9 +960,8 @@ mod tests {
         }
 
         #[test]
-        fn takes_a_body_of_one_entry_table() {
-            let window = Layout::new(2 * 4096, entry::table_len(1)).map(|l| l.window);
-            assert_eq!(window, Ok(4096));
+        fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
+            assert_eq!(Layout::new(2 * 4096, 4087).map(Layout::entry_max), Ok(4032));
         }
 
         #[test]
@@ -980,7 +979,7 @@ mod tests {
             /// wherever the restart record is.
             #[test]
             fn takes_the_largest_record_after_the_restart_record_at_any_tail(
-                body_max in entry::table_len(1)..=3 * ALIGN - HEADER_LEN,
+                body_max in BODY_MIN..=3 * ALIGN - HEADER_LEN,
                 tail in 0..64u64,
             ) {
                 let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));

@@ -185,6 +185,9 @@ impl env::files::Descriptor for Descriptor {
 
 impl Drop for Descriptor {
     fn drop(&mut self) {
+        // No drop follows the crash that released the hold: a descriptor is `!Send`,
+        // no target holds a `thread_local!`, and a crash drops every task of its
+        // node.
         let unused = lock(&self.node.shared)
             .files()
             .release(self.node.node, self.handle);
