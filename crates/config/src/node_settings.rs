@@ -2,58 +2,48 @@ use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
 use spec::node_settings::{Error, Policy};
 
-use crate::{Check, Entry};
+use crate::{Entry, Found};
 
-const MISSING_ATTRIBUTE: Code = Code::new("config.missing-attribute");
 const ZERO_SIZE: Code = Code::new("config.zero-size");
+const KEYS: [&str; 3] = ["select", "disk", "pool"];
 
-/// Checks a `node_settings` block and adds its policy to the entries.
-pub(crate) fn check<'a>(check: &mut Check<'a>, block: &'a Block) {
-    let keyword = &*block.keyword;
-    let key = check.key(block);
-    let before = check.diagnostics.len();
-    let (mut select, mut disk, mut pool) = (None, None, None);
-    for attribute in block.body.attributes.iter() {
-        match &*attribute.key {
-            "select" => select = check.report(read::selector(&attribute.value)),
-            "disk" => disk = check.report(read::size(&attribute.value)),
-            "pool" => pool = check.report(read::size(&attribute.value)),
-            _ => check.unknown_attribute(
-                keyword,
-                attribute,
-                "`select`, `disk`, or `pool`",
-            ),
-        }
+/// Checks a `node_settings` block and adds its policy to the entries. An unknown
+/// attribute stops the budget check, because it may be a budget under a wrong key.
+pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
+    let key = found.key(block);
+    let unknown = found.unknown_attributes(block, &KEYS);
+    found.unknown_blocks(block);
+    let select = found.attribute(block, "select", read::selector);
+    let disk = found.attribute(block, "disk", read::size);
+    let pool = found.attribute(block, "pool", read::size);
+    if matches!(select, Ok(None)) {
+        let fix = "Add a `select` attribute with the nodes that it sets, such as \
+                   \"site_a.*\"";
+        found.missing(block, &["select"], fix.into());
     }
-    let refused = check.diagnostics.len() > before;
-    check.unknown_blocks(keyword, &block.body);
-    if block.body.attributes.get("select").is_none() {
-        check.diagnostics.push(Diagnostic::new(
-            MISSING_ATTRIBUTE,
-            block.keyword_span,
-            format!("the `{keyword}` block has no `select`"),
-            "Add the nodes that it sets, such as `select = \"site_a.*\"`".into(),
-        ));
-    }
-    if refused {
-        return;
-    }
-    let Some(select) = select else {
+    let (Ok(()), Ok(Some(select)), Ok(disk), Ok(pool)) = (unknown, select, disk, pool)
+    else {
         return;
     };
     match Policy::new(select, disk, pool) {
         Ok(policy) => {
-            if let Some((key, span)) = key {
+            if let Some((key, label_span)) = key {
                 let definition = spec::definition::Definition::NodeSettings(policy);
-                check.entries.insert(key, Entry { definition, span });
+                found.entries.insert(
+                    key,
+                    Entry {
+                        definition,
+                        label_span,
+                    },
+                );
             }
         }
-        Err(error) => check.diagnostics.push(refusal(block, error)),
+        Err(error) => refuse(found, block, error),
     }
 }
 
-/// The diagnostic for a policy that `Policy::new` refuses.
-fn refusal(block: &Block, error: Error) -> Diagnostic {
+/// Reports a policy that `Policy::new` refuses.
+fn refuse(found: &mut Found<'_>, block: &Block, error: Error) {
     let zero = |key: &str| {
         let at = block.body.attributes.get(key);
         Diagnostic::new(
@@ -64,13 +54,12 @@ fn refusal(block: &Block, error: Error) -> Diagnostic {
         )
     };
     match error {
-        Error::ZeroDisk => zero("disk"),
-        Error::ZeroPool => zero("pool"),
-        Error::NoBudget => Diagnostic::new(
-            MISSING_ATTRIBUTE,
-            block.keyword_span,
-            format!("the `{}` block has no `disk` or `pool`", block.keyword),
-            "Add `disk`, `pool`, or both, such as `disk = \"10GiB\"`".into(),
-        ),
+        Error::ZeroDisk => found.diagnostics.push(zero("disk")),
+        Error::ZeroPool => found.diagnostics.push(zero("pool")),
+        Error::NoBudget => {
+            let fix = "Add a `disk` attribute, a `pool` attribute, or both, with a \
+                       size such as \"10GiB\"";
+            found.missing(block, &["disk", "pool"], fix.into());
+        }
     }
 }

@@ -6,15 +6,23 @@ mod node_settings;
 use std::collections::{BTreeMap, btree_map};
 
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Attribute, Block, Document, Label, Span, read};
+use document::value::Value;
+use document::{Block, Document, Label, Span, read};
 use types::name::Name;
 
 const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
 const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
+const MISSING_ATTRIBUTE: Code = Code::new("config.missing-attribute");
 const LABEL_COUNT: Code = Code::new("config.label-count");
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
+
+/// The check of one kind of block.
+type Check = for<'a> fn(&mut Found<'a>, &'a Block);
+
+/// Each kind of block, by keyword, and its check.
+const KINDS: [(&str, Check); 1] = [("node_settings", node_settings::check)];
 
 /// A checked definition and the label that names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,8 +30,8 @@ const LONG_NAME: Code = Code::new("config.long-name");
 pub struct Entry {
     /// The definition, as the spec tree stores it.
     pub definition: spec::definition::Definition,
-    /// The label that names it, for `explain`.
-    pub span: Option<Span>,
+    /// Where the label is.
+    pub label_span: Option<Span>,
 }
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
@@ -33,13 +41,14 @@ pub struct Entry {
 ///
 /// Every problem in the Documents, in the order of `documents`, then in source order.
 /// A value that a reader or a definition refuses gives only its first problem. A
-/// policy's budgets are checked only after all its attributes read.
+/// definition is checked as a whole (a policy's budgets, for example) only when each
+/// of its attributes is known and reads, and the ones it needs are there.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
-    let mut check = Check::default();
+    let mut found = Found::default();
     for document in documents {
-        let start = check.diagnostics.len();
+        let start = found.diagnostics.len();
         for attribute in document.attributes.iter() {
-            check.diagnostics.push(Diagnostic::new(
+            found.diagnostics.push(Diagnostic::new(
                 UNKNOWN_ATTRIBUTE,
                 attribute.key_span,
                 format!("`{}` is an attribute outside a block", attribute.key),
@@ -47,39 +56,63 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
             ));
         }
         for block in &document.blocks {
-            match &*block.keyword {
-                "node_settings" => node_settings::check(&mut check, block),
-                keyword => check.diagnostics.push(Diagnostic::new(
+            match KINDS
+                .iter()
+                .find(|(keyword, _)| *keyword == &*block.keyword)
+            {
+                Some((_, check_block)) => check_block(&mut found, block),
+                None => found.diagnostics.push(Diagnostic::new(
                     UNKNOWN_BLOCK,
                     block.keyword_span,
-                    format!("`{keyword}` is not a kind of block"),
-                    "Use `node_settings`, or remove the block".into(),
+                    format!("`{}` is not a kind of block", block.keyword),
+                    format!(
+                        "Use {}, or remove the block",
+                        one_of(&KINDS.map(|(keyword, _)| keyword))
+                    ),
                 )),
             }
         }
-        check.diagnostics[start..]
+        found.diagnostics[start..]
             .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
-    if check.diagnostics.is_empty() {
-        Ok(check.entries)
+    if found.diagnostics.is_empty() {
+        Ok(found.entries)
     } else {
-        Err(check.diagnostics)
+        Err(found.diagnostics)
+    }
+}
+
+/// `words` in backticks, as a list that ends with "or".
+fn one_of(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [word] => format!("`{word}`"),
+        [first, second] => format!("`{first}` or `{second}`"),
+        [rest @ .., last] => {
+            let rest: Vec<String> =
+                rest.iter().map(|word| format!("`{word}`")).collect();
+            format!("{}, or `{last}`", rest.join(", "))
+        }
     }
 }
 
 /// What `check` has found so far.
 #[derive(Debug, Default)]
-struct Check<'a> {
+struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// The label of each policy name so far, by block keyword and the name in
-    /// lowercase, so that names that differ only in case collide.
-    names: BTreeMap<(&'a str, Box<str>), &'a Label>,
+    /// The label of each tree key so far, by the key in lowercase, so that keys that
+    /// differ only in case collide.
+    labels: BTreeMap<Box<str>, &'a Label>,
 }
 
-impl<'a> Check<'a> {
-    /// Reads the one label of a policy block as its name, unique among the policies
-    /// of its kind, and gives the tree key and the label's span.
+/// A problem that is already in the diagnostics.
+#[derive(Debug)]
+struct Reported;
+
+impl<'a> Found<'a> {
+    /// Reads the one label of a policy block as its name, and gives the tree key,
+    /// unique in any case, and the label's span.
     fn key(&mut self, block: &'a Block) -> Option<(Name, Option<Span>)> {
         let keyword = &*block.keyword;
         let label = self.label(block)?;
@@ -91,15 +124,15 @@ impl<'a> Check<'a> {
                 LONG_NAME,
                 label.span,
                 format!(
-                    "the name {:?} is {bytes} bytes, and a `{keyword}` name holds at \
-                     most {most}",
+                    "the name {:?} is {bytes} bytes, and the most for the `{keyword}` \
+                     block is {most}",
                     label.text
                 ),
                 format!("Shorten the name to at most {most} bytes"),
             ));
             return None;
         }
-        let name = self.report(read::name(label))?;
+        let name = self.report(read::name(label)).ok()?;
         if name.reserved() {
             self.diagnostics.push(Diagnostic::new(
                 RESERVED_NAME,
@@ -112,14 +145,13 @@ impl<'a> Check<'a> {
             ));
             return None;
         }
-        let folded = name.as_str().to_ascii_lowercase().into();
-        let first = match self.names.entry((keyword, folded)) {
+        let key: Name = format!("{name}{suffix}")
+            .parse()
+            .expect("a name and a reserved keyword segment make a name");
+        let first = match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
             btree_map::Entry::Occupied(first) => *first.get(),
             btree_map::Entry::Vacant(entry) => {
                 entry.insert(label);
-                let key = format!("{name}{suffix}").parse();
-                let key =
-                    key.expect("a name and a reserved keyword segment make a name");
                 return Some((key, label.span));
             }
         };
@@ -145,7 +177,6 @@ impl<'a> Check<'a> {
 
     /// The one label of a policy block.
     fn label(&mut self, block: &'a Block) -> Option<&'a Label> {
-        let keyword = &*block.keyword;
         let [label] = block.labels.as_slice() else {
             let at = block
                 .labels
@@ -155,56 +186,95 @@ impl<'a> Check<'a> {
                 LABEL_COUNT,
                 at,
                 format!(
-                    "a `{keyword}` block has {} labels, and it needs one, its name",
+                    "the `{}` block has {} labels, and it needs one, its name",
+                    block.keyword,
                     block.labels.len()
                 ),
-                format!("Write one label, such as `{keyword} \"site_a.budget\"`"),
+                "Give the block one label, its name, such as \"site_a.budget\"".into(),
             ));
             return None;
         };
         Some(label)
     }
 
-    /// The value that a reader gives, or `None` after it reports the reader's
+    /// The value that a reader gives, or `Reported` after it reports the reader's
     /// diagnostic.
-    fn report<T>(&mut self, read: Result<T, Diagnostic>) -> Option<T> {
-        read.map_err(|diagnostic| self.diagnostics.push(diagnostic))
-            .ok()
+    fn report<T>(&mut self, read: Result<T, Diagnostic>) -> Result<T, Reported> {
+        read.map_err(|diagnostic| {
+            self.diagnostics.push(diagnostic);
+            Reported
+        })
     }
 
-    /// Reports an attribute of a `keyword` block that is not one of `keys`.
-    fn unknown_attribute(&mut self, keyword: &str, attribute: &Attribute, keys: &str) {
-        self.diagnostics.push(Diagnostic::new(
-            UNKNOWN_ATTRIBUTE,
-            attribute.key_span,
-            format!(
-                "`{}` is not an attribute of a `{keyword}` block",
-                attribute.key
-            ),
-            format!("Use {keys}, or remove it"),
-        ));
+    /// The attribute `key` of `block` as `read` reads it, or `None` when the block has
+    /// no such attribute.
+    fn attribute<T>(
+        &mut self,
+        block: &Block,
+        key: &str,
+        read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
+    ) -> Result<Option<T>, Reported> {
+        let attribute = block.body.attributes.get(key);
+        attribute
+            .map(|attribute| self.report(read(&attribute.value)))
+            .transpose()
     }
 
-    /// Reports each block in the body of a `keyword` block, which holds none.
-    fn unknown_blocks(&mut self, keyword: &str, body: &Document) {
-        for block in &body.blocks {
+    /// Reports each attribute of `block` that is not one of `keys`.
+    fn unknown_attributes(
+        &mut self,
+        block: &Block,
+        keys: &[&str],
+    ) -> Result<(), Reported> {
+        let mut result = Ok(());
+        for attribute in block.body.attributes.iter() {
+            if keys.contains(&&*attribute.key) {
+                continue;
+            }
+            self.diagnostics.push(Diagnostic::new(
+                UNKNOWN_ATTRIBUTE,
+                attribute.key_span,
+                format!(
+                    "`{}` is not an attribute of the `{}` block",
+                    attribute.key, block.keyword
+                ),
+                format!("Use {}, or remove it", one_of(keys)),
+            ));
+            result = Err(Reported);
+        }
+        result
+    }
+
+    /// Reports each block in the body of `block`, which holds none.
+    fn unknown_blocks(&mut self, block: &Block) {
+        for inner in &block.body.blocks {
             self.diagnostics.push(Diagnostic::new(
                 UNKNOWN_BLOCK,
-                block.keyword_span,
+                inner.keyword_span,
                 format!(
-                    "a `{keyword}` block cannot hold a `{}` block",
-                    block.keyword
+                    "the `{}` block cannot hold the `{}` block",
+                    block.keyword, inner.keyword
                 ),
                 "Remove it".into(),
             ));
         }
     }
+
+    /// Reports that `block` has none of the attributes `keys`.
+    fn missing(&mut self, block: &Block, keys: &[&str], fix: String) {
+        self.diagnostics.push(Diagnostic::new(
+            MISSING_ATTRIBUTE,
+            block.keyword_span,
+            format!("the `{}` block has no {}", block.keyword, one_of(keys)),
+            fix,
+        ));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use document::value::{Kind, Value};
-    use document::{Map, Position, Source};
+    use document::value::Kind;
+    use document::{Attribute, Map, Position, Source};
     use proptest::prelude::*;
     use spec::node_settings::Policy;
     use types::byte;
@@ -309,9 +379,12 @@ mod tests {
         let policy = Policy::new(selector(select), disk, pool).unwrap();
         Entry {
             definition: spec::definition::Definition::NodeSettings(policy),
-            span,
+            label_span: span,
         }
     }
+
+    const NO_BUDGET_FIX: &str = "Add a `disk` attribute, a `pool` attribute, or \
+                                 both, with a size such as \"10GiB\"";
 
     fn key(text: &str) -> Name {
         text.parse().unwrap()
@@ -418,7 +491,7 @@ mod tests {
     #[test]
     fn refuses_a_policy_without_one_label() {
         let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
-        let fix = "Write one label, such as `node_settings \"site_a.budget\"`";
+        let fix = "Give the block one label, its name, such as \"site_a.budget\"";
         let documents = [document(vec![
             block(0, 0, "node_settings", &[], &policy),
             block(0, 100, "node_settings", &["a", "b", "c"], &policy),
@@ -429,13 +502,15 @@ mod tests {
                 refused(
                     "config.label-count",
                     at(0, 0),
-                    "a `node_settings` block has 0 labels, and it needs one, its name",
+                    "the `node_settings` block has 0 labels, and it needs one, its \
+                     name",
                     fix,
                 ),
                 refused(
                     "config.label-count",
                     at(0, 102),
-                    "a `node_settings` block has 3 labels, and it needs one, its name",
+                    "the `node_settings` block has 3 labels, and it needs one, its \
+                     name",
                     fix,
                 ),
             ])
@@ -518,13 +593,13 @@ mod tests {
                 refused(
                     "config.unknown-attribute",
                     at(0, 12),
-                    "`disks` is not an attribute of a `node_settings` block",
+                    "`disks` is not an attribute of the `node_settings` block",
                     "Use `select`, `disk`, or `pool`, or remove it",
                 ),
                 refused(
                     "config.unknown-block",
                     at(0, 50),
-                    "a `node_settings` block cannot hold a `node_settings` block",
+                    "the `node_settings` block cannot hold the `node_settings` block",
                     "Remove it",
                 ),
             ])
@@ -532,21 +607,47 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_policy_without_select() {
-        let documents = [document(vec![settings(
-            0,
-            0,
-            "a",
-            &[("disk", string("1GiB"))],
-        )])];
+    fn refuses_a_policy_without_select_before_its_budgets() {
+        let documents = [document(vec![
+            settings(0, 0, "a", &[("disk", string("1GiB"))]),
+            settings(0, 100, "b", &[("disk", string("0B"))]),
+            settings(0, 200, "c", &[]),
+        ])];
+        let missing = |offset| {
+            refused(
+                "config.missing-attribute",
+                at(0, offset),
+                "the `node_settings` block has no `select`",
+                "Add a `select` attribute with the nodes that it sets, such as \
+                 \"site_a.*\"",
+            )
+        };
         assert_eq!(
             check(&documents),
-            Err(vec![refused(
-                "config.missing-attribute",
-                at(0, 0),
-                "the `node_settings` block has no `select`",
-                "Add the nodes that it sets, such as `select = \"site_a.*\"`",
-            )])
+            Err(vec![missing(0), missing(100), missing(200)])
+        );
+    }
+
+    #[test]
+    fn checks_the_budgets_of_a_policy_that_holds_a_block() {
+        let mut policy = settings(0, 0, "a", &[("select", string("site_a.*"))]);
+        policy.body.blocks.push(block(0, 50, "inner", &[], &[]));
+        assert_eq!(
+            check(&[document(vec![policy])]),
+            Err(vec![
+                refused(
+                    "config.missing-attribute",
+                    at(0, 0),
+                    "the `node_settings` block has no `disk` or `pool`",
+                    NO_BUDGET_FIX,
+                ),
+                refused(
+                    "config.unknown-block",
+                    at(0, 50),
+                    "the `node_settings` block cannot hold the `inner` block",
+                    "Remove it",
+                ),
+            ])
         );
     }
 
@@ -570,8 +671,8 @@ mod tests {
                     "config.long-name",
                     at(0, 101),
                     &format!(
-                        "the name {long:?} is 241 bytes, and a `node_settings` name \
-                         holds at most 240"
+                        "the name {long:?} is 241 bytes, and the most for the \
+                         `node_settings` block is 240"
                     ),
                     "Shorten the name to at most 240 bytes",
                 ),
@@ -579,8 +680,8 @@ mod tests {
                     "config.long-name",
                     at(0, 201),
                     &format!(
-                        "the name {longest:?} is 256 bytes, and a `node_settings` \
-                         name holds at most 240"
+                        "the name {longest:?} is 256 bytes, and the most for the \
+                         `node_settings` block is 240"
                     ),
                     "Shorten the name to at most 240 bytes",
                 ),
@@ -608,7 +709,7 @@ mod tests {
                 "config.missing-attribute",
                 at(0, 0),
                 "the `node_settings` block has no `disk` or `pool`",
-                "Add `disk`, `pool`, or both, such as `disk = \"10GiB\"`",
+                NO_BUDGET_FIX,
             )])
         );
     }
