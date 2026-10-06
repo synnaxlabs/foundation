@@ -5,8 +5,8 @@ use std::future::{pending, poll_fn};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use env::files::{Error, Mode, Operation};
@@ -50,33 +50,13 @@ fn crash_after<F>(
     sim.crash(node, crash);
 }
 
-/// Runs `body` on a new shard of `node` until it ends, and returns what it gives.
-fn on<T, F>(
-    sim: &mut Sim,
-    node: &node::Node,
-    body: impl FnOnce(node::Node) -> F + Send + 'static,
-) -> T
-where
-    T: Send + 'static,
-    F: Future<Output = T> + 'static,
-{
-    let out = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&out);
-    let own = node.clone();
-    let handle = node.shards().start(shard("after"), move |_| async move {
-        *slot.lock().unwrap() = Some(body(own).await);
-    });
-    sim.run().unwrap();
-    handle.unwrap().join().unwrap();
-    out.lock().unwrap().take().expect("the shard gave a value")
-}
-
 /// The sectors of the 1 KiB file `a` of `node`.
 fn sectors_of(sim: &mut Sim, node: &node::Node) -> Vec<u8> {
-    on(sim, node, |node| async move {
+    sim.run_on(node, |node, _| async move {
         let file = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
         sectors(&read(&file, &pool(), 0, 1_024).await)
     })
+    .unwrap()
 }
 
 /// Makes the 1 KiB file `a` durable in the data directory, with each sector 1.
@@ -101,9 +81,11 @@ fn a_process_crash_keeps_each_call_that_ended() {
                 .unwrap();
             node.files().create_dir(Path::new("d")).await.unwrap();
         });
-        let names = on(&mut sim, &node, |node| async move {
-            node.files().list(Path::new("")).await.unwrap()
-        });
+        let names = sim
+            .run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
         assert_eq!(
             names,
             [PathBuf::from("a"), PathBuf::from("d")],
@@ -205,11 +187,12 @@ fn changed(seed: u64, synced: bool) -> (Vec<PathBuf>, u64) {
             files.sync_dir(Path::new("")).await.unwrap();
         }
     });
-    on(&mut sim, &node, |node| async move {
+    sim.run_on(&node, |node, _| async move {
         let files = node.files();
         let names = files.list(Path::new("")).await.unwrap();
         (names, files.free().await.unwrap())
     })
+    .unwrap()
 }
 
 #[test]
@@ -231,12 +214,14 @@ fn a_power_cut_drops_a_directory_whose_parent_was_never_synced() {
         drop(create(&node, "d/f", 64 * KIB).await);
         files.sync_dir(Path::new("d")).await.unwrap();
     });
-    let (names, free, opened) = on(&mut sim, &node, |node| async move {
-        let files = node.files();
-        let names = files.list(Path::new("")).await.unwrap();
-        let opened = files.open(Path::new("d/f"), Mode::Read).await.map(drop);
-        (names, files.free().await.unwrap(), opened)
-    });
+    let (names, free, opened) = sim
+        .run_on(&node, |node, _| async move {
+            let files = node.files();
+            let names = files.list(Path::new("")).await.unwrap();
+            let opened = files.open(Path::new("d/f"), Mode::Read).await.map(drop);
+            (names, files.free().await.unwrap(), opened)
+        })
+        .unwrap();
     assert_eq!(names, Vec::<PathBuf>::new());
     assert_eq!(free, MIB);
     let path = "d/f".into();
@@ -247,16 +232,18 @@ fn a_power_cut_drops_a_directory_whose_parent_was_never_synced() {
 /// a fault fails: as a new descriptor reads them, and after a power cut.
 fn torn(seed: u64) -> (Vec<u8>, Vec<u8>) {
     let (mut sim, node) = disk(seed);
-    let shown = on(&mut sim, &node, |node| async move {
-        let (file, pool) = (create_synced(&node).await, pool());
-        file.write_at(0, &[block(&pool, &[2; 1_024])])
-            .await
-            .unwrap();
-        node.fail_file(Path::new("a"), Operation::Sync);
-        assert_eq!(file.sync().await, Err(io("a", Operation::Sync, 5)));
-        let reopened = node.files().open(Path::new("a"), Mode::Read).await;
-        sectors(&read(&reopened.unwrap(), &pool, 0, 1_024).await)
-    });
+    let shown = sim
+        .run_on(&node, |node, _| async move {
+            let (file, pool) = (create_synced(&node).await, pool());
+            file.write_at(0, &[block(&pool, &[2; 1_024])])
+                .await
+                .unwrap();
+            node.fail_file(Path::new("a"), Operation::Sync);
+            assert_eq!(file.sync().await, Err(io("a", Operation::Sync, 5)));
+            let reopened = node.files().open(Path::new("a"), Mode::Read).await;
+            sectors(&read(&reopened.unwrap(), &pool, 0, 1_024).await)
+        })
+        .unwrap();
     sim.crash(&node, Crash::Power);
     (shown, sectors_of(&mut sim, &node))
 }
@@ -306,11 +293,12 @@ fn in_flight(seed: u64, crash: Crash, failed: bool) -> Vec<u8> {
     crash_after(&mut sim, &node, crash, move |node| {
         write_in_flight(node, failed)
     });
-    on(&mut sim, &node, |node| async move {
+    sim.run_on(&node, |node, _| async move {
         node.clock().sleep(Span::MILLISECOND).await;
         let file = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
         sectors(&read(&file, &pool(), 0, 1_024).await)
     })
+    .unwrap()
 }
 
 #[test]
@@ -331,9 +319,11 @@ fn a_crash_frees_each_file_that_a_write_handle_held() {
     {
         let (mut sim, node) = disk(value);
         crash_after(&mut sim, &node, crash, |node| write_in_flight(node, false));
-        let open = on(&mut sim, &node, |node| async move {
-            node.files().open(Path::new("a"), Mode::Write).await.err()
-        });
+        let open = sim
+            .run_on(&node, |node, _| async move {
+                node.files().open(Path::new("a"), Mode::Write).await.err()
+            })
+            .unwrap();
         assert_eq!(open, None, "{crash:?}, value {value}");
     }
 }
@@ -377,12 +367,14 @@ fn a_sync_in_flight_at_a_power_cut_has_no_effect() {
 #[test]
 fn a_power_cut_frees_a_file_that_a_call_in_flight_held() {
     let (mut sim, node) = sync_at_cut(0);
-    let free = on(&mut sim, &node, |node| async move {
-        let files = node.files();
-        files.remove(Path::new("a")).await.unwrap();
-        files.sync_dir(Path::new("")).await.unwrap();
-        files.free().await.unwrap()
-    });
+    let free = sim
+        .run_on(&node, |node, _| async move {
+            let files = node.files();
+            files.remove(Path::new("a")).await.unwrap();
+            files.sync_dir(Path::new("")).await.unwrap();
+            files.free().await.unwrap()
+        })
+        .unwrap();
     assert_eq!(free, MIB);
 }
 
@@ -394,9 +386,11 @@ fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
         until_crash(&node).await;
         hang(node.files().sync_dir(Path::new(""))).await;
     });
-    let names = on(&mut sim, &node, |node| async move {
-        node.files().list(Path::new("")).await.unwrap()
-    });
+    let names = sim
+        .run_on(&node, |node, _| async move {
+            node.files().list(Path::new("")).await.unwrap()
+        })
+        .unwrap();
     assert_eq!(names, Vec::<PathBuf>::new());
 }
 
@@ -529,9 +523,11 @@ fn a_process_crash_frees_a_file_that_a_write_open_in_flight_opens() {
             until_crash(&node).await;
             hang(node.files().open(Path::new("a"), Mode::Write)).await;
         });
-        let open = on(&mut sim, &node, |node| async move {
-            node.files().open(Path::new("a"), Mode::Write).await.err()
-        });
+        let open = sim
+            .run_on(&node, |node, _| async move {
+                node.files().open(Path::new("a"), Mode::Write).await.err()
+            })
+            .unwrap();
         assert_eq!(open, None, "value {value}");
     }
 }
@@ -544,9 +540,11 @@ fn a_process_crash_applies_a_create_dir_in_flight() {
             until_crash(&node).await;
             hang(node.files().create_dir(Path::new("d"))).await;
         });
-        let names = on(&mut sim, &node, |node| async move {
-            node.files().list(Path::new("")).await.unwrap()
-        });
+        let names = sim
+            .run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
         assert_eq!(names, [PathBuf::from("d")], "value {value}");
     }
 }
@@ -570,10 +568,11 @@ fn remove_then_create_at_a_crash(value: u64) -> Vec<PathBuf> {
         .await;
         pending::<()>().await;
     });
-    on(&mut sim, &node, |node| async move {
+    sim.run_on(&node, |node, _| async move {
         node.clock().sleep(Span::MILLISECOND).await;
         node.files().list(Path::new("")).await.unwrap()
     })
+    .unwrap()
 }
 
 #[test]
@@ -603,13 +602,15 @@ fn create_then_sync_dir_at_a_crash(value: u64) -> Vec<PathBuf> {
         .await;
         pending::<()>().await;
     });
-    on(&mut sim, &node, |node| async move {
+    sim.run_on(&node, |node, _| async move {
         node.clock().sleep(Span::MILLISECOND).await;
-    });
+    })
+    .unwrap();
     sim.crash(&node, Crash::Power);
-    on(&mut sim, &node, |node| async move {
+    sim.run_on(&node, |node, _| async move {
         node.files().list(Path::new("")).await.unwrap()
     })
+    .unwrap()
 }
 
 #[test]

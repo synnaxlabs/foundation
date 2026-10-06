@@ -79,8 +79,8 @@ impl Transport {
     /// # Errors
     ///
     /// [`Error::Config`] when `config.idle` is not positive, `config.window_bytes` is
-    /// below `config.message_bytes_max`, or `config.message_bytes_max` is over
-    /// `config.pool.largest()`.
+    /// below `config.message_bytes_max`, or `config.message_bytes_max` is below 1472
+    /// or over `config.pool.largest()`.
     ///
     /// ```
     /// use transport::{Config, Error, Transport};
@@ -184,7 +184,8 @@ pub struct Config {
     pub private_key: PrivateKey,
     /// The largest message this node accepts on a stream, and the largest datagram.
     /// Peers exchange their limits in the handshake, and each sender checks the
-    /// peer's. Must be at most `pool.largest()`.
+    /// peer's. Must be at least 1472, the largest UDP payload a node takes, and at
+    /// most `pool.largest()`.
     pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.

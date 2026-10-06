@@ -292,12 +292,7 @@ impl Closed {
             header.copy_from_slice(&write.header);
             (write.place, wrap.freeze().skip(start))
         });
-        let sealed = Sealed {
-            group,
-            place: plan.place,
-            next: plan.next,
-            wrap,
-        };
+        let sealed = Sealed { group, plan, wrap };
         (sealed, next)
     }
 }
@@ -307,8 +302,7 @@ impl Closed {
 #[derive(Debug)]
 pub(crate) struct Sealed {
     group: Group,
-    place: u64,
-    next: u64,
+    plan: Plan,
     wrap: Option<(u64, Block)>,
 }
 
@@ -321,13 +315,18 @@ impl Sealed {
             .as_ref()
             .map(|(place, block)| (*place, slice::from_ref(block)));
         wrap.into_iter()
-            .chain(iter::once((self.place, &*self.group.writes)))
+            .chain(iter::once((self.plan.place, &*self.group.writes)))
+    }
+
+    /// The offset of the record.
+    pub(crate) fn offset(&self) -> u64 {
+        self.plan.offset
     }
 
     /// The offset after the record.
     #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn next(&self) -> u64 {
-        self.next
+        self.plan.next
     }
 
     /// The headers, for the durable tails once the record is synced.
@@ -754,6 +753,8 @@ mod tests {
             [(31 * 4096, 1), (0, 2)],
             "the wrap, then the record"
         );
+        assert_eq!(sealed.offset(), 32 * 4096, "the offset is past the wrap");
+        assert_eq!(sealed.next(), 34 * 4096);
         let bodies = area.walk_from(tail);
         assert_eq!(bodies.len(), 10);
         assert_eq!(bodies[9].len(), table_len(1) + 4096);
