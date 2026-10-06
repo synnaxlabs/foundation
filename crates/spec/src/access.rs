@@ -154,7 +154,7 @@ impl Policy {
 mod tests {
     use super::*;
 
-    fn patterns(texts: &[&str]) -> Selector {
+    fn selector(texts: &[&str]) -> Selector {
         Selector::new(texts.iter().copied()).unwrap()
     }
 
@@ -199,8 +199,8 @@ mod tests {
     fn gives_an_authority_only_with_write() {
         let write = [Action::Write].into_iter().collect();
         let policy = Policy::new(
-            patterns(&["ops.*"]),
-            patterns(&["a.**"]),
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
             write,
             Authority(7),
         );
@@ -208,15 +208,15 @@ mod tests {
 
         let read = [Action::Read].into_iter().collect();
         let policy = Policy::new(
-            patterns(&["ops.*"]),
-            patterns(&["a.**"]),
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
             read,
             Authority(7),
         );
         assert_eq!(policy.authority(), None);
         let zero = Policy::new(
-            patterns(&["ops.*"]),
-            patterns(&["a.**"]),
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
             read,
             Authority(0),
         );

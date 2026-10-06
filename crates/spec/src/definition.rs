@@ -12,9 +12,9 @@
 //! ```
 //!
 //! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
-//! otherwise. The stored text has no `!`.
-//! Patterns are stored as written, so a rewrite that matches the same names still
-//! changes the bytes, and `plan` shows it.
+//! otherwise. The stored text has no `!`. Patterns keep the order and form written,
+//! so a rewrite that matches the same names still changes the bytes, and `plan` shows
+//! it.
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
@@ -93,8 +93,8 @@ impl Definition {
 }
 
 fn patterns(out: &mut Vec<u8>, selector: &Selector) {
-    count(out, selector.patterns().len());
-    for pattern in selector.patterns() {
+    count(out, selector.written().len());
+    for pattern in selector.written() {
         let (excluded, body) = match pattern {
             Written::Include(body) => (0, body),
             Written::Exclude(body) => (1, body),

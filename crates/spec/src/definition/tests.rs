@@ -4,15 +4,15 @@ use types::name::Name;
 
 use super::*;
 
-fn patterns(texts: &[&str]) -> Selector {
+fn selector(texts: &[&str]) -> Selector {
     Selector::new(texts.iter().copied()).unwrap()
 }
 
 fn policy() -> Definition {
     let allow = [Action::Read, Action::Write].into_iter().collect();
     Definition::Access(Policy::new(
-        patterns(&["ops.*"]),
-        patterns(&["site_a.**", "!site_a.@secrets.**"]),
+        selector(&["ops.*"]),
+        selector(&["site_a.**", "!site_a.@secrets.**"]),
         allow,
         Authority(9),
     ))
@@ -58,7 +58,7 @@ fn reads_what_it_writes() {
 #[test]
 fn writes_no_authority_without_write() {
     let read = [Action::Read].into_iter().collect();
-    let policy = Policy::new(patterns(&["a"]), patterns(&["b"]), read, Authority(9));
+    let policy = Policy::new(selector(&["a"]), selector(&["b"]), read, Authority(9));
     let bytes = Definition::Access(policy).encode();
     assert_eq!(bytes, access(&[b"a"], &[b"b"], 0b1, 0));
 }
@@ -196,7 +196,7 @@ fn stores_an_exclusion_of_the_longest_name() {
     let longest = "a".repeat(Name::MAX_BYTES);
     let excluded = format!("!{longest}");
     let select = Selector::new(["**", excluded.as_str()]).unwrap();
-    let policy = Policy::new(patterns(&["a"]), select, Actions::NONE, Authority(0));
+    let policy = Policy::new(selector(&["a"]), select, Actions::NONE, Authority(0));
     let definition = Definition::Access(policy);
     let bytes = definition.encode();
     let stored = [
@@ -251,7 +251,7 @@ fn pattern() -> impl Strategy<Value = String> {
     })
 }
 
-fn patterns_strategy() -> impl Strategy<Value = Selector> {
+fn selectors() -> impl Strategy<Value = Selector> {
     ("[a-c]{1,3}", prop::collection::vec(pattern(), 0..4)).prop_map(|(first, rest)| {
         Selector::new(std::iter::once(first.as_str()).chain(rest.iter().map(|s| &**s)))
             .unwrap()
@@ -260,8 +260,8 @@ fn patterns_strategy() -> impl Strategy<Value = Selector> {
 
 fn definition() -> impl Strategy<Value = Definition> {
     (
-        patterns_strategy(),
-        patterns_strategy(),
+        selectors(),
+        selectors(),
         prop::sample::subsequence(Action::ALL.to_vec(), 0..=6),
         any::<u8>(),
     )

@@ -203,7 +203,7 @@ pub struct Specificity {
     ones: usize,
 }
 
-/// A set of patterns, as written. A name matches when an include pattern matches it
+/// A list of patterns, as written. A name matches when an include pattern matches it
 /// and no exclusion does. An exclusion is a pattern written with a leading `!`.
 /// Equality and hashing compare the texts in order.
 #[derive(Clone)]
@@ -239,15 +239,17 @@ impl Selector {
         let mut exclude = Vec::new();
         for (position, text) in texts.iter().enumerate() {
             let text = &**text;
-            match text.strip_prefix('!') {
-                Some("") => {
+            match written(text) {
+                Written::Exclude("") => {
                     return Err(Error::Segment {
                         input: text.into(),
                         segment: String::new(),
                     });
                 }
-                Some(body) => exclude.push(Pattern::read(text, body)?),
-                None => include.push((position, Pattern::read(text, text)?)),
+                Written::Exclude(body) => exclude.push(Pattern::read(text, body)?),
+                Written::Include(body) => {
+                    include.push((position, Pattern::read(text, body)?));
+                }
             }
         }
         if include.is_empty() {
@@ -268,11 +270,8 @@ impl Selector {
 
     /// The patterns as written, in order, each by what it does.
     #[must_use]
-    pub fn patterns(&self) -> impl ExactSizeIterator<Item = Written<'_>> {
-        self.texts().map(|text| {
-            text.strip_prefix('!')
-                .map_or(Written::Include(text), Written::Exclude)
-        })
+    pub fn written(&self) -> impl ExactSizeIterator<Item = Written<'_>> {
+        self.texts().map(written)
     }
 
     /// The specificity of the most specific include pattern that matches `name`, or
@@ -289,8 +288,8 @@ impl Selector {
             .max()
     }
 
-    /// The positions, in the list given to [`Selector::new`], of the include patterns
-    /// that can match a name that does not start with `prefix`, by whole segments, as
+    /// The positions, in [`Selector::texts`], of the include patterns that can match a
+    /// name that does not start with `prefix`, by whole segments, as
     /// [`Name::starts_with`] reads it. The selector stays within `prefix` when this
     /// gives no position. Exclusions are not read, so an include that only its
     /// exclusions keep inside `prefix` still gives its position.
@@ -320,6 +319,12 @@ impl fmt::Debug for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.texts()).finish()
     }
+}
+
+/// Reads a pattern as written: a leading `!` makes it an exclusion.
+fn written(text: &str) -> Written<'_> {
+    text.strip_prefix('!')
+        .map_or(Written::Include(text), Written::Exclude)
 }
 
 fn split(s: &str) -> Result<Split<'_, char>, Error> {
@@ -791,7 +796,7 @@ mod tests {
             assert_eq!(format!("{s:?}"), r#"["a.**.**", "!a.b"]"#);
             assert_eq!(s.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
             assert_eq!(
-                s.patterns().collect::<Vec<_>>(),
+                s.written().collect::<Vec<_>>(),
                 [Written::Include("a.**.**"), Written::Exclude("a.b")]
             );
         }
@@ -816,6 +821,8 @@ mod tests {
             let a = read(&["a", "!a.b"]);
             assert_eq!(a, read(&["a", "!a.b"]));
             assert_eq!(hash(&a), hash(&read(&["a", "!a.b"])));
+            assert_ne!(hash(&read(&["a", "b"])), hash(&read(&["b", "a"])));
+            assert_ne!(hash(&read(&["a.**.**"])), hash(&read(&["a.**"])));
         }
 
         mod outside {
