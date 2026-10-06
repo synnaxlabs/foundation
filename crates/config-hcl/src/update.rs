@@ -259,7 +259,7 @@ impl<'a> File<'a> {
         let open =
             at == self.text.len() && at > self.floor && !self.text.ends_with('\n');
         if open {
-            text.insert(0, '\n');
+            text.insert_str(0, if self.crlf { "\r\n" } else { "\n" });
         }
         Edit {
             range: at..at,
@@ -273,14 +273,12 @@ impl<'a> File<'a> {
         // At one place, inserts after the item above come first, then inserts before
         // the item below, each in the order made, then a cut.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end, edit.below));
-        let line_end = if self.crlf { "\r\n" } else { "\n" };
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
-            // With `\r\n`, the writer writes no heredoc, so each `\n` ends a line.
-            out.push_str(&text.replace('\n', line_end));
+            out.push_str(&text);
             at = range.end;
         }
         out.push_str(
