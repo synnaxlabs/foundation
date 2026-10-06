@@ -340,28 +340,54 @@ fn a_fault_on_free_with_a_path_panics() {
     node.fail_file(Path::new("a"), Operation::Free);
 }
 
-/// The sectors that a read of two sectors gives while a write of 0xab over them is
-/// in flight.
+/// The bytes that a read of two sectors gives while a write of 0xab over them is in
+/// flight.
 fn read_in_flight(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
         let pool = Rc::new(pool());
         let (writer, parts) = (Rc::clone(&file), [block(&pool, &[0xab; 1_024])]);
         tasks.spawn(async move { writer.write_at(0, &parts).await.unwrap() });
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
-fn a_read_in_flight_with_a_write_sees_old_or_new_bytes_per_sector() {
-    let reads: BTreeSet<Vec<u8>> = (0..64).map(read_in_flight).collect();
+fn a_read_in_flight_with_a_write_sees_old_or_new_bytes_and_may_split_a_sector() {
+    let reads: Vec<Vec<u8>> = (0..128).map(read_in_flight).collect();
+    assert_bytes_in(reads.iter().map(Vec::as_slice), &[0, 0xab]);
     let both =
         BTreeSet::from([vec![0, 0], vec![0, 0xab], vec![0xab, 0], vec![0xab; 2]]);
-    assert_eq!(reads, both);
+    assert_eq!(whole(&reads), both);
+    assert!(reads.iter().any(|bytes| split(bytes)), "no sector split");
+    let three = (reads.iter().flat_map(|bytes| bytes.chunks(512)))
+        .any(|sector| sector.chunk_by(PartialEq::eq).count() == 3);
+    assert!(three, "no sector in three runs");
     assert_eq!(read_in_flight(7), read_in_flight(7));
 }
 
-/// Whether a write of 0xab over two sectors ended first, and the sectors that a read
+/// Asserts that each byte of each of `runs` is one of `values`.
+fn assert_bytes_in<'a>(runs: impl IntoIterator<Item = &'a [u8]>, values: &[u8]) {
+    for (value, bytes) in runs.into_iter().enumerate() {
+        let wrong = bytes.iter().find(|byte| !values.contains(byte));
+        assert_eq!(wrong, None, "value {value}");
+    }
+}
+
+/// The sectors of each of `runs` in which no sector holds two values.
+fn whole(runs: &[Vec<u8>]) -> BTreeSet<Vec<u8>> {
+    (runs.iter())
+        .filter(|bytes| !split(bytes))
+        .map(|bytes| sectors(bytes))
+        .collect()
+}
+
+/// Whether a sector of `bytes` holds two values.
+fn split(bytes: &[u8]) -> bool {
+    (bytes.chunks(512)).any(|sector| sector.iter().any(|&byte| byte != sector[0]))
+}
+
+/// Whether a write of 0xab over two sectors ended first, and the bytes that a read
 /// of them gives, when both start at once.
 fn read_over_write(seed: u64) -> (bool, Vec<u8>) {
     run(seed, MIB, |node, tasks| async move {
@@ -374,21 +400,19 @@ fn read_over_write(seed: u64) -> (bool, Vec<u8>) {
             writer.write_at(0, &parts).await.unwrap();
             flag.set(true);
         });
-        let sectors = sectors(&read(&file, &pool, 0, 1_024).await);
-        (written.get(), sectors)
+        let bytes = read(&file, &pool, 0, 1_024).await;
+        (written.get(), bytes)
     })
 }
 
 #[test]
 fn a_read_may_miss_a_write_that_ends_before_it() {
     let reads: Vec<(bool, Vec<u8>)> = (0..64).map(read_over_write).collect();
-    let missed = reads
-        .iter()
-        .any(|(ended, sectors)| *ended && sectors.contains(&0));
+    let missed = (reads.iter()).any(|(ended, bytes)| *ended && bytes.contains(&0));
     assert!(missed, "{reads:?}");
 }
 
-/// The sectors after two writes over the same two sectors were in flight at once.
+/// The bytes after two writes over the same two sectors were in flight at once.
 fn writes_in_flight(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
@@ -399,15 +423,17 @@ fn writes_in_flight(seed: u64) -> Vec<u8> {
             .await
             .unwrap();
         node.clock().sleep(Span::MILLISECOND).await;
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
-fn writes_in_flight_over_one_sector_leave_either_bytes() {
-    let writes: BTreeSet<Vec<u8>> = (0..64).map(writes_in_flight).collect();
+fn writes_in_flight_over_one_sector_leave_either_bytes_and_may_split_it() {
+    let writes: Vec<Vec<u8>> = (0..128).map(writes_in_flight).collect();
+    assert_bytes_in(writes.iter().map(Vec::as_slice), &[1, 2]);
     let both = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
-    assert_eq!(writes, both);
+    assert_eq!(whole(&writes), both);
+    assert!(writes.iter().any(|bytes| split(bytes)), "no sector split");
 }
 
 /// The sectors of a file after a write of 0xab over its four sectors whose future
@@ -485,28 +511,28 @@ fn a_zero_length_write_races_no_write() {
 #[test]
 fn a_read_may_take_the_bytes_of_a_write_still_in_flight() {
     let reads: Vec<(bool, Vec<u8>)> = (0..64).map(read_over_write).collect();
-    let taken = reads
-        .iter()
-        .any(|(ended, sectors)| !*ended && sectors.contains(&0xab));
+    let taken = (reads.iter()).any(|(ended, bytes)| !*ended && bytes.contains(&0xab));
     assert!(taken, "{reads:?}");
 }
 
-/// The sectors that a read of two sectors gives while a write of 0xab over the
-/// second is in flight.
+/// The bytes that a read of two sectors gives while a write of 0xab over the second
+/// is in flight.
 fn read_beside_write(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
         let pool = Rc::new(pool());
         let (writer, parts) = (Rc::clone(&file), [block(&pool, &[0xab; 512])]);
         tasks.spawn(async move { writer.write_at(512, &parts).await.unwrap() });
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
 fn a_read_sees_a_write_in_flight_only_where_they_overlap() {
-    let reads: BTreeSet<Vec<u8>> = (0..64).map(read_beside_write).collect();
-    assert_eq!(reads, BTreeSet::from([vec![0, 0], vec![0, 0xab]]));
+    let reads: Vec<Vec<u8>> = (0..64).map(read_beside_write).collect();
+    assert_bytes_in(reads.iter().map(|bytes| &bytes[..512]), &[0]);
+    assert_bytes_in(reads.iter().map(|bytes| &bytes[512..]), &[0, 0xab]);
+    assert_eq!(whole(&reads), BTreeSet::from([vec![0, 0], vec![0, 0xab]]));
 }
 
 /// The sectors that a read of file `a` gives while a write of 0xab over file `b` is
@@ -573,8 +599,8 @@ fn a_call_ends_at_its_own_time_whatever_else_is_due() {
     }
 }
 
-/// The sectors after two writes were in flight at once over two sectors that a
-/// write of 9 filled before.
+/// The bytes after two writes were in flight at once over two sectors that a write
+/// of 9 filled before.
 fn writes_over_filled_sectors(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
@@ -588,15 +614,16 @@ fn writes_over_filled_sectors(seed: u64) -> Vec<u8> {
             .await
             .unwrap();
         node.clock().sleep(Span::MILLISECOND).await;
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
 fn writes_in_flight_over_filled_sectors_leave_either_bytes() {
-    let writes: BTreeSet<Vec<u8>> = (0..64).map(writes_over_filled_sectors).collect();
+    let writes: Vec<Vec<u8>> = (0..256).map(writes_over_filled_sectors).collect();
+    assert_bytes_in(writes.iter().map(Vec::as_slice), &[1, 2]);
     let both = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
-    assert_eq!(writes, both);
+    assert_eq!(whole(&writes), both);
 }
 
 /// The free bytes after an open that makes a 64 KiB file is polled once, its future
@@ -711,10 +738,10 @@ fn a_write_to_the_last_sector_of_the_largest_file_stays() {
     assert_eq!(bytes, vec![0, 7]);
 }
 
-/// The values of bytes 0 to 100 and 100 to 200 of a file after writes of 1 over the
-/// first, 2 over the second, and 3 over both were in flight at once.
-fn three_writes_in_flight(value: u64) -> (u8, u8) {
-    let bytes = run(value, MIB, |node, tasks| async move {
+/// The first 200 bytes of a file after writes of 1 over bytes 0 to 100, 2 over 100 to
+/// 200, and 3 over both were in flight at once.
+fn three_writes_in_flight(value: u64) -> Vec<u8> {
+    run(value, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 512).await);
         let pool = pool();
         for (offset, len, byte) in [(0, 100, 1), (100, 100, 2)] {
@@ -724,18 +751,26 @@ fn three_writes_in_flight(value: u64) -> (u8, u8) {
         file.write_at(0, &[block(&pool, &[3; 200])]).await.unwrap();
         node.clock().sleep(Span::MILLISECOND).await;
         read(&file, &pool, 0, 200).await
-    });
-    let (first, second) = bytes.split_at(100);
-    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
-    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
-    (first[0], second[0])
+    })
+}
+
+/// The values of each run of `runs` whose bytes 0 to 100 hold one value and bytes 100
+/// to 200 hold one value.
+fn halves(runs: &[Vec<u8>]) -> BTreeSet<(u8, u8)> {
+    (runs.iter())
+        .filter(|bytes| bytes[..100].iter().all(|&byte| byte == bytes[0]))
+        .filter(|bytes| bytes[100..].iter().all(|&byte| byte == bytes[100]))
+        .map(|bytes| (bytes[0], bytes[100]))
+        .collect()
 }
 
 #[test]
 fn three_writes_in_flight_leave_the_result_of_each_order() {
-    let results: BTreeSet<(u8, u8)> = (0..128).map(three_writes_in_flight).collect();
+    let results: Vec<Vec<u8>> = (0..128).map(three_writes_in_flight).collect();
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[2, 3]);
     let orders = BTreeSet::from([(1, 2), (1, 3), (3, 2), (3, 3)]);
-    assert_eq!(results, orders);
+    assert_eq!(halves(&results), orders);
 }
 
 #[test]
@@ -777,11 +812,11 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
     assert_eq!(results, expected);
 }
 
-/// The values of bytes 0 to 100 and 100 to 200 of a file after the writes of `order`
-/// (offset, length, and value), each started when the one before it ended or, when
-/// `spawned`, at once with it.
-fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> (u8, u8) {
-    let bytes = run(value, MIB, move |node, tasks| async move {
+/// The first 200 bytes of a file after the writes of `order` (offset, length, and
+/// value), each started when the one before it ended or, when `spawned`, at once with
+/// it.
+fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> Vec<u8> {
+    run(value, MIB, move |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 512).await);
         let pool = pool();
         for (offset, len, byte, spawned) in order {
@@ -795,31 +830,35 @@ fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> (u8, u8) {
         }
         node.clock().sleep(Span::MILLISECOND).await;
         read(&file, &pool, 0, 200).await
-    });
-    let (first, second) = bytes.split_at(100);
-    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
-    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
-    (first[0], second[0])
+    })
 }
 
 #[test]
-fn three_writes_in_flight_over_nested_bytes_leave_the_result_of_an_order() {
+fn three_writes_in_flight_over_nested_bytes_leave_each_order_or_a_mix() {
     let writes = [(0, 200, 1, true), (0, 100, 2, true), (0, 200, 3, false)];
-    let results: BTreeSet<(u8, u8)> = (0..256)
+    let results: Vec<Vec<u8>> = (0..256)
         .map(|value| writes_in_order(value, writes))
         .collect();
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 2, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[1, 3]);
     let orders = BTreeSet::from([(1, 1), (2, 1), (2, 3), (3, 3)]);
-    assert_eq!(results, orders);
+    assert!(
+        halves(&results).is_superset(&orders),
+        "{:?}",
+        halves(&results)
+    );
 }
 
 #[test]
 fn a_write_in_flight_over_two_in_turn_keeps_their_order() {
-    let writes = [(0, 200, 1, true), (0, 100, 2, false), (100, 100, 3, false)];
-    let results: BTreeSet<(u8, u8)> = (0..256)
+    let writes = [(0, 200, 1, true), (0, 100, 2, false), (0, 100, 3, false)];
+    let results: Vec<Vec<u8>> = (0..256)
         .map(|value| writes_in_order(value, writes))
         .collect();
-    let orders = BTreeSet::from([(1, 1), (1, 3), (2, 3)]);
-    assert_eq!(results, orders);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[1]);
+    assert_eq!(halves(&results), BTreeSet::from([(1, 1), (3, 1)]));
+    assert!(results.iter().any(|bytes| split(&bytes[..100])), "no mix");
 }
 
 /// The bytes of a one-sector file after writes of 1, 2, and 3, with a sync started

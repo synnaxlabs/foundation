@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use env::shards::{Config, Shards};
 use env::tasks::Tasks;
-use env::thread::{Handle, Panicked};
 use tokio::task::yield_now;
+
+use crate::common::{Bomb, assert_joins, panicked};
 
 fn shards() -> Shards {
     os::shards().expect("the OS gives the cores of this process")
@@ -21,20 +22,6 @@ fn config(name: &str) -> Config {
         name: name.into(),
         core: None,
     }
-}
-
-/// Asserts that `handle` joins with `outcome` in ten seconds, so a shard that does not
-/// end fails its test and does not hang the run.
-#[expect(clippy::disallowed_methods, reason = "the test bounds the join")]
-fn assert_joins(handle: Handle, outcome: Result<(), Panicked>) {
-    let (done, joined) = mpsc::channel();
-    std::thread::spawn(move || done.send(handle.join()));
-    let joined = joined.recv_timeout(Duration::from_secs(10));
-    assert_eq!(joined, Ok(outcome), "the shard ends in ten seconds");
-}
-
-fn panicked(name: &str) -> Result<(), Panicked> {
-    Err(Panicked { name: name.into() })
 }
 
 /// A flag that a [`Dropped`] sets.
@@ -52,15 +39,6 @@ struct Dropped(Arc<AtomicBool>);
 impl Drop for Dropped {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
-    }
-}
-
-/// Panics when it drops.
-struct Bomb;
-
-impl Drop for Bomb {
-    fn drop(&mut self) {
-        panic!("bomb");
     }
 }
 
@@ -297,16 +275,8 @@ fn a_name_with_a_nul_starts_and_panicked_keeps_the_whole_name() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use rustix::thread::{CpuSet, sched_getaffinity};
-
     use super::*;
-
-    fn affinity() -> Vec<usize> {
-        let set = sched_getaffinity(None).unwrap();
-        (0..CpuSet::MAX_CPU)
-            .filter(|&cpu| set.is_set(cpu))
-            .collect()
-    }
+    use crate::common::affinity;
 
     #[test]
     fn each_core_pins_its_shard_to_its_cpu_of_the_affinity_set() {
