@@ -1141,6 +1141,34 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_index_of_data_among_hundreds_of_groups() {
+        // Entries 0 to 256 are the indexes of groups 0 to 256, and 257 to 513 their
+        // data. More groups than search memos share each memo.
+        let data: Vec<_> = (1..=257).map(|n| [(key(n + 300), F64)]).collect();
+        let groups: Vec<_> = (1..=257)
+            .zip(&data)
+            .map(|(n, data)| Group {
+                index: key(n),
+                data,
+            })
+            .collect();
+        let set = interner().intern(&groups);
+        let pool = pool(1 << 20);
+        let all: Vec<_> = (0..514).map(|entry| (entry, 1)).collect();
+        Draft::new(&pool, &set, Form::Raw, &all).unwrap();
+        let mut series = all.clone();
+        series.remove(256);
+        let error = Draft::new(&pool, &set, Form::Raw, &series).unwrap_err();
+        assert_eq!(
+            error,
+            Error::IndexAbsent {
+                entry: 513,
+                index: 256
+            }
+        );
+    }
+
+    #[test]
     fn finds_the_index_of_data_that_alternate_groups() {
         // Entries 0 and 1 are the indexes, and the data of groups 0 and 1 alternate.
         let set = interner().intern(&[
