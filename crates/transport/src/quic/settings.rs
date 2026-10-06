@@ -180,6 +180,10 @@ fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
 fn transport(config: &Config) -> TransportConfig {
     let idle_ms = idle_ms(config.idle);
     let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
+    // noq-proto gives credit back in steps of 1/8 of a window, so a stream with the
+    // connection's credit can run out while the connection has room.
+    let stream_window = config.window_bytes.saturating_mul(2);
+    let stream_window = VarInt::try_from(stream_window).unwrap_or(VarInt::MAX);
     let streams = VarInt::from_u32(config.streams_max.get());
     // One more for the peer's hello, whose credit does not come back when it ends.
     let uni = u64::from(config.streams_max.get()) + 1;
@@ -193,7 +197,7 @@ fn transport(config: &Config) -> TransportConfig {
     transport
         .max_concurrent_bidi_streams(streams)
         .max_concurrent_uni_streams(uni)
-        .stream_receive_window(window)
+        .stream_receive_window(stream_window)
         .receive_window(window)
         .send_window(window.into_inner())
         .send_fairness(true)
