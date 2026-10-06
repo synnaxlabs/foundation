@@ -1452,6 +1452,12 @@ How to read this record:
 - **BQ11b** `node` pulls each crate's values and writes status channels through `hub`.
   Rebalancing is an outside controller that reads status channels and acts through
   plan and apply.
+- **STATUS CHANNELS (2026-10-06)** `node::status::TABLE` is the fixed set of a node's
+  status channels: `clock.status` (`U8`: 0 unsynced, 1 synced, 2 holdover),
+  `clock.offset` (`Span`), and `clock.error` (`Span`; 36500 days means unknown). An
+  unsynced clock gives no offset or error. A pure `Collector` pulls each value from a
+  reader that its crate gives; no crate calls `node`. Lost: each crate pushes status
+  events to a sink (BQ11b locks pull). Decided in #728.
 - **OWN REPO (revises C9a)** Foundation lives in its own private repository,
   `synnaxlabs/foundation`, with one Cargo workspace: `crates/` (crate list in section
   4), `xtask/`, `oracles/`, and later `sdk/` and `bench/`. Every PR runs the layer

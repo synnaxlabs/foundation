@@ -10,10 +10,14 @@ name = "foundation"
 path = "src/main.rs"
 
 [dependencies]
+clock = { path = "../clock" }
 env = { path = "../env" }
 ops = { path = "../ops" }
+types = { path = "../types" }
 
 [dev-dependencies]
+estimate = { path = "../estimate" }
+proptest = { workspace = true }
 sim = { path = "../sim" }
 
 [target.'cfg(loom)'.dependencies]
