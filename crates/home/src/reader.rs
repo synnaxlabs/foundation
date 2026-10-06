@@ -141,28 +141,28 @@ impl Set {
             return;
         }
         let entry = &mut self.entries[place];
-        entry.readers.queue(&frame, seq.clone());
-        wake(&mut self.keys, entry.slot, entry.readers.put(frame, seq));
+        entry.readers.queue(&frame, seq);
+        wake(&mut self.keys, entry.slot, entry.readers.put(frame));
         if entry.readers.pending() && !mem::replace(&mut entry.listed, true) {
             self.listed.push(place);
         }
     }
 
-    /// Makes `frame`, a live frame with the samples `seq` that found no room in the
-    /// buffer, the newest frame of the index at `place`, unless it has no samples.
-    /// Complete readers never get it.
+    /// Makes `frame`, a live frame that found no room in the buffer, the newest frame
+    /// of the index at `place`, unless it has no samples. Complete readers never get
+    /// it.
     ///
     /// # Panics
     ///
     /// If `frame` is a backfill frame, which waits for room instead.
-    pub(crate) fn lost(&mut self, place: usize, frame: Frame, seq: Range<u64>) {
+    pub(crate) fn lost(&mut self, place: usize, frame: Frame) {
         assert_eq!(
             frame.path(),
             Path::Live,
             "invariant: only a live frame is lost"
         );
         let entry = &mut self.entries[place];
-        wake(&mut self.keys, entry.slot, entry.readers.put(frame, seq));
+        wake(&mut self.keys, entry.slot, entry.readers.put(frame));
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
@@ -352,7 +352,7 @@ mod tests {
             let mut set = carried(1);
             let latest = set.open_latest(0, now());
             let complete = set.open_complete(0, 0, u64::MAX);
-            set.lost(0, frames.frame(Path::Live, 0..2), 0..2);
+            set.lost(0, frames.frame(Path::Live, 0..2));
             assert_eq!(woken(&mut set), [reader(0, latest)]);
             assert_eq!(set.listed(), []);
             assert_eq!(taken(&mut set, 0, latest), [range(0, 2)]);
@@ -366,7 +366,7 @@ mod tests {
         fn panics_on_a_backfill_frame() {
             let frames = Frames::new();
             let mut set = carried(1);
-            set.lost(0, frames.frame(Path::Backfill, 0..2), 0..2);
+            set.lost(0, frames.frame(Path::Backfill, 0..2));
         }
     }
 

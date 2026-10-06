@@ -1,6 +1,5 @@
 //! The latest sessions of [`Readers`].
 
-use std::ops::Range;
 use std::{fmt, mem};
 
 use types::frame::Frame;
@@ -79,14 +78,14 @@ impl Readers {
         }
     }
 
-    /// Makes `frame`, which landed on the live path with the samples `seq`, the newest
-    /// frame and the waiting frame of every latest session, and drops the frame it
-    /// replaces. A frame with no samples changes nothing. Returns the latest sessions
-    /// that had no waiting frame, in key order: wake them.
+    /// Makes `frame`, which landed on the live path, the newest frame and the waiting
+    /// frame of every latest session, and drops the frame it replaces. A frame with no
+    /// samples changes nothing. Returns the latest sessions that had no waiting frame,
+    /// in key order: wake them.
     #[must_use]
-    pub fn put(&mut self, frame: Frame, seq: Range<u64>) -> &[Key] {
+    pub fn put(&mut self, frame: Frame) -> &[Key] {
         self.woken_latest.clear();
-        if seq.is_empty() {
+        if frame.ranges().all(|(_, range)| range.count == 0) {
             return &self.woken_latest;
         }
         self.newest = Some(frame);
@@ -184,10 +183,8 @@ mod tests {
         readers.take(key.into()).as_ref().map(number)
     }
 
-    /// Puts frame `n`, which holds the sample at seq `n`.
     fn put(readers: &mut Readers, frame: Frame) -> Vec<Key> {
-        let n = number(&frame);
-        readers.put(frame, n..n + 1).to_vec()
+        readers.put(frame).to_vec()
     }
 
     mod open_latest {
@@ -340,7 +337,7 @@ mod tests {
             let (a, b) = (unnamed(&mut readers), unnamed(&mut readers));
             assert_eq!(put(&mut readers, frames.frame(1)), [a, b]);
             assert_eq!(taken(&mut readers, a), Some(1));
-            assert_eq!(readers.put(frames.frame(2), 2..2), []);
+            assert_eq!(put(&mut readers, frames.empty(2)), []);
             assert_eq!(taken(&mut readers, a), None);
             assert_eq!(taken(&mut readers, b), Some(1));
             let late = readers.open_latest(None, at(0));
@@ -352,7 +349,7 @@ mod tests {
         fn makes_no_newest_frame_of_a_first_frame_with_no_samples() {
             let frames = Frames::new(4);
             let mut readers = Readers::new(0);
-            assert_eq!(readers.put(frames.frame(1), 1..1), []);
+            assert_eq!(put(&mut readers, frames.empty(1)), []);
             let late = readers.open_latest(None, at(0));
             assert!(!late.woken);
             assert_eq!(taken(&mut readers, late.key), None);
@@ -399,11 +396,11 @@ mod tests {
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
             let second = frames.frame(2);
             assert!(matches!(
-                frames.make(3),
+                frames.make(3, 1),
                 Err(types::frame::Error::Pool(block::Error::Exhausted { .. }))
             ));
             assert_eq!(put(&mut readers, second), []);
-            assert_eq!(frames.make(3).as_ref().map(number), Ok(3));
+            assert_eq!(frames.make(3, 1).as_ref().map(number), Ok(3));
             assert_eq!(taken(&mut readers, key), Some(2));
         }
 
@@ -416,7 +413,7 @@ mod tests {
             let sending = readers.take(key.into()).expect("frame 1 waits");
             assert_eq!(put(&mut readers, frames.frame(2)), [key]);
             assert!(matches!(
-                frames.make(3),
+                frames.make(3, 1),
                 Err(types::frame::Error::Pool(block::Error::Exhausted { .. }))
             ));
             assert_eq!(number(&sending), 1);
@@ -512,6 +509,7 @@ mod tests {
             Open,
             Complete,
             Put,
+            Empty,
             Take(usize),
             Close(usize),
         }
@@ -521,13 +519,15 @@ mod tests {
                 Just(Input::Open),
                 Just(Input::Complete),
                 Just(Input::Put),
+                Just(Input::Empty),
                 any::<usize>().prop_map(Input::Take),
                 any::<usize>().prop_map(Input::Close),
             ]
         }
 
         /// The rules stated a second way: each latest session's mailbox holds a frame
-        /// number or nothing, and complete sessions get no frame from a put.
+        /// number or nothing, complete sessions get no frame from a put, and a frame
+        /// with no samples changes nothing.
         #[derive(Default)]
         struct Model {
             newest: Option<u64>,
@@ -578,6 +578,10 @@ mod tests {
                         assert_eq!(put(&mut readers, frames.frame(n)), empty);
                         model.newest = Some(n);
                         model.mailboxes.values_mut().for_each(|m| *m = Some(n));
+                    }
+                    Input::Empty => {
+                        n += 1;
+                        assert_eq!(put(&mut readers, frames.empty(n)), []);
                     }
                     Input::Take(i) => {
                         if let Some(key) = model.nth(i) {

@@ -598,21 +598,33 @@ pub(super) mod tests {
             }
         }
 
-        pub(super) fn make(&self, n: u64) -> Result<Frame, types::frame::Error> {
+        /// Frame `n`, which holds the sample at seq `n`, or no sample when `count` is 0.
+        pub(super) fn make(
+            &self,
+            n: u64,
+            count: u32,
+        ) -> Result<Frame, types::frame::Error> {
             let series = [(0, 8)];
             let mut draft = Draft::new(&self.pool, &self.set, Form::Raw, &series)?;
             let bytes = draft.series_mut(0).expect("the index is present");
             bytes.copy_from_slice(&n.to_le_bytes());
+            draft.set_seq(0, n);
+            draft.set_count(0, count);
             Ok(draft.freeze(Path::Live))
         }
 
         pub(super) fn frame(&self, n: u64) -> Frame {
-            self.make(n).expect("the pool has room")
+            self.make(n, 1).expect("the pool has room")
+        }
+
+        /// Frame `n`, with no samples.
+        pub(super) fn empty(&self, n: u64) -> Frame {
+            self.make(n, 0).expect("the pool has room")
         }
 
         /// The pool has room for one more frame.
         fn spare(&self) -> bool {
-            self.make(0).is_ok()
+            self.make(0, 1).is_ok()
         }
     }
 

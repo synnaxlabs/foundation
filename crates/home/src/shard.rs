@@ -550,11 +550,10 @@ fn spend<'a>(
                 Outcome::Applied { slot, range }
             }
             Ok(accepted) => {
-                let seq = accepted.seq();
-                let range = range(&seq);
+                let range = range(&accepted.seq());
                 index.spend(accepted);
                 if let Some(frame) = frozen {
-                    readers.lost(claim.place, frame, seq);
+                    readers.lost(claim.place, frame);
                 }
                 Outcome::Lost { slot, range }
             }
