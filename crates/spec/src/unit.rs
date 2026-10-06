@@ -2,34 +2,31 @@
 
 use std::fmt;
 
-use types::sample::{Scalar, Type};
-
 /// The unit of the values of a data channel, as a file wrote it (`kPa`). Units are
 /// case-sensitive: `mPa` and `MPa` are different units.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit(Box<str>);
 
-impl Unit {
-    /// The most bytes a unit may have.
-    pub const MAX_BYTES: usize = 32;
+/// The most bytes a unit may have.
+const MAX_BYTES: usize = 32;
 
-    /// Reads a unit: 1 to [`Unit::MAX_BYTES`] bytes of text with no whitespace and no
-    /// control character. A unit that is not in the table is valid; it has no code.
+impl Unit {
+    /// Reads a unit: 1 to 32 printable ASCII characters, with no space. A unit that is
+    /// not in the table is valid; it has no code.
     ///
     /// # Errors
     ///
-    /// Returns an [`Error`] when `text` is empty, too long, or has whitespace or a
-    /// control character.
+    /// Returns an [`Error`] when `text` is empty, longer than 32 bytes, or has a
+    /// character that is not printable ASCII or is a space.
     pub fn new(text: &str) -> Result<Self, Error> {
         if text.is_empty() {
             return Err(Error::Empty);
         }
-        if text.len() > Self::MAX_BYTES {
+        if text.len() > MAX_BYTES {
             return Err(Error::Long { len: text.len() });
         }
-        if let Some((at, found)) = text
-            .char_indices()
-            .find(|(_, c)| c.is_whitespace() || c.is_control())
+        if let Some((at, found)) =
+            text.char_indices().find(|(_, c)| !c.is_ascii_graphic())
         {
             return Err(Error::Character { at, found });
         }
@@ -51,35 +48,6 @@ impl Unit {
             .ok()
             .and_then(|at| TABLE.get(at))
             .map(|(_, code)| *code)
-    }
-
-    /// Reports whether values of `data_type` can have this unit: integers and floats,
-    /// and arrays and lists of them. Bool, stamp, span, UUID, string, and bytes values
-    /// cannot.
-    #[must_use]
-    pub fn fits(&self, data_type: Type) -> bool {
-        match data_type {
-            Type::Scalar(s)
-            | Type::Array { element: s, .. }
-            | Type::List { element: s, .. } => number(s),
-            Type::String | Type::Bytes => false,
-        }
-    }
-}
-
-const fn number(scalar: Scalar) -> bool {
-    match scalar {
-        Scalar::I8
-        | Scalar::I16
-        | Scalar::I32
-        | Scalar::I64
-        | Scalar::U8
-        | Scalar::U16
-        | Scalar::U32
-        | Scalar::U64
-        | Scalar::F32
-        | Scalar::F64 => true,
-        Scalar::Bool | Scalar::Stamp | Scalar::Span | Scalar::Uuid => false,
     }
 }
 
@@ -139,12 +107,12 @@ const TABLE: &[(&str, &str)] = &[
 pub enum Error {
     /// The text is empty.
     Empty,
-    /// The text is longer than [`Unit::MAX_BYTES`].
+    /// The text is longer than 32 bytes.
     Long {
         /// Its length in bytes.
         len: usize,
     },
-    /// The text has whitespace or a control character.
+    /// The text has a character that is not printable ASCII, or a space.
     Character {
         /// The byte offset of the character.
         at: usize,
@@ -158,10 +126,13 @@ impl fmt::Display for Error {
         match self {
             Self::Empty => write!(f, "a unit is empty"),
             Self::Long { len } => {
-                write!(f, "a unit has {len} bytes, more than {}", Unit::MAX_BYTES)
+                write!(f, "a unit has {len} bytes, more than {MAX_BYTES}")
             }
             Self::Character { at, found } => {
-                write!(f, "a unit has the character {found:?} at byte {at}")
+                write!(
+                    f,
+                    "a unit has the character {found:?} at byte {at}, which is not printable ASCII"
+                )
             }
         }
     }
