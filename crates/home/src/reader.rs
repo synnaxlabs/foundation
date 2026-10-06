@@ -3,7 +3,7 @@
 use types::channel::Slot;
 
 /// An open reader on its shard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     /// The slot of the reader's index.
     pub(crate) slot: Slot,

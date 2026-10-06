@@ -1,5 +1,5 @@
-//! One index of a shard: who may write it, the order of its samples, and its newest
-//! frame.
+//! One index of a shard: who may write it, the order of its samples, and who reads
+//! it.
 
 use std::ops::Range;
 
@@ -20,8 +20,6 @@ pub(crate) struct Index {
     /// Who reads the index. The shard opens and closes readers, takes their frames,
     /// and releases each live frame to complete readers once it is on disk.
     pub(crate) readers: Readers,
-    /// Whether the shard lists the index to release its live frames after a commit.
-    pub(crate) listed: bool,
 }
 
 /// A frame that passed [`Index::check`]. [`Index::advance`] or [`Index::lose`] spends
@@ -64,7 +62,6 @@ impl Index {
             gate: Gate::new(),
             readers: Readers::new(live.seq),
             order: Order::new(limits, live, backfill),
-            listed: false,
         }
     }
 
@@ -125,21 +122,22 @@ impl Index {
 
     /// Spends the seq of `accepted`, whose frame is in the buffer, and renews the
     /// writer's control lease. A live frame becomes the newest frame, and is queued for
-    /// complete readers until it is on disk. Returns the latest sessions to wake.
+    /// complete readers until it is on disk. Returns whether the frame was queued, and
+    /// the latest sessions to wake.
     ///
     /// # Panics
     ///
     /// If either path moved, or the holder changed, after the check, or no frame was
     /// frozen.
-    pub(crate) fn advance(&mut self, accepted: Accepted) -> &[delivery::Key] {
+    pub(crate) fn advance(&mut self, accepted: Accepted) -> (bool, &[delivery::Key]) {
         let (path, seq, frame) = self.spend(accepted);
         let frame = frame.expect("invariant: a stored frame was frozen");
         match path {
             Path::Live => {
                 self.readers.queue(&frame, seq);
-                self.readers.put(frame)
+                (true, self.readers.put(frame))
             }
-            Path::Backfill => &[],
+            Path::Backfill => (false, &[]),
         }
     }
 
@@ -408,7 +406,7 @@ mod tests {
                 .check(key, Path::Live, Ok(&series), at(2), mesh())
                 .expect("a holder's frame in order");
             let frame = accepted.freeze(frames.draft(&series), 0).clone();
-            assert_eq!(index.advance(accepted), &[session]);
+            assert_eq!(index.advance(accepted), (true, &[session][..]));
             let taken = index.readers.take(session).expect("the newest frame");
             assert_eq!(taken.path(), Path::Live);
             assert_eq!(taken.range(0), Some(frame::Range { seq: 1, count: 2 }));
@@ -428,7 +426,7 @@ mod tests {
             let frame = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(frame.path(), Path::Backfill);
             assert_eq!(frame.range(0), Some(frame::Range { seq: 0, count: 2 }));
-            assert_eq!(index.advance(accepted), &[]);
+            assert_eq!(index.advance(accepted), (false, &[][..]));
             assert!(index.readers.take(session).is_none());
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(0..1));
         }
@@ -449,7 +447,7 @@ mod tests {
                 .check(key, Path::Live, Ok(&series), at(1), mesh())
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
-            assert_eq!(index.advance(accepted), &[]);
+            assert_eq!(index.advance(accepted), (true, &[][..]));
             assert_eq!(index.readers.release(1), &[]);
             assert_eq!(index.readers.release(2), &[session]);
             let taken = index.readers.take(session).expect("the stored frame");
