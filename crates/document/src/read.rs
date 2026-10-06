@@ -162,6 +162,8 @@ mod tests {
     const SYNTAX: &str = "Write a size such as \"200GiB\" or \"1.5GiB\"";
     const UNIT: &str = "Use a unit such as `MiB` or `GiB`, with exact case";
     const FRACTION: &str = "Round the size to whole bytes";
+    const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in that \
+                           segment, after an optional leading `@`";
 
     /// The message for `text`, which is not a number and a unit with no space.
     fn syntax(text: &str) -> String {
@@ -372,12 +374,11 @@ mod tests {
                 (
                     "site a",
                     "a segment is not valid: \"site a\" in \"site a\"",
-                    "Use one or more ASCII letters, digits, `_`, and `-` in that \
-                     segment, after an optional leading `@`",
+                    SEGMENT,
                 ),
                 (
                     "site_a.*",
-                    "a wildcard is in a name or inside a segment: \"site_a.*\"",
+                    "a wildcard is out of place: \"site_a.*\"",
                     "Use `*` and `**` only as whole segments of a pattern, never in a \
                      name",
                 ),
@@ -468,8 +469,6 @@ mod tests {
             )
         }
 
-        const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in \
-                               that segment, after an optional leading `@`";
         const NO_INCLUDE: &str = "Add a pattern without a leading `!`";
 
         #[test]
@@ -527,7 +526,7 @@ mod tests {
                 selector(&string("a*b")),
                 Err(refused(
                     Some(span()),
-                    "a wildcard is in a name or inside a segment: \"a*b\"",
+                    "a wildcard is out of place: \"a*b\"",
                     "Use `*` and `**` only as whole segments of a pattern, never in a \
                      name"
                 ))

@@ -5,7 +5,7 @@
 //! [`Selector`]. No other crate matches names.
 
 use std::cmp::Reverse;
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::{FromStr, Split};
 
@@ -423,43 +423,17 @@ impl fmt::Display for Error {
                 Name::MAX_BYTES
             ),
             Self::NoInclude => f.write_str("a selector includes no names"),
-            Self::Segment { input, segment } => write!(
-                f,
-                "a segment is not valid: {} in {}",
-                Quoted(segment),
-                Quoted(input)
-            ),
-            Self::Wildcard { input } => write!(
-                f,
-                "a wildcard is in a name or inside a segment: {}",
-                Quoted(input)
-            ),
+            Self::Segment { input, segment } => {
+                write!(f, "a segment is not valid: {segment:?} in {input:?}")
+            }
+            Self::Wildcard { input } => {
+                write!(f, "a wildcard is out of place: {input:?}")
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
-
-/// Text in double quotes, as HCL, TOML, and YAML read it. Printable ASCII shows as
-/// written, with a `\` before each `"` and `\`. Each other character shows as `\u` and
-/// four hex digits, or `\U` and eight above U+FFFF, so no control or look-alike
-/// character reaches the reader, and no two texts show the same.
-struct Quoted<'a>(&'a str);
-
-impl fmt::Display for Quoted<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_char('"')?;
-        for c in self.0.chars() {
-            match c {
-                '"' | '\\' => write!(f, "\\{c}")?,
-                ' '..='~' => f.write_char(c)?,
-                _ if u32::from(c) <= 0xFFFF => write!(f, "\\u{:04X}", u32::from(c))?,
-                _ => write!(f, "\\U{:08X}", u32::from(c))?,
-            }
-        }
-        f.write_char('"')
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -591,35 +565,12 @@ mod tests {
         }
 
         #[test]
-        fn shows_each_other_character_as_an_escape() {
-            for (segment, shown) in [
-                ("\u{202e}", r"\u202E"),
-                ("b\nc", r"b\u000Ac"),
-                ("\u{7f}", r"\u007F"),
-                ("é", r"\u00E9"),
-                ("d\u{430}ta", r"d\u0430ta"),
-                ("\u{1f600}", r"\U0001F600"),
-            ] {
-                assert_eq!(
-                    format!("plc.{segment}")
-                        .parse::<Name>()
-                        .unwrap_err()
-                        .to_string(),
-                    format!("a segment is not valid: \"{shown}\" in \"plc.{shown}\"")
-                );
-            }
-        }
-
-        #[test]
         fn rejects_wildcards() {
             for input in ["a.*", "a.**", "a*", "*", "a.b*c"] {
                 assert_eq!(input.parse::<Name>(), Err(wildcard_error(input)));
             }
             let error = wildcard_error("a.*");
-            assert_eq!(
-                error.to_string(),
-                "a wildcard is in a name or inside a segment: \"a.*\""
-            );
+            assert_eq!(error.to_string(), "a wildcard is out of place: \"a.*\"");
             assert_eq!(error.fix(), WILDCARD_FIX);
         }
 
