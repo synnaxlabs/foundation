@@ -393,7 +393,7 @@ impl Frame {
 
     /// Each present entry and the end of its series, as `(entry, end)`, in the order
     /// of [`Frame::iter`]. `end` counts from the start of [`Frame::body`], and
-    /// [`split`] reads each series back from the body and these ends.
+    /// [`split`] cuts the body at these ends.
     pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
         let (_, descriptors, _) = parts(&self.0);
         ends(descriptors)
@@ -407,7 +407,7 @@ impl Frame {
 ///
 /// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
 /// one frame never panic. Run [`check`] once on a body and ends from another node
-/// before the first read.
+/// before the first [`split`].
 pub fn split<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
@@ -426,7 +426,7 @@ pub fn split<T>(
     })
 }
 
-/// Checks that `ends` fit `body`, so that [`split`] reads them without a panic.
+/// Checks that `ends` fit `body`, so that [`split`] cuts at them without a panic.
 ///
 /// # Errors
 ///
