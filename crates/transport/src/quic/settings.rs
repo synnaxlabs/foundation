@@ -18,8 +18,8 @@ use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
 use super::cid;
-use crate::Config;
 use crate::tls::{Epoch, Tls};
+use crate::{Config, PAYLOAD_IPV4};
 
 const QUIC_V1: u32 = 1;
 
@@ -29,10 +29,6 @@ pub(super) const VERSIONS: [u32; 1] = [QUIC_V1];
 /// The smallest datagram QUIC allows. Every datagram is this size until MTU
 /// discovery finds a larger one.
 pub(super) const MTU_MIN: u16 = 1200;
-
-/// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
-/// node takes.
-pub(super) const PAYLOAD_IPV4: u16 = 1472;
 
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.
@@ -198,7 +194,7 @@ fn idle_ms(idle: Span) -> u64 {
     let nanos = u64::try_from(idle.nanos())
         .ok()
         .filter(|&nanos| nanos > 0)
-        .expect("invariant: Transport::new refuses a non-positive idle");
+        .expect("invariant: `Config::check` refuses a non-positive idle");
     nanos.div_ceil(1_000_000)
 }
 
@@ -245,8 +241,9 @@ mod tests {
     use types::time::Monotonic;
 
     use super::*;
-    use crate::quic::testing::{self, CLIENT_SHARD, Pair, SERVER_SHARD, Side};
+    use crate::quic::pair::{self, CLIENT_SHARD, Pair, SERVER_SHARD, Side};
     use crate::quic::{Endpoint, Event};
+    use crate::testing;
     use crate::{Class, Error, tls};
 
     /// The link delay each way in [`dial`].
@@ -255,7 +252,7 @@ mod tests {
     /// A dial with an idle of 1 s, after `span`.
     fn dial(shard: &testing::Shard, span: Duration) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-        pair.dial(tls::public(&testing::SERVER_KEY));
+        pair.dial(tls::public(&pair::SERVER_KEY));
         pair.run(span);
         pair
     }
@@ -299,7 +296,7 @@ mod tests {
         source: SocketAddr,
         datagram: &[u8],
     ) -> Option<Vec<u8>> {
-        endpoint.receive(now, &testing::meta(source, datagram), datagram);
+        endpoint.receive(now, &pair::meta(source, datagram), datagram);
         let mut buffer = Vec::new();
         let transmit = endpoint.transmit(now, &mut buffer)?;
         Some(transmit.contents.to_vec())
@@ -408,7 +405,7 @@ mod tests {
         fn keeps_the_connection_when_the_client_address_changes() {
             testing::run(1, |shard| {
                 let mut pair = dial(shard, Duration::from_millis(100));
-                let moved = SocketAddr::new(testing::CLIENT.ip(), 3);
+                let moved = SocketAddr::new(pair::CLIENT.ip(), 3);
                 pair.client.address = moved;
                 assert_eq!(ping(shard, &mut pair), b"ping");
                 let (_, to, _) = pair.server.sent.last().expect("a datagram");
@@ -518,12 +515,11 @@ mod tests {
         #[test]
         fn offers_only_quic_v1_to_a_peer_of_another_version() {
             let versions = testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
-                let initial = testing::draft_29();
-                let reply =
-                    reply(&mut endpoint, Monotonic(0), testing::CLIENT, &initial);
+                let initial = pair::draft_29();
+                let reply = reply(&mut endpoint, Monotonic(0), pair::CLIENT, &initial);
                 let reply = reply.expect("a reply");
                 let (_, Some(_)) = ids(&reply) else {
                     panic!("not a long header: {reply:02x?}");
@@ -542,14 +538,14 @@ mod tests {
         #[test]
         fn ignores_another_version_in_fewer_than_1200_bytes() {
             let replies = testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
-                let mut initial = testing::draft_29();
+                let mut initial = pair::draft_29();
                 initial.pop();
                 let bare = [0xc0, 0xff, 0, 0, 0x1d, 0, 0];
                 [bare.as_slice(), &initial].map(|datagram| {
-                    reply(&mut endpoint, Monotonic(0), testing::CLIENT, datagram)
+                    reply(&mut endpoint, Monotonic(0), pair::CLIENT, datagram)
                 })
             });
             assert_eq!(replies, [None, None]);
@@ -560,7 +556,7 @@ mod tests {
             let reason = testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 pair.server.silent = true;
-                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.dial(tls::public(&pair::SERVER_KEY));
                 pair.run(Duration::ZERO);
                 let (.., initial) = &pair.client.sent[0];
                 let (destination, Some(source)) = ids(initial) else {
@@ -577,7 +573,7 @@ mod tests {
                     &unknown,
                 ]
                 .concat();
-                let meta = testing::meta(testing::SERVER, &negotiation);
+                let meta = pair::meta(pair::SERVER, &negotiation);
                 pair.client
                     .endpoint
                     .receive(pair.now(), &meta, &negotiation);
@@ -629,7 +625,7 @@ mod tests {
 
         #[test]
         #[should_panic(
-            expected = "invariant: Transport::new refuses a non-positive idle"
+            expected = "invariant: `Config::check` refuses a non-positive idle"
         )]
         fn panics_when_not_positive() {
             idle_ms(Span::from_nanos(0));
@@ -644,7 +640,7 @@ mod tests {
             let sent = testing::run(1, |shard| {
                 let idle = Span::from_nanos(10 * Span::SECOND.nanos());
                 let mut pair = Pair::new(shard, idle, ROUND_TRIP / 2);
-                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.dial(tls::public(&pair::SERVER_KEY));
                 pair.run(Duration::from_secs(1));
                 let before = pair.client.sent.len();
                 pair.client.drops = 1;
@@ -683,7 +679,7 @@ mod tests {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 let client = &mut pair.client.endpoint.settings.transport;
                 Arc::make_mut(client).datagram_receive_buffer_size(None);
-                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.dial(tls::public(&pair::SERVER_KEY));
                 pair.run(Duration::from_millis(100));
                 let key = pair.server.key.expect("a connection");
                 let server = &mut pair.server.endpoint;
@@ -708,7 +704,7 @@ mod tests {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 let client = &mut pair.client.endpoint.settings.transport;
                 Arc::make_mut(client).datagram_receive_buffer_size(Some(500));
-                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.dial(tls::public(&pair::SERVER_KEY));
                 pair.run(Duration::from_millis(100));
                 let key = pair.server.key.expect("a connection");
                 let server = &mut pair.server.endpoint;
@@ -736,7 +732,7 @@ mod tests {
         use super::*;
         use crate::quic::stateless::WINDOW;
 
-        /// An address on another host than [`testing::CLIENT`].
+        /// An address on another host than [`pair::CLIENT`].
         const OTHER: SocketAddr =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)), 9);
 
@@ -763,7 +759,7 @@ mod tests {
             let (_, _, stale) = sent
                 .find(|(_, _, datagram)| datagram[0] & 0x80 == 0)
                 .expect("a short header");
-            let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+            let config = shard.config(pair::SERVER_KEY, Span::SECOND);
             let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
             (stale.clone(), endpoint)
         }
@@ -772,17 +768,17 @@ mod tests {
         fn resets_each_stale_datagram_while_another_address_sends_junk() {
             let resets = testing::run(1, |shard| {
                 let (stale, mut endpoint) = stale(shard);
-                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
+                let attacker = SocketAddr::new(pair::CLIENT.ip(), 9);
                 let mut junk = vec![0x40, SERVER_SHARD];
                 junk.resize(23, 9);
                 let mut resets = 0;
                 for ms in 0..1_000 {
-                    let now = testing::at(Duration::from_millis(ms));
+                    let now = pair::at(Duration::from_millis(ms));
                     if ms % 10 == 0 {
                         reply(&mut endpoint, now, attacker, &junk);
                     }
                     if ms % 100 == 5 {
-                        let reset = reply(&mut endpoint, now, testing::CLIENT, &stale);
+                        let reset = reply(&mut endpoint, now, pair::CLIENT, &stale);
                         resets += usize::from(reset.is_some());
                     }
                 }
@@ -803,7 +799,7 @@ mod tests {
             };
             let mut forged = [[0x40].as_slice(), issued].concat();
             forged.resize(40, 0);
-            let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+            let config = shard.config(pair::SERVER_KEY, Span::SECOND);
             let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
             (forged, endpoint)
         }
@@ -812,11 +808,10 @@ mod tests {
         fn sends_a_stranger_one_reset_for_many_ports_of_one_ip_at_once() {
             let resets = testing::run(1, |shard| {
                 let (forged, mut endpoint) = stranger(shard);
-                let now = testing::at(Duration::from_millis(1));
+                let now = pair::at(Duration::from_millis(1));
                 (0..1_000u16)
                     .filter(|port| {
-                        let victim =
-                            SocketAddr::new(testing::CLIENT.ip(), 1_000 + port);
+                        let victim = SocketAddr::new(pair::CLIENT.ip(), 1_000 + port);
                         reply(&mut endpoint, now, victim, &forged).is_some()
                     })
                     .count()
@@ -830,8 +825,8 @@ mod tests {
                 let (forged, mut endpoint) = stranger(shard);
                 (0..1_000u16)
                     .filter(|&ms| {
-                        let now = testing::at(Duration::from_millis(u64::from(ms)));
-                        let victim = SocketAddr::new(testing::CLIENT.ip(), 1_000 + ms);
+                        let now = pair::at(Duration::from_millis(u64::from(ms)));
+                        let victim = SocketAddr::new(pair::CLIENT.ip(), 1_000 + ms);
                         reply(&mut endpoint, now, victim, &forged).is_some()
                     })
                     .count()
@@ -843,8 +838,8 @@ mod tests {
         fn resets_a_stale_datagram_that_another_address_sent_at_the_same_time() {
             let resets = testing::run(1, |shard| {
                 let (stale, mut endpoint) = stale(shard);
-                let now = testing::at(Duration::from_millis(1));
-                [OTHER, testing::CLIENT]
+                let now = pair::at(Duration::from_millis(1));
+                [OTHER, pair::CLIENT]
                     .map(|source| reply(&mut endpoint, now, source, &stale).is_some())
             });
             assert_eq!(resets, [true, true]);
@@ -856,10 +851,10 @@ mod tests {
                 let (stale, mut endpoint) = stale(shard);
                 let mut resets = 0;
                 for ms in 0..1_000 {
-                    let now = testing::at(Duration::from_millis(ms));
+                    let now = pair::at(Duration::from_millis(ms));
                     reply(&mut endpoint, now, OTHER, &stale);
                     if ms % 100 == 5 {
-                        let reset = reply(&mut endpoint, now, testing::CLIENT, &stale);
+                        let reset = reply(&mut endpoint, now, pair::CLIENT, &stale);
                         resets += usize::from(reset.is_some());
                     }
                 }
@@ -875,8 +870,8 @@ mod tests {
                 let (start, nano) = (Duration::from_millis(1), Duration::from_nanos(1));
                 let at = [start + nano, start + WINDOW, start + WINDOW + nano];
                 at.map(|at| {
-                    let now = testing::at(at);
-                    reply(&mut endpoint, now, testing::CLIENT, &stale).is_some()
+                    let now = pair::at(at);
+                    reply(&mut endpoint, now, pair::CLIENT, &stale).is_some()
                 })
             });
             assert_eq!(resets, [true, false, true]);
@@ -888,7 +883,7 @@ mod tests {
                 let (stale, mut endpoint) = stale(shard);
                 let mut junk = stale;
                 junk[1 + cid::LEN - 1] ^= 1;
-                reply(&mut endpoint, Monotonic(0), testing::CLIENT, &junk)
+                reply(&mut endpoint, Monotonic(0), pair::CLIENT, &junk)
             });
             assert_eq!(reply, None);
         }
@@ -898,13 +893,13 @@ mod tests {
             let replies = testing::run(1, |shard| {
                 let (stale, mut server) = stale(shard);
                 let now = Monotonic(0);
-                let reset = reply(&mut server, now, testing::CLIENT, &stale);
+                let reset = reply(&mut server, now, pair::CLIENT, &stale);
                 let reset = reset.expect("a reset");
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut client =
                     Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
                 [&mut server, &mut client]
-                    .map(|endpoint| reply(endpoint, now, testing::SERVER, &reset))
+                    .map(|endpoint| reply(endpoint, now, pair::SERVER, &reset))
             });
             assert_eq!(replies, [None, None]);
         }

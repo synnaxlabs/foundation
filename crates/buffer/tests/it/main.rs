@@ -5,11 +5,14 @@
 
 mod memory;
 
+use std::future::poll_fn;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use block::{Block, Heap, Pool};
 use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Parts, Tail, Unfit};
@@ -325,6 +328,35 @@ fn an_idle_buffer_wakes_no_task() {
     assert_eq!(sim.digest(), idle, "a task ran while the buffer idled");
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
+}
+
+/// Runs a buffer that idles while its shard wakes every one and a half commits,
+/// with `empty` empty appends at each wake. Returns the digest of the run.
+fn idle_with_wakes(empty: usize) -> u64 {
+    let (mut sim, handle) = start(27, Memory::default(), move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        for _ in 0..8 {
+            shard.clock.sleep(commits(3)).await;
+            for _ in 0..empty {
+                buffer.append(Vec::new()).expect("takes an empty batch");
+            }
+        }
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Empty appends on an idle buffer wake no task: the run goes as one with no
+/// appends.
+#[test]
+fn empty_appends_wake_no_task() {
+    assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
 }
 
 #[test]
@@ -662,9 +694,87 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             failed
         );
+        assert_eq!(buffer.append(Vec::new()), failed, "an empty append");
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
         assert_eq!(buffer.committed().await, failed);
         assert_eq!(shard.memory.syncs(), 2, "the task ended at the failed sync");
+    });
+}
+
+/// `commits` counts the commits that ended: each one that a `committed` future
+/// waited on, and one with nothing to write. A failed commit does not count.
+#[test]
+fn commits_counts_the_commits_that_ended() {
+    run(29, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        assert_eq!(buffer.commits(), 0);
+        for (count, first, last) in [(1, 0, 30), (2, 3, 60)] {
+            buffer
+                .append([entry(
+                    1,
+                    a,
+                    Path::Live,
+                    first,
+                    3,
+                    Some(last),
+                    Parts::default(),
+                )])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            assert_eq!(buffer.commits(), count);
+        }
+        let syncs = shard.memory.syncs();
+        buffer.committed().await.expect("commits nothing");
+        assert_eq!(buffer.commits(), 3, "a commit with nothing to write ended");
+        assert_eq!(shard.memory.syncs(), syncs, "it synced nothing");
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 6, 1, None, Parts::default())])
+            .expect("queues");
+        let failed = Err(Error::Files(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        }));
+        assert_eq!(buffer.committed().await, failed);
+        assert_eq!(buffer.commits(), 3, "the failed commit did not count");
+    });
+}
+
+/// A move of `commits` does not make every entry durable: an entry appended while
+/// a commit runs goes in the next one, and so does a `committed` future made then.
+#[test]
+fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
+    run(30, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(buffer.commits(), 0, "the first sync runs");
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues during the sync");
+        let mut commit = pin!(buffer.committed());
+        let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "the future waits for the next commit");
+        shard.clock.sleep(tenths(4)).await;
+        assert_eq!(buffer.commits(), 1);
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "the future still waits");
     });
 }
 
@@ -1245,6 +1355,25 @@ fn a_header_with_sizes_that_make_no_ring_is_unfit() {
                 body_max: 0
             }))
         );
+    });
+}
+
+/// A header whose `body_max` is under one block less the record header makes no
+/// ring.
+#[test]
+fn a_header_with_a_body_under_one_block_is_unfit() {
+    run(28, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let body_max = BODY_MAX - 1;
+        let small = u32::try_from(body_max).expect("a small size");
+        shard.tamper(BODY_MAX_AT, &small.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area: AREA,
+            body_max,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
     });
 }
 
