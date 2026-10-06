@@ -1007,6 +1007,10 @@ mod tests {
             updated("a = 1\r\nb = 2\n", "a = 1\nb = 2\nc = \"x\\n\""),
             "a = 1\r\nb = 2\nc = \"x\\n\"\r\n"
         );
+        assert_eq!(
+            updated("a = 1\nb = 2\r\nc = 3", "a = 1\nb = 2\nc = 3\nd = 4"),
+            "a = 1\nb = 2\r\nc = 3\nd = 4\n"
+        );
     }
 
     #[test]
