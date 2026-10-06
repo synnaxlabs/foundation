@@ -108,6 +108,10 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
         .freeze(Path::Live);
     let narrow = Mask::new(set, [set.entries()[2].slot]);
     let full = Mask::new(set, set.entries().iter().map(|entry| entry.slot));
+    let slot = |entry: usize| set.entries()[entry].slot;
+    // Leaves out key 3, so the frame's only series left is the index.
+    let most = Mask::new(set, [0, 1, 3].map(slot));
+    let index = Mask::new(set, [slot(0)]);
     let (read, allocations) = ALLOCATOR.count(|| {
         let view = View::new(&frame, &narrow);
         let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
@@ -119,8 +123,22 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
             frame.charge(),
             "a full view charges the frame"
         );
-        (read, full_read)
+        let view = View::new(&frame, &most);
+        let mut most_read = 0;
+        for (_, bytes) in view.iter() {
+            most_read += bytes.len();
+        }
+        assert_eq!(
+            view.charge(),
+            View::new(&frame, &index).charge(),
+            "a view of most charges as a view of the series it holds"
+        );
+        (read, full_read, most_read)
     });
     assert_eq!(allocations, 0, "the view allocated");
-    assert_eq!(read, (32, 32), "each view reads the index and key 3");
+    assert_eq!(
+        read,
+        (32, 32, 16),
+        "the views read both series, then the index"
+    );
 }
