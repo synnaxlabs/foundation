@@ -58,10 +58,10 @@ impl Clock {
     /// # Panics
     ///
     /// When `source` was removed already.
-    pub fn remove(&mut self, source: source::Key) -> Status {
+    pub fn remove(&mut self, source: source::Key) {
         let removed = self.sources.remove(&source);
         assert!(removed.is_some(), "{source:?} was removed");
-        self.steer()
+        self.steer();
     }
 
     /// Records a measurement of the monotonic clock from `source`, then moves mesh
@@ -70,12 +70,12 @@ impl Clock {
     /// # Panics
     ///
     /// When `source` was removed.
-    pub fn push(&mut self, source: source::Key, measurement: Measurement) -> Status {
+    pub fn push(&mut self, source: source::Key, measurement: Measurement) {
         let Some(filter) = self.sources.get_mut(&source) else {
             panic!("{source:?} was removed");
         };
         filter.push(measurement);
-        self.steer()
+        self.steer();
     }
 
     /// Feeds the clock from the node's time sources, today the OS clock `wall`. Each
@@ -97,7 +97,7 @@ impl Clock {
         }
     }
 
-    fn steer(&mut self) -> Status {
+    fn steer(&mut self) {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
         let state = match (self.state.slew(), estimate) {
             (None, Err(e)) => State::Unsynced(e),
@@ -120,7 +120,6 @@ impl Clock {
             self.state = state;
             self.cell.update(|_| encode(state));
         }
-        state.at(self.monotonic.now())
     }
 }
 
@@ -149,7 +148,8 @@ impl State {
     }
 }
 
-/// What a clock follows after a change to its sources.
+/// What a clock follows after its last [`Clock::add`], [`Clock::remove`], or
+/// [`Clock::push`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     /// No majority of the sources has agreed yet, so readers have no time. A source
@@ -184,10 +184,10 @@ impl Reader {
         })
     }
 
-    /// What the clock follows now: the status after its last change of sources, with
-    /// mesh time at the call. That mesh time is the one [`Reader::now`] gives, so it
-    /// never goes back. [`Status::Unsynced`] until a majority of the sources first
-    /// agree.
+    /// What the clock follows now, with mesh time at the call. It holds the result of
+    /// the last [`Clock::add`], [`Clock::remove`], or [`Clock::push`] to return. That
+    /// mesh time is the one [`Reader::now`] gives, so it never goes back.
+    /// [`Status::Unsynced`] until a majority of the sources first agree.
     #[must_use]
     pub fn status(&self) -> Status {
         self.cell

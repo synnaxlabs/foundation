@@ -1,6 +1,7 @@
 //! A file driver over memory, a stand-in until `sim` has files (#114).
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
@@ -213,5 +214,9 @@ impl Descriptor for Open {
             }
             result
         })
+    }
+
+    fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(async move { drop(self) })
     }
 }

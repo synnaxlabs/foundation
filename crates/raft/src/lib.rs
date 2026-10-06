@@ -90,7 +90,8 @@ pub enum Error {
     },
     /// A heartbeat, an append reply, or an append reject names a log index past this
     /// node's last entry. A heartbeat commits only what the follower holds, and a
-    /// follower answers only for entries the leader sent, so the sender is faulty.
+    /// follower answers only for entries the leader sent. So the sender is faulty, or,
+    /// from a heartbeat, this node's disk lost entries it synced.
     IndexPastLog {
         /// The index the message names.
         index: u64,
@@ -124,7 +125,8 @@ pub enum Error {
     },
     /// A message names this node as its sender.
     Loopback,
-    /// A second node claims to lead a term that this node leads. Election safety is
+    /// A heartbeat or an append of this node's term from a node other than the
+    /// leader of the term it knows: the one it heard, or itself. Election safety is
     /// broken, or the sender is faulty.
     SecondLeader {
         /// The term with two leaders.
