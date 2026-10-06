@@ -547,7 +547,8 @@ How to read this record:
   are in mesh time; connectors convert device time. Each node publishes
   `<node>.clock.offset` and `<node>.clock.error`. Zero time config by default: sources
   are detected, and the clock follows the smallest measured bound, with no fixed
-  ranking. Supersedes: C6 fixed source choice (X36).
+  ranking. Supersedes: C6 fixed source choice (X36). Amended by ESTIMATE COMBINE: the
+  clock follows more than half of the bounds, not the smallest one (#344).
 - **R6 TIME LOCKED** Own sans-I/O estimator over our transport. The bound is half the
   round trip. Keep the fastest exchange per source, combine sources, widen the bound
   with drift, slew only. Sources are read directly: mesh peers, GPS, PPS with NMEA, the
@@ -569,17 +570,23 @@ How to read this record:
   its last 8 measurements and offers the one with the smallest bound now. This reads R6
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
-  offsets inside the most bounds (Marzullo). It fails when no offset is inside the
-  bounds of more than half of the sources that vote. This reads C6's "follows the
-  smallest measured bound": when sources agree, the result is never wider than the
-  narrowest. The result holds the true offset when the bounds that hold it are a
-  majority of the sources that vote, and every other bound that votes misses them.
-  Decided by the `time` builder (#49). Each
-  source votes: a source with no measurement agrees with no offset, and it votes beside
-  the known bounds, or beside the unknown bounds when no bound is known. So before its
-  first estimate a clock waits until more than half of its sources agree, and one
-  source that answers first cannot set mesh time. The person decided on 2026-10-05
-  ("clock question si approved at whatever path you think"), #488. A device's readings
+  offsets inside more than half of the bounds that vote. A known result holds the true
+  offset when more than half of the bounds that vote hold it, whatever the other bounds
+  are. It can be wider than the narrowest bound, so C6's "follows the smallest measured
+  bound" no longer holds. Cost: PPS at ±100 ns beside two peers at ±1 ms, all centered
+  on the true offset, gives ±1 ms, not ±100 ns. Lost: the hull of the offsets inside the
+  most bounds (Marzullo), and NTP's selection, which first tries the offsets inside
+  every bound. When one lying source of three put a small bound inside the honest
+  overlap, each followed the liar. A threshold that also counts the sources with no
+  measurement lost too: beside two of them, it needs all three bounds of that case. The
+  person decided on 2026-10-05 ("a is fine"), #344. Amends C6 and X36. `combine` fails
+  when no offset is inside the bounds of more than half of the sources that vote.
+  Decided by the `time` builder (#49). Each source votes: a source with no measurement
+  agrees with no offset, and it votes beside the known bounds, or beside the unknown
+  bounds when no bound is known. So before its first estimate a clock waits until more
+  than half of its sources agree, and one source that answers first cannot set mesh
+  time. The person decided on 2026-10-05 ("clock question si approved at whatever path
+  you think"), #488. A device's readings
   go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
@@ -597,8 +604,11 @@ How to read this record:
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
-  is unknown too, at the center of the offsets inside the most of them. Approved by the
-  coordinator (#437). `Measurement::unknown(at, offset)` gives
+  is unknown too, at the center of the same hull. Approved by the coordinator (#437),
+  with the hull of #344. When drift grows unknown bounds so that this hull spans more
+  than 73000 days, no unknown estimate holds it, and its center can miss an offset that
+  every bound holds. The estimate is then at the center of the offsets inside the most
+  bounds. Decided by the `time` builder (#344). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
@@ -2253,7 +2263,8 @@ follows the smallest measured bound with no fixed ranking and detects sources.
 Resolution: the time policy lists only the peer nodes a node may use as mesh
 references (default: its region's voters). Local hardware sources are found
 automatically. The estimator always follows the smallest bound. Basis: R6 TIME LOCKED,
-TIME ADAPTERS.
+TIME ADAPTERS. Amended by ESTIMATE COMBINE: the estimator follows more than half of the
+bounds, not the smallest one (#344).
 
 **X37. Bootstrap peers and relays.**
 Conflict: D7 puts bootstrap peers in the file and lets any public node relay. R5 drops
