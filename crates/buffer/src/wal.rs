@@ -23,6 +23,9 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
+/// The smallest body a layout allows: the table of one entry.
+const BODY_MIN: usize = entry::table_len(1);
+
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 
@@ -100,8 +103,7 @@ impl Layout {
             .checked_add(body_max)
             .and_then(|len| len.checked_next_multiple_of(ALIGN))
             .map(to_u64);
-        let body =
-            entry::table_len(1)..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
         match window {
             Some(window)
                 if body.contains(&body_max)
@@ -129,6 +131,16 @@ impl Layout {
     #[must_use]
     pub fn body_max(self) -> usize {
         self.body_max
+    }
+
+    /// The most bytes of parts in a batch of one entry that
+    /// [`Buffer::append`](crate::Buffer::append) takes: one byte more gives
+    /// [`Error::Large`](crate::Error::Large) with [`Limit::Body`](crate::Limit::Body).
+    /// Each entry of a larger batch adds to the record's table, so its entries hold
+    /// less in all.
+    #[must_use]
+    pub fn entry_max(self) -> usize {
+        self.body_max - BODY_MIN
     }
 
     /// The length of the ring file: the two header blocks and the area.

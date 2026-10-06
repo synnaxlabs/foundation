@@ -294,9 +294,9 @@ impl Raft {
     /// Moves the node's time forward by one tick. `random` is a fresh, uniformly
     /// random value. The node uses it to choose its next election timeout.
     ///
-    /// A follower or candidate that reaches its election timeout starts an election. A
-    /// leader sends heartbeats, and steps down when it has not heard from a quorum for
-    /// `election_ticks`.
+    /// A follower or candidate that reaches its election timeout starts an election,
+    /// unless its term is the last (`u64::MAX`). A leader sends heartbeats, and steps
+    /// down when it has not heard from a quorum for `election_ticks`.
     pub fn tick(&mut self, random: u64) {
         self.election_elapsed += 1;
         if self.role == Role::Leader {
@@ -311,8 +311,9 @@ impl Raft {
         }
     }
 
-    /// Starts an election now, without a wait for the election timeout. A leader and
-    /// a node that is not in its own voter list do nothing.
+    /// Starts an election now, without a wait for the election timeout. A leader, a
+    /// node that is not in its own voter list, and a node in the last term
+    /// (`u64::MAX`) do nothing.
     pub fn campaign(&mut self) {
         if self.role != Role::Leader && self.promotable() {
             self.pre_campaign();
