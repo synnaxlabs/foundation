@@ -161,7 +161,7 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   `#![expect(clippy::disallowed_macros)]` lifts it. `cargo xtask globals` refuses
   that lift outside the root file of a test or benchmark target, and refuses each
   `static` that does not come right after `#[global_allocator]`, in every Rust file
-  but `xtask`.
+  but the sample workspace in `xtask/fixture`.
 
 ## Async and threads
 

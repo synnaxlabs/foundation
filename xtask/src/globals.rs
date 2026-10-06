@@ -11,8 +11,8 @@ use serde_json::Value;
 
 use crate::{field, files, select};
 
-/// Checks every Rust file of the workspace at `root` but those of `xtask`, whose tests
-/// hold sample source. A file may hold a `static` item only right after
+/// Checks every Rust file of the workspace at `root` but the sample workspace in
+/// `xtask/fixture`. A file may hold a `static` item only right after
 /// `#[global_allocator]`, and may name `disallowed_macros` only when it is the root
 /// file of a test or benchmark target. Comments and literals do not count.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
@@ -30,7 +30,7 @@ fn problems(root: &Path) -> Result<Vec<String>, String> {
     let roots = roots(&metadata)?;
     let mut problems = Vec::new();
     for file in files::rust(workspace)? {
-        if file.starts_with(workspace.join("xtask")) {
+        if file.starts_with(workspace.join("xtask/fixture")) {
             continue;
         }
         let text = std::fs::read_to_string(&file)
@@ -127,6 +127,7 @@ mod tests {
             held("crates/globals/src/unread.rs:3"),
             held("crates/globals/tests/alloc.rs:10"),
             lifted("crates/globals/tests/lift/inner.rs:3"),
+            held("xtask/src/main.rs:3"),
         ];
         refused.sort();
         assert_eq!(check(&crate::fixture()), Err(refused));

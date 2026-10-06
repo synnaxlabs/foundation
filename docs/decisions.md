@@ -1699,7 +1699,7 @@ How to read this record:
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
   `xtask globals` check refuses every other `static`, mutable or not, in each Rust
-  file but `xtask`; a constant is a `const` (#645). The static also holds the state of
+  file; a constant is a `const` (#645). The static also holds the state of
   `Allocator::freed_holding` (#349): a phase with a count of the frees that scan, the
   caller's needle while a call runs, and a found count, because Rust has no other way
   to see a freed block. `freed_holding` is the one exception to "Safe code is sound
