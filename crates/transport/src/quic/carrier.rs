@@ -85,7 +85,8 @@ impl Carrier {
     ///
     /// # Errors
     ///
-    /// [`Error::Network`] when the socket broke.
+    /// [`Error::Network`] when the socket broke and each session that connected
+    /// before was given.
     pub(crate) async fn accept(&self) -> Result<Session, Error> {
         poll_fn(|cx| self.poll_accept(cx)).await
     }
@@ -201,8 +202,8 @@ impl State {
         }
     }
 
-    /// Ends each session with [`Error::Network`], and refuses each later dial and
-    /// accept.
+    /// Ends each session with [`Error::Network`], and refuses each later dial, and
+    /// each accept once none that connected waits.
     fn fail(&mut self, error: env::net::Error) {
         for slot in self.sessions.values_mut() {
             slot.end.get_or_insert_with(|| Error::Network {
@@ -327,7 +328,7 @@ impl Task {
     }
 
     /// Ready when the socket broke, or when the carrier and its sessions dropped and
-    /// their closes went to the socket.
+    /// each connection drained.
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.state.borrow_mut();
         let fresh =
@@ -351,13 +352,15 @@ impl Task {
         while let Some(event) = state.endpoint.poll() {
             state.dispatch(event);
         }
-        // Every carrier and session dropped.
+        // Every carrier and session dropped. A handshake that connects later gets a
+        // slot in `dispatch`, and its close on the next poll.
         if Rc::strong_count(&self.state) == 1 {
+            state.endpoint.refuse();
             for key in mem::take(&mut state.sessions).into_keys() {
                 state.endpoint.close(now, key, Code(0));
             }
             self.socket.send(cx, &mut state.endpoint, now);
-            if self.socket.held.is_none() {
+            if state.endpoint.drained() && self.socket.held.is_none() {
                 return Poll::Ready(());
             }
         }
@@ -490,7 +493,9 @@ mod tests {
     use std::future::poll_fn;
     use std::net::SocketAddr;
     use std::pin::pin;
-    use std::task::{Context, Poll};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     use env::net::udp::{self, Transmit};
     use sim::Sim;
@@ -498,7 +503,7 @@ mod tests {
     use types::node::PrivateKey;
     use types::time::Span;
 
-    use super::{BATCHES, Carrier, Socket};
+    use super::{BATCHES, Carrier, Socket, register};
     use crate::quic::Endpoint;
     use crate::testing::Shard;
     use crate::tls::public;
@@ -631,12 +636,7 @@ mod tests {
             assert_eq!(session.closed().await, Error::TimedOut);
         });
         assert_eq!(sim.run_for(spans(Span::MILLISECOND, 500)), Ok(()));
-        let cut = sim::link::Config {
-            loss: 1.0,
-            ..sim::link::Config::default()
-        };
-        sim.link(&client, &server, cut);
-        sim.link(&server, &client, cut);
+        link(&mut sim, &client, &server, cut());
         assert_eq!(sim.run(), Ok(()));
     }
 
@@ -722,6 +722,118 @@ mod tests {
             node.clock().sleep(Span::MILLISECOND).await;
         });
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// Links `a` and `b` both ways with `config`.
+    fn link(sim: &mut Sim, a: &Node, b: &Node, config: sim::link::Config) {
+        sim.link(a, b, config);
+        sim.link(b, a, config);
+    }
+
+    /// A link with a one-way delay of 50 ms.
+    fn slow() -> sim::link::Config {
+        sim::link::Config {
+            delay: spans(Span::MILLISECOND, 50),
+            ..sim::link::Config::default()
+        }
+    }
+
+    fn cut() -> sim::link::Config {
+        sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        }
+    }
+
+    #[test]
+    fn the_last_drop_on_a_slow_link_sends_the_close() {
+        let (mut sim, client, server) = nodes(0);
+        link(&mut sim, &client, &server, slow());
+        let at = address(&server);
+        start(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            drop(dialed.expect("a session"));
+            drop(carrier);
+            node.clock().sleep(spans(IDLE, 3)).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_after_the_last_drop_is_refused() {
+        let (mut sim, client, server) = nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        // The server's close to `client` drains for hundreds of milliseconds.
+        link(&mut sim, &client, &server, slow());
+        let at = address(&server);
+        start(&server, SERVER, |carrier, node| async move {
+            drop(carrier.accept().await.expect("a session"));
+            drop(carrier);
+            node.clock().sleep(spans(IDLE, 3)).await;
+        });
+        start(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        start(&late, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let reason =
+                "aborted by peer: the server refused to accept a new connection";
+            let reason = String::from(reason);
+            assert_eq!(dialed.err(), Some(Error::Broken { reason }));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_timer_due_in_a_pause_runs_when_it_ends() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        start(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            assert_eq!(session.closed().await, Error::TimedOut);
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            // The close's drain ends in the pause, before the keep-alive.
+            drop(session);
+            node.pause(spans(Span::MILLISECOND, 150));
+            node.clock().sleep(spans(Span::MILLISECOND, 151)).await;
+            assert!(carrier.0.borrow().endpoint.drained());
+        });
+        assert_eq!(sim.run_for(spans(Span::MILLISECOND, 40)), Ok(()));
+        // Only the timer can wake the client's task.
+        link(&mut sim, &client, &server, cut());
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn register_keeps_one_waker_for_each_task() {
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let one = Arc::new(Count(AtomicUsize::new(0)));
+        let other = Arc::new(Count(AtomicUsize::new(0)));
+        let mut wakers = Vec::new();
+        for count in [&one, &one, &other] {
+            register(&mut wakers, &Waker::from(Arc::clone(count)));
+        }
+        wakers.into_iter().for_each(Waker::wake);
+        let counts = [&one, &other].map(|count| count.0.load(Ordering::Relaxed));
+        assert_eq!(counts, [1, 1]);
     }
 
     #[test]
