@@ -240,3 +240,36 @@ fn a_shard_fault_past_the_node_cores_panics() {
     let node = sim.node(node::Config::default());
     node.fail_shard(4, Fault::Start);
 }
+
+#[test]
+fn a_node_can_pin_by_default() {
+    let mut sim = sim(0);
+    assert!(sim.node(node::Config::default()).shards().pinnable());
+}
+
+#[test]
+fn a_node_that_cannot_pin_fails_a_start_with_a_core_and_starts_one_without() {
+    let mut sim = sim(0);
+    let config = node::Config {
+        unpinnable: true,
+        ..node::Config::default()
+    };
+    let node = sim.node(config);
+    let shards = node.shards();
+    assert!(!shards.pinnable());
+    let e = shards
+        .start(pinned("shard-1", 1), |_| async {})
+        .unwrap_err();
+    assert_eq!(
+        e,
+        thread::Error::Pin {
+            name: "shard-1".into(),
+            core: 1,
+            reason: "the node cannot pin a thread".into(),
+        }
+    );
+    let free = shards.start(shard("free"), |_| async {});
+    assert_eq!(node.shard_starts(), vec![shard("free")]);
+    sim.run().unwrap();
+    free.unwrap().join().unwrap();
+}

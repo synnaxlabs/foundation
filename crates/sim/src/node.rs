@@ -213,6 +213,9 @@ impl fmt::Debug for Node {
 pub struct Config {
     /// The core count that [`env::shards::Shards::cores`] reports.
     pub cores: NonZeroUsize,
+    /// The node cannot pin a shard to a core: [`env::shards::Shards::pinnable`] is
+    /// `false`, and `env` fails a start with a core before the node records it.
+    pub unpinnable: bool,
     /// The monotonic reading when the node is added.
     pub monotonic: Monotonic,
     /// The wall time when the node is added.
@@ -226,11 +229,12 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
+    /// Four cores that can pin, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
     /// of 10 ms and a disk of 64 GiB.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
+            unpinnable: false,
             monotonic: Monotonic::default() + Span::HOUR,
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
             wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
