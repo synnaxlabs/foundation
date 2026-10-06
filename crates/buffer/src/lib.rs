@@ -10,7 +10,7 @@ mod log;
 mod record;
 mod wal;
 
-pub use buffer::{Buffer, Commit, Config, Error, Rejected};
+pub use buffer::{Buffer, Commit, Config, Error, Read, Rejected, Stored};
 pub use entry::{Entry, PARTS_MAX, Parts};
-pub use log::Tail;
+pub use log::{Mark, Tail};
 pub use wal::{Layout, Limit, Unfit};

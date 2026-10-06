@@ -315,19 +315,34 @@ pub(crate) fn parse(start: &[u8], len: usize) -> Result<Headers<'_>, Invalid> {
     let (headers, rest) = rest
         .split_at_checked(headers_len)
         .ok_or(Invalid::Truncated)?;
-    let bytes = len
-        .checked_sub(start.len())
-        .and_then(|outside| outside.checked_add(rest.len()))
+    let offset = start
+        .len()
+        .checked_sub(rest.len())
         .expect("invariant: the body holds its start");
-    Ok(Headers { headers, bytes })
+    Ok(Headers {
+        table: headers,
+        offset,
+        len,
+    })
+}
+
+/// The size of the table at the start of the body that begins with `start`, or
+/// `None` when `start` holds no count or the count is over [`ENTRIES_MAX`].
+pub(crate) fn table_at(start: &[u8]) -> Option<usize> {
+    let (count, _) = start.split_first_chunk::<4>()?;
+    let count = usize::try_from(u32::from_le_bytes(*count)).ok()?;
+    (count <= ENTRIES_MAX).then(|| table_len(count))
 }
 
 /// The headers of one group commit, in order.
 #[derive(Clone, Debug)]
 pub(crate) struct Headers<'a> {
-    headers: &'a [u8],
-    /// Bytes of the body after the table that no header given so far names.
-    bytes: usize,
+    /// The headers not given yet.
+    table: &'a [u8],
+    /// The body offset of the bytes of the next header.
+    offset: usize,
+    /// Bytes of the body.
+    len: usize,
 }
 
 impl Iterator for Headers<'_> {
@@ -336,31 +351,41 @@ impl Iterator for Headers<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.header()?;
         if item.is_err() {
-            self.headers = &[];
-            self.bytes = 0;
+            self.table = &[];
+            self.offset = self.len;
         }
         Some(item)
     }
 }
 
 impl Headers<'_> {
+    /// The body offset of the bytes of the header that `next` gives next.
+    pub(crate) fn offset(&self) -> usize {
+        self.offset
+    }
+
+    #[expect(clippy::unwrap_in_result, reason = "the offset stays in the body")]
     fn header(&mut self) -> Option<Result<Header, Invalid>> {
-        let Some((header, rest)) = self.headers.split_first_chunk::<HEADER_LEN>()
-        else {
-            return (self.bytes != 0).then_some(Err(Invalid::Trailing(self.bytes)));
+        let Some((header, rest)) = self.table.split_first_chunk::<HEADER_LEN>() else {
+            let trailing = self
+                .len
+                .checked_sub(self.offset)
+                .expect("invariant: the offset is in the body");
+            return (trailing != 0).then_some(Err(Invalid::Trailing(trailing)));
         };
-        self.headers = rest;
+        self.table = rest;
         let header = match Header::decode(header) {
             Ok(header) => header,
             Err(invalid) => return Some(Err(invalid)),
         };
-        let Some(bytes) = usize::try_from(header.bytes)
+        let Some(offset) = usize::try_from(header.bytes)
             .ok()
-            .and_then(|len| self.bytes.checked_sub(len))
+            .and_then(|bytes| self.offset.checked_add(bytes))
+            .filter(|&offset| offset <= self.len)
         else {
             return Some(Err(Invalid::Truncated));
         };
-        self.bytes = bytes;
+        self.offset = offset;
         Some(Ok(header))
     }
 }
@@ -369,11 +394,7 @@ impl Headers<'_> {
 #[cfg(test)]
 pub(crate) fn parsed(body: &[u8]) -> Result<Vec<(Header, &[u8])>, Invalid> {
     let headers = parse(body, body.len())?;
-    let table = body
-        .len()
-        .checked_sub(headers.bytes)
-        .expect("the table is in the body");
-    let mut bytes = body.get(table..).unwrap_or(&[]);
+    let mut bytes = body.get(headers.offset()..).unwrap_or(&[]);
     headers
         .map(|header| {
             let header = header?;
