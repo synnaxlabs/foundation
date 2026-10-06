@@ -142,6 +142,13 @@ fn writes_each_channel_within_its_range() {
 }
 
 #[test]
+fn refuses_a_write_after_a_stop() {
+    let mut task = output(&linked(), "Dev1/ao0");
+    task.stop().unwrap();
+    assert_eq!(task.write(&[1.0], SECOND), Err(refused(stub::STOPPED)));
+}
+
+#[test]
 #[should_panic(expected = "3 values do not fill 2 channels")]
 fn panics_on_values_that_do_not_fill_the_channels() {
     let mut task = output(&linked(), "Dev1/ao0:1");
