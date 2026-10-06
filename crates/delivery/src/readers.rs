@@ -47,7 +47,8 @@ pub struct Readers {
     /// The complete sessions, sorted by key.
     complete: Vec<Session>,
     /// The flow of each complete session, at its index in `complete`. Apart so that a
-    /// `Session` stays 64 bytes, which `find` indexes with a shift, not a multiply.
+    /// `Session` stays 64 bytes, which a search by key indexes with a shift, not a
+    /// multiply.
     flows: Vec<Flow>,
     /// The live frames not yet on disk, with their seq, oldest first. Empty when no
     /// complete session is open.
@@ -235,19 +236,18 @@ impl Readers {
     }
 
     /// Raises the session's credit to `limit_bytes` since it opened. A limit that is
-    /// not higher than the current one changes nothing, and so does a grant to a
-    /// closed session: a grant can arrive after its session closes.
+    /// not higher than the current one changes nothing, and so does a grant to a key
+    /// that is not an open complete session: a grant can arrive after its session
+    /// closes.
     ///
     /// # Panics
     ///
-    /// If no session had `key`, or `key` is an open latest session.
+    /// If this `Readers` never gave `key`.
     pub fn grant(&mut self, key: Key, limit_bytes: u64) {
         if let Ok(i) = self.complete.binary_search_by_key(&key, |s| s.key) {
             self.flows[i].credit.grant(limit_bytes);
         } else {
             assert!(key.0 < self.next, "session {key} was never open");
-            let latest = self.latest.binary_search_by_key(&key, |s| s.key);
-            assert!(latest.is_err(), "session {key} is a latest session");
         }
     }
 
@@ -1194,11 +1194,11 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "session 0 is a latest session")]
-        fn grant_panics_on_a_latest_session() {
+        #[should_panic(expected = "session 2 was never open")]
+        fn grant_panics_on_a_key_past_the_next() {
             let mut readers = Readers::new(0);
-            let key = readers.open_latest(None, at(0)).key;
-            readers.grant(key, 10);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)));
+            readers.grant(Key(2), 10);
         }
     }
 
@@ -1419,6 +1419,17 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), []);
             assert_eq!(taken(&mut readers, new), []);
+        }
+
+        #[test]
+        fn drops_a_grant_to_a_session_a_latest_takeover_closed() {
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0))).key;
+            let name = "a".parse().expect("a valid name");
+            let latest = readers.open_latest(Some(name), at(1));
+            assert_eq!(latest.replaced, Some(old));
+            readers.grant(old, 10 * CHARGE);
+            assert_eq!(taken(&mut readers, latest.key), []);
         }
 
         #[test]
