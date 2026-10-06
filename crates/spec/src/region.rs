@@ -38,9 +38,10 @@ impl Delegation {
         self.epoch
     }
 
-    /// The first voters, in name order with no repeat.
+    /// The voters the region started with, in name order with no repeat. The record
+    /// does not follow later changes; the region's Raft config holds the current set.
     #[must_use]
-    pub fn voters(&self) -> &[Name] {
+    pub fn initial_voters(&self) -> &[Name] {
         &self.voters
     }
 }
@@ -82,11 +83,11 @@ mod tests {
             rotated.rotate_left(by);
             rotated.extend(rotated.clone());
             prop_assert_eq!(Delegation::new(3, rotated), Ok(made.clone()));
-            prop_assert!(made.voters().is_sorted_by(|a, b| a < b));
+            prop_assert!(made.initial_voters().is_sorted_by(|a, b| a < b));
             let mut expected = texts.clone();
             expected.sort();
             expected.dedup();
-            let voters = made.voters().iter().map(Name::as_str).collect::<Vec<_>>();
+            let voters = made.initial_voters().iter().map(Name::as_str).collect::<Vec<_>>();
             prop_assert_eq!(voters, expected);
         }
     }

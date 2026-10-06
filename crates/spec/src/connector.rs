@@ -37,7 +37,8 @@ impl Connector {
         &self.node
     }
 
-    /// The config, which only the kind reads.
+    /// The config, which only the kind reads. It keeps the spans it was made with;
+    /// the encoding drops them, so a decoded config has none.
     #[must_use]
     pub const fn config(&self) -> &Document {
         &self.config

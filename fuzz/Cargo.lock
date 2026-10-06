@@ -167,6 +167,10 @@ dependencies = [
 [[package]]
 name = "connector-modbus"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "types",
+]
 
 [[package]]
 name = "constant_time_eq"
@@ -612,6 +616,7 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 name = "spec"
 version = "0.0.0"
 dependencies = [
+ "document",
  "types",
 ]
 

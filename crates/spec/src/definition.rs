@@ -91,8 +91,8 @@ impl Definition {
             Self::Region(delegation) => {
                 out.push(REGION);
                 out.extend_from_slice(&delegation.epoch().to_le_bytes());
-                count(&mut out, delegation.voters().len());
-                for voter in delegation.voters() {
+                count(&mut out, delegation.initial_voters().len());
+                for voter in delegation.initial_voters() {
                     text(&mut out, voter.as_str());
                 }
             }
