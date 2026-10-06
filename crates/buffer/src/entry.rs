@@ -239,11 +239,12 @@ const fn path_byte(path: Path) -> u8 {
 /// # Panics
 ///
 /// When the table would be over `usize::MAX` bytes.
-pub(crate) fn table_len(count: usize) -> usize {
-    count
-        .checked_mul(HEADER_LEN)
-        .and_then(|headers| headers.checked_add(4))
-        .expect("invariant: a table fits in memory")
+pub(crate) const fn table_len(count: usize) -> usize {
+    match count.checked_mul(HEADER_LEN) {
+        Some(headers) => headers.checked_add(4),
+        None => None,
+    }
+    .expect("invariant: a table fits in memory")
 }
 
 /// Writes the table of `headers` at the front of `into` and returns its size,
