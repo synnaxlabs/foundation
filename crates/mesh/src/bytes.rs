@@ -4,9 +4,9 @@
 //! function takes it from the start of a slice, and gives `None` when the slice is
 //! too short; the slice is then at no known place.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use raft::{Grant, Position, Proof, Term};
+use raft::{Grant, Position, Proof, Signature, Term};
 use types::node;
 
 /// Takes `N` bytes.
@@ -78,8 +78,29 @@ pub(crate) fn put_optional_key(key: Option<node::Key>, out: &mut Vec<u8>) {
     }
 }
 
+/// Adds a signature's 64 bytes.
+///
+/// # Panics
+///
+/// When `signature` is `None`: the caller signs every grant before it encodes one.
+pub(crate) fn put_signature(signature: Option<Signature>, out: &mut Vec<u8>) {
+    let Signature(bytes) =
+        signature.expect("invariant: a grant is signed before it is encoded");
+    out.extend(bytes);
+}
+
+/// Takes a signature.
+pub(crate) fn take_signature(bytes: &mut &[u8]) -> Option<Signature> {
+    take(bytes).map(Signature)
+}
+
 /// Adds a presence byte, then the proof when there is one: its grant as one byte,
-/// the candidate, and the voters as [`put_keys`] gives them.
+/// the candidate, a count of voters as 8 little-endian bytes, then each voter's key
+/// and signature in rising key order.
+///
+/// # Panics
+///
+/// When a voter has no signature, as [`put_signature`].
 pub(crate) fn put_optional_proof(proof: Option<&Proof>, out: &mut Vec<u8>) {
     match proof {
         None => out.push(ABSENT),
@@ -90,7 +111,13 @@ pub(crate) fn put_optional_proof(proof: Option<&Proof>, out: &mut Vec<u8>) {
                 Grant::Vote => VOTE,
             });
             put_key(proof.candidate, out);
-            put_keys(&proof.voters, out);
+            let count = u64::try_from(proof.voters.len())
+                .expect("invariant: a count fits in 64 bits");
+            out.extend(count.to_le_bytes());
+            for (&voter, &signature) in &proof.voters {
+                put_key(voter, out);
+                put_signature(signature, out);
+            }
         }
     }
 }
@@ -104,7 +131,8 @@ pub(crate) fn take_present(bytes: &mut &[u8]) -> Option<bool> {
     }
 }
 
-/// Takes what [`put_optional_proof`] gives after its presence byte.
+/// Takes what [`put_optional_proof`] gives after its presence byte. `None` when the
+/// voters are not in rising order.
 pub(crate) fn take_proof(bytes: &mut &[u8]) -> Option<Proof> {
     let grant = match u8::from_le_bytes(take(bytes)?) {
         PRE_VOTE => Grant::PreVote,
@@ -112,7 +140,18 @@ pub(crate) fn take_proof(bytes: &mut &[u8]) -> Option<Proof> {
         _ => return None,
     };
     let candidate = take_key(bytes)?;
-    let voters = take_keys(bytes)?;
+    let count = u64::from_le_bytes(take(bytes)?);
+    let mut voters = BTreeMap::new();
+    for _ in 0..count {
+        let voter = take_key(bytes)?;
+        if voters
+            .last_key_value()
+            .is_some_and(|(last, _)| *last >= voter)
+        {
+            return None;
+        }
+        voters.insert(voter, Some(take_signature(bytes)?));
+    }
     Some(Proof {
         grant,
         candidate,

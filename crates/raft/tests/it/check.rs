@@ -5,7 +5,8 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
 use raft::{
-    Body, Data, Entry, Grant, Message, Position, Proof, Raft, Ready, Term, Voters,
+    Answer, Body, Data, Entry, Grant, Message, Position, Proof, Raft, Ready, Signature,
+    Term, Voters,
 };
 
 use types::node;
@@ -39,8 +40,8 @@ fn body() -> impl Strategy<Value = Body> {
     prop_oneof![
         position().prop_map(|last| Body::PreVote { last }),
         position().prop_map(|last| Body::Vote { last }),
-        any::<bool>().prop_map(|granted| Body::PreVoteReply { granted }),
-        any::<bool>().prop_map(|granted| Body::VoteReply { granted }),
+        answer().prop_map(|answer| Body::PreVoteReply { answer }),
+        answer().prop_map(|answer| Body::VoteReply { answer }),
         edge().prop_map(|commit| Body::Heartbeat { commit }),
         Just(Body::HeartbeatReply),
         (position(), prop::collection::vec(entry(), 0..3), edge()).prop_map(
@@ -55,17 +56,30 @@ fn body() -> impl Strategy<Value = Body> {
     ]
 }
 
+// A signature is opaque to `raft`, so one byte repeated reaches every case.
+fn signature() -> impl Strategy<Value = Signature> {
+    any::<u8>().prop_map(|byte| Signature([byte; 64]))
+}
+
+fn answer() -> impl Strategy<Value = Answer> {
+    prop_oneof![
+        Just(Answer::Refused),
+        prop::option::of(signature()).prop_map(Answer::Granted),
+    ]
+}
+
 // A proof of a random grant for a random candidate by a random set of nodes, one
 // past the nodes included. `nodes` is the group size.
 fn proof(nodes: usize) -> impl Strategy<Value = Proof> {
     let candidate = any::<Index>().prop_map(move |pick| pick.index(nodes + 1));
-    let voters = prop::collection::vec(any::<bool>(), nodes + 1);
+    let voter = (any::<bool>(), prop::option::of(signature()));
+    let voters = prop::collection::vec(voter, nodes + 1);
     (any::<bool>(), candidate, voters).prop_map(|(vote, candidate, voters)| Proof {
         grant: if vote { Grant::Vote } else { Grant::PreVote },
         candidate: Network::key(candidate),
         voters: (0..voters.len())
-            .filter(|&node| voters[node])
-            .map(Network::key)
+            .filter(|&node| voters[node].0)
+            .map(|node| (Network::key(node), voters[node].1))
             .collect(),
     })
 }

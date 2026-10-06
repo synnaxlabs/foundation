@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use types::node;
 
@@ -33,18 +33,34 @@ pub enum Grant {
     Vote,
 }
 
-/// A quorum of signed pre-votes or votes for one candidate in one term. A `Raft`
-/// counts the keys against its own configuration. The caller holds the signatures:
-/// it adds them to a message it sends and checks them on a message it steps, so the
-/// voters of a stepped proof are only the ones whose signature held.
+/// A voter's signature of its grant. A `Raft` carries it and never reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signature(pub [u8; 64]);
+
+/// A voter's answer to a [`Body::PreVote`] or a [`Body::Vote`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The voter does not grant it.
+    Refused,
+    /// The voter grants it, with its signature. `None` only when this node sends the
+    /// grant: the caller signs it.
+    Granted(Option<Signature>),
+}
+
+/// A quorum of signed pre-votes or votes for one candidate in one term: the term of
+/// the message or hard state that holds it. A `Raft` counts the keys against its
+/// own configuration and carries the signatures. The caller signs this node's
+/// entries before it writes or sends them, and checks every signature before it
+/// steps a message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof {
     /// What the voters granted.
     pub grant: Grant,
     /// The node they granted it to.
     pub candidate: node::Key,
-    /// The voters that signed, the candidate included.
-    pub voters: BTreeSet<node::Key>,
+    /// The voters, the candidate included, each with its signature. `None` only for
+    /// this node's own entry in a proof this node made: the caller signs it.
+    pub voters: BTreeMap<node::Key, Option<Signature>>,
 }
 
 /// What a [`Message`] says.
@@ -57,8 +73,8 @@ pub enum Body {
     },
     /// Answers a [`Body::PreVote`].
     PreVoteReply {
-        /// Whether the receiver would vote for the sender.
-        granted: bool,
+        /// Whether the sender would vote for the receiver.
+        answer: Answer,
     },
     /// Asks for the receiver's vote in the message's term.
     Vote {
@@ -67,8 +83,8 @@ pub enum Body {
     },
     /// Answers a [`Body::Vote`].
     VoteReply {
-        /// Whether the sender has the vote.
-        granted: bool,
+        /// Whether the receiver has the sender's vote.
+        answer: Answer,
     },
     /// A leader states that it leads the message's term.
     Heartbeat {

@@ -3,12 +3,12 @@
 //! A message has one byte form: [`Message::decode`] takes only what
 //! [`Message::encode`] gives. The stream's header carries the format version.
 
-use raft::{Body, Position, Term};
+use raft::{Answer, Body, Position, Term};
 use types::node;
 
 use crate::bytes::{
-    put_key, put_optional_proof, put_position, take, take_key, take_position,
-    take_present, take_proof,
+    put_key, put_optional_proof, put_position, put_signature, take, take_key,
+    take_position, take_present, take_proof, take_signature,
 };
 use crate::entry;
 use crate::region::Change;
@@ -60,6 +60,10 @@ pub(crate) enum Message {
 
 impl Message {
     /// The byte form of the message.
+    ///
+    /// # Panics
+    ///
+    /// When a grant or a proof entry has no signature: the caller signs them first.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
@@ -142,15 +146,17 @@ fn body(body: &Body, out: &mut Vec<u8>) {
             out.push(PRE_VOTE);
             put_position(*last, out);
         }
-        Body::PreVoteReply { granted } => {
-            out.extend([PRE_VOTE_REPLY, u8::from(*granted)]);
+        Body::PreVoteReply { answer } => {
+            out.push(PRE_VOTE_REPLY);
+            put_answer(*answer, out);
         }
         Body::Vote { last } => {
             out.push(VOTE);
             put_position(*last, out);
         }
-        Body::VoteReply { granted } => {
-            out.extend([VOTE_REPLY, u8::from(*granted)]);
+        Body::VoteReply { answer } => {
+            out.push(VOTE_REPLY);
+            put_answer(*answer, out);
         }
         Body::Heartbeat { commit } => {
             out.push(HEARTBEAT);
@@ -187,13 +193,13 @@ fn take_body(bytes: &mut &[u8]) -> Option<Body> {
             last: take_position(bytes)?,
         },
         PRE_VOTE_REPLY => Body::PreVoteReply {
-            granted: flag(bytes)?,
+            answer: take_answer(bytes)?,
         },
         VOTE => Body::Vote {
             last: take_position(bytes)?,
         },
         VOTE_REPLY => Body::VoteReply {
-            granted: flag(bytes)?,
+            answer: take_answer(bytes)?,
         },
         HEARTBEAT => Body::Heartbeat {
             commit: u64::from_le_bytes(take(bytes)?),
@@ -223,10 +229,24 @@ fn take_body(bytes: &mut &[u8]) -> Option<Body> {
     Some(body)
 }
 
-fn flag(bytes: &mut &[u8]) -> Option<bool> {
+const REFUSED: u8 = 0;
+const GRANTED: u8 = 1;
+
+// A refusal is its byte alone. A grant is its byte, then its signature.
+fn put_answer(answer: Answer, out: &mut Vec<u8>) {
+    match answer {
+        Answer::Refused => out.push(REFUSED),
+        Answer::Granted(signature) => {
+            out.push(GRANTED);
+            put_signature(signature, out);
+        }
+    }
+}
+
+fn take_answer(bytes: &mut &[u8]) -> Option<Answer> {
     match u8::from_le_bytes(take(bytes)?) {
-        0 => Some(false),
-        1 => Some(true),
+        REFUSED => Some(Answer::Refused),
+        GRANTED => Some(Answer::Granted(Some(take_signature(bytes)?))),
         _ => None,
     }
 }
@@ -236,7 +256,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use proptest::prelude::*;
-    use raft::{Data, Entry, Grant, Proof, Voters};
+    use raft::{Data, Entry, Grant, Proof, Signature, Voters};
     use types::channel;
 
     use super::*;
@@ -260,6 +280,17 @@ mod tests {
         prop::collection::btree_set(any::<u128>().prop_map(node), 0..4)
     }
 
+    fn a_signature() -> impl Strategy<Value = Signature> {
+        prop::array::uniform(any::<u8>()).prop_map(Signature)
+    }
+
+    fn an_answer() -> impl Strategy<Value = Answer> {
+        prop_oneof![
+            Just(Answer::Refused),
+            a_signature().prop_map(|signature| Answer::Granted(Some(signature))),
+        ]
+    }
+
     fn an_entry() -> impl Strategy<Value = Entry> {
         let data = prop_oneof![
             Just(Data::Empty),
@@ -275,9 +306,9 @@ mod tests {
         let entries = prop::collection::vec(an_entry(), 0..4);
         prop_oneof![
             a_position().prop_map(|last| Body::PreVote { last }),
-            any::<bool>().prop_map(|granted| Body::PreVoteReply { granted }),
+            an_answer().prop_map(|answer| Body::PreVoteReply { answer }),
             a_position().prop_map(|last| Body::Vote { last }),
-            any::<bool>().prop_map(|granted| Body::VoteReply { granted }),
+            an_answer().prop_map(|answer| Body::VoteReply { answer }),
             any::<u64>().prop_map(|commit| Body::Heartbeat { commit }),
             Just(Body::HeartbeatReply),
             (a_position(), entries, any::<u64>()).prop_map(
@@ -297,7 +328,12 @@ mod tests {
     fn a_proof() -> impl Strategy<Value = Proof> {
         let grant = any::<bool>()
             .prop_map(|vote| if vote { Grant::Vote } else { Grant::PreVote });
-        (grant, any::<u128>(), keys()).prop_map(|(grant, candidate, voters)| Proof {
+        let voters = prop::collection::btree_map(
+            any::<u128>().prop_map(node),
+            a_signature().prop_map(Some),
+            0..4,
+        );
+        (grant, any::<u128>(), voters).prop_map(|(grant, candidate, voters)| Proof {
             grant,
             candidate: node(candidate),
             voters,
@@ -351,6 +387,10 @@ mod tests {
         key
     }
 
+    fn signature(byte: u8) -> Signature {
+        Signature([byte; 64])
+    }
+
     fn raft(body: Body) -> Message {
         Message::Raft(raft::Message {
             from: node(1),
@@ -370,9 +410,19 @@ mod tests {
     fn each_body_has_a_fixed_byte_form() {
         let cases: [(Body, &[&[u8]]); 8] = [
             (Body::PreVote { last: at(2, 4) }, &[&[1], &le(2), &le(4)]),
-            (Body::PreVoteReply { granted: true }, &[&[2, 1]]),
+            (
+                Body::PreVoteReply {
+                    answer: Answer::Granted(Some(signature(7))),
+                },
+                &[&[2, 1], &[7; 64]],
+            ),
             (Body::Vote { last: at(2, 4) }, &[&[3], &le(2), &le(4)]),
-            (Body::VoteReply { granted: false }, &[&[4, 0]]),
+            (
+                Body::VoteReply {
+                    answer: Answer::Refused,
+                },
+                &[&[4, 0]],
+            ),
             (Body::Heartbeat { commit: 6 }, &[&[5], &le(6)]),
             (Body::HeartbeatReply, &[&[6]]),
             (Body::AppendReply { last: 8 }, &[&[8], &le(8)]),
@@ -414,10 +464,11 @@ mod tests {
             proof: Some(Proof {
                 grant: Grant::Vote,
                 candidate: node(1),
-                voters: [node(1), node(4)].into(),
+                voters: [(node(1), Some(signature(5))), (node(4), Some(signature(6)))]
+                    .into(),
             }),
         });
-        let voters = [&le(2)[..], &key(1), &key(4)].concat();
+        let voters = [&le(2)[..], &key(1), &[5; 64], &key(4), &[6; 64]].concat();
         let proof = [&[1, 1][..], &key(1), &voters].concat();
         let head = &head()[..head().len() - 1];
         let expected = [head, &proof, &[5], &le(6)].concat();
@@ -463,9 +514,13 @@ mod tests {
     #[test]
     fn decode_refuses_what_is_not_a_message() {
         let heartbeat = raft(Body::HeartbeatReply).encode();
-        let granted = raft(Body::VoteReply { granted: true }).encode();
-        let mut flag = granted.clone();
-        *flag.last_mut().unwrap() = 2;
+        let granted = raft(Body::VoteReply {
+            answer: Answer::Granted(Some(signature(7))),
+        })
+        .encode();
+        let mut answer = granted.clone();
+        answer[head().len() + 1] = 2;
+        let unsigned = [&head()[..], &[4, 1]].concat();
         let mut body = heartbeat.clone();
         *body.last_mut().unwrap() = 10;
         let mut tail = heartbeat.clone();
@@ -474,6 +529,11 @@ mod tests {
         let mut presence = heartbeat.clone();
         presence[proof_at] = 2;
         let grant = [&head()[..proof_at], &[1, 2], &key(1), &le(0), &[6]].concat();
+        let proven = |voters: [u8; 2]| {
+            let voters = voters.map(|voter| [key(voter), vec![voter; 64]].concat());
+            let proof = [&[1, 1][..], &key(1), &le(2), &voters.concat()].concat();
+            [&head()[..proof_at], &proof, &[6]].concat()
+        };
         let voters = |keys: [u128; 2]| {
             raft(Body::Append {
                 prev: at(0, 0),
@@ -497,15 +557,18 @@ mod tests {
         twice.swap(len - 40, len - 24);
         twice[len - 40] = 2;
         twice[len - 24] = 2;
-        let cases: [(&str, &[u8]); 11] = [
+        let cases: [(&str, &[u8]); 14] = [
             ("no bytes", &[]),
             ("an unknown kind", &[0]),
             ("a cut message", &heartbeat[..heartbeat.len() - 1]),
             ("a byte after the end", &tail),
             ("an unknown body", &body),
-            ("a flag that is not 0 or 1", &flag),
+            ("an answer that is not 0 or 1", &answer),
+            ("a grant with no signature", &unsigned),
             ("a proof byte that is not 0 or 1", &presence),
             ("a grant that is not 0 or 1", &grant),
+            ("proof voters that do not rise", &proven([2, 1])),
+            ("a proof voter twice", &proven([1, 1])),
             (
                 "a change that is not valid",
                 &[2, 0, 0, 0, 0, 0, 0, 0, 0, 9],
@@ -517,7 +580,34 @@ mod tests {
             assert_eq!(Message::decode(bytes), None, "{name}");
         }
         assert!(Message::decode(&voters([1, 2])).is_some());
+        assert!(Message::decode(&proven([1, 2])).is_some());
         assert!(Message::decode(&granted).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    fn encode_panics_on_an_unsigned_grant() {
+        raft(Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        })
+        .encode();
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    fn encode_panics_on_an_unsigned_proof_entry() {
+        Message::Raft(raft::Message {
+            from: node(1),
+            to: node(2),
+            term: Term(3),
+            body: Body::Vote { last: at(0, 0) },
+            proof: Some(Proof {
+                grant: Grant::PreVote,
+                candidate: node(1),
+                voters: [(node(1), None), (node(2), Some(signature(2)))].into(),
+            }),
+        })
+        .encode();
     }
 
     proptest! {
