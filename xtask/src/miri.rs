@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use serde_json::Value;
+
 use crate::select;
 
 /// The `MIRIFLAGS` of each Miri pass.
@@ -11,17 +13,28 @@ const PASSES: [&str; 2] = [
     "-Zmiri-strict-provenance -Zmiri-tree-borrows",
 ];
 
-/// Runs `cargo miri test` once per pass in [`PASSES`] on each workspace crate whose
-/// source names `unsafe_code`, the lint that each `unsafe` use must expect. It uses
-/// rustup and the nightly in `rust-toolchain-nightly`. It fails when a crate fails or
-/// runs no tests.
+/// Crates whose `unsafe` code only calls the OS, which Miri cannot run. Tests on the
+/// real OS check them (BLOCK MEMORY).
+pub(crate) const SKIPPED: [&str; 1] = ["os"];
+
+/// The workspace crates whose source names `unsafe_code`, the lint that each `unsafe`
+/// use must expect, except those in [`SKIPPED`].
+pub(crate) fn packages(metadata: &Value) -> Result<Vec<select::Package>, String> {
+    let mut packages =
+        select::packages(metadata, |s| select::has_word(s, "unsafe_code"))?;
+    packages.retain(|package| !SKIPPED.contains(&package.name.as_str()));
+    Ok(packages)
+}
+
+/// Runs `cargo miri test` once per pass in [`PASSES`] on each crate of [`packages`].
+/// It uses rustup and the nightly in `rust-toolchain-nightly`. It fails when a crate
+/// fails or runs no tests.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let pin = root.join("rust-toolchain-nightly");
     let nightly = std::fs::read_to_string(&pin)
         .map_err(|e| vec![format!("{}: {e}", pin.display())])?;
     let metadata = crate::metadata(root).map_err(|e| vec![e])?;
-    let packages = select::packages(&metadata, |s| select::has_word(s, "unsafe_code"))
-        .map_err(|e| vec![e])?;
+    let packages = packages(&metadata).map_err(|e| vec![e])?;
     if packages.is_empty() {
         eprintln!("no crate names `unsafe_code`, so Miri has nothing to check");
         return Ok(());
@@ -83,6 +96,14 @@ mod tests {
         let output = "\nrunning 2 tests\ntest a ... ok\n\nrunning 0 tests\n\n\
                       running 1 test\ntest b ... ok\n";
         assert_eq!(tests_ran(output), 3);
+    }
+
+    #[test]
+    fn packages_are_the_crates_that_name_unsafe_code() {
+        let metadata = crate::metadata(&crate::fixture()).unwrap();
+        let picked = packages(&metadata).unwrap();
+        let names: Vec<_> = picked.into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["model"]);
     }
 
     #[test]

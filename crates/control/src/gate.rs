@@ -27,8 +27,8 @@ pub struct Gate {
     seat: Seat,
     next: u64,
     /// The holder named by the newest handoff record in the index log.
-    recorded: Option<Writer>,
-    /// The holder differs from `recorded`. Kept at each change of seat, so that a
+    record: Option<Record>,
+    /// The holder differs from the record. Kept at each change of seat, so that a
     /// frame does not compare subjects.
     unrecorded: bool,
     /// The writer and time of the newest check that passed on this seat.
@@ -41,6 +41,15 @@ pub struct Gate {
 pub struct Permit {
     key: Key,
     at: Monotonic,
+}
+
+#[derive(Debug)]
+enum Record {
+    /// The open writer with this key.
+    Open(Key),
+    /// A writer with no open claim: it closed after the record, or the gate
+    /// recovered it.
+    Closed(Writer),
 }
 
 #[derive(Debug)]
@@ -90,7 +99,7 @@ impl Gate {
                 writer: last.clone(),
                 until: deadline(now, grace),
             },
-            recorded: Some(last),
+            record: Some(Record::Closed(last)),
             ..Self::default()
         }
     }
@@ -140,7 +149,10 @@ impl Gate {
     pub fn close(&mut self, key: Key, now: Monotonic) {
         self.advance(now);
         let i = self.position(key);
-        self.claims.remove(i);
+        let claim = self.claims.remove(i);
+        if matches!(self.record, Some(Record::Open(open)) if open == key) {
+            self.record = Some(Record::Closed(claim.writer));
+        }
         if matches!(self.seat, Seat::Held { key: held, .. } if held == key) {
             self.elect(now);
         }
@@ -247,11 +259,17 @@ impl Gate {
     }
 
     /// Marks the holder as the newest record in the index log. Call it after the
-    /// caller records [`Gate::handoff`] and before the next input to the gate. Clones
-    /// the holder when a handoff waits.
+    /// caller records [`Gate::handoff`] and before the next input to the gate. Does
+    /// not allocate.
     pub fn recorded(&mut self) {
         if self.unrecorded {
-            self.recorded = self.holder().cloned();
+            match self.seat {
+                Seat::Empty => self.record = None,
+                Seat::Held { key, .. } => self.record = Some(Record::Open(key)),
+                Seat::Recovered { .. } => {
+                    unreachable!("invariant: a recovered seat is never unrecorded")
+                }
+            }
             self.unrecorded = false;
         }
     }
@@ -275,7 +293,15 @@ impl Gate {
     fn sit(&mut self, seat: Seat) {
         self.seat = seat;
         self.checked = None;
-        self.unrecorded = self.holder() != self.recorded.as_ref();
+        self.unrecorded = self.holder() != self.last();
+    }
+
+    /// The holder named by the newest handoff record.
+    fn last(&self) -> Option<&Writer> {
+        match self.record.as_ref()? {
+            Record::Open(key) => Some(&self.claim(*key).writer),
+            Record::Closed(writer) => Some(writer),
+        }
     }
 
     /// The waiting claim with the highest authority, and on a tie the first opened.
@@ -723,6 +749,57 @@ mod tests {
             let b = gate.open(writer("b", 200), None, at(1));
             assert_eq!(gate.handoff(), Some(to(&writer("b", 200))));
             gate.close(b, at(2));
+            assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn compares_with_a_recorded_holder_that_closed() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), None, at(0));
+            gate.recorded();
+            gate.close(a, at(1));
+            assert_eq!(gate.handoff(), EMPTY);
+            gate.open(writer("a", 100), None, at(2));
+            assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn is_found_after_the_recorded_holder_closed() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), None, at(0));
+            gate.recorded();
+            gate.close(a, at(1));
+            gate.open(writer("a", 101), None, at(2));
+            assert_eq!(gate.handoff(), Some(to(&writer("a", 101))));
+        }
+
+        #[test]
+        fn is_found_when_a_writer_opens_after_a_recorded_empty_gate() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), None, at(0));
+            gate.recorded();
+            gate.close(a, at(1));
+            gate.recorded();
+            gate.open(writer("a", 100), None, at(2));
+            assert_eq!(gate.handoff(), Some(to(&writer("a", 100))));
+        }
+
+        #[test]
+        fn compares_with_a_recovered_holder_that_was_replaced() {
+            let mut gate = Gate::recover(writer("a", 100), at(0), lease(10));
+            let b = gate.open(writer("b", 101), None, at(1));
+            gate.close(b, at(2));
+            assert_eq!(gate.handoff(), EMPTY);
+            gate.open(writer("a", 100), None, at(3));
+            assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn compares_with_a_recovered_holder_after_its_grace() {
+            let mut gate = Gate::recover(writer("a", 100), at(0), lease(10));
+            gate.advance(at(10));
+            assert_eq!(gate.handoff(), EMPTY);
+            gate.open(writer("a", 100), None, at(11));
             assert_eq!(gate.handoff(), None);
         }
 

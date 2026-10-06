@@ -159,7 +159,6 @@ mod tests {
 
     #[test]
     fn models_filter_names_each_crate_that_a_model_task_selects() {
-        type Matcher = fn(&str) -> bool;
         let root = fixture().join("../..");
         let ci =
             std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
@@ -168,21 +167,37 @@ mod tests {
             .nth(1)
             .expect("ci.yaml has a models filter");
         let metadata = metadata(&root).unwrap();
-        let tasks: [(&str, Matcher); 3] = [
-            ("loom", |s| select::names_cfg(s, "loom")),
-            ("shuttle", |s| select::names_cfg(s, "shuttle")),
-            ("miri", |s| select::has_word(s, "unsafe_code")),
+        let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
+        let tasks = [
+            ("loom", by_cfg("loom").unwrap()),
+            ("shuttle", by_cfg("shuttle").unwrap()),
+            ("miri", miri::packages(&metadata).unwrap()),
         ];
-        for (task, matches) in tasks {
-            for select::Package { name, .. } in
-                select::packages(&metadata, matches).unwrap()
-            {
+        for (task, packages) in tasks {
+            for select::Package { name, .. } in packages {
                 assert!(
                     models.contains(&format!("'crates/{name}/**'")),
                     "`cargo xtask {task}` runs `{name}`, but the `models` filter in \
                      .github/workflows/ci.yaml lacks 'crates/{name}/**'"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn miri_skips_only_crates_that_name_unsafe_code() {
+        let metadata = metadata(&fixture().join("../..")).unwrap();
+        let named = select::packages(&metadata, |s| select::has_word(s, "unsafe_code"));
+        let (named, checked) = (named.unwrap(), miri::packages(&metadata).unwrap());
+        for name in miri::SKIPPED {
+            assert!(
+                named.iter().any(|package| package.name == name),
+                "`{name}` names no `unsafe_code`"
+            );
+            assert!(
+                !checked.iter().any(|package| package.name == name),
+                "Miri checks `{name}`"
+            );
         }
     }
 }
