@@ -1821,7 +1821,7 @@ c = "°C # not a comment"
         fn bad_segment(message: &str) -> String {
             format!(
                 "{message}. Use one or more ASCII letters, digits, `_`, and `-` in \
-                 that segment, and no other character"
+                 that segment, after an optional leading `@`"
             )
         }
 
@@ -2322,17 +2322,19 @@ c = "°C # not a comment"
                     (
                         name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
                         &bad_segment(
-                            "\"x.température\" has a segment that is not valid: \
-                             \"température\"",
+                            "a segment is not valid: \"temp\\u00E9rature\" in \
+                             \"x.temp\\u00E9rature\"",
                         ),
                     ),
                     (
                         name("é", span(at(24, 1, 5), at(26, 1, 6))),
-                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
+                        &bad_segment(r#"a segment is not valid: "\u00E9" in "\u00E9""#),
                     ),
                     (
                         name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
-                        &bad_segment(r#""x.é" has a segment that is not valid: "é""#),
+                        &bad_segment(
+                            r#"a segment is not valid: "\u00E9" in "x.\u00E9""#,
+                        ),
                     ),
                 ],
             );
@@ -2344,20 +2346,21 @@ c = "°C # not a comment"
                 span,
                 error: text.parse::<Name>().unwrap_err(),
             };
-            let wildcard = "\"plc.*\" uses a wildcard where it cannot. Use `*` and \
-                            `**` only as whole segments of a pattern, never in a name";
+            let wildcard = "a wildcard is in a name or inside a segment: \"plc.*\". \
+                            Use `*` and `**` only as whole segments of a pattern, \
+                            never in a name";
             check(
                 "a = plc[\"\"]\nb = plc[\"*\"]\nc = plc[<<EOT\nx\nEOT\n]\n",
                 &[
                     (
                         name("plc.", on(4, 11)),
-                        &bad_segment(r#""plc." has a segment that is not valid: """#),
+                        &bad_segment(r#"a segment is not valid: "" in "plc.""#),
                     ),
                     (name("plc.*", span(at(16, 1, 4), at(24, 1, 12))), wildcard),
                     (
                         name("plc.x\n", span(at(29, 2, 4), at(46, 5, 1))),
                         &bad_segment(
-                            r#""plc.x\n" has a segment that is not valid: "x\n""#,
+                            r#"a segment is not valid: "x\u000A" in "plc.x\u000A""#,
                         ),
                     ),
                 ],
@@ -2585,7 +2588,7 @@ c = "°C # not a comment"
                     (null, NULL),
                     (
                         name,
-                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
+                        &bad_segment(r#"a segment is not valid: "\u00E9" in "\u00E9""#),
                     ),
                     (value, &needs("a value")),
                 ],

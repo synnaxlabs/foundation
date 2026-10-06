@@ -441,9 +441,10 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Text in double quotes. Printable ASCII shows as written, with a `\` before each `"`
-/// and `\`. Each other character shows as its code point, such as `U+202E`, so no
-/// file syntax's escapes and no character that looks like an ASCII one reach the
-/// reader.
+/// and `\`. Each other character shows as `\u` and four hex digits, or above U+FFFF as
+/// `\U` and eight: the escapes of HCL, TOML, and YAML. No control character and no
+/// character that looks like an ASCII one reaches the reader, and no two texts show
+/// the same.
 struct Quoted<'a>(&'a str);
 
 impl fmt::Display for Quoted<'_> {
@@ -453,7 +454,8 @@ impl fmt::Display for Quoted<'_> {
             match c {
                 '"' | '\\' => write!(f, "\\{c}")?,
                 ' '..='~' => f.write_char(c)?,
-                _ => write!(f, "U+{:04X}", u32::from(c))?,
+                _ if u32::from(c) <= 0xFFFF => write!(f, "\\u{:04X}", u32::from(c))?,
+                _ => write!(f, "\\U{:08X}", u32::from(c))?,
             }
         }
         f.write_char('"')
@@ -580,20 +582,24 @@ mod tests {
             for (input, message) in [
                 ("a.\"b", r#"a segment is not valid: "\"b" in "a.\"b""#),
                 (r"a.b\c", r#"a segment is not valid: "b\\c" in "a.b\\c""#),
+                (
+                    r"a.\u00E9",
+                    r#"a segment is not valid: "\\u00E9" in "a.\\u00E9""#,
+                ),
             ] {
                 assert_eq!(input.parse::<Name>().unwrap_err().to_string(), message);
             }
         }
 
         #[test]
-        fn shows_each_other_character_as_its_code_point() {
+        fn shows_each_other_character_as_an_escape() {
             for (segment, shown) in [
-                ("\u{202e}", "U+202E"),
-                ("b\nc", "bU+000Ac"),
-                ("\u{7f}", "U+007F"),
-                ("é", "U+00E9"),
-                ("d\u{430}ta", "dU+0430ta"),
-                ("\u{1f600}", "U+1F600"),
+                ("\u{202e}", r"\u202E"),
+                ("b\nc", r"b\u000Ac"),
+                ("\u{7f}", r"\u007F"),
+                ("é", r"\u00E9"),
+                ("d\u{430}ta", r"d\u0430ta"),
+                ("\u{1f600}", r"\U0001F600"),
             ] {
                 assert_eq!(
                     format!("plc.{segment}")

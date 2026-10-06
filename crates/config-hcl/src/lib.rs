@@ -629,9 +629,9 @@ mod tests {
                     error: "a.@".parse::<name::Name>().unwrap_err(),
                 },
                 "hcl.name",
-                "\"a.@\" has a segment that is not valid: \"@\"",
+                "a segment is not valid: \"@\" in \"a.@\"",
                 "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
-                 and no other character",
+                 after an optional leading `@`",
             ),
             (
                 Error::Number {
