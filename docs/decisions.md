@@ -825,17 +825,20 @@ How to read this record:
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
-  message that fits starts at once, ahead of streams that wait for room, whatever their
-  class (#611). A send that does not wait (`try_send`) starts a message only by the same
-  rule and when, after a flush, the stream holds no part of an earlier one; else it
-  gives the message back with no byte of it sent, and the stream does not wait for room
-  (#597). A receiver takes a block only when the messages that hold one stay within
-  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable`. So bytes
+  message starts only when it fits and no stream of its class or a higher class waits
+  for room. Room that frees goes to the waiting streams highest class first, then oldest
+  first, until the next one does not fit, and only those streams wake (#611). A send
+  that does not wait (`try_send`) starts a message only by the same rule and when, after
+  a flush, the stream holds no part of an earlier one; else it gives the message back
+  with no byte of it sent, and the stream does not wait for room (#597). A receiver
+  takes a block only when the messages that hold one stay within `window_bytes` plus
+  `message_bytes_max`; else the read waits for `Readable`. Its budget gives room in the
+  same order (#611). So bytes
   that wait for a block never use up the credit that a started message needs, and a peer
   that breaks the send rule holds at most the receive budget and stops only its own
   connection. Until the hello carries the peer's window, a sender uses its own. Proposed
   by `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
-  `network` in #228.
+  `network` in #228. The room order: approved by the advisor on #611.
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
@@ -2480,7 +2483,7 @@ Parameters and later choices, recorded and not asked:
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
-- Delivery and wire internals: RECV WAITS (#581).
+- Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per

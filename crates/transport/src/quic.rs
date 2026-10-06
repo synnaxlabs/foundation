@@ -266,7 +266,7 @@ impl Endpoint {
         class: Class,
     ) -> Option<(Sender, Receiver)> {
         let stream = self.start(now, key, Dir::Bi)?;
-        let receiver = Receiver::new(stream, self.message_bytes_max);
+        let receiver = Receiver::new(stream, class, self.message_bytes_max);
         Some((Sender::new(stream, class), receiver))
     }
 

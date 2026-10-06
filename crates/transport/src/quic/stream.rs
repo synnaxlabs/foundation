@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::task::Poll;
-use std::{mem, slice, vec};
+use std::{mem, slice};
 
 use block::{Block, Pool};
 use bytes::Bytes;
@@ -90,28 +90,36 @@ pub(super) struct Streams {
     receiving: Budget,
 }
 
-/// The message bytes that one direction of a connection counts, and the streams that
-/// found no room.
+/// The message bytes that one direction of a connection counts, and the claims that
+/// found no room. Room goes to waiting claims highest class first, then oldest first.
 #[derive(Debug)]
 struct Budget {
     max: usize,
     used: usize,
-    /// One more than the wakes so far.
-    round: u64,
-    /// The streams whose claims wait in this `round`.
-    waiting: Vec<Key>,
-    /// At most the fewest bytes that a waiting claim asks for, or `usize::MAX`. The
-    /// room stays below it between wakes.
-    smallest: usize,
+    /// The claims that wait for room, in the order they get it.
+    waiting: VecDeque<Wait>,
+    /// The claims that got room while they waited, and have not taken it. Their bytes
+    /// count in `used`.
+    granted: Vec<Wait>,
+}
+
+/// A claim in a [`Budget`]'s queue.
+#[derive(Debug)]
+struct Wait {
+    stream: Key,
+    class: Class,
+    bytes: usize,
 }
 
 /// The part of a [`Budget`] that the message of one stream holds or waits for.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Claim {
+    /// The stream's class, which orders the claim among those that wait.
+    class: Class,
     /// The bytes the message counts, or 0.
     bytes: usize,
-    /// The budget's round when the stream began to wait, or 0.
-    round: u64,
+    /// The claim waits for room, or has room it has not taken.
+    queued: bool,
 }
 
 /// A fault of the peer's that closes the connection, with the reason.
@@ -126,19 +134,19 @@ impl Sender {
         Self {
             started: false,
             header,
-            ..Self::reply(key)
+            ..Self::reply(key, class)
         }
     }
 
-    /// A sender for the reply half of `key`, a stream the peer opened.
-    fn reply(key: Key) -> Self {
+    /// A sender for the reply half of `key`, a stream of `class` that the peer opened.
+    fn reply(key: Key, class: Class) -> Self {
         Self {
             key,
             started: true,
             header: [0; 9],
             unsent: 0..0,
             body: Bytes::new(),
-            claim: Claim::default(),
+            claim: Claim::new(class),
             finished: false,
         }
     }
@@ -191,12 +199,13 @@ impl Sender {
 }
 
 impl Receiver {
-    /// A receiver for `key` that refuses a message over `bytes_max`.
-    pub(super) fn new(key: Key, bytes_max: usize) -> Self {
+    /// A receiver for `key`, a stream of `class`, that refuses a message over
+    /// `bytes_max`.
+    pub(super) fn new(key: Key, class: Class, bytes_max: usize) -> Self {
         Self {
             key,
             reader: Reader::new(bytes_max),
-            claim: Claim::default(),
+            claim: Claim::new(class),
             end: None,
         }
     }
@@ -215,29 +224,43 @@ impl Receiver {
     }
 }
 
+impl Claim {
+    fn new(class: Class) -> Self {
+        Self {
+            class,
+            bytes: 0,
+            queued: false,
+        }
+    }
+}
+
 impl Budget {
     fn new(max: usize) -> Self {
         Self {
             max,
             used: 0,
-            round: 1,
-            waiting: Vec::new(),
-            smallest: usize::MAX,
+            waiting: VecDeque::new(),
+            granted: Vec::new(),
         }
     }
 
-    /// Whether the stream of `claim` waits for the next wake.
-    fn waits(&self, claim: &Claim) -> bool {
-        claim.round == self.round
+    /// Whether `claim`, the claim of `stream`, waits for room.
+    fn waits(&self, stream: Key, claim: &Claim) -> bool {
+        claim.queued && !self.granted.iter().any(|wait| wait.stream == stream)
     }
 
     fn room(&self) -> usize {
         self.max - self.used
     }
 
-    /// Charges `bytes` to `claim` when they fit now.
+    /// Charges `bytes` to `claim` when they fit now and no claim of its class or a
+    /// higher class waits.
     fn admit(&mut self, bytes: usize, claim: &mut Claim) -> bool {
-        let fits = bytes <= self.room();
+        let first = self
+            .waiting
+            .front()
+            .is_none_or(|wait| ahead(claim.class, wait.class));
+        let fits = first && bytes <= self.room();
         if fits {
             self.used += bytes;
             claim.bytes = bytes;
@@ -245,39 +268,73 @@ impl Budget {
         fits
     }
 
-    /// Charges `bytes` to `claim` when they fit. Else `stream` waits for the next
-    /// wake.
+    /// Charges `bytes` to `claim`, the claim of `stream`, when [`Budget::admit`] does,
+    /// or when the claim waited and got room. Else the claim waits for room.
+    ///
+    /// # Panics
+    ///
+    /// When `bytes` is over the budget, which no claim could ever fit.
     fn charge(&mut self, stream: Key, bytes: usize, claim: &mut Claim) -> bool {
-        if self.waits(claim) {
-            return false;
+        assert!(
+            bytes <= self.max,
+            "a claim of {bytes} bytes is over the budget, {} bytes",
+            self.max
+        );
+        if claim.queued {
+            let Some(at) = self.granted.iter().position(|wait| wait.stream == stream)
+            else {
+                return false;
+            };
+            claim.bytes = self.granted.swap_remove(at).bytes;
+            claim.queued = false;
+            return true;
         }
         if self.admit(bytes, claim) {
             return true;
         }
-        claim.round = self.round;
-        self.smallest = self.smallest.min(bytes);
-        self.waiting.push(stream);
+        let at = self
+            .waiting
+            .partition_point(|wait| !ahead(claim.class, wait.class));
+        let class = claim.class;
+        self.waiting.insert(
+            at,
+            Wait {
+                stream,
+                class,
+                bytes,
+            },
+        );
+        claim.queued = true;
         false
     }
 
-    /// Ends `claim`, the claim of `stream`: gives back its bytes, or stops its wait.
-    /// Returns the streams to wake: each waiting stream when the room then fits the
-    /// smallest waiting claim, else none.
-    fn release(&mut self, stream: Key, claim: &mut Claim) -> vec::Drain<'_, Key> {
-        if self.waits(claim) {
-            let at = self.waiting.iter().position(|&other| other == stream);
-            self.waiting
-                .swap_remove(at.expect("invariant: a waiting stream is listed"));
+    /// Ends `claim`, the claim of `stream`: gives back its bytes, or ends its wait.
+    /// Then gives room to the waiting claims in order, until the next does not fit.
+    /// Returns the streams that got room.
+    fn release(
+        &mut self,
+        stream: Key,
+        claim: &mut Claim,
+    ) -> impl Iterator<Item = Key> + use<'_> {
+        if mem::take(&mut claim.queued) {
+            let found = self.granted.iter().position(|wait| wait.stream == stream);
+            if let Some(at) = found {
+                self.used -= self.granted.swap_remove(at).bytes;
+            } else {
+                let at = self.waiting.iter().position(|wait| wait.stream == stream);
+                self.waiting
+                    .remove(at.expect("invariant: a queued claim is listed"));
+            }
         }
-        self.used -= mem::take(claim).bytes;
-        let woken = if self.room() >= self.smallest {
-            self.round += 1;
-            self.smallest = usize::MAX;
-            self.waiting.len()
-        } else {
-            0
-        };
-        self.waiting.drain(..woken)
+        self.used -= mem::take(&mut claim.bytes);
+        let start = self.granted.len();
+        while let Some(next) = self.waiting.front()
+            && next.bytes <= self.room()
+        {
+            self.used += next.bytes;
+            self.granted.extend(self.waiting.pop_front());
+        }
+        self.granted[start..].iter().map(|wait| wait.stream)
     }
 }
 
@@ -376,16 +433,17 @@ impl Streams {
             .zip(&mut self.incoming)
             .find_map(|(byte, queue)| Some((byte, queue.pop_front()?)))?;
         let key = Key { connection, id };
+        let class = class(byte).expect("invariant: a queued stream has a class byte");
         Some(Incoming {
-            class: class(byte).expect("invariant: a queued stream has a class byte"),
-            receiver: Receiver::new(key, bytes_max),
-            sender: (id.dir() == Dir::Bi).then(|| Sender::reply(key)),
+            class,
+            receiver: Receiver::new(key, class, bytes_max),
+            sender: (id.dir() == Dir::Bi).then(|| Sender::reply(key, class)),
         })
     }
 
     /// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
     /// `Pending` when the stream takes no more now, or the message has no room in the
-    /// send budget. The senders that room returns to get [`Event::Writable`] in
+    /// send budget. The senders that get the freed room get [`Event::Writable`] in
     /// `events`.
     ///
     /// # Errors
@@ -509,7 +567,7 @@ impl Streams {
     }
 
     /// Resets `sender`'s stream of `inner` with `code`, and gives back its send budget.
-    /// The senders that room returns to get [`Event::Writable`] in `events`.
+    /// The senders that get the freed room get [`Event::Writable`] in `events`.
     pub(super) fn reset(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -527,8 +585,8 @@ impl Streams {
     }
 
     /// Stops `receiver`'s stream of `inner` with `code`, drops the message in its
-    /// reader, and gives back its receive budget. The receivers that room returns to
-    /// get [`Event::Readable`] in `events`.
+    /// reader, and gives back its receive budget. The receivers that get the freed
+    /// room get [`Event::Readable`] in `events`.
     pub(super) fn stop(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -548,8 +606,8 @@ impl Streams {
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
     /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
-    /// yet, or the next has no room in the receive budget. The receivers that room
-    /// returns to get [`Event::Readable`] in `events`.
+    /// yet, or the next has no room in the receive budget. The receivers that get the
+    /// freed room get [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
@@ -576,7 +634,7 @@ impl Streams {
         let receiving = &mut self.receiving;
         let mut recv = inner.recv_stream(key.id);
         let mut result = Ok(Poll::Pending);
-        if !receiving.waits(claim) {
+        if !receiving.waits(*key, claim) {
             let mut chunks = recv.read(true).expect(RECEIVING);
             let admit = |len| receiving.charge(*key, len, claim);
             result = reader.read(pool, admit, |max| match chunks.next(max) {
@@ -586,7 +644,7 @@ impl Streams {
             });
         }
         // The reader takes no bytes while it waits, so only this finds a reset.
-        if receiving.waits(claim)
+        if receiving.waits(*key, claim)
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
             result = Err(reset_error(error));
@@ -669,6 +727,12 @@ fn byte(class: Class) -> u8 {
         Class::Complete => 2,
         Class::CatchUp => 3,
     }
+}
+
+/// Whether a claim of `class` goes ahead of a waiting claim of `other`: `class` is
+/// higher.
+fn ahead(class: Class, other: Class) -> bool {
+    byte(class) < byte(other)
 }
 
 /// The class whose streams start with `byte`, if any.
@@ -1388,10 +1452,15 @@ mod tests {
         }
     }
 
+    /// `N` claims of `class`.
+    fn claims<const N: usize>(class: Class) -> [Claim; N] {
+        [(); N].map(|()| Claim::new(class))
+    }
+
     #[test]
-    fn a_budget_wakes_no_stream_until_the_room_fits_the_smallest_claim_that_waits() {
+    fn a_budget_wakes_no_stream_until_the_room_fits_the_first_claim_that_waits() {
         let mut budget = Budget::new(10);
-        let [mut a, mut b, mut c, mut d] = <[Claim; 4]>::default();
+        let [mut a, mut b, mut c, mut d] = claims(Class::Complete);
         assert!(budget.charge(stream(0), 9, &mut a));
         assert!(!budget.charge(stream(1), 2, &mut b));
         let woken: Vec<_> = budget.release(stream(0), &mut a).collect();
@@ -1405,19 +1474,99 @@ mod tests {
     }
 
     #[test]
-    fn a_budget_wakes_every_waiting_stream_when_the_room_fits_the_smallest_claim() {
+    fn a_budget_gives_room_highest_class_first_then_oldest_first() {
         let mut budget = Budget::new(10);
-        let [mut a, mut b, mut c, mut d] = <[Claim; 4]>::default();
-        assert!(budget.charge(stream(0), 6, &mut a));
-        assert!(budget.charge(stream(3), 3, &mut d));
-        assert!(!budget.charge(stream(1), 2, &mut b));
-        assert!(!budget.charge(stream(2), 5, &mut c));
-        let woken: Vec<_> = budget.release(stream(3), &mut d).collect();
-        assert_eq!(woken, [stream(1), stream(2)]);
+        let classes = [
+            Class::Latest,
+            Class::CatchUp,
+            Class::Command,
+            Class::Latest,
+            Class::Command,
+        ];
+        let mut claims = classes.map(Claim::new);
+        let [a, rest @ ..] = &mut claims;
+        assert!(budget.charge(stream(0), 10, a));
+        for (index, claim) in (1..).zip(rest) {
+            assert!(!budget.charge(stream(index), 3, claim));
+        }
+        let woken: Vec<_> = budget.release(stream(0), a).collect();
+        assert_eq!(woken, [stream(2), stream(4), stream(3)]);
     }
 
     #[test]
-    fn a_read_wakes_no_stream_until_the_room_fits_the_smallest_waiting_message() {
+    fn a_budget_gives_no_room_past_a_waiting_claim_that_does_not_fit() {
+        let mut budget = Budget::new(10);
+        let [mut a, mut b, mut c, mut d] = claims(Class::Complete);
+        assert!(budget.charge(stream(0), 6, &mut a));
+        assert!(budget.charge(stream(1), 3, &mut b));
+        assert!(!budget.charge(stream(2), 5, &mut c));
+        assert!(!budget.charge(stream(3), 1, &mut d));
+        assert_eq!(budget.release(stream(1), &mut b).count(), 0);
+        let woken: Vec<_> = budget.release(stream(0), &mut a).collect();
+        assert_eq!(woken, [stream(2), stream(3)]);
+    }
+
+    #[test]
+    fn a_budget_starts_a_new_claim_only_ahead_of_lower_classes_that_wait() {
+        let mut budget = Budget::new(20);
+        let [mut held] = claims(Class::Command);
+        let [mut waiting] = claims(Class::Latest);
+        assert!(budget.charge(stream(0), 8, &mut held));
+        assert!(!budget.charge(stream(1), 15, &mut waiting));
+        let classes = [
+            Class::Command,
+            Class::Latest,
+            Class::Complete,
+            Class::CatchUp,
+        ];
+        let admitted = classes.map(|class| budget.admit(1, &mut Claim::new(class)));
+        assert_eq!(admitted, [true, false, false, false]);
+    }
+
+    #[test]
+    fn a_budget_counts_room_it_gives_until_the_claim_takes_it_or_ends() {
+        let mut budget = Budget::new(10);
+        let [mut a, mut b, mut c] = claims(Class::Complete);
+        assert!(budget.charge(stream(0), 10, &mut a));
+        assert!(!budget.charge(stream(1), 6, &mut b));
+        assert!(!budget.charge(stream(2), 6, &mut c));
+        let woken: Vec<_> = budget.release(stream(0), &mut a).collect();
+        assert_eq!(woken, [stream(1)]);
+        assert!(!budget.admit(5, &mut Claim::new(Class::Command)));
+        let woken: Vec<_> = budget.release(stream(1), &mut b).collect();
+        assert_eq!(woken, [stream(2)]);
+        assert!(budget.charge(stream(2), 6, &mut c));
+        assert!(budget.admit(4, &mut Claim::new(Class::Command)));
+    }
+
+    #[test]
+    #[should_panic(expected = "a claim of 11 bytes is over the budget, 10 bytes")]
+    fn a_budget_refuses_a_claim_over_the_budget_before_it_waits() {
+        let mut budget = Budget::new(10);
+        let [mut a, mut b] = claims(Class::CatchUp);
+        assert!(budget.charge(stream(0), 10, &mut a));
+        budget.charge(stream(1), 11, &mut b);
+    }
+
+    #[test]
+    fn a_stream_the_peer_opened_counts_in_its_budgets_by_its_class() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::Latest);
+            let (mut sender, receiver) = opened.expect("a stream");
+            assert_eq!(receiver.claim.class, Class::Latest);
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let reply = incoming.sender.expect("a sender");
+            let classes = [incoming.receiver.claim.class, reply.claim.class];
+            assert_eq!(classes, [Class::Latest; 2]);
+        });
+    }
+
+    #[test]
+    fn a_read_wakes_a_waiting_stream_only_when_the_room_fits_its_message() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let small =
@@ -1568,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_message_that_finds_no_room_after_a_wake_fails_the_read() {
+    fn a_reset_message_that_gets_room_fails_the_read_and_passes_the_room_on() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let ids = prefixes(&mut pair, 5);
@@ -1588,8 +1737,14 @@ mod tests {
             assert_eq!(read, (vec![body], false));
             let read = next(&mut pair.server, now, &mut receivers[4]);
             assert_eq!(read, Ok(Poll::Pending));
+            let seen = pair.server.events.len();
             let read = next(&mut pair.server, now, &mut receivers[3]);
             assert_eq!(read, Err(Error::Reset { code: Code(7) }));
+            pair.run(Duration::ZERO);
+            let readable = Event::Readable {
+                stream: receivers[4].key(),
+            };
+            assert!(got(&pair.server, seen, &readable));
         });
     }
 
@@ -2429,6 +2584,83 @@ mod tests {
                     .endpoint
                     .try_write(now, &mut sender, shard.block(b"a")),
             );
+        });
+    }
+
+    #[test]
+    fn a_waiting_command_gets_the_next_room_ahead_of_a_later_try_write() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut latest =
+                [Class::Latest; 2].map(|class| open_sender(&mut pair, class));
+            let now = pair.now();
+            for byte in 0_u8.. {
+                let block = shard.block(&vec![byte; MESSAGE_MAX]);
+                let written = try_write(&mut pair.client, now, &mut latest[0], block);
+                assert_eq!(written, Ok(None));
+                if latest[0].holds() {
+                    break;
+                }
+            }
+            let block = shard.block(&vec![0xb; MESSAGE_MAX]);
+            let written = try_write(&mut pair.client, now, &mut latest[1], block);
+            assert_eq!(written, Ok(None));
+            let mut command = open_sender(&mut pair, Class::Command);
+            let message = shard.block(&vec![0xc; MESSAGE_MAX]);
+            let written = pair.client.endpoint.write(now, &mut command, message);
+            assert_eq!(written, Ok(Poll::Pending));
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            drain(&mut pair.server, now, &mut incoming.receiver);
+            pair.run(RUN);
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut latest[0]);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            let written =
+                try_write(&mut pair.client, now, &mut latest[0], shard.block(b"l"));
+            assert_eq!(written, Ok(Some(b"l".to_vec())));
+            pair.run(Duration::ZERO);
+            let writable = Event::Writable {
+                stream: command.key(),
+            };
+            assert!(got(&pair.client, seen, &writable));
+            pair.run(RUN);
+            let now = pair.now();
+            drain(&mut pair.server, now, &mut incoming.receiver);
+            let id = command.key().id;
+            let [_, second] = latest;
+            let read = exchange(&mut pair, &mut [second, command], 10 * RUN);
+            let command: Vec<_> =
+                read.into_iter().filter(|&(at, _)| at == id).collect();
+            let expected = [(id, vec![0xc; MESSAGE_MAX])];
+            assert_eq!(shapes(&command), shapes(&expected));
+        });
+    }
+
+    #[test]
+    fn a_waiting_catch_up_message_lets_a_later_latest_try_write_start() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            let written =
+                try_write(&mut pair.client, now, &mut second, shard.block(&[0xb; 100]));
+            assert_eq!(written, Ok(None));
+            let mut catch_up = open_sender(&mut pair, Class::CatchUp);
+            let message = shard.block(&vec![0xc; MESSAGE_MAX]);
+            let written = pair.client.endpoint.write(now, &mut catch_up, message);
+            assert_eq!(written, Ok(Poll::Pending));
+            let mut latest = open_sender(&mut pair, Class::Latest);
+            let written =
+                try_write(&mut pair.client, now, &mut latest, shard.block(b"l"));
+            assert_eq!(written, Ok(None));
+            let id = latest.key().id;
+            let mut senders = [first, second, catch_up, latest];
+            let read = exchange(&mut pair, &mut senders, 10 * RUN);
+            assert!(read.contains(&(id, b"l".to_vec())));
         });
     }
 }
