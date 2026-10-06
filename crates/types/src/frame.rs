@@ -125,7 +125,7 @@ impl Range {
     }
 }
 
-/// Why [`Draft::new`] refused a frame.
+/// Why [`Draft::new`] or [`size`] refused a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// An entry is past the end of the key set.
@@ -1245,11 +1245,9 @@ mod tests {
         assert_eq!(error, Error::IndexAbsent { entry: 0, index: 1 });
     }
 
-    #[test]
-    fn refuses_data_without_its_index_when_the_pool_is_full() {
-        let set = one_group(&mut interner());
-        let pool = pool(256);
-        let _held = [pool.alloc(1).unwrap(), pool.alloc(1).unwrap()];
+    /// Takes each block of `pool`, a `pool(256)`, and gives them.
+    fn exhaust(pool: &block::Pool) -> [block::Unique; 2] {
+        let held = [pool.alloc(1).unwrap(), pool.alloc(1).unwrap()];
         assert_eq!(
             pool.alloc(1).unwrap_err(),
             block::Error::Exhausted {
@@ -1257,6 +1255,14 @@ mod tests {
                 available: 0
             }
         );
+        held
+    }
+
+    #[test]
+    fn refuses_data_without_its_index_when_the_pool_is_full() {
+        let set = one_group(&mut interner());
+        let pool = pool(256);
+        let _held = exhaust(&pool);
         let error = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap_err();
         assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
     }
@@ -1265,7 +1271,7 @@ mod tests {
     fn sizes_a_frame_with_the_errors_of_a_draft_on_a_full_pool() {
         let set = one_group(&mut interner());
         let pool = pool(256);
-        let _held = [pool.alloc(1).unwrap(), pool.alloc(1).unwrap()];
+        let _held = exhaust(&pool);
         for (series, expected) in [
             (
                 &[(3, 1)][..],
@@ -1275,6 +1281,11 @@ mod tests {
                 },
             ),
             (&[(1, 1), (0, 1)], Error::Unordered { entry: 0, last: 1 }),
+            // The search for index 0 misses in unsorted series.
+            (
+                &[(1, 1), (2, 1), (0, 1)],
+                Error::Unordered { entry: 0, last: 2 },
+            ),
             (&[(2, 1)], Error::IndexAbsent { entry: 2, index: 0 }),
         ] {
             let draft = Draft::new(&pool, &set, Form::Raw, series);
