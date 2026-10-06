@@ -22,8 +22,8 @@ env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
-spec = { path = "../crates/spec" }
 sim = { path = "../crates/sim" }
+spec = { path = "../crates/spec" }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
