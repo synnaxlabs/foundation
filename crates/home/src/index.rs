@@ -79,10 +79,13 @@ impl Index {
     ) -> Result<Accepted, Refusal> {
         let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
         let mut stamps = stamps.map_err(Refusal::Codec)?;
-        let mut order = self.order.check(path, mesh);
+        // A codec error comes first, so the vectors after an order error still decode.
+        let mut order = Ok(self.order.check(path, mesh));
         while let Some(vector) = stamps.next() {
-            order = order.push(vector).map_err(Refusal::Order)?;
+            let vector = vector.map_err(Refusal::Codec)?;
+            order = order.and_then(|order| order.push(vector));
         }
+        let order = order.map_err(Refusal::Order)?;
         Ok(Accepted {
             order: order.end(),
             permit,
