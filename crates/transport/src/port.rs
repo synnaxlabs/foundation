@@ -33,16 +33,21 @@ pub struct Port {
 }
 
 impl Port {
-    /// Binds the node's UDP socket at `udp`. Port 0 binds a free port, which
-    /// [`Port::addresses`] shows. `[::]` takes IPv4 and IPv6.
+    /// Binds the node's sockets at `local`: UDP, and TCP on the same port number
+    /// once the port carries TCP (#77). Port 0 lets UDP take a free port, which
+    /// [`Port::addresses`] shows, and TCP binds that port with no retry on another.
+    /// `[::]` takes IPv4 and IPv6.
     ///
     /// # Errors
     ///
-    /// The error of the bind: [`env::net::Error::AddressInUse`] when another socket
-    /// holds `udp`.
-    pub fn bind(net: &env::net::Net, udp: SocketAddr) -> Result<Self, env::net::Error> {
+    /// The error of the first bind that fails: [`env::net::Error::AddressInUse`]
+    /// when another socket holds the address.
+    pub fn bind(
+        net: &env::net::Net,
+        local: SocketAddr,
+    ) -> Result<Self, env::net::Error> {
         let (sender, receiver) = net.udp(&udp::Config {
-            local: udp,
+            local,
             send_buffer_bytes: BUFFER_BYTES,
             recv_buffer_bytes: BUFFER_BYTES,
         })?;

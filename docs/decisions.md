@@ -927,19 +927,20 @@ How to read this record:
   header has one length (a request then sends 32 zero bytes); `encode` into a
   `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
   for the kind of time (two checks where one kind byte does the work).
-- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
-  however many shards it runs, so each site's firewall needs one known port per
-  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
-  issues encodes that shard. A receive loop on one shard reads the UDP socket in
-  batches and hands each batch to the owning shard over the C2 ring; every shard
-  sends on the same socket. The TCP listener accepts and moves each stream to its
-  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
-  and a send half that any shard may use, and `sim` models the split. Rejected: a
-  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
-  by address, breaks on NAT rebinding), and one shard doing all network work. If the
-  receive loop saturates on Linux, add a reuse-port group steered by the same
-  connection ID. Decided by the design session under the architecture delegation
-  (#53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
+  the same port number, however many shards it runs, so each site's firewall needs one
+  known port per conduit. Each QUIC connection belongs to one shard, and every
+  connection ID a node issues encodes that shard. A receive loop on one shard reads the
+  UDP socket in batches and hands each batch to the owning shard over the C2 ring; every
+  shard sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner and
+  a send half that any shard may use, and `sim` models the split. Rejected: a port per
+  shard (a port range in every firewall), kernel reuse-port hashing (routes by address,
+  breaks on NAT rebinding), and one shard doing all network work. If the receive loop
+  saturates on Linux, add a reuse-port group steered by the same connection ID. Decided
+  by the design session under the architecture delegation (#53). The same port number
+  (2026-10-06): port 0 lets UDP take a free port, and TCP binds that port with no retry
+  on another, so a failed bind stays visible. Approved by the coordinator on #990.
 - **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
   random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
   as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
