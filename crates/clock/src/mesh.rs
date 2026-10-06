@@ -195,6 +195,8 @@ impl Reader {
     }
 }
 
+// A slew changes only words 1 to 5. They share the first cache line with the cell's
+// sequence number, so a push leaves the line of the last words in readers' caches.
 fn encode(state: State) -> [u64; WORDS] {
     let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
     let (kind, cause) = match state {
