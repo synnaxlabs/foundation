@@ -18,15 +18,16 @@ pub struct Mask {
     held: Held,
 }
 
-/// The entries a mask holds. A list is the shorter side: at most half the key set.
 #[derive(Debug)]
 enum Held {
     /// Every entry of a key set that has at least one.
     Every,
-    /// Only the listed entries.
-    Only(List),
-    /// Every entry but the listed ones, at least one.
-    Except(List),
+    /// The listed entries.
+    Listed {
+        list: List,
+        /// The entries left out, when they are fewer than the listed ones.
+        left_out: Option<List>,
+    },
 }
 
 /// Sorted entries, and the sorted groups whose index is among them.
@@ -50,10 +51,6 @@ impl List {
             groups,
         }
     }
-
-    fn has_group(&self, group: u32) -> bool {
-        self.groups.binary_search(&group).is_ok()
-    }
 }
 
 impl Mask {
@@ -71,28 +68,33 @@ impl Mask {
         entries.sort_unstable();
         entries.dedup();
         let len = set.entries().len();
+        if !entries.is_empty() && entries.len() == len {
+            return Self {
+                set: set.key(),
+                held: Held::Every,
+            };
+        }
         // The complement costs O(k), and k < 2 * entries.len() <= 4m.
-        let held = if 2 * entries.len() <= len {
-            Held::Only(List::new(set, entries))
-        } else if entries.len() == len {
-            Held::Every
-        } else {
-            let mut held = entries.into_iter().peekable();
+        let left_out = (2 * entries.len() > len).then(|| {
+            let mut held = entries.iter().peekable();
             let others = (0..to_u32(len))
-                .filter(|&entry| held.next_if_eq(&entry).is_none())
+                .filter(|entry| held.next_if_eq(&entry).is_none())
                 .collect();
-            Held::Except(List::new(set, others))
-        };
+            List::new(set, others)
+        });
         Self {
             set: set.key(),
-            held,
+            held: Held::Listed {
+                list: List::new(set, entries),
+                left_out,
+            },
         }
     }
 
     /// Whether the mask holds no entry: the reader wants nothing of the key set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        matches!(&self.held, Held::Only(list) if list.entries.is_empty())
+        matches!(&self.held, Held::Listed { list, .. } if list.entries.is_empty())
     }
 }
 
@@ -143,48 +145,34 @@ impl<'a> View<'a> {
     /// group's index. Time is logarithmic in the frame's ranges and the mask's groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        let held = match &self.mask.held {
-            Held::Every => true,
-            Held::Only(list) => list.has_group(group),
-            Held::Except(list) => !list.has_group(group),
-        };
-        if held { self.frame.range(group) } else { None }
+        match &self.mask.held {
+            Held::Listed { list, .. } if list.groups.binary_search(&group).is_err() => {
+                None
+            }
+            _ => self.frame.range(group),
+        }
     }
 
     /// Each present entry that the mask holds and its series bytes, in entry order.
-    /// Time is O(m log(n/m)) for the smaller m and larger n of the frame's series and
-    /// the mask's entries when the mask holds at most half the key set, else linear in
-    /// the frame's series.
+    /// Time is linear in the frame's series when the mask holds every entry, else
+    /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
+    /// mask's entries.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &'a [u8])> + use<'a> {
-        let list = match &self.mask.held {
-            Held::Every => return Series::Every(self.frame.iter()),
-            Held::Only(list) | Held::Except(list) => list,
+        let Held::Listed { list, .. } = &self.mask.held else {
+            return Series::Every(self.frame.iter());
         };
         let (_, descriptors, body) = parts(&self.frame.0);
-        let series = move |n| {
+        Series::Listed(join(descriptors, &list.entries).map(move |n| {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
-        };
-        let mut listed = join(descriptors, &list.entries);
-        if let Held::Only(_) = self.mask.held {
-            return Series::Only(listed.map(series));
-        }
-        let mut next = Some(0);
-        // The runs of series between those left out.
-        let runs = iter::from_fn(move || {
-            let first = next?;
-            let end = listed.next();
-            next = end.map(|end| end + 1);
-            Some(first..end.unwrap_or(descriptors.len()))
-        });
-        Series::Except(runs.flatten().map(series))
+        }))
     }
 
     /// The charge of a frame of only the view's series (CREDIT RULES): what a remote
     /// complete reader spends. Equal to [`Frame::charge`] when the mask holds every
     /// present series. Time is constant when the mask holds every entry, else
     /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
-    /// mask's list, which has at most half the key set.
+    /// shorter of the mask's entries and the entries it leaves out.
     #[must_use]
     pub fn charge(&self) -> u64 {
         charge_of(self.len())
@@ -194,8 +182,11 @@ impl<'a> View<'a> {
     fn len(&self) -> usize {
         match &self.mask.held {
             Held::Every => self.frame.0.len(),
-            Held::Only(list) => len_of_only(self.frame, list),
-            Held::Except(list) => len_without(self.frame, list),
+            Held::Listed {
+                left_out: Some(list),
+                ..
+            } => len_without(self.frame, list),
+            Held::Listed { list, .. } => len_of_only(self.frame, list),
         }
     }
 }
@@ -245,47 +236,28 @@ fn len_without(frame: &Frame, list: &List) -> usize {
         - (cut - tail_cut)
 }
 
-/// The series of a view, as [`Held`] gives them.
-enum Series<V, O, E> {
-    Every(V),
-    Only(O),
-    Except(E),
+/// The series of a view: those of the whole frame, or those of the listed entries.
+enum Series<E, L> {
+    Every(E),
+    Listed(L),
 }
 
-impl<T, V, O, E> Iterator for Series<V, O, E>
-where
-    V: Iterator<Item = T>,
-    O: Iterator<Item = T>,
-    E: Iterator<Item = T>,
-{
+impl<T, E: Iterator<Item = T>, L: Iterator<Item = T>> Iterator for Series<E, L> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
         match self {
             Self::Every(series) => series.next(),
-            Self::Only(series) => series.next(),
-            Self::Except(series) => series.next(),
+            Self::Listed(series) => series.next(),
         }
     }
 
     fn fold<B, F: FnMut(B, T) -> B>(self, init: B, f: F) -> B {
         match self {
             Self::Every(series) => series.fold(init, f),
-            Self::Only(series) => series.fold(init, f),
-            Self::Except(series) => fold_out_of_line(series, init, f),
+            Self::Listed(series) => series.fold(init, f),
         }
     }
-}
-
-/// Folds `series` out of line. Inline, its state takes the caller's registers, and
-/// the walk of a narrow view takes about 15% longer.
-#[inline(never)]
-fn fold_out_of_line<T, B>(
-    series: impl Iterator<Item = T>,
-    init: B,
-    f: impl FnMut(B, T) -> B,
-) -> B {
-    series.fold(init, f)
 }
 
 /// The position of each record in `records` that leads with a key in `keys`, in order.
@@ -296,27 +268,23 @@ fn join<'a, const N: usize>(
     mut keys: &'a [u32],
 ) -> impl Iterator<Item = usize> + 'a {
     let mut at = 0;
-    iter::from_fn(
-        // Without it, the walk of a narrow view takes about 40% longer.
-        #[inline(always)]
-        move || {
-            loop {
-                let key = lead(records.get(at)?);
-                let &next = keys.first()?;
-                match next.cmp(&key) {
-                    Ordering::Less => keys = &keys[gallop(keys, |&held| held < key)..],
-                    Ordering::Greater => {
-                        at += gallop(&records[at..], |record| lead(record) < next);
-                    }
-                    Ordering::Equal => {
-                        keys = &keys[1..];
-                        at += 1;
-                        return Some(at - 1);
-                    }
+    iter::from_fn(move || {
+        loop {
+            let key = lead(records.get(at)?);
+            let &next = keys.first()?;
+            match next.cmp(&key) {
+                Ordering::Less => keys = &keys[gallop(keys, |&held| held < key)..],
+                Ordering::Greater => {
+                    at += gallop(&records[at..], |record| lead(record) < next);
+                }
+                Ordering::Equal => {
+                    keys = &keys[1..];
+                    at += 1;
+                    return Some(at - 1);
                 }
             }
-        },
-    )
+        }
+    })
 }
 
 /// The first position in `items` where `before` is false, as `slice::partition_point`
@@ -346,18 +314,22 @@ mod tests {
 
     /// The entries of `set` that `mask` holds.
     fn held(set: &KeySet, mask: &Mask) -> Vec<usize> {
-        let is_listed = |entry: &usize| listed(mask).contains(&to_u32(*entry));
-        let only = matches!(mask.held, Held::Only(_));
-        (0..set.entries().len())
-            .filter(|entry| is_listed(entry) == only)
-            .collect()
+        match &mask.held {
+            Held::Every => (0..set.entries().len()).collect(),
+            Held::Listed { list, .. } => {
+                list.entries.iter().map(|&n| to_usize(n)).collect()
+            }
+        }
     }
 
-    /// The entries that `mask` lists.
-    fn listed(mask: &Mask) -> &[u32] {
+    /// The entries that `mask` lists as left out.
+    fn left_out(mask: &Mask) -> Option<&[u32]> {
         match &mask.held {
-            Held::Every => &[],
-            Held::Only(list) | Held::Except(list) => &list.entries,
+            Held::Listed {
+                left_out: Some(list),
+                ..
+            } => Some(&list.entries),
+            _ => None,
         }
     }
 
@@ -414,17 +386,16 @@ mod tests {
     fn lists_the_entries_that_a_mask_of_most_leaves_out() {
         let set = two_groups();
         let mask = Mask::new(&set, [1, 3, 4].map(Slot::new));
-        assert!(matches!(mask.held, Held::Except(_)));
-        assert_eq!(listed(&mask), [1]);
+        assert_eq!(left_out(&mask), Some([1].as_slice()));
         assert_eq!(held(&set, &mask), [0, 2, 3]);
     }
 
     #[test]
-    fn lists_the_entries_held_when_they_are_half() {
+    fn lists_none_left_out_when_it_holds_half() {
         let set = two_groups();
         let mask = Mask::new(&set, [Slot::new(2)]);
-        assert!(matches!(mask.held, Held::Only(_)));
-        assert_eq!(listed(&mask), [0, 1]);
+        assert_eq!(left_out(&mask), None);
+        assert_eq!(held(&set, &mask), [0, 1]);
     }
 
     #[test]
@@ -478,7 +449,7 @@ mod tests {
         let set = two_groups();
         let frame = full(&set);
         let mask = Mask::new(&set, [1, 2, 3].map(Slot::new));
-        assert_eq!(listed(&mask), [3]);
+        assert_eq!(left_out(&mask), Some([3].as_slice()));
         let view = View::new(&frame, &mask);
         assert_eq!(view.len(), 101);
         assert_eq!(view.charge(), charge(101));
@@ -510,7 +481,7 @@ mod tests {
         };
         let (whole, narrow) = (frame(&series), frame(&series[..5]));
         let mask = Mask::new(&set, [2, 3, 5].map(Slot::new));
-        assert_eq!(listed(&mask), [5]);
+        assert_eq!(left_out(&mask), Some([5].as_slice()));
         let view = View::new(&whole, &mask);
         assert_eq!(view.len(), 256);
         assert_eq!(narrow.0.len(), 256);
@@ -602,11 +573,13 @@ mod tests {
                 .collect();
             prop_assert_eq!(held(&set, &mask), expected.clone());
             prop_assert_eq!(mask.is_empty(), expected.is_empty());
-            prop_assert!(2 * listed(&mask).len() <= entries);
-            let only = 2 * expected.len() <= entries;
-            prop_assert_eq!(matches!(mask.held, Held::Only(_)), only);
-            let every = !only && expected.len() == entries;
+            let every = !expected.is_empty() && expected.len() == entries;
             prop_assert_eq!(matches!(mask.held, Held::Every), every);
+            let others: Vec<u32> = (0..to_u32(entries))
+                .filter(|&entry| !expected.contains(&to_usize(entry)))
+                .collect();
+            let most = !every && 2 * expected.len() > entries;
+            prop_assert_eq!(left_out(&mask), most.then_some(others.as_slice()));
         }
 
         #[test]
