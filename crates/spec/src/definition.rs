@@ -311,7 +311,8 @@ pub enum Error {
         /// The authority.
         found: Authority,
     },
-    /// The budgets of a node settings policy make no policy.
+    /// The budgets of a node settings policy make no policy. A zero budget reads as
+    /// no budget, so `error` is always [`node_settings::Error::NoBudget`].
     Budget {
         /// Where the budgets start.
         at: usize,
