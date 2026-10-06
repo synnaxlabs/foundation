@@ -167,6 +167,10 @@ dependencies = [
 [[package]]
 name = "connector-modbus"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "types",
+]
 
 [[package]]
 name = "constant_time_eq"
