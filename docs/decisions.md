@@ -454,7 +454,9 @@ How to read this record:
   the frame. The waiting handoffs of the frame's indexes are still recorded (HANDOFF
   RECORD). The writer splits the frame by samples or by indexes and writes each part.
   The home never splits a frame, because a frame applies whole (B7). Each handoff
-  goes in its own append, so a handoff never makes a frame large.
+  goes in its own append, so a handoff never makes a frame large. The size is checked
+  only when the bodies are appended, after the handoffs: a frame whose handoff finds
+  no room is lost (live) or refused with `Full` (backfill) before its size is known.
   Decided by the `write-path` builder (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The

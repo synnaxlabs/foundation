@@ -240,8 +240,9 @@ impl Shard {
     ///
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
-    /// whose bodies no record holds; no seq moves for either. [`Error::Disk`] after a
-    /// failed commit.
+    /// whose bodies no record holds; no seq moves for either. A handoff with no room
+    /// decides first: the frame is lost or gets [`Error::Full`] before its size is
+    /// checked. [`Error::Disk`] after a failed commit.
     ///
     /// # Panics
     ///
@@ -1154,6 +1155,36 @@ mod tests {
             );
             shard.committed().await.expect("the commit ends");
             assert_eq!(find(&test.ring().await, &handoff).len(), 1);
+        });
+    }
+
+    #[test]
+    fn loses_a_large_live_frame_whose_handoff_finds_no_room() {
+        run(40, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(1 << 16).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamp = 10;
+            loop {
+                let write = frame(&test.pool, &set, &[(2, &[stamp])]);
+                let written = shard.write(a, LIVE, write, NOW, MESH).expect("written");
+                stamp += 1;
+                if matches!(written, [Outcome::Lost { .. }]) {
+                    break;
+                }
+                shard.committed().await.expect("the commit ends");
+            }
+            let stamps: Vec<i64> = (10..610).collect();
+            let large =
+                || frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
+            assert_eq!(shard.write(a, LIVE, large(), NOW, MESH), Err(Error::Large));
+            let b = shard.open_writer(writer("b", 2, &set), NOW, MESH);
+            assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
+            // The handoff is appended before the bodies, so the size is never checked.
+            assert_eq!(
+                shard.write(b, LIVE, large(), NOW, MESH),
+                Ok(&[lost(0, 0, 600)][..])
+            );
         });
     }
 
