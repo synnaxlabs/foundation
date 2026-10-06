@@ -85,7 +85,16 @@ fn refuses_a_newer_or_unknown_version() {
 #[test]
 fn refuses_an_unknown_kind() {
     for tag in (0..=u8::MAX).filter(|t| {
-        ![ACCESS, CONNECTOR, REGION, NODE_SETTINGS, COMPRESSION].contains(t)
+        ![
+            ACCESS,
+            CONNECTOR,
+            REGION,
+            NODE_SETTINGS,
+            COMPRESSION,
+            PLACEMENT,
+            TIME,
+        ]
+        .contains(t)
     }) {
         assert_eq!(
             Definition::decode(&[VERSION, tag]),
@@ -167,12 +176,9 @@ fn refuses_patterns_that_do_not_read() {
 fn refuses_an_exclusion_flag_that_is_not_0_or_1() {
     let mut bytes = access(&[b"a"], &[b"b"], 1, 0);
     bytes[10] = 2;
-    let error = Error::Excluded { at: 10, found: 2 };
+    let error = Error::Flag { at: 10, found: 2 };
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
-    assert_eq!(
-        error.to_string(),
-        "the exclusion flag 2 at byte 10 is not 0 or 1"
-    );
+    assert_eq!(error.to_string(), "the flag 2 at byte 10 is not 0 or 1");
 }
 
 #[test]
@@ -375,7 +381,7 @@ fn refuses_voters_out_of_order_or_repeated() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the voter at byte 29 is not after the voter before it"
+        "the name at byte 29 is not after the name before it"
     );
     let bytes = region_bytes(1, &[b"n_1", b"n_1"]);
     assert_eq!(Definition::decode(&bytes), Err(error));
@@ -523,6 +529,145 @@ fn defaults_to_the_auto_mode() {
     assert_eq!(Mode::default(), Mode::Auto);
 }
 
+/// Writes a count, then each name as a text.
+fn names(bytes: &mut Vec<u8>, names: &[&[u8]]) {
+    length(bytes, names.len());
+    for name in names {
+        length(bytes, name.len());
+        bytes.extend_from_slice(name);
+    }
+}
+
+/// The bytes of a placement, from its parts.
+fn placement_bytes(standby: Option<&[u8]>, copies: &[&[u8]]) -> Vec<u8> {
+    let mut rest = Vec::new();
+    match standby {
+        None => rest.push(0),
+        Some(node) => {
+            rest.push(1);
+            length(&mut rest, node.len());
+            rest.extend_from_slice(node);
+        }
+    }
+    names(&mut rest, copies);
+    select_bytes(PLACEMENT, &rest)
+}
+
+fn placement(standby: Option<&str>, copies: &[&str]) -> Definition {
+    let copies = copies.iter().map(|c| name(c));
+    let policy = placement::Policy::new(select(), standby.map(name), copies);
+    Definition::Placement(policy.unwrap())
+}
+
+#[test]
+fn writes_the_documented_placement_layout() {
+    for (definition, expected) in [
+        (
+            placement(Some("n_1"), &["n_3", "n_2"]),
+            placement_bytes(Some(b"n_1"), &[b"n_2", b"n_3"]),
+        ),
+        (placement(None, &["n_2"]), placement_bytes(None, &[b"n_2"])),
+        (
+            placement(Some("n_1"), &[]),
+            placement_bytes(Some(b"n_1"), &[]),
+        ),
+    ] {
+        assert_eq!(definition.encode(), expected);
+        assert_eq!(Definition::decode(&expected), Ok(definition));
+    }
+}
+
+#[test]
+fn refuses_a_presence_flag_that_is_not_0_or_1() {
+    let mut bytes = placement_bytes(None, &[b"n_2"]);
+    let at = select_bytes(PLACEMENT, &[]).len();
+    bytes[at] = 2;
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Flag { at, found: 2 })
+    );
+}
+
+#[test]
+fn refuses_copies_out_of_order_or_repeated() {
+    let at = select_bytes(PLACEMENT, &[]).len() + 1 + 8 + 11;
+    for copies in [[b"n_3", b"n_2"], [b"n_2", b"n_2"]] {
+        let bytes = placement_bytes(None, &copies.map(|c| &c[..]));
+        assert_eq!(Definition::decode(&bytes), Err(Error::Order { at }));
+    }
+}
+
+#[test]
+fn refuses_a_placement_the_policy_refuses() {
+    let at = select_bytes(PLACEMENT, &[]).len();
+    let bytes = placement_bytes(None, &[]);
+    let error = Error::Placement {
+        at,
+        error: placement::Error::Empty,
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        format!("the placement at byte {at}: a placement has no standby and no copy")
+    );
+    let bytes = placement_bytes(Some(b"n_2"), &[b"n_1", b"n_2"]);
+    let error = Error::Placement {
+        at,
+        error: placement::Error::Overlap(name("n_2")),
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error));
+}
+
+#[test]
+fn refuses_a_placement_that_ends_early() {
+    let bytes = placement_bytes(Some(b"n_1"), &[]);
+    let end = bytes.len();
+    assert_eq!(
+        Definition::decode(&bytes[..end - 1]),
+        Err(Error::Truncated { at: end - 8 })
+    );
+}
+
+/// The bytes of a time policy, from its parts.
+fn time_bytes(peers: Option<&[&[u8]]>) -> Vec<u8> {
+    let mut rest = Vec::new();
+    match peers {
+        None => rest.push(0),
+        Some(peers) => {
+            rest.push(1);
+            names(&mut rest, peers);
+        }
+    }
+    select_bytes(TIME, &rest)
+}
+
+fn time_policy(peers: Option<&[&str]>) -> Definition {
+    let peers = peers.map(|p| p.iter().map(|p| name(p)).collect::<Vec<_>>());
+    Definition::Time(time::Policy::new(select(), peers))
+}
+
+#[test]
+fn writes_the_documented_time_layout() {
+    for (definition, expected) in [
+        (time_policy(None), time_bytes(None)),
+        (time_policy(Some(&[])), time_bytes(Some(&[]))),
+        (
+            time_policy(Some(&["n_2", "n_1"])),
+            time_bytes(Some(&[b"n_1", b"n_2"])),
+        ),
+    ] {
+        assert_eq!(definition.encode(), expected);
+        assert_eq!(Definition::decode(&expected), Ok(definition));
+    }
+}
+
+#[test]
+fn refuses_peers_out_of_order() {
+    let bytes = time_bytes(Some(&[b"n_2", b"n_1"]));
+    let at = select_bytes(TIME, &[]).len() + 1 + 8 + 11;
+    assert_eq!(Definition::decode(&bytes), Err(Error::Order { at }));
+}
+
 fn pattern() -> impl Strategy<Value = String> {
     let segment = prop_oneof![
         Just("*".to_owned()),
@@ -602,6 +747,23 @@ fn compression_strategy() -> impl Strategy<Value = Definition> {
     })
 }
 
+fn placement_strategy() -> impl Strategy<Value = Definition> {
+    let copies = prop::collection::vec(name_strategy(), 0..4);
+    (selectors(), prop::option::of(name_strategy()), copies).prop_filter_map(
+        "a policy refuses no standby and no copy, or a standby that is a copy",
+        |(select, standby, copies)| {
+            let policy = placement::Policy::new(select, standby, copies);
+            policy.ok().map(Definition::Placement)
+        },
+    )
+}
+
+fn time_strategy() -> impl Strategy<Value = Definition> {
+    let peers = prop::option::of(prop::collection::vec(name_strategy(), 0..4));
+    (selectors(), peers)
+        .prop_map(|(select, peers)| Definition::Time(time::Policy::new(select, peers)))
+}
+
 fn definition() -> impl Strategy<Value = Definition> {
     prop_oneof![
         access_strategy(),
@@ -609,6 +771,8 @@ fn definition() -> impl Strategy<Value = Definition> {
         region_strategy(),
         settings_strategy(),
         compression_strategy(),
+        placement_strategy(),
+        time_strategy(),
     ]
 }
 
