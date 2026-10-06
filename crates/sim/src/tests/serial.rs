@@ -493,6 +493,84 @@ fn a_crash_closes_the_ports_of_its_node() {
     open(&a, &config(A, 9_600, None)).unwrap();
 }
 
+#[test]
+fn a_crash_closes_a_leaked_port() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, _b) = pair(0, line::Config::default());
+        let serial = a.serial();
+        let leak = a.shards().start(shard("leak"), move |_| async move {
+            Box::leak(Box::new(
+                serial.open(&config(A, 9_600, None)).await.unwrap(),
+            ));
+        });
+        drop(leak.unwrap());
+        sim.run().unwrap();
+        sim.crash(&a, crash);
+        open(&a, &config(A, 9_600, None)).unwrap();
+    }
+}
+
+#[test]
+fn a_crash_keeps_the_port_of_another_node_open() {
+    let (mut sim, a, b) = pair(0, line::Config::default());
+    let config = config(B, 9_600, None);
+    let _port = open(&b, &config).unwrap();
+    sim.crash(&a, Crash::Process);
+    let busy = open(&b, &config).unwrap_err();
+    assert_eq!(busy, Error::Busy { path: B.into() });
+}
+
+#[test]
+fn a_port_from_before_a_crash_drops_and_leaves_the_next_port_open() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, _b) = pair(0, line::Config::default());
+        let config = config(A, 9_600, None);
+        let old = open(&a, &config).unwrap();
+        sim.crash(&a, crash);
+        let next = open(&a, &config).unwrap();
+        drop(old);
+        let results = write_once(&mut sim, &a, next);
+        assert_eq!(*results.lock().unwrap(), [Ok(1)], "{crash:?}");
+    }
+}
+
+/// What `poll` gives on a port of node A from before a `crash`, after a read on
+/// thread `first` when `polled`.
+fn stale(crash: Crash, polled: bool, poll: fn(&mut env::serial::Port)) -> crate::Error {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let mut port = open(&a, &config(A, 9_600, None)).unwrap();
+    if polled {
+        port = read_on_first(&mut sim, &a, port);
+    }
+    sim.crash(&a, crash);
+    let _after = a.shards().start(shard("after"), move |_| async move {
+        poll(&mut port);
+    });
+    sim.run().unwrap_err()
+}
+
+#[test]
+fn a_port_from_before_a_crash_panics_when_it_polls() {
+    let write = |port: &mut env::serial::Port| {
+        let cx = &mut Context::from_waker(Waker::noop());
+        assert_eq!(port.poll_write(cx, &[1]), Poll::Ready(Ok(1)));
+    };
+    let message = "a serial port of node 0 polls after a crash of the node";
+    let panicked = crate::Error::Panicked {
+        thread: "after".into(),
+        message: message.into(),
+        seed: 0,
+    };
+    for crash in [Crash::Process, Crash::Power] {
+        for polled in [false, true] {
+            for poll in [read_once, write] {
+                let error = stale(crash, polled, poll);
+                assert_eq!(error, panicked, "{crash:?}, polled: {polled}");
+            }
+        }
+    }
+}
+
 /// The digest of a run in which [`A`] sends the bytes 0 to 99 over `line` to [`B`],
 /// which holds its port open and never reads, so the fate of a byte changes no poll.
 fn unread(line: line::Config) -> u64 {
@@ -568,18 +646,29 @@ fn read_once(port: &mut env::serial::Port) {
     assert_eq!(port.poll_read(cx, &mut [0; 8]), Poll::Pending);
 }
 
-#[test]
-fn a_port_polled_on_a_second_thread_panics() {
-    let (mut sim, a, _b) = pair(0, line::Config::default());
-    let mut port = open(&a, &config(A, 9_600, None)).unwrap();
+/// Reads once from `port` on a new thread named `first` of `node`, and gives the
+/// port back.
+fn read_on_first(
+    sim: &mut Sim,
+    node: &node::Node,
+    mut port: env::serial::Port,
+) -> env::serial::Port {
     let slot = Arc::new(Mutex::new(None));
     let give = Arc::clone(&slot);
-    let _first = a.shards().start(shard("first"), move |_| async move {
+    let _first = node.shards().start(shard("first"), move |_| async move {
         read_once(&mut port);
         *give.lock().unwrap() = Some(port);
     });
     sim.run().unwrap();
-    let mut port = slot.lock().unwrap().take().unwrap();
+    let port = slot.lock().unwrap().take();
+    port.unwrap()
+}
+
+#[test]
+fn a_port_polled_on_a_second_thread_panics() {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let port = open(&a, &config(A, 9_600, None)).unwrap();
+    let mut port = read_on_first(&mut sim, &a, port);
     let _second = a.shards().start(shard("second"), move |_| async move {
         read_once(&mut port);
     });
@@ -600,4 +689,169 @@ fn a_port_polled_outside_the_sim_panics() {
     let (_sim, a, _b) = pair(0, line::Config::default());
     let mut port = open(&a, &config(A, 9_600, None)).unwrap();
     read_once(&mut port);
+}
+
+/// The error of each read and write of a failed port at `path`.
+fn failed(path: &str) -> Error {
+    Error::Io {
+        path: path.into(),
+        code: 5,
+    }
+}
+
+/// What a port gave: the result of each read and write.
+type Results = Arc<Mutex<Vec<Result<usize, Error>>>>;
+
+#[test]
+fn each_read_and_write_of_a_failed_port_gives_eio() {
+    let (mut sim, _a, b) = pair(0, line::Config::default());
+    let (node, serial, results) = (b.clone(), b.serial(), Results::default());
+    let log = Arc::clone(&results);
+    let _port = b.shards().start(shard("port"), move |_| async move {
+        let mut port = serial.open(&config(B, 9_600, None)).await.unwrap();
+        node.fail_serial(Path::new(B));
+        let read = poll_fn(|cx| port.poll_read(cx, &mut [0; 8])).await;
+        let write = poll_fn(|cx| port.poll_write(cx, &[1])).await;
+        log.lock().unwrap().extend([read, write]);
+    });
+    sim.run().unwrap();
+    let message = "serial port /dev/ttyUSB0 failed with OS error 5";
+    assert_eq!(failed(B).to_string(), message);
+    assert_eq!(*results.lock().unwrap(), [Err(failed(B)), Err(failed(B))]);
+}
+
+#[test]
+fn a_read_that_waits_wakes_with_the_error() {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let (serial, results) = (a.serial(), Results::default());
+    let log = Arc::clone(&results);
+    let _port = a.shards().start(shard("port"), move |_| async move {
+        let mut port = serial.open(&config(A, 9_600, None)).await.unwrap();
+        let read = poll_fn(|cx| port.poll_read(cx, &mut [0; 8])).await;
+        log.lock().unwrap().push(read);
+    });
+    sim.run_for(millis(10)).unwrap();
+    assert_eq!(*results.lock().unwrap(), []);
+    a.fail_serial(Path::new(A));
+    sim.run().unwrap();
+    assert_eq!(*results.lock().unwrap(), [Err(failed(A))]);
+}
+
+#[test]
+fn a_write_that_waits_wakes_with_the_error() {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let (serial, results) = (a.serial(), Results::default());
+    let log = Arc::clone(&results);
+    let _port = a.shards().start(shard("port"), move |_| async move {
+        // At 300 baud the first byte arrives after 33 ms, so the queue stays full.
+        let mut port = serial.open(&config(A, 300, None)).await.unwrap();
+        write(&mut port, &[0; 4_096]).await;
+        let write = poll_fn(|cx| port.poll_write(cx, &[1])).await;
+        log.lock().unwrap().push(write);
+    });
+    sim.run_for(millis(10)).unwrap();
+    assert_eq!(*results.lock().unwrap(), []);
+    a.fail_serial(Path::new(A));
+    sim.run().unwrap();
+    assert_eq!(*results.lock().unwrap(), [Err(failed(A))]);
+}
+
+/// Starts a shard on `node` that writes one byte to `port`, and gives what the
+/// write gave.
+fn write_once(
+    sim: &mut Sim,
+    node: &node::Node,
+    mut port: env::serial::Port,
+) -> Results {
+    let results = Results::default();
+    let log = Arc::clone(&results);
+    let _write = node.shards().start(shard("write"), move |_| async move {
+        let write = poll_fn(|cx| port.poll_write(cx, &[1])).await;
+        log.lock().unwrap().push(write);
+    });
+    sim.run().unwrap();
+    results
+}
+
+#[test]
+fn a_fault_with_no_open_port_fails_the_next_port_to_open() {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let config = config(A, 9_600, None);
+    a.fail_serial(Path::new(A));
+    let first = open(&a, &config).unwrap();
+    let results = write_once(&mut sim, &a, first);
+    assert_eq!(*results.lock().unwrap(), [Err(failed(A))]);
+    let next = open(&a, &config).unwrap();
+    assert_eq!(*write_once(&mut sim, &a, next).lock().unwrap(), [Ok(1)]);
+}
+
+#[test]
+fn a_failed_port_holds_its_end_until_it_drops() {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let config = config(A, 9_600, None);
+    let first = open(&a, &config).unwrap();
+    a.fail_serial(Path::new(A));
+    let busy = open(&a, &config).unwrap_err();
+    assert_eq!(busy, Error::Busy { path: A.into() });
+    drop(first);
+    let next = open(&a, &config).unwrap();
+    assert_eq!(*write_once(&mut sim, &a, next).lock().unwrap(), [Ok(1)]);
+}
+
+#[test]
+fn a_failed_port_loses_the_bytes_not_yet_arrived() {
+    let (mut sim, a, b) = pair(0, line::Config::default());
+    let log = Log::default();
+    let _send = send(&a, config(A, 9_600, None), (0..100).collect());
+    let _receive = receive(&b, config(B, 9_600, None), Span::ZERO, &log);
+    sim.run_for(millis(10)).unwrap();
+    a.fail_serial(Path::new(A));
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(received(&log), (0..9).collect::<Vec<u8>>());
+}
+
+#[test]
+fn a_failed_port_loses_the_bytes_it_has_not_read() {
+    let (mut sim, a, b) = pair(0, line::Config::default());
+    let (node, clock, serial) = (b.clone(), b.clock(), b.serial());
+    let results = Results::default();
+    let log = Arc::clone(&results);
+    let _send = send(&a, config(A, 9_600, None), vec![1, 2, 3]);
+    let _port = b.shards().start(shard("port"), move |_| async move {
+        let mut port = serial.open(&config(B, 9_600, None)).await.unwrap();
+        clock.sleep(millis(10)).await;
+        node.fail_serial(Path::new(B));
+        let read = poll_fn(|cx| port.poll_read(cx, &mut [0; 8])).await;
+        log.lock().unwrap().push(read);
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*results.lock().unwrap(), [Err(failed(B))]);
+}
+
+/// The digest of a run in which [`A`] sends the bytes 0 to 99 to [`B`], which holds
+/// its port open and never reads. The port at [`B`] fails from the start when
+/// `failed`.
+fn failing(failed: bool) -> u64 {
+    let (mut sim, a, b) = pair(0, line::Config::default());
+    if failed {
+        b.fail_serial(Path::new(B));
+    }
+    let _held = send(&b, config(B, 9_600, None), Vec::new());
+    let _send = send(&a, config(A, 9_600, None), (0..100).collect());
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_bytes_that_arrive_at_a_failed_port_are_lost() {
+    let lost = failing(true);
+    assert_eq!(failing(true), lost);
+    assert_ne!(failing(false), lost);
+}
+
+#[test]
+#[should_panic(expected = "no line joins port /dev/ttyUSB0 of node 0")]
+fn a_fault_on_a_port_that_no_line_joins_panics() {
+    let (_sim, a, _b) = pair(0, line::Config::default());
+    a.fail_serial(Path::new(B));
 }

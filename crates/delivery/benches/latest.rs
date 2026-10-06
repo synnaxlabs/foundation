@@ -1,7 +1,8 @@
 //! The cost of one live frame to the latest readers of its index, which the home pays
 //! for each frame on the write path.
 
-use delivery::{Key, Readers};
+use delivery::Readers;
+use delivery::latest::Key;
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner};
@@ -37,7 +38,7 @@ fn put_and_take(bencher: Bencher<'_, '_>, sessions: usize) {
     bencher.bench_local(|| {
         divan::black_box(readers.put(frame.clone()));
         for &key in &keys {
-            divan::black_box(readers.take(key));
+            divan::black_box(readers.take(key.into()));
         }
     });
 }

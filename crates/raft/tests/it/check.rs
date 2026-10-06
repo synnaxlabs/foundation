@@ -90,7 +90,13 @@ proptest! {
     ) {
         let (mut raft, _, from) = receiver(&run, to, from)?;
         let (hard, role, leader) = (raft.hard(), raft.role(), raft.leader());
-        let message = Message { from, to: raft.key(), term: Term(term), body };
+        let message = Message {
+            from,
+            to: raft.key(),
+            term: Term(term),
+            body,
+            proof: None,
+        };
         if raft.step(message).is_err() {
             let after = (raft.hard(), raft.role(), raft.leader());
             prop_assert_eq!(after, (hard, role, leader));
@@ -123,7 +129,13 @@ proptest! {
             .collect();
         let body = Body::Append { prev, entries, commit: 0 };
         let term = Term(raft.term().0.saturating_add(ahead));
-        let message = Message { from, to: raft.key(), term, body };
+        let message = Message {
+            from,
+            to: raft.key(),
+            term,
+            body,
+            proof: None,
+        };
         if raft.step(message).is_ok() {
             let term = raft.hard().term;
             for entry in raft.ready().entries {

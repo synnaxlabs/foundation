@@ -1,28 +1,58 @@
-//! The bytes of a handoff record: the writer that holds control of an index from the
-//! record's place in the index log.
+//! The handoff entry of an index. Its body names the writer that holds control of the
+//! index from the entry's place in the index log.
 
 use std::str;
 
 use block::Block;
+use buffer::Entry;
 use control::{Handoff, Writer};
 use types::authority::Authority;
+use types::frame::{Path, key_set};
 use types::name::Name;
+use types::time::Stamp;
 
 /// The buffer tag of a handoff entry.
-pub(crate) const TAG: u8 = 1;
+const TAG: u8 = 1;
 
 /// The most bytes in the body of a handoff: the authority and the longest subject.
 /// One entry of a record holds it alone, since `Layout::entry_max` is at least 4032.
 pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
 const _: () = assert!(MAX_BYTES <= 4032, "a handoff fits one entry of any ring");
 
-/// The parts of the buffer entry that records `handoff`: a block from `pool`, or `None`
-/// when no writer holds control.
+/// The buffer entry that records `handoff` on the live path of `index` at seq `first`,
+/// at mesh time `stored_at`. Its body is a block from `pool`, or no part when no
+/// writer holds control.
 ///
 /// # Errors
 ///
 /// [`block::Error`] when `pool` has no block for the bytes.
-pub(crate) fn body(
+pub(crate) fn entry(
+    pool: &block::Pool,
+    handoff: Handoff<'_>,
+    index: &key_set::Entry,
+    first: u64,
+    stored_at: Stamp,
+) -> Result<Entry, block::Error> {
+    Ok(Entry {
+        index: index.key,
+        slot: index.slot,
+        path: Path::Live,
+        first,
+        len: 0,
+        stored_at,
+        last: None,
+        tag: TAG,
+        parts: body(pool, handoff)?.into(),
+    })
+}
+
+/// The body of the entry that records `handoff`: a block from `pool`, or `None` when
+/// no writer holds control.
+///
+/// # Errors
+///
+/// [`block::Error`] when `pool` has no block for the bytes.
+fn body(
     pool: &block::Pool,
     handoff: Handoff<'_>,
 ) -> Result<Option<Block>, block::Error> {
@@ -59,14 +89,68 @@ pub(crate) fn read(body: &[u8]) -> Option<Writer> {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use types::channel::Slot;
+    use types::frame::key_set::Group;
 
     use super::*;
-    use crate::common::pool;
+    use crate::common::{interner, key, pool};
 
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {
             subject: subject.parse().expect("a valid name"),
             authority: Authority(authority),
+        }
+    }
+
+    mod entry {
+        use super::*;
+
+        /// The index entry of slot 4 in a key set of its own.
+        fn index() -> key_set::Entry {
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(4)),
+                data: &[],
+            }]);
+            set.entries()[0]
+        }
+
+        #[test]
+        fn records_the_holder_on_the_live_path_at_first() {
+            let holder = writer("plant.pump-1", 7);
+            let stored_at = Stamp::from_nanos(9);
+
+            let entry = entry(
+                &pool(4096),
+                Handoff { to: Some(&holder) },
+                &index(),
+                12,
+                stored_at,
+            )
+            .expect("room");
+
+            let place = (entry.index, entry.slot, entry.path, entry.first, entry.len);
+            assert_eq!(place, (key(Slot::new(4)), Slot::new(4), Path::Live, 12, 0));
+            assert_eq!(
+                (entry.stored_at, entry.last, entry.tag),
+                (stored_at, None, 1)
+            );
+            let parts: Vec<_> =
+                entry.parts.into_iter().map(|part| part.to_vec()).collect();
+            assert_eq!(parts, [b"\x07plant.pump-1".to_vec()]);
+        }
+
+        #[test]
+        fn has_no_part_when_no_writer_holds_control() {
+            let entry = entry(
+                &pool(4096),
+                Handoff { to: None },
+                &index(),
+                12,
+                Stamp::from_nanos(9),
+            )
+            .expect("room");
+
+            assert_eq!(entry.parts.into_iter().count(), 0);
         }
     }
 
