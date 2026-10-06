@@ -6,6 +6,7 @@
 mod behind;
 mod change;
 mod check;
+mod claim;
 mod config;
 mod disk;
 mod election;

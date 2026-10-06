@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Ready,
-    Role, Start, Term, Voters,
+    Answer, Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft,
+    Ready, Role, Start, Term, Voters,
 };
 use types::node;
 
@@ -24,7 +24,7 @@ pub(crate) fn proof(grant: Grant, candidate: u8, ids: &[u8]) -> Proof {
     Proof {
         grant,
         candidate: key(candidate),
-        voters: set(ids),
+        voters: ids.iter().map(|&id| (key(id), None)).collect(),
     }
 }
 
@@ -283,10 +283,17 @@ pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
     raft.campaign();
     disk.store(raft.ready());
     for granted in [
-        Body::PreVoteReply { granted: true },
-        Body::VoteReply { granted: true },
+        Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        },
+        Body::VoteReply {
+            answer: Answer::Granted(None),
+        },
     ] {
-        let vote = granted == Body::VoteReply { granted: true };
+        let vote = granted
+            == Body::VoteReply {
+                answer: Answer::Granted(None),
+            };
         for &from in others {
             raft.step(Message {
                 from: key(from),

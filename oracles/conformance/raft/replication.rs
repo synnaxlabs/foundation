@@ -3,7 +3,8 @@
 //! etcd source: `README.md` lists each source and the changes.
 
 use raft::{
-    Body, Data, Entry, Error, Grant, Hard, Message, Position, Raft, Ready, Role, Term,
+    Answer, Body, Data, Entry, Error, Grant, Hard, Message, Position, Raft, Ready,
+    Role, Term,
 };
 
 use crate::common::{
@@ -300,8 +301,12 @@ fn leader_sync_follower_log() {
             body,
             proof: None,
         };
-        network.send(from_3(Body::PreVoteReply { granted: true }));
-        network.send(from_3(Body::VoteReply { granted: true }));
+        network.send(from_3(Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        }));
+        network.send(from_3(Body::VoteReply {
+            answer: Answer::Granted(None),
+        }));
         network.propose(1, b"");
         network.check(1, Role::Leader, term + 1);
         assert_eq!(network.disk(1).entries, network.disk(2).entries, "#{i}");

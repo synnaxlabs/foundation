@@ -21,7 +21,7 @@ use types::node;
 pub use config::{Config, Start};
 pub use log::{Data, Entry};
 pub use machine::{Raft, Ready, Role};
-pub use message::{Body, Grant, Message, Proof};
+pub use message::{Answer, Body, Claim, Grant, Message, Proof, Signature};
 pub use voters::Voters;
 
 /// An election term. A term has at most one leader.
