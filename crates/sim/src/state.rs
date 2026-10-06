@@ -296,9 +296,21 @@ impl State {
         }
     }
 
-    /// Adds timer `key` of `thread`, which wakes `waker` at true time `at`.
-    pub(crate) fn arm(&mut self, thread: u64, at: Monotonic, key: u64, waker: Waker) {
+    /// Adds timer `key` of `thread`, which wakes `waker` at true time `at`. A timer of
+    /// a thread that has ended never fires: it gives `waker` back, for the caller to
+    /// drop after it releases the lock.
+    pub(crate) fn arm(
+        &mut self,
+        thread: u64,
+        at: Monotonic,
+        key: u64,
+        waker: Waker,
+    ) -> Option<Waker> {
+        if self.threads[&thread].outcome.is_some() {
+            return Some(waker);
+        }
         self.timers.insert((at, key), (thread, waker));
+        None
     }
 
     /// Removes timer `key` at true time `at`, and returns its waker for the caller to
