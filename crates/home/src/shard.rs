@@ -110,6 +110,9 @@ pub(crate) enum Error {
     /// A backfill frame found no room in the ring or the pool. No seq moves, and the
     /// writer writes the frame again later.
     Full,
+    /// The frame is too large for one write. Nothing is spent: the writer splits the
+    /// frame by samples or by indexes and writes each part.
+    Large,
     /// A commit failed. The shard takes no more frames.
     Disk(env::files::Error),
 }
@@ -119,6 +122,7 @@ impl fmt::Display for Error {
         match self {
             Self::Resend => write!(f, "the home does not take a resend frame yet"),
             Self::Full => write!(f, "the ring or the pool has no room for the frame"),
+            Self::Large => write!(f, "the frame is too large for one write: split it"),
             Self::Disk(error) => write!(f, "a commit failed: {error}"),
         }
     }
@@ -235,8 +239,11 @@ impl Shard {
     /// # Errors
     ///
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
-    /// frame when the ring or the pool has no room; no seq moves. [`Error::Disk`]
-    /// after a failed commit.
+    /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
+    /// whose bodies no record or no block of the pool holds; no seq moves for either.
+    /// A handoff with no room decides first: the frame is lost or gets
+    /// [`Error::Full`] before its size is checked. [`Error::Disk`] after a failed
+    /// commit.
     ///
     /// # Panics
     ///
@@ -282,7 +289,12 @@ impl Shard {
         if !ready {
             batch.clear();
         }
-        let appended = batch.append(&self.buffer, session, path, mesh);
+        let appended = match made {
+            Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
+                Err(Error::Large)
+            }
+            _ => batch.append(&self.buffer, session, path, mesh),
+        };
         let room =
             recorded
                 .and(appended)
@@ -372,7 +384,8 @@ impl Batch {
     ///
     /// # Errors
     ///
-    /// [`Error::Disk`] after a failed commit, also for an empty batch.
+    /// [`Error::Large`] when no record holds the batch. [`Error::Disk`] after a failed
+    /// commit, also for an empty batch.
     fn append(
         &mut self,
         buffer: &Buffer,
@@ -441,6 +454,9 @@ fn record(
             tag: handoff::TAG,
             parts: parts.into(),
         }]);
+        if let Err(buffer::Error::Large(limit)) = appended {
+            panic!("invariant: a record holds one handoff: {limit}");
+        }
         if room(appended)? {
             index.gate.recorded();
         } else {
@@ -494,23 +510,33 @@ fn range(accepted: &Accepted) -> frame::Range {
 ///
 /// # Errors
 ///
-/// [`Error::Disk`] after a failed commit.
+/// [`Error::Large`] when no record holds the batch, and [`Error::Disk`] after a
+/// failed commit.
 ///
 /// # Panics
 ///
-/// If the append failed for another reason: a batch that no record holds, or a
-/// failure that only an open has.
+/// If the append failed as only an open fails.
 fn room(appended: Result<(), buffer::Error>) -> Result<bool, Error> {
+    use buffer::Error::{Damaged, Invalid, Length, Missing, Unfit, Version};
     match appended {
         Ok(()) => Ok(true),
         Err(buffer::Error::Full { .. } | buffer::Error::Pool(_)) => Ok(false),
+        Err(buffer::Error::Large(_)) => Err(Error::Large),
         Err(buffer::Error::Files(error)) => Err(Error::Disk(error)),
-        Err(error) => panic!("an append failed for neither room nor a commit: {error}"),
+        Err(
+            error @ (Length { .. }
+            | Missing
+            | Damaged
+            | Version(_)
+            | Unfit(_)
+            | Invalid { .. }),
+        ) => panic!("invariant: an append never fails as an open: {error}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
     use std::path::{Path as FilePath, PathBuf};
 
     use block::{Heap, Pool, Unique};
@@ -528,7 +554,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{interner, key};
+    use crate::common::{interner, key, pool};
 
     const DIR: &str = "shard-0";
     const RING: &str = "shard-0/ring";
@@ -760,6 +786,17 @@ mod tests {
             .collect()
     }
 
+    /// `count` values that no codec makes smaller.
+    fn scattered(count: usize) -> Vec<i64> {
+        let next = |x: &i64| {
+            x.wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407)
+        };
+        iter::successors(Some(1), |x| Some(next(x)))
+            .take(count)
+            .collect()
+    }
+
     /// The bytes of a handoff to `subject` at authority 1.
     fn handoff_to(subject: &str) -> Vec<u8> {
         [&[1], subject.as_bytes()].concat()
@@ -967,12 +1004,7 @@ mod tests {
             let mut outcomes = Vec::new();
             for n in 0..24_i64 {
                 let stamps: Vec<i64> = (0..400).map(|k| 10 + n * 400 + k).collect();
-                let values: Vec<i64> = (0..400)
-                    .map(|k| {
-                        (n * 400 + k)
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed())
-                    })
-                    .collect();
+                let values = scattered(400);
                 let write = frame(&test.pool, &set, &[(0, &stamps), (1, &values)]);
                 let written = shard.write(a, LIVE, write, NOW, MESH).expect("written");
                 outcomes.extend_from_slice(written);
@@ -1081,6 +1113,120 @@ mod tests {
             drop((twin, blocks));
             shard.committed().await.expect("the commit ends");
             assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+        });
+    }
+
+    #[test]
+    fn refuses_a_frame_too_large_for_one_write_and_spends_nothing() {
+        run(38, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let stamps: Vec<i64> = (10..610).collect();
+            let values = scattered(600);
+            for (label, stamp) in [(LIVE, 700), (BACKFILL, 5)] {
+                let large = frame(&test.pool, &set, &[(0, &stamps), (1, &values)]);
+                assert_eq!(shard.write(a, label, large, NOW, MESH), Err(Error::Large));
+                let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
+                assert_eq!(
+                    shard.write(a, label, small, NOW, MESH),
+                    Ok(&[applied(0, 0, 1)][..])
+                );
+            }
+            assert_eq!(
+                Error::Large.to_string(),
+                "the frame is too large for one write: split it"
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_a_frame_whose_group_no_block_of_the_shard_holds() {
+        run(45, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            // The shard's largest block is 1835008 bytes. The writer's pool has larger
+            // blocks, and scattered values do not compress.
+            let writers = pool(4 * POOL);
+            let len = 240_000;
+            let stamps: Vec<i64> = (10..).take(len).collect();
+            let values = scattered(len);
+            for (label, stamp) in [(LIVE, 300_000), (BACKFILL, 5)] {
+                let series: [(usize, &[i64]); 3] =
+                    [(0, &stamps), (1, &values), (2, &[stamp])];
+                let large = frame(&writers, &set, &series);
+                assert_eq!(shard.write(a, label, large, NOW, MESH), Err(Error::Large));
+                let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
+                assert_eq!(
+                    shard.write(a, label, small, NOW, MESH),
+                    Ok(&[applied(0, 0, 1)][..])
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn records_a_waiting_handoff_before_a_frame_too_large_for_one_write() {
+        run(39, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let stamps: Vec<i64> = (10..610).collect();
+            let large = frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
+            let blocks = test.fill();
+            let a = shard.open_writer(writer("subject-a", 1, &set), NOW, MESH);
+            drop(blocks);
+            assert_eq!(shard.write(a, LIVE, large, NOW, MESH), Err(Error::Large));
+            shard.committed().await.expect("the commit ends");
+            let handoff = handoff_to("subject-a");
+            assert_eq!(find(&test.ring().await, &handoff).len(), 1);
+            let small = frame(&test.pool, &set, &[(0, &[700]), (1, &[1])]);
+            assert_eq!(
+                shard.write(a, LIVE, small, NOW, MESH),
+                Ok(&[applied(0, 0, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(find(&test.ring().await, &handoff).len(), 1);
+        });
+    }
+
+    #[test]
+    fn loses_a_large_live_frame_whose_handoff_finds_no_room() {
+        run(40, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(1 << 16).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamp = 10;
+            loop {
+                let write = frame(&test.pool, &set, &[(2, &[stamp])]);
+                let written = shard.write(a, LIVE, write, NOW, MESH).expect("written");
+                stamp += 1;
+                if matches!(written, [Outcome::Lost { .. }]) {
+                    break;
+                }
+                shard.committed().await.expect("the commit ends");
+            }
+            let stamps: Vec<i64> = (10..610).collect();
+            let large =
+                || frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
+            assert_eq!(shard.write(a, LIVE, large(), NOW, MESH), Err(Error::Large));
+            let b = shard.open_writer(writer("b", 2, &set), NOW, MESH);
+            assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
+            // The handoff is appended before the bodies, so the size is never checked.
+            assert_eq!(
+                shard.write(b, LIVE, large(), NOW, MESH),
+                Ok(&[lost(0, 0, 600)][..])
+            );
+            let len = 240_000;
+            let stamps: Vec<i64> = (1000..).take(len).collect();
+            let values = scattered(len);
+            let series: [(usize, &[i64]); 3] =
+                [(0, &stamps), (1, &values), (2, &[stamp])];
+            let huge = frame(&pool(4 * POOL), &set, &series);
+            assert_eq!(
+                shard.write(b, LIVE, huge, NOW, MESH),
+                Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
+            );
         });
     }
 

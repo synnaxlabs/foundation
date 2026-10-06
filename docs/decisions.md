@@ -465,6 +465,15 @@ How to read this record:
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
+  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
+  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
+  and writes each part. The home never splits a frame, because a frame applies whole
+  (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
+  size is checked only when the bodies are appended, after the handoffs: a frame whose
+  handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
+  is known. Decided by the `write-path` builder (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
