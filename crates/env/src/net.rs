@@ -130,7 +130,8 @@ impl fmt::Debug for Net {
 /// A drop never blocks. A drop before [`Tcp::poll_close`] is ready aborts the stream:
 /// the peer gets a reset (RST), and the queued bytes are lost. To deliver every byte,
 /// wait for `poll_close` first; it sends FIN after the queued bytes. A drop with
-/// received bytes unread also resets, even after `poll_close`.
+/// received bytes unread also resets, even after `poll_close`. A stream that has
+/// ended sends no reset: a reset arrived, or each end has the other's bytes and FIN.
 ///
 /// ```
 /// use std::future::poll_fn;

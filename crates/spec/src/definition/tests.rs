@@ -182,17 +182,52 @@ fn refuses_an_exclusion_flag_that_is_not_0_or_1() {
 }
 
 #[test]
+fn refuses_a_bad_flag_before_a_short_text() {
+    let mut bytes = vec![VERSION, ACCESS];
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.push(2);
+    bytes.extend_from_slice(&255_u64.to_le_bytes());
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Flag { at: 10, found: 2 })
+    );
+}
+
+#[test]
 fn refuses_an_included_pattern_that_starts_with_a_bang() {
     let mut bytes = vec![VERSION, ACCESS];
     bytes.extend_from_slice(&1_u64.to_le_bytes());
     bytes.push(0);
     bytes.extend_from_slice(&2_u64.to_le_bytes());
     bytes.extend_from_slice(b"!a");
-    let error = Error::Include { at: 19 };
+    let error = Error::Pattern {
+        at: 2,
+        error: name::Error::Segment {
+            input: "!a".into(),
+            segment: "!a".into(),
+        },
+    };
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the included pattern at byte 19 starts with `!`"
+        "the patterns at byte 2 do not read: a segment is not valid: \"!a\" in \"!a\""
+    );
+}
+
+#[test]
+fn refuses_an_excluded_pattern_that_starts_with_a_bang() {
+    let bytes = access(&[b"a"], &[b"b", b"!!c"], 1, 0);
+    let error = Error::Pattern {
+        at: 20,
+        error: name::Error::Segment {
+            input: "!!c".into(),
+            segment: "!c".into(),
+        },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the patterns at byte 20 do not read: a segment is not valid: \"!c\" in \"!!c\""
     );
 }
 
@@ -459,10 +494,7 @@ fn refuses_node_settings_with_no_budget() {
     );
     assert_eq!(
         error.to_string(),
-        format!(
-            "the budgets at byte {at}: {}",
-            node_settings::Error::NoBudget
-        )
+        format!("the budgets at byte {at}: the policy sets no budget")
     );
 }
 

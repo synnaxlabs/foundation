@@ -309,6 +309,12 @@ checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 [[package]]
 name = "config"
 version = "0.0.0"
+dependencies = [
+ "document",
+ "proptest",
+ "spec",
+ "types",
+]
 
 [[package]]
 name = "config-hcl"
@@ -719,6 +725,7 @@ version = "0.0.0"
 dependencies = [
  "block",
  "buffer",
+ "clock",
  "codec",
  "control",
  "delivery",
@@ -1000,9 +1007,14 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "divan",
  "env",
+ "getrandom 0.4.3",
+ "libc",
+ "proptest",
  "rustix",
  "tokio",
+ "types",
 ]
 
 [[package]]

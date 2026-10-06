@@ -230,20 +230,33 @@ fn a_power_cut_drops_a_directory_whose_parent_was_never_synced() {
     assert_eq!(opened, Err(Error::NotFound { path }));
 }
 
-/// The sectors of a synced file of 1s after an unsynced write of 2s and a sync that
-/// a fault fails: as a new descriptor reads them, and after a power cut.
+/// Makes a synced file of 1s on `node`, then a write of 2s over both its sectors, a
+/// sync that a fault fails, and a close. Gives the file opened again to write, as a
+/// caller recovers.
+async fn create_torn(node: &node::Node) -> env::files::File {
+    let file = create_synced(node).await;
+    file.write_at(0, &[block(&pool(), &[2; 1_024])])
+        .await
+        .unwrap();
+    node.fail_file(Path::new("a"), Operation::Sync);
+    assert_eq!(file.sync().await, Err(io("a", Operation::Sync, 5)));
+    file.close().await;
+    node.files()
+        .open(Path::new("a"), Mode::Write)
+        .await
+        .unwrap()
+}
+
+/// The sectors of the file of [`create_torn`] as it reads them, and after a sync and
+/// then a power cut.
 fn torn(seed: u64) -> (Vec<u8>, Vec<u8>) {
     let (mut sim, node) = disk(seed);
     let shown = sim
         .run_on(&node, |node, _| async move {
-            let (file, pool) = (create_synced(&node).await, pool());
-            file.write_at(0, &[block(&pool, &[2; 1_024])])
-                .await
-                .unwrap();
-            node.fail_file(Path::new("a"), Operation::Sync);
-            assert_eq!(file.sync().await, Err(io("a", Operation::Sync, 5)));
-            let reopened = node.files().open(Path::new("a"), Mode::Read).await;
-            sectors(&read(&reopened.unwrap(), &pool, 0, 1_024).await)
+            let file = create_torn(&node).await;
+            let shown = sectors(&read(&file, &pool(), 0, 1_024).await);
+            file.sync().await.unwrap();
+            shown
         })
         .unwrap();
     sim.crash(&node, Crash::Power);
@@ -251,14 +264,57 @@ fn torn(seed: u64) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn a_failed_sync_keeps_the_durable_bytes_or_the_write_per_sector() {
-    let outcomes: BTreeSet<(Vec<u8>, Vec<u8>)> = (0..64).map(torn).collect();
-    for (seen, kept) in &outcomes {
-        assert_eq!(seen, kept, "the bytes that a reopen reads are durable");
-    }
-    let seen: BTreeSet<Vec<u8>> = outcomes.into_iter().map(|(seen, _)| seen).collect();
-    let all = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
-    assert_eq!(seen, all);
+fn a_read_after_a_failed_sync_sees_its_lost_writes_until_the_cache_drops_them() {
+    let outcomes: BTreeSet<(u8, u8)> = (0..64)
+        .flat_map(|seed| {
+            let (shown, kept) = torn(seed);
+            shown.into_iter().zip(kept)
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([(1, 1), (2, 1), (2, 2)]));
+}
+
+/// The bytes of the file of [`create_torn`] after a write of one 3 at its start, a
+/// sync, and a power cut.
+fn rewritten(seed: u64) -> Vec<u8> {
+    let (mut sim, node) = disk(seed);
+    sim.run_on(&node, |node, _| async move {
+        let file = create_torn(&node).await;
+        file.write_at(0, &[block(&pool(), &[3])]).await.unwrap();
+        file.sync().await.unwrap();
+    })
+    .unwrap();
+    sim.crash(&node, Crash::Power);
+    sim.run_on(&node, |node, _| async move {
+        let file = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        read(&file, &pool(), 0, 1_024).await
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_sync_after_a_write_on_a_sector_that_a_failed_sync_lost_makes_it_durable() {
+    let kept: BTreeSet<Vec<u8>> = (0..64)
+        .map(|seed| rewritten(seed)[..512].to_vec())
+        .collect();
+    let over = |byte| [[3].as_slice(), &[byte; 511]].concat();
+    assert_eq!(kept, BTreeSet::from([over(1), over(2)]));
+}
+
+#[test]
+fn a_process_crash_keeps_the_writes_that_a_failed_sync_lost() {
+    let outcomes: BTreeSet<(u8, u8)> = (0..64)
+        .flat_map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Process, |node| async move {
+                drop(create_torn(&node).await);
+            });
+            let shown = sectors_of(&mut sim, &node);
+            sim.crash(&node, Crash::Power);
+            shown.into_iter().zip(sectors_of(&mut sim, &node))
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([(1, 1), (2, 1), (2, 2)]));
 }
 
 /// Sleeps until the instant of the crash of [`crash_after`].

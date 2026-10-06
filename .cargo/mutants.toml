@@ -12,8 +12,9 @@ exclude_re = [
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
-  # Stubs that panic until #68 fills them; #68 removes this line.
-  'crates/transport/src/(datagram|session|stream)\.rs:',
+  # Stubs that panic until #68 fills them; #68 removes these lines.
+  'crates/transport/src/(datagram|stream)\.rs:',
+  'crates/transport/src/session\.rs:.*Session::(open|accept|datagrams)',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.
   'crates/transport/src/tls\.rs:.*root_hint_subjects.*Vec::leak',
   # The boundary draw is a 64-bit hash against a multiple of 2^64. Equality needs a
@@ -29,4 +30,10 @@ exclude_re = [
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
+  # A fence changes the order of memory operations around a counter read, and no
+  # result a test can see. Loom does not model a counter read.
+  'crates/os/src/clock\.rs:.*replace (settle|hold) with \(\)',
+  # When the measured time asleep equals the largest, `fetch_max` stores the same
+  # value, so `>=` gives the same result as `>`.
+  'crates/os/src/clock\.rs:.*replace > with >= in combine',
 ]

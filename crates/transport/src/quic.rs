@@ -1,5 +1,6 @@
 //! The QUIC carrier: noq-proto with time, datagrams, and randomness as inputs.
 
+mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
@@ -32,8 +33,14 @@ use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::{Class, Code, Config, Error, Peer};
 
+pub(crate) use self::carrier::{Carrier, Session};
+
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
+
+/// The most responses that wait for [`Endpoint::transmit`]. A peer makes one with
+/// each datagram it sends, so a later one is dropped, as the network may drop it.
+const RESPONSES_MAX: usize = 64;
 
 /// One shard's QUIC endpoint and its connections, with no I/O. The caller gives it
 /// the time and the datagrams that arrive, and takes from it the datagrams to send,
@@ -61,9 +68,10 @@ pub(crate) struct Endpoint {
     ready: VecDeque<connection::Key>,
     events: VecDeque<Event>,
     /// Datagrams that no connection sends, such as a version negotiation or a
-    /// stateless reset. At most one for each datagram of a batch, because the caller
-    /// takes them all with [`Endpoint::transmit`] after each [`Endpoint::receive`].
+    /// stateless reset. At most [`RESPONSES_MAX`].
     responses: VecDeque<(noq_proto::Transmit, Vec<u8>)>,
+    /// Each connection that a peer dials is refused.
+    refusing: bool,
     /// The limit on stateless resets to each address.
     resets: stateless::Limit,
     /// The buffer that each received batch is copied into and split from. noq-proto
@@ -124,6 +132,7 @@ impl Endpoint {
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
+            refusing: false,
             resets: stateless::Limit::new(&config.entropy),
             received: BytesMut::new(),
         }
@@ -237,6 +246,17 @@ impl Endpoint {
                 self.drive(handle, now);
             }
         }
+    }
+
+    /// Refuses each connection that a peer dials from now on. The peer's dial ends
+    /// at once.
+    pub(crate) fn refuse(&mut self) {
+        self.refusing = true;
+    }
+
+    /// `true` when each connection drained, so none sends again.
+    pub(crate) fn drained(&self) -> bool {
+        self.connections.iter().all(Option::is_none)
     }
 
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
@@ -572,6 +592,9 @@ impl Endpoint {
                 self.drive(handle, now);
                 None
             }
+            Some(DatagramEvent::NewConnection(incoming)) if self.refusing => {
+                Some(self.inner.refuse(incoming, &mut reply))
+            }
             Some(DatagramEvent::NewConnection(incoming)) => {
                 match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
@@ -590,7 +613,9 @@ impl Endpoint {
                 admitted.then_some(response)
             }
         };
-        if let Some(response) = response {
+        if let Some(response) = response
+            && self.responses.len() < RESPONSES_MAX
+        {
             self.responses.push_back((response, reply));
         }
     }
@@ -996,6 +1021,26 @@ mod tests {
                 let transmit = endpoint.transmit(Monotonic(0), &mut buffer);
                 let contents = transmit.expect("a version negotiation").contents;
                 assert_eq!(contents.as_ptr(), start);
+            });
+        }
+
+        #[test]
+        fn keeps_at_most_responses_max_responses() {
+            testing::run(1, |shard| {
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
+                let mut endpoint =
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let initial = pair::draft_29();
+                let meta = pair::meta(pair::CLIENT, &initial);
+                for _ in 0..=RESPONSES_MAX {
+                    endpoint.receive(Monotonic(0), &meta, &initial);
+                }
+                let mut buffer = Vec::new();
+                let mut responses = 0;
+                while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {
+                    responses += 1;
+                }
+                assert_eq!(responses, RESPONSES_MAX);
             });
         }
 
