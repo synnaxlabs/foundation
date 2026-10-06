@@ -336,6 +336,28 @@ pub(crate) fn public(private_key: &PrivateKey) -> PublicKey {
         .expect("aws-lc makes no key of small order")
 }
 
+/// A client like an SDK: it pins the server's key and has no certificate.
+#[cfg(test)]
+pub(crate) fn anonymous(
+    provider: CryptoProvider,
+    expected: PublicKey,
+) -> Arc<ClientConfig> {
+    let provider = Arc::new(provider);
+    let algorithms = provider.signature_verification_algorithms;
+    #[expect(clippy::disallowed_methods, reason = "it passes the fixed time")]
+    let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 is available")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Pinned {
+            expected,
+            algorithms,
+        }))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![ALPN.to_vec()];
+    Arc::new(config)
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv6Addr};
@@ -415,24 +437,6 @@ mod tests {
             peer(client.alpn_protocol(), client.peer_certificates())?,
             peer(server.alpn_protocol(), server.peer_certificates())?,
         ))
-    }
-
-    /// A client like an SDK: it pins the server's key and has no certificate.
-    fn anonymous(provider: CryptoProvider, expected: PublicKey) -> Arc<ClientConfig> {
-        let provider = Arc::new(provider);
-        let algorithms = provider.signature_verification_algorithms;
-        #[expect(clippy::disallowed_methods, reason = "it passes the fixed time")]
-        let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .expect("TLS 1.3 is available")
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(Pinned {
-                expected,
-                algorithms,
-            }))
-            .with_no_client_auth();
-        config.alpn_protocols = vec![ALPN.to_vec()];
-        Arc::new(config)
     }
 
     /// The node's certificate and key, as its resolver gives them.

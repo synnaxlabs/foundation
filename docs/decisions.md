@@ -915,17 +915,22 @@ How to read this record:
   id 1 is `message_bytes_max`; both are required. A node ignores an id it does not know,
   so an advisory field needs no new ALPN; a field that the peer must understand needs
   one. The acceptor sends its hello at 0.5-RTT, once it has the whole ClientHello and so
-  the peer's transport parameters, and the dialer at its `Connected`, so the hello adds
-  no round trip. The hello uses one of the peer's `streams_max` one-way streams until
-  QUIC next raises the limit. Until the peer's hello arrives, a node opens and accepts
-  no stream. A sender obeys only the peer's values: each message is at most the peer's
-  `message_bytes_max`, and the send budget is the peer's `window_bytes`. A value over
-  what the node can count counts as the largest it can count. A peer breaks the protocol
-  when its hello ends inside a pair, misses a required id, has an id out of order, is
-  over 256 bytes, has a `message_bytes_max` of 0 or a `window_bytes` below it, or
-  resets. A peer whose QUIC transport parameters cannot take this node's hello at once
-  (no one-way stream, or a stream window under the hello) also breaks it, with the
-  reason `a peer with no room for the hello`. A Foundation node always has room:
+  the peer's transport parameters, or at its `Connected` when a HelloRetryRequest holds
+  them back. The dialer sends at its `Connected`. So the hello adds no round trip. The
+  hello has its own one-way stream: a node lets the peer open `streams_max` + 1 one-way
+  streams, and lowers the limit to `streams_max` when it accepts the peer's hello
+  stream. Until the peer's hello arrives, a node opens and accepts no stream; the caller
+  bounds that wait (#563). A sender obeys only the peer's values: each message is at
+  most the peer's `message_bytes_max`, and the send budget is the peer's
+  `window_bytes`. A value over what the node can count counts as the largest it can
+  count. A peer breaks the protocol when its hello ends inside a pair, misses a required
+  id, has an id out of order, is over 256 bytes, has a `message_bytes_max` of 0 or a
+  `window_bytes` below it, or resets. A peer whose QUIC transport parameters cannot take
+  this node's whole hello at once (no one-way stream, or a stream or connection window
+  under the hello) also breaks it, with the reason `a peer with no room for the hello`.
+  A dial that breaks so gets `Error::Broken` with no `Connected` before it, and an
+  accept gives the caller no event. Before the handshake is confirmed, QUIC gives the
+  peer no reason, only APPLICATION_ERROR. A Foundation node always has room:
   `streams_max` is at least 1, and `window_bytes` is at least `message_bytes_max`, which
   is at least 1472. A compile-time assertion holds 1472 at or above the hello limit, so
   only a foreign peer gets this. Lost: send the hello later when credit comes, because

@@ -14,7 +14,7 @@ use types::node::PublicKey;
 
 use super::Event;
 use super::datagram::Received;
-use super::stream::{Fault, Streams};
+use super::stream::Streams;
 use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
@@ -26,6 +26,10 @@ pub(crate) struct Key {
     /// How many connections the endpoint made before this one.
     pub(super) serial: u64,
 }
+
+/// A fault of the peer's that closes the connection, with the reason.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Fault(pub(super) String);
 
 /// One noq-proto connection, and what the caller knows of it.
 pub(super) struct Connection {
@@ -131,15 +135,13 @@ impl Connection {
                     matches!(self.state, State::Dialing { .. } | State::Accepting),
                     "invariant: noq-proto connects a connection once, before it ends"
                 );
-                let dialed = matches!(self.state, State::Dialing { .. });
+                if let Err(Fault(reason)) = self.streams.greet(&mut self.inner) {
+                    events.extend(self.fault(now, reason));
+                    return;
+                }
                 self.state = State::Open;
                 let peer = self.peer();
                 events.push_back(Event::Connected { key, peer });
-                if dialed
-                    && let Err(Fault(reason)) = self.streams.greet(&mut self.inner)
-                {
-                    events.extend(self.fault(now, reason));
-                }
             }
             noq_proto::Event::ConnectionLost { reason } => {
                 let expected = match self.end() {
@@ -160,9 +162,8 @@ impl Connection {
                     events.extend(self.fault(now, reason));
                 }
             }
-            noq_proto::Event::DatagramReceived => {
-                // noq-proto gives it before stream events, and none after it closes,
-                // so it never follows a fault or close of ours.
+            // noq-proto gives the datagrams it queued before a fault of ours.
+            noq_proto::Event::DatagramReceived if self.live() => {
                 assert!(
                     self.connected(),
                     "invariant: noq-proto gives datagrams only on an open connection"
@@ -170,8 +171,8 @@ impl Connection {
                 self.datagrams.pull(&mut self.inner, pool, key, events);
             }
             // An acceptor has the whole ClientHello here, so it knows the peer's
-            // transport parameters and can send at 0.5-RTT. A dialer knows them only
-            // at `Connected`.
+            // transport parameters and can send at 0.5-RTT, unless a HelloRetryRequest
+            // holds them back until `Connected`.
             noq_proto::Event::HandshakeDataReady
                 if matches!(self.state, State::Accepting) =>
             {
@@ -182,6 +183,7 @@ impl Connection {
             noq_proto::Event::HandshakeDataReady
             | noq_proto::Event::HandshakeConfirmed
             | noq_proto::Event::Stream(_)
+            | noq_proto::Event::DatagramReceived
             | noq_proto::Event::DatagramsUnblocked
             | noq_proto::Event::Path(_)
             | noq_proto::Event::NatTraversal(_) => {}
@@ -204,18 +206,16 @@ impl Connection {
     ///
     /// # Panics
     ///
-    /// When the connection is a dial still in its handshake, or ended.
+    /// When the connection ended.
     pub(super) fn fault(&mut self, now: Instant, reason: String) -> Option<Event> {
-        let open = match self.end() {
-            State::Open => true,
+        let known = match self.end() {
+            State::Dialing { .. } | State::Open => true,
             State::Accepting => false,
-            State::Dialing { .. } | State::Ended => {
-                panic!("invariant: a fault is found on an accept or an open connection")
-            }
+            State::Ended => panic!("invariant: a fault is found on a live connection"),
         };
         let code = VarInt::from_u64(1 << 32).expect("invariant: 2^32 is a varint");
         self.inner.close(now, code, Bytes::from(reason.clone()));
-        open.then_some(Event::Closed {
+        known.then_some(Event::Closed {
             key: self.key,
             error: Error::Broken { reason },
         })

@@ -83,7 +83,8 @@ pub(crate) enum Event {
     /// [`Endpoint::accept`] has a stream for `key`.
     Incoming { key: connection::Key },
     /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
-    /// comes first when the peer's hello arrives.
+    /// comes first when the peer's hello arrives. A peer may never send its hello:
+    /// the caller bounds that wait.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -280,7 +281,7 @@ impl Endpoint {
     /// connection ended.
     pub(crate) fn accept(&mut self, key: connection::Key) -> Option<Incoming> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        connection.streams.accept(key, self.message_bytes_max)
+        connection.streams.accept(key)
     }
 
     /// Puts `message` on the stream after the messages before it. `Ready` when the
@@ -303,6 +304,7 @@ impl Endpoint {
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
+        sender.check();
         sender.check_size(&message)?;
         sender.load(message);
         self.flush(now, sender)

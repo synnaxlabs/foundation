@@ -1,12 +1,10 @@
 //! The hello: the limits a node sends on its first one-way stream, which its peer
 //! obeys. It is (id, value) pairs, both QUIC varints, ids strictly increasing.
 
-use std::mem;
-
 use noq_proto::coding::{Decodable, Encodable};
-use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt, WriteError};
+use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
-use super::stream::Fault;
+use super::connection::Fault;
 
 /// The most bytes a hello takes.
 pub(super) const BYTES_MAX: usize = 256;
@@ -90,62 +88,46 @@ impl Hello {
     }
 }
 
-/// This side's hello, and the peer's as it arrives.
+/// The peer's hello, as it arrives.
 #[derive(Debug)]
-pub(super) struct Exchange {
-    own: Hello,
-    /// The peer's first one-way stream, once it opened.
-    stream: Option<StreamId>,
-    /// The bytes of the peer's hello that arrived.
-    bytes: Vec<u8>,
+pub(super) enum Peer {
+    Waiting {
+        /// The peer's first one-way stream, once it opened.
+        stream: Option<StreamId>,
+        /// The bytes of the hello that arrived.
+        bytes: Vec<u8>,
+    },
+    Arrived(Hello),
 }
 
-impl Exchange {
-    /// An exchange that sends `own`.
-    pub(super) fn new(own: Hello) -> Self {
-        Self {
-            own,
+impl Peer {
+    /// A hello that has not started to arrive.
+    pub(super) fn new() -> Self {
+        Self::Waiting {
             stream: None,
             bytes: Vec::new(),
         }
     }
 
-    /// Opens this side's first one-way stream of `inner`, puts the hello on it ahead
-    /// of every other stream, and finishes it. Call it once the peer's transport
-    /// parameters are known.
-    ///
-    /// # Errors
-    ///
-    /// [`Fault`] when the peer allows no one-way stream, or its stream window cannot
-    /// take the whole hello now.
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "a stream this side just opened is open"
-    )]
-    pub(super) fn send(&self, inner: &mut noq_proto::Connection) -> Result<(), Fault> {
-        let room = || Fault("a peer with no room for the hello".to_owned());
-        let id = inner.streams().open(Dir::Uni).ok_or_else(room)?;
-        let mut send = inner.send_stream(id);
-        send.set_priority(i32::MAX).expect(OPEN);
-        let bytes = self.own.encode();
-        match send.write(&bytes) {
-            Ok(written) if written == bytes.len() => {}
-            Ok(_) | Err(WriteError::Blocked) => return Err(room()),
-            Err(error @ (WriteError::Stopped(_) | WriteError::ClosedStream)) => {
-                panic!("{OPEN}: {error}")
-            }
+    /// The hello, once it arrived.
+    pub(super) fn hello(&self) -> Option<Hello> {
+        match *self {
+            Self::Waiting { .. } => None,
+            Self::Arrived(hello) => Some(hello),
         }
-        send.finish().expect(OPEN);
-        Ok(())
     }
 
-    /// Takes `event` of `inner` toward the peer's hello: accepts the peer's first
-    /// one-way stream and reads it. Gives the hello once its stream ended. Ignores
-    /// every other event.
+    /// Takes `event` of `inner` toward the hello: accepts the peer's first one-way
+    /// stream, lowers the peer's one-way stream limit by the hello's slot, and reads
+    /// the stream. Gives the hello once its stream ended. Ignores every other event.
     ///
     /// # Errors
     ///
     /// [`Fault`] when the hello is over [`BYTES_MAX`], does not decode, or resets.
+    ///
+    /// # Panics
+    ///
+    /// After the hello arrived.
     #[expect(
         clippy::unwrap_in_result,
         reason = "an `Opened` event has a stream to accept, and this side reads the \
@@ -156,10 +138,20 @@ impl Exchange {
         inner: &mut noq_proto::Connection,
         event: &StreamEvent,
     ) -> Result<Option<Hello>, Fault> {
-        let id = match (self.stream, event) {
+        let Self::Waiting { stream, bytes } = self else {
+            panic!("invariant: the hello is read until it arrives");
+        };
+        let id = match (*stream, event) {
             (None, &StreamEvent::Opened { dir: Dir::Uni }) => {
                 let id = inner.streams().accept(Dir::Uni);
-                *self.stream.insert(id.expect("invariant: a stream opened"))
+                let id = *stream.insert(id.expect("invariant: a stream opened"));
+                // The limit counts the hello's slot until the hello frees it, and must
+                // not give it back.
+                let limit = inner.max_concurrent_streams(Dir::Uni) - 1;
+                let limit = VarInt::from_u64(limit);
+                let limit = limit.expect("invariant: a smaller limit is a varint");
+                inner.set_max_concurrent_streams(Dir::Uni, limit);
+                id
             }
             (Some(id), &StreamEvent::Readable { id: other }) if other == id => id,
             _ => return Ok(None),
@@ -168,9 +160,9 @@ impl Exchange {
         let mut chunks = recv
             .read(true)
             .expect("invariant: the hello stream is open");
-        while self.bytes.len() <= BYTES_MAX {
-            match chunks.next(BYTES_MAX + 1 - self.bytes.len()) {
-                Ok(Some(chunk)) => self.bytes.extend_from_slice(&chunk.bytes),
+        while bytes.len() <= BYTES_MAX {
+            match chunks.next(BYTES_MAX + 1 - bytes.len()) {
+                Ok(Some(chunk)) => bytes.extend_from_slice(&chunk.bytes),
                 Ok(None) => break,
                 Err(ReadError::Blocked) => return Ok(None),
                 Err(ReadError::Reset(_)) => {
@@ -178,11 +170,11 @@ impl Exchange {
                 }
             }
         }
-        Hello::decode(&mem::take(&mut self.bytes)).map(Some)
+        let hello = Hello::decode(bytes)?;
+        *self = Self::Arrived(hello);
+        Ok(Some(hello))
     }
 }
-
-const OPEN: &str = "invariant: a stream this side just opened is open";
 
 #[cfg(test)]
 mod tests {

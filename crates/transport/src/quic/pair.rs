@@ -4,16 +4,21 @@ use std::collections::VecDeque;
 use std::mem;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use env::net::udp::Meta;
-use noq_proto::{ConnectionHandle, DatagramEvent, FourTuple, TransportConfig};
+use noq_proto::{
+    ClientConfig, ConnectionHandle, DatagramEvent, FourTuple, SendDatagramError,
+    TransportConfig,
+};
 use types::node::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
 use super::settings::{MTU_MIN, Settings};
 use super::{Endpoint, Event, SERVER_NAME, cid, connection, find, queue};
+use crate::Config;
 use crate::testing::Shard;
 
 /// The client's address. The server's is [`SERVER`].
@@ -119,9 +124,21 @@ pub(super) struct Side {
 impl Pair {
     /// Two endpoints with `idle`, and no connection.
     pub(super) fn new(shard: &Shard, idle: Span, delay: Duration) -> Self {
-        let config = shard.config(CLIENT_KEY, idle);
+        Self::with(shard, idle, delay, |_| {})
+    }
+
+    /// As [`Pair::new`], with `change` made to the config of each endpoint.
+    pub(super) fn with(
+        shard: &Shard,
+        idle: Span,
+        delay: Duration,
+        change: impl Fn(&mut Config),
+    ) -> Self {
+        let mut config = shard.config(CLIENT_KEY, idle);
+        change(&mut config);
         let client = Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
-        let config = shard.config(SERVER_KEY, idle);
+        let mut config = shard.config(SERVER_KEY, idle);
+        change(&mut config);
         let server = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
         Self {
             now: Duration::ZERO,
@@ -295,6 +312,8 @@ pub(super) struct Foreign {
     responses: Vec<(SocketAddr, Vec<u8>)>,
     /// Each event of its connection, in order.
     pub(super) events: Vec<noq_proto::Event>,
+    /// A datagram it sends as soon as its connection can.
+    pub(super) datagram: Option<Bytes>,
 }
 
 impl Foreign {
@@ -312,13 +331,29 @@ impl Foreign {
             connection: None,
             responses: Vec::new(),
             events: Vec::new(),
+            datagram: None,
         }
     }
 
     /// Dials `remote` at `now`, which must prove `peer`.
     pub(super) fn dial(&mut self, now: Monotonic, peer: PublicKey, remote: SocketAddr) {
-        let now = self.epoch + Duration::from_nanos(now.0);
         let dial = self.settings.client(peer);
+        self.connect(now, dial, remote);
+    }
+
+    /// Dials `remote` at `now` with `tls`.
+    pub(super) fn dial_with(
+        &mut self,
+        now: Monotonic,
+        tls: Arc<rustls::ClientConfig>,
+        remote: SocketAddr,
+    ) {
+        let dial = self.settings.dial(tls);
+        self.connect(now, dial, remote);
+    }
+
+    fn connect(&mut self, now: Monotonic, dial: ClientConfig, remote: SocketAddr) {
+        let now = self.epoch + Duration::from_nanos(now.0);
         let connection = self.endpoint.connect(now, dial, remote, SERVER_NAME);
         self.connection = Some(connection.expect("a dial"));
     }
@@ -407,6 +442,16 @@ impl Foreign {
         }
         while let Some(event) = connection.poll() {
             self.events.push(event);
+        }
+        if let Some(datagram) = self.datagram.take() {
+            match connection.datagrams().send(datagram.clone(), false) {
+                Ok(()) => {}
+                // Until it has the peer's transport parameters.
+                Err(SendDatagramError::UnsupportedByPeer) => {
+                    self.datagram = Some(datagram);
+                }
+                Err(error) => panic!("{error}"),
+            }
         }
     }
 }

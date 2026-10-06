@@ -100,7 +100,16 @@ impl Settings {
 
     /// The settings for a dial that expects `expected`.
     pub(super) fn client(&self, expected: PublicKey) -> ClientConfig {
-        let crypto = QuicClientConfig::try_from(self.tls.client(expected))
+        self.dial(self.tls.client(expected))
+    }
+
+    /// The settings for a dial with `tls`.
+    ///
+    /// # Panics
+    ///
+    /// When `tls` has no AES-128-GCM suite.
+    pub(super) fn dial(&self, tls: Arc<rustls::ClientConfig>) -> ClientConfig {
+        let crypto = QuicClientConfig::try_from(tls)
             .expect("invariant: the TLS suites include AES-128-GCM");
         let entropy = self.entropy.clone();
         #[expect(
@@ -172,6 +181,9 @@ fn transport(config: &Config) -> TransportConfig {
     let idle_ms = idle_ms(config.idle);
     let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
     let streams = VarInt::from_u32(config.streams_max.get());
+    // The hello takes one one-way slot until it arrives.
+    let uni = u64::from(config.streams_max.get()) + 1;
+    let uni = VarInt::from_u64(uni).expect("invariant: a u32 and one fit a varint");
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(PAYLOAD_IPV6)
         .interval(Duration::from_secs(600))
@@ -180,7 +192,7 @@ fn transport(config: &Config) -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(streams)
-        .max_concurrent_uni_streams(streams)
+        .max_concurrent_uni_streams(uni)
         .stream_receive_window(window)
         .receive_window(window)
         .send_window(window.into_inner())
@@ -413,9 +425,7 @@ mod tests {
                         .map_while(|_| streams.open(dir))
                         .count();
                     let max = usize::try_from(testing::STREAMS_MAX).expect("fits");
-                    // The hello took the first one-way stream.
-                    let hello = usize::from(dir == Dir::Uni);
-                    assert_eq!(opened + hello, max, "{dir:?}");
+                    assert_eq!(opened, max, "{dir:?}");
                 }
             });
         }

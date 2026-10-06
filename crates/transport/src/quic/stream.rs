@@ -13,8 +13,9 @@ use noq_proto::{
     WriteError,
 };
 
-use super::hello::{Exchange, Hello};
-use super::{Body, Event, connection};
+use super::connection::{self, Fault};
+use super::hello::{self, Hello};
+use super::{Body, Event};
 use crate::message::{Prefix, Reader};
 use crate::{Class, Code, Error};
 
@@ -78,9 +79,12 @@ pub(crate) struct Incoming {
 /// What a connection keeps of its streams between calls.
 #[derive(Debug)]
 pub(super) struct Streams {
-    exchange: Exchange,
-    /// The peer's hello, once it arrived. Until then no stream opens or is accepted.
-    peer: Option<Hello>,
+    /// This side's limits, which its hello carries.
+    own: Hello,
+    /// This side sent its hello.
+    greeted: bool,
+    /// Until the peer's hello arrives, no stream opens or is accepted.
+    peer: hello::Peer,
     /// Streams the peer opened whose class byte has not arrived.
     unclassified: Vec<StreamId>,
     /// Streams the peer opened that the caller has not accepted, by class byte,
@@ -140,10 +144,6 @@ enum State {
     Held(usize),
 }
 
-/// A fault of the peer's that closes the connection, with the reason.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct Fault(pub(super) String);
-
 impl Sender {
     /// A sender for `key` that starts the stream with `class`'s byte, to a peer whose
     /// largest message is `bytes_max`.
@@ -177,13 +177,9 @@ impl Sender {
         self.key
     }
 
-    /// Takes `message` as the message in hand, after its header.
-    ///
-    /// # Panics
-    ///
-    /// When the sender holds part of a message, or after `end`.
+    /// Takes `message` as the message in hand, after its header. The sender holds no
+    /// part of a message and is not finished.
     pub(super) fn load(&mut self, message: Block) {
-        self.check();
         let prefix = Prefix::new(message.len());
         let start = usize::from(self.started);
         self.started = true;
@@ -215,7 +211,10 @@ impl Sender {
         Ok(())
     }
 
-    fn check(&self) {
+    /// # Panics
+    ///
+    /// When the sender holds part of a message, or after `end`.
+    pub(super) fn check(&self) {
         assert!(!self.holds(), "a sender holds part of a message");
         self.check_unfinished();
     }
@@ -374,13 +373,13 @@ impl Streams {
     /// The streams of a connection that refuses a message over `bytes_max`, with a
     /// window of `window_bytes`.
     pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
-        let own = Hello {
-            window_bytes,
-            message_bytes_max: bytes_max,
-        };
         Self {
-            exchange: Exchange::new(own),
-            peer: None,
+            own: Hello {
+                window_bytes,
+                message_bytes_max: bytes_max,
+            },
+            greeted: false,
+            peer: hello::Peer::new(),
             unclassified: Vec::new(),
             incoming: Default::default(),
             senders: Vec::new(),
@@ -389,14 +388,46 @@ impl Streams {
         }
     }
 
-    /// Sends this side's hello on `inner`. Call it once, when the peer's transport
-    /// parameters are known.
+    /// Sends this side's hello on `inner`, on this side's first one-way stream, ahead
+    /// of every other stream, and finishes it. Does nothing after it sent it, or while
+    /// the handshake holds back the peer's transport parameters.
     ///
     /// # Errors
     ///
-    /// [`Fault`] when the peer has no room for the hello.
-    pub(super) fn greet(&self, inner: &mut noq_proto::Connection) -> Result<(), Fault> {
-        self.exchange.send(inner)
+    /// [`Fault`] when the peer has no room for the whole hello now.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a stream this side just opened is open"
+    )]
+    pub(super) fn greet(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+    ) -> Result<(), Fault> {
+        if self.greeted {
+            return Ok(());
+        }
+        let room = || Fault("a peer with no room for the hello".to_owned());
+        let Some(id) = inner.streams().open(Dir::Uni) else {
+            return if inner.is_handshaking() {
+                Ok(())
+            } else {
+                Err(room())
+            };
+        };
+        self.greeted = true;
+        let mut send = inner.send_stream(id);
+        send.set_priority(i32::MAX).expect(OPENED);
+        let mut hello = [Bytes::from(self.own.encode())];
+        let mut unsent = &mut hello[..];
+        match send.write_chunks(&mut unsent) {
+            Ok(_) if unsent.is_empty() => {}
+            Ok(_) | Err(WriteError::Blocked) => return Err(room()),
+            Err(error @ (WriteError::Stopped(_) | WriteError::ClosedStream)) => {
+                panic!("{OPENED}: {error}")
+            }
+        }
+        send.finish().expect(OPENED);
+        Ok(())
     }
 
     /// Queues in `events` what `event` of `inner`, the connection of `key`, means to
@@ -414,13 +445,13 @@ impl Streams {
         event: &StreamEvent,
         events: &mut VecDeque<Event>,
     ) -> Result<(), Fault> {
-        if self.peer.is_none() {
-            if let Some(peer) = self.exchange.read(inner, event)? {
+        if self.peer.hello().is_none() {
+            if let Some(peer) = self.peer.read(inner, event)? {
                 self.arrive(inner, key, peer, events)?;
             }
             return Ok(());
         }
-        let event = self.next(inner, key, event)?;
+        let event = self.translate(inner, key, event)?;
         if let Some(event) = event
             && events.back() != Some(&event)
         {
@@ -438,7 +469,6 @@ impl Streams {
         peer: Hello,
         events: &mut VecDeque<Event>,
     ) -> Result<(), Fault> {
-        self.peer = Some(peer);
         self.sending = Budget::new(peer.window_bytes);
         events.push_back(Event::Available { key });
         let bi = self.take(inner, Dir::Bi)?;
@@ -450,7 +480,7 @@ impl Streams {
 
     /// What `event` of `inner`, the connection of `key`, means to the caller after
     /// the peer's hello.
-    fn next(
+    fn translate(
         &mut self,
         inner: &mut noq_proto::Connection,
         key: connection::Key,
@@ -476,12 +506,7 @@ impl Streams {
                 Ok(Some(Event::Writable { stream: stream(id) }))
             }
             StreamEvent::Stopped { id, error_code } => {
-                let Some(code) = code(error_code) else {
-                    return Err(Fault(format!(
-                        "a stop code over 32 bits: {error_code}"
-                    )));
-                };
-                reset(inner, id, code);
+                let code = reset_stopped(inner, id, error_code)?;
                 let sender = self.senders.iter_mut().find(|(other, _)| *other == id);
                 Ok(sender.map(|(_, stopped)| {
                     *stopped = Some(code);
@@ -502,7 +527,7 @@ impl Streams {
         dir: Dir,
         class: Class,
     ) -> Option<Sender> {
-        let peer = self.peer?;
+        let peer = self.peer.hello()?;
         let id = inner.streams().open(dir)?;
         let prioritized = inner.send_stream(id).set_priority(priority(class));
         prioritized.expect("invariant: a stream that opens has a send half");
@@ -516,23 +541,18 @@ impl Streams {
         clippy::unwrap_in_result,
         reason = "a stream is queued only under a class byte"
     )]
-    pub(super) fn accept(
-        &mut self,
-        connection: connection::Key,
-        bytes_max: usize,
-    ) -> Option<Incoming> {
+    pub(super) fn accept(&mut self, connection: connection::Key) -> Option<Incoming> {
         let (byte, id) = (0u8..)
             .zip(&mut self.incoming)
             .find_map(|(byte, queue)| Some((byte, queue.pop_front()?)))?;
         let key = Key { connection, id };
         let class = class(byte).expect("invariant: a queued stream has a class byte");
-        let peer = self
-            .peer
-            .expect("invariant: streams queue after the peer's hello");
+        let peer = self.peer.hello();
+        let peer = peer.expect("invariant: streams queue after the peer's hello");
         let reply = || Sender::reply(key, class, peer.message_bytes_max);
         Some(Incoming {
             class,
-            receiver: Receiver::new(key, class, bytes_max),
+            receiver: Receiver::new(key, class, self.own.message_bytes_max),
             sender: (id.dir() == Dir::Bi).then(reply),
         })
     }
@@ -775,6 +795,10 @@ impl Streams {
 
     /// Accepts each new stream of `inner` in `dir` and reads its class byte. Returns
     /// whether one is now queued for [`Streams::accept`].
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a two-way stream noq-proto just gave has a send half"
+    )]
     fn take(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -783,7 +807,11 @@ impl Streams {
         let mut queued = false;
         while let Some(id) = inner.streams().accept(dir) {
             if dir == Dir::Bi {
-                self.senders.push((id, None));
+                // A stop before the peer's hello gave this side no event.
+                let stopped = inner.send_stream(id).stopped();
+                let stopped = stopped.expect("invariant: a new stream has a send half");
+                let code = stopped.map(|code| reset_stopped(inner, id, code));
+                self.senders.push((id, code.transpose()?));
             }
             queued |= self.classify(inner, id)?;
         }
@@ -854,6 +882,7 @@ impl Streams {
 const STOPPED: &str = "invariant: a stream resets at the peer's stop";
 const OPEN: &str = "invariant: only a stop resets a sender's stream";
 const RECEIVING: &str = "invariant: a receiver's stream is open until it ends";
+const OPENED: &str = "invariant: a stream this side just opened is open";
 
 /// The byte that starts a stream of `class` on the wire. The byte order is the order
 /// in which [`Streams::accept`] gives streams.
@@ -899,6 +928,24 @@ fn reset_error(error: VarInt) -> Error {
     }
 }
 
+/// Resets stream `id` of `inner`, which the peer stopped with `code`, with that code,
+/// and gives it.
+///
+/// # Errors
+///
+/// [`Fault`] when `code` is over 32 bits.
+fn reset_stopped(
+    inner: &mut noq_proto::Connection,
+    id: StreamId,
+    code: VarInt,
+) -> Result<Code, Fault> {
+    let Some(code) = self::code(code) else {
+        return Err(Fault(format!("a stop code over 32 bits: {code}")));
+    };
+    reset(inner, id, code);
+    Ok(code)
+}
+
 /// Resets stream `id` of `inner` with `code`. Does nothing when this side reset it
 /// before, or the peer has all of it.
 fn reset(inner: &mut noq_proto::Connection, id: StreamId, code: Code) {
@@ -932,9 +979,6 @@ mod tests {
     const STEP: Duration = Duration::from_millis(1);
     /// The largest message in [`Shard::config`].
     const MESSAGE_MAX: usize = 1 << 16;
-    /// The one-way streams the client may open after its hello. noq-proto gives the
-    /// hello's slot back only with two more.
-    const UNI_MAX: u32 = testing::STREAMS_MAX - 1;
 
     /// A pair whose client dialed the server and connected.
     fn connected(shard: &Shard) -> Pair {
@@ -1454,10 +1498,10 @@ mod tests {
     fn prefixes_past_the_budget_wait_and_take_no_more_of_the_pool() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            prefixes(&mut pair, UNI_MAX);
+            prefixes(&mut pair, testing::STREAMS_MAX);
             let before = shard.committed();
             let receivers = wait(&mut pair);
-            assert_eq!(receivers.len(), 15);
+            assert_eq!(receivers.len(), 16);
             let taken = shard.committed() - before;
             assert_eq!(taken, 3 * block::footprint(MESSAGE_MAX));
         });
@@ -1504,7 +1548,7 @@ mod tests {
     fn streams_that_wait_for_budget_let_the_streams_with_a_block_finish() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            let mut senders: Vec<Sender> = (0..UNI_MAX)
+            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
                 .map(|_| open_sender(&mut pair, Class::Complete))
                 .collect();
             let now = pair.now();
@@ -2282,7 +2326,7 @@ mod tests {
     fn past_the_limit_open_none_until_available() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let mut senders: Vec<Sender> = (0..UNI_MAX)
+            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
                 .map(|_| open_sender(&mut pair, Class::Command))
                 .collect();
             let (now, key) = (pair.now(), key(&pair.client));
@@ -2345,14 +2389,10 @@ mod tests {
         });
     }
 
-    /// Opens each raw stream in `dir` that the client may open, and ends each before
-    /// its class byte: with a reset of `code`, or else with a finish.
+    /// Opens [`testing::STREAMS_MAX`] raw streams in `dir` on the client, and ends
+    /// each before its class byte: with a reset of `code`, or else with a finish.
     fn end_before_the_class_byte(pair: &mut Pair, dir: Dir, code: Option<VarInt>) {
-        let count = match dir {
-            Dir::Bi => testing::STREAMS_MAX,
-            Dir::Uni => UNI_MAX,
-        };
-        for _ in 0..count {
+        for _ in 0..testing::STREAMS_MAX {
             let id = raw(pair.client.connection(), dir, &[], code.is_none());
             if let Some(code) = code {
                 let reset = pair.client.connection().send_stream(id).reset(code);
@@ -2521,7 +2561,7 @@ mod tests {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let now = pair.now();
-            let _senders: Vec<Sender> = (0..UNI_MAX)
+            let _senders: Vec<Sender> = (0..testing::STREAMS_MAX)
                 .map(|_| {
                     let mut sender = open_sender(&mut pair, Class::Complete);
                     write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
@@ -2654,6 +2694,20 @@ mod tests {
                     .endpoint
                     .write(now, &mut sender, shard.block(b"a")),
             );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "a sender is used after finish")]
+    fn a_write_after_finish_panics_before_it_checks_the_size() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            let endpoint = &mut pair.client.endpoint;
+            endpoint.finish(now, &mut sender).expect("finished");
+            let over = shard.block(&vec![1; MESSAGE_MAX + 1]);
+            drop(endpoint.write(now, &mut sender, over));
         });
     }
 
@@ -3342,7 +3396,12 @@ mod tests {
     }
 
     mod hello {
+        use std::num::NonZeroU32;
+        use std::sync::Arc;
+
         use noq_proto::TransportConfig;
+        use rustls::crypto::CryptoProvider;
+        use rustls::crypto::aws_lc_rs::{default_provider, kx_group};
 
         use super::*;
         use crate::quic::pair::Foreign;
@@ -3367,13 +3426,10 @@ mod tests {
             pair
         }
 
-        /// A pair whose client dialed a foreign peer with `change` made, after a run.
-        fn dial_foreign(
-            shard: &Shard,
-            change: impl FnOnce(&mut TransportConfig),
-        ) -> Pair {
+        /// A pair whose client dialed `foreign`, after a run.
+        fn dial_foreign(shard: &Shard, foreign: Foreign) -> Pair {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.foreign = Some(Foreign::new(shard, change));
+            pair.foreign = Some(foreign);
             let (now, peer) = (pair.now(), tls::public(&pair::FOREIGN_KEY));
             let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
             pair.client.key = Some(key);
@@ -3458,7 +3514,7 @@ mod tests {
                 assert_eq!(OWN.encode(), own);
                 let mut pair = foreign_dial(shard, |_| {});
                 assert_eq!(read(&mut pair), own);
-                let mut pair = dial_foreign(shard, |_| {});
+                let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
                 assert_eq!(read(&mut pair), own);
             });
         }
@@ -3466,7 +3522,7 @@ mod tests {
         #[test]
         fn hold_back_each_stream_until_the_peer_hello() {
             testing::run(1, |shard| {
-                let mut pair = dial_foreign(shard, |_| {});
+                let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
                 let (now, key) = (pair.now(), key(&pair.client));
                 assert!(matches!(
                     events(&pair.client)[..],
@@ -3574,6 +3630,82 @@ mod tests {
         }
 
         #[test]
+        fn keep_a_stop_that_comes_before_them() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let connection = foreign(&mut pair);
+                let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
+                let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                pair.run(RUN);
+                assert!(matches!(
+                    events(&pair.server)[..],
+                    [Event::Connected { .. }]
+                ));
+                let mut send = foreign(&mut pair).send_stream(hello);
+                let own = OWN.encode();
+                assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                let incoming = accept(&mut pair.server);
+                let mut reply = incoming.sender.expect("a two-way stream");
+                let (now, message) = (pair.now(), shard.block(b"b"));
+                let written = pair.server.endpoint.write(now, &mut reply, message);
+                assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+            });
+        }
+
+        #[test]
+        fn leave_the_peer_streams_max_one_way_streams() {
+            testing::run(1, |shard| {
+                let one = |config: &mut Config| config.streams_max = NonZeroU32::MIN;
+                let mut pair = Pair::with(shard, Span::SECOND, DELAY, one);
+                pair.dial(tls::public(&pair::SERVER_KEY));
+                for _ in 0..100 {
+                    if available(&pair.client) {
+                        break;
+                    }
+                    pair.run(STEP);
+                }
+                let (now, key) = (pair.now(), key(&pair.client));
+                let opened = pair.client.endpoint.open_sender(now, key, Class::Command);
+                assert!(opened.is_some());
+                pair.run(RUN);
+                let now = pair.now();
+                let opened = pair.client.endpoint.open_sender(now, key, Class::Command);
+                assert!(opened.is_none(), "{opened:?}");
+            });
+        }
+
+        /// A client whose first key share is `MLKEM768` alone. A node lacks that
+        /// group, so it asks for `X25519` in a `HelloRetryRequest`.
+        fn retrying() -> Arc<rustls::ClientConfig> {
+            let provider = CryptoProvider {
+                kx_groups: vec![kx_group::MLKEM768, kx_group::X25519],
+                ..default_provider()
+            };
+            tls::anonymous(provider, tls::public(&pair::SERVER_KEY))
+        }
+
+        #[test]
+        fn leave_after_a_hello_retry_request() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let mut foreign = Foreign::new(shard, |_| {});
+                foreign.dial_with(pair.now(), retrying(), pair::SERVER);
+                pair.foreign = Some(foreign);
+                pair.run(RUN);
+                assert!(
+                    matches!(events(&pair.server)[..], [Event::Connected { .. }]),
+                    "{:?}",
+                    pair.server.events
+                );
+                assert_eq!(read(&mut pair), OWN.encode());
+            });
+        }
+
+        #[test]
         fn arrive_only_at_the_end_of_their_stream() {
             testing::run(1, |shard| {
                 let mut pair = foreign_dial(shard, |_| {});
@@ -3647,7 +3779,7 @@ mod tests {
         fn with_no_room_at_the_peer_break_a_dial() {
             testing::run(1, |shard| {
                 for change in hostile() {
-                    let pair = dial_foreign(shard, change);
+                    let pair = dial_foreign(shard, Foreign::new(shard, change));
                     let reason = "a peer with no room for the hello";
                     let closed = Event::Closed {
                         key: key(&pair.client),
@@ -3655,14 +3787,7 @@ mod tests {
                             reason: reason.into(),
                         },
                     };
-                    assert!(
-                        matches!(
-                            &events(&pair.client)[..],
-                            [Event::Connected { .. }, last] if *last == &closed
-                        ),
-                        "{:?}",
-                        pair.client.events
-                    );
+                    assert_eq!(events(&pair.client), [&closed]);
                     assert_eq!(lost(&pair), HANDSHAKE);
                 }
             });
@@ -3670,12 +3795,34 @@ mod tests {
 
         #[test]
         fn with_no_room_at_the_peer_refuse_an_accept() {
-            testing::run(1, |shard| {
-                for change in hostile() {
+            // With no one-way stream, the acceptor waits for `Connected` in case a
+            // HelloRetryRequest held back the limit, so its close has a reason.
+            let closed = "closed by peer: a peer with no room for the hello (code \
+                          4294967296)";
+            testing::run(1, move |shard| {
+                for (change, seen) in hostile().into_iter().zip([closed, HANDSHAKE]) {
                     let pair = foreign_dial(shard, change);
                     assert!(pair.server.events.is_empty(), "{:?}", pair.server.events);
-                    assert_eq!(lost(&pair), HANDSHAKE);
+                    assert_eq!(lost(&pair), seen);
                 }
+            });
+        }
+
+        #[test]
+        fn with_no_room_at_the_peer_drop_the_datagrams_of_a_dial() {
+            testing::run(1, |shard| {
+                let mut foreign = Foreign::new(shard, |config| {
+                    config.max_concurrent_uni_streams(VarInt::from_u32(0));
+                });
+                foreign.datagram = Some(Bytes::from_static(b"x"));
+                let pair = dial_foreign(shard, foreign);
+                let closed = Event::Closed {
+                    key: key(&pair.client),
+                    error: Error::Broken {
+                        reason: "a peer with no room for the hello".into(),
+                    },
+                };
+                assert_eq!(events(&pair.client), [&closed]);
             });
         }
     }
