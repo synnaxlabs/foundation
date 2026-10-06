@@ -27,7 +27,7 @@ pub async fn serve(
         Ok(port) => port,
         Err(error) => return error,
     };
-    let mut line = Line::new(port, clock.clone(), config.settings);
+    let mut line = Line::new(port, clock, config.settings);
     let (mut bytes, mut reply) = (Vec::new(), Vec::new());
     let mut bad = false;
     loop {
@@ -59,9 +59,12 @@ pub async fn serve(
             }
             bytes.drain(..len);
             if to == unit.get() {
-                clock.sleep_until(line.rested()).await;
                 super::seal(&mut reply, 0);
-                if let Err(error) = line.write(&reply, None).await {
+                let sent = match line.rest(None, None).await {
+                    Ok(_) => line.write(&reply, None).await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = sent {
                     return error;
                 }
             }

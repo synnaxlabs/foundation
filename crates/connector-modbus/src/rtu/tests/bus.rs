@@ -253,7 +253,7 @@ fn refuses_a_request_that_is_not_valid_and_sends_nothing() {
         let next = said(client.exchange(UNIT, &read(Table::Coils, 0, 1)).await);
         (got, next)
     });
-    let error = Failure::Frame(Error::Count {
+    let error = Failure::Request(Error::Count {
         count: 0,
         max: 2000,
     });
@@ -455,13 +455,21 @@ fn gives_a_reply_that_does_not_match_the_request() {
 
 #[test]
 fn leaves_the_line_quiet_between_frames() {
-    // 11 bits a character at 9,600 baud: 3.5 characters take 4.01 ms.
-    let quiet = Span::from_nanos(4_010_416);
-    let mut bus = Bus::new(
-        6,
-        settings(9_600, Some(Parity::Even)),
-        line::Config::default(),
-    );
+    // 11 bits a character: 3.5 characters, and a fixed 1.75 ms above 19,200 baud.
+    for (baud, quiet) in [
+        (9_600, 4_010_416),
+        (19_200, 2_005_208),
+        (115_200, 1_750_000),
+    ] {
+        leaves_the_line_quiet(
+            settings(baud, Some(Parity::Even)),
+            Span::from_nanos(quiet),
+        );
+    }
+}
+
+fn leaves_the_line_quiet(settings: Settings, quiet: Span) {
+    let mut bus = Bus::new(6, settings, line::Config::default());
     let rate = bus.settings.rate();
     let gaps = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&gaps);
@@ -582,4 +590,117 @@ fn serves_only_its_unit_and_drops_a_bad_frame() {
     let device = device.lock().expect("no panic");
     assert_eq!(device.holding_registers[3], 3, "another unit's write");
     assert_eq!(device.holding_registers[4], 0x1234, "the broadcast write");
+}
+
+#[test]
+fn serves_only_after_the_line_is_quiet_again() {
+    // 10 bits a character at 9,600 baud: 3.5 characters take 3.65 ms.
+    let quiet = Span::from_nanos(3_645_833);
+    let mut bus = Bus::new(9, settings(9_600, None), line::Config::default());
+    let device = device();
+    bus.serve(UNIT, &device);
+    let (serial, clock) = (bus.client.serial(), bus.client.clock());
+    let config = config(CLIENT, bus.settings);
+    let rate = bus.settings.rate();
+    let gap = bus.on_client(move || async move {
+        let mut port = serial.open(&config).await.expect("the port opens");
+        let (mut request, mut other) = (Vec::new(), Vec::new());
+        let frame = read(Table::HoldingRegisters, 0, 1);
+        rtu::encode(17, &frame, &mut request).expect("valid");
+        rtu::encode(5, &frame, &mut other).expect("valid");
+        clock.sleep(ms(10)).await;
+        write(&mut port, &request).await;
+        // 2 ms after the request ends: inside the device's quiet before its reply.
+        clock
+            .sleep(Span::from_nanos(rate.span(8).nanos() + 2_000_000))
+            .await;
+        let start = clock.now();
+        write(&mut port, &other).await;
+        let (first, _) = take(&mut port, &clock, 7).await;
+        first - rate.span(1) - (start + rate.span(8))
+    });
+    assert!(gap >= quiet, "{gap}");
+    assert!(gap.nanos() < quiet.nanos() + 1_000_000, "{gap}");
+}
+
+/// Polls `exchange` for at most 5 seconds, and gives what it gave and how long it
+/// took.
+async fn bounded(
+    client: &mut Client,
+    clock: &Clock,
+    request: &Request,
+) -> (Option<Result<Said, Failure>>, Span) {
+    let start = clock.now();
+    let mut exchange = pin!(client.exchange(UNIT, request));
+    let mut sleep = clock.sleep(ms(5_000));
+    let got = poll_fn(|cx| {
+        if let Poll::Ready(reply) = exchange.as_mut().poll(cx) {
+            return Poll::Ready(Some(said(reply)));
+        }
+        std::pin::Pin::new(&mut sleep).poll(cx).map(|()| None)
+    })
+    .await;
+    (got, clock.now() - start)
+}
+
+#[test]
+fn times_out_on_a_line_that_is_never_quiet() {
+    let mut bus = Bus::new(10, settings(9_600, None), line::Config::default());
+    raw(&mut bus, |mut port, clock| async move {
+        loop {
+            write(&mut port, &[0x55]).await;
+            clock.sleep(ms(2)).await;
+        }
+    });
+    let (got, spent) = bus.client(|mut client, clock| async move {
+        let request = read(Table::HoldingRegisters, 0, 1);
+        bounded(&mut client, &clock, &request).await
+    });
+    assert_eq!(got, Some(Err(Failure::Timeout)));
+    assert!(spent <= TIMEOUT, "{spent}");
+}
+
+#[test]
+fn does_not_wait_out_the_timeout_after_a_bad_reply() {
+    let mut bus = Bus::new(11, settings(9_600, None), line::Config::default());
+    raw(&mut bus, |mut port, clock| async move {
+        let reply = framed(&[17, 0x03, 0x02, 0x00, 0x2A]);
+        let mut bad = reply.clone();
+        bad[6] ^= 0xFF;
+        take(&mut port, &clock, 8).await;
+        write(&mut port, &bad).await;
+        take(&mut port, &clock, 8).await;
+        write(&mut port, &reply).await;
+        port
+    });
+    let got = bus.client(|mut client, clock| async move {
+        let request = read(Table::HoldingRegisters, 0, 1);
+        let first = said(client.exchange(UNIT, &request).await);
+        let (second, spent) = bounded(&mut client, &clock, &request).await;
+        (first, second, spent)
+    });
+    let (first, second, spent) = got;
+    assert!(
+        matches!(first, Err(Failure::Frame(Error::Crc { .. }))),
+        "{first:?}"
+    );
+    assert_eq!(second, Some(Ok(Said::Registers(vec![42]))));
+    assert!(spent < ms(50), "{spent}");
+}
+
+#[test]
+fn times_out_at_once_with_a_timeout_below_zero() {
+    let mut bus = Bus::new(12, settings(9_600, None), line::Config::default());
+    let (serial, clock) = (bus.client.serial(), bus.client.clock());
+    let config = config(CLIENT, bus.settings);
+    let (got, spent) = bus.on_client(move || async move {
+        let timeout = Span::from_nanos(i64::MIN);
+        let mut client = Client::open(&serial, &config, clock.clone(), timeout)
+            .await
+            .expect("the port opens");
+        let request = read(Table::HoldingRegisters, 0, 1);
+        bounded(&mut client, &clock, &request).await
+    });
+    assert_eq!(got, Some(Err(Failure::Timeout)));
+    assert_eq!(spent, Span::ZERO);
 }

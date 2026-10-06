@@ -48,7 +48,7 @@ impl Line {
     pub(crate) fn rested(&self) -> Monotonic {
         self.busy
             .checked_add(self.quiet)
-            .expect("invariant: a clock reading plus 4 ms fits a u64")
+            .expect("invariant: a clock reading plus 3.5 characters fits a u64")
     }
 
     /// Reads the bytes that arrived into the end of `bytes`, and gives `false` when
@@ -91,17 +91,25 @@ impl Line {
     }
 
     /// Drops the bytes that arrive until `after`, and then until the line was quiet
-    /// long enough to end a frame.
-    pub(crate) async fn rest(&mut self, after: Option<Monotonic>) -> Result<(), Error> {
+    /// long enough to end a frame. Call it before each frame sent. Gives `false`
+    /// when the line cannot be quiet by `deadline`.
+    pub(crate) async fn rest(
+        &mut self,
+        after: Option<Monotonic>,
+        deadline: Option<Monotonic>,
+    ) -> Result<bool, Error> {
         let mut dropped = Vec::new();
         loop {
-            let until = after.map_or(self.rested(), |after| after.max(self.rested()));
+            let rested = self.rested();
+            let until = after.map_or(rested, |after| after.max(rested));
+            if deadline.is_some_and(|deadline| until > deadline) {
+                return Ok(false);
+            }
             if !self.read(&mut dropped, Some(until)).await? {
-                break;
+                return Ok(true);
             }
             dropped.clear();
         }
-        Ok(())
     }
 
     /// Polls `poll` on the port until it is ready, or until `deadline`.
