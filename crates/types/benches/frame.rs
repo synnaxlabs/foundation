@@ -248,7 +248,7 @@ fn stored(bencher: Bencher<'_, '_>, case: &Case) {
     let frame = frame(&pool, case);
     let (body, ends): (_, Vec<_>) = (frame.body(), frame.ends().collect());
     bencher.bench_local(|| {
-        frame::series(black_box(&body), black_box(&ends).iter().copied())
+        frame::split(black_box(&body), black_box(&ends).iter().copied())
             .map(|(_, bytes)| bytes.len())
             .sum::<usize>()
     });

@@ -105,7 +105,7 @@ pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
         let end = u32::from_le_bytes(field(descriptor, at::END));
         (descriptor, to_usize(end))
     });
-    frame::series(series, ends).map(|(descriptor, bytes)| Series {
+    frame::split(series, ends).map(|(descriptor, bytes)| Series {
         channel: channel::Key::from_u128(u128::from_le_bytes(field(descriptor, 0))),
         data_type: data_type(descriptor),
         bytes,

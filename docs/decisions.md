@@ -501,7 +501,7 @@ How to read this record:
   their order and padding are part of the disk and wire format version (C9d). A change
   to either needs a new version. The padding is at most 7 bytes for each present
   series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
+  (measured on #317). `frame::split` reads a body from `(entry, end)` pairs and panics
   on ends that do not fit. Copy mode runs `frame::check` once where remote records
   enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
@@ -2479,7 +2479,8 @@ Parameters and later choices, recorded and not asked:
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
-- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, and
+  `frame::split`, which cuts a frame body at its ends and gives each part (#632).
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
