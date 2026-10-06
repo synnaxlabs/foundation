@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 3396b8fbea34aace29c408f0b13a98368811000d95f2e15ea30ab11bd266cf7a # shrinks to document = Document { attributes: Map([Attribute { key: "a", key_span: None, value: Value { kind: Call(Call { function: "a", function_span: None, arguments: [] }), span: None } }]), blocks: [] }
+cc b8584747694e2c870679aa392bbe56fc4a102ffefa27f4eaa12b180ee5119cfa # shrinks to name = Name("a.@_")
