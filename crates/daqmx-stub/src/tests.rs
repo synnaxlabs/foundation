@@ -117,7 +117,8 @@ fn warns_and_reads_short_on_demand() {
     let handle = create();
     assert_eq!(analog_in(handle, c"warn/ai0", DEFAULT, VOLTS), 0);
     assert_eq!(analog_in(handle, c"short/ai1", DEFAULT, VOLTS), 0);
-    start(handle);
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { DAQmxStartTask(handle) }, WARN);
     let mut out = [0.0; 4];
     assert_eq!(read_analog(handle, BY_SCAN, &mut out), (WARN, 1));
     assert_eq!(out[..2], [0.0, 1000.0]);
@@ -187,13 +188,19 @@ fn cuts_the_message_to_the_buffer() {
     assert_eq!(code, 0);
     // SAFETY: the call wrote a NUL inside `out`.
     assert_eq!(unsafe { CStr::from_ptr(out.as_ptr()) }, WARNING);
+    // SAFETY: `out` holds 64 bytes.
+    let code = unsafe { DAQmxGetErrorString(FAIL, out.as_mut_ptr(), 64) };
+    assert_eq!(code, 0);
+    // SAFETY: the call wrote a NUL inside `out`.
+    assert_eq!(unsafe { CStr::from_ptr(out.as_ptr()) }, c"");
 }
 
 #[test]
 fn warns_on_a_write() {
     let handle = create();
     assert_eq!(output(handle, c"warn/ao0", 5.0), 0);
-    start(handle);
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { DAQmxStartTask(handle) }, WARN);
     let (mut written, mut reserved, value) = (0, 0, 1.0_f64);
     // SAFETY: a live handle, and `value` is one sample of one channel.
     let code = unsafe {

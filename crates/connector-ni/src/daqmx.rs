@@ -1,7 +1,6 @@
 //! NI's driver, loaded at run time, and its tasks. A read or a write gives the
 //! driver's [`Warning`]; every other call treats a warning as success.
 
-use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::path::Path;
@@ -94,25 +93,23 @@ impl Library {
         utf8(&message)
     }
 
-    /// Gives the driver's warning for a code above zero, `None` for zero, and the
-    /// driver's error for a code below zero.
+    /// As [`Library::check`], and gives the driver's warning for a code above zero.
     fn outcome(&self, code: i32) -> Result<Option<Warning>, Error> {
-        match code.cmp(&0) {
-            Ordering::Less => Err(Error::Daqmx {
-                code,
-                message: self.message(),
-            }),
-            Ordering::Equal => Ok(None),
-            Ordering::Greater => Ok(Some(Warning {
-                code,
-                message: self.describe(code),
-            })),
-        }
+        self.check(code)?;
+        Ok((code > 0).then(|| Warning {
+            code,
+            message: self.describe(code),
+        }))
     }
 
-    /// As [`Library::outcome`], with a warning dropped.
+    /// Gives `Ok` for a code of zero or above (success or a warning), and the
+    /// driver's error for a code below zero.
     fn check(&self, code: i32) -> Result<(), Error> {
-        self.outcome(code).map(drop)
+        if code >= 0 {
+            return Ok(());
+        }
+        let message = self.message();
+        Err(Error::Daqmx { code, message })
     }
 }
 
@@ -147,13 +144,10 @@ impl Task {
         self.library.functions()
     }
 
-    fn check(&self, code: i32) -> Result<(), Error> {
-        self.library.check(code)
-    }
-
     fn start(&mut self) -> Result<(), Error> {
         // SAFETY: a live handle.
-        self.check(unsafe { (self.functions().start_task)(self.handle) })
+        self.library
+            .check(unsafe { (self.functions().start_task)(self.handle) })
     }
 
     fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
@@ -168,7 +162,7 @@ impl Task {
                 buffer,
             )
         };
-        self.check(code)
+        self.library.check(code)
     }
 
     /// Adds the lines `lines` names with `create`, one channel for each line.
@@ -177,12 +171,13 @@ impl Task {
         // SAFETY: a live handle and NUL-terminated strings.
         let code =
             unsafe { create(self.handle, lines.as_ptr(), c"".as_ptr(), ffi::PER_LINE) };
-        self.check(code)
+        self.library.check(code)
     }
 
     fn stop(&mut self) -> Result<(), Error> {
         // SAFETY: a live handle.
-        self.check(unsafe { (self.functions().stop_task)(self.handle) })
+        self.library
+            .check(unsafe { (self.functions().stop_task)(self.handle) })
     }
 
     /// Gives the number of channels in the task, from the driver, so a failed add
@@ -190,7 +185,7 @@ impl Task {
     fn channels(&self) -> Result<u32, Error> {
         let mut channels = 0;
         // SAFETY: a live handle, and `channels` is valid for one write.
-        self.check(unsafe {
+        self.library.check(unsafe {
             (self.functions().channels)(self.handle, &raw mut channels)
         })?;
         Ok(channels)
@@ -286,7 +281,7 @@ impl fmt::Display for Warning {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Read {
     /// The number of values read into the buffer.
-    pub values: usize,
+    pub count: usize,
     /// The driver's warning, when it gave one.
     pub warning: Option<Warning>,
 }

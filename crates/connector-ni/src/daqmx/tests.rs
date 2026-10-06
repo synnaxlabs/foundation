@@ -39,9 +39,9 @@ fn linked() -> Library {
 }
 
 /// A read of `values` values with no warning.
-fn clean(values: usize) -> Read {
+fn clean(count: usize) -> Read {
     Read {
-        values,
+        count,
         warning: None,
     }
 }
@@ -104,10 +104,11 @@ fn warning() -> Warning {
 }
 
 fn warns(library: &Library) {
+    // `input` starts the task, and a start that warns succeeds.
     let mut task = input(library, "warn/ai0");
     let mut out = [0.0; 2];
     let read = Read {
-        values: 2,
+        count: 2,
         warning: Some(warning()),
     };
     assert_eq!(task.read(&mut out, SECOND), Ok(read.clone()));

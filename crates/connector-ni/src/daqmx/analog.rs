@@ -53,7 +53,7 @@ impl Input {
                 ptr::null(),
             )
         };
-        task.check(code)
+        task.library.check(code)
     }
 
     /// Samples each channel `rate` times a second without end, on the device's own
@@ -119,7 +119,7 @@ impl Input {
         };
         let warning = task.library.outcome(code)?;
         Ok(Read {
-            values: values(read, channels),
+            count: values(read, channels),
             warning,
         })
     }
@@ -169,7 +169,7 @@ impl Output {
                 ptr::null(),
             )
         };
-        task.check(code)
+        task.library.check(code)
     }
 
     /// Starts the task, so writes reach the device.

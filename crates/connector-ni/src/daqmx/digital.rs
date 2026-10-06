@@ -106,7 +106,7 @@ impl Input {
         };
         let warning = task.library.outcome(code)?;
         Ok(Read {
-            values: values(read, channels),
+            count: values(read, channels),
             warning,
         })
     }
