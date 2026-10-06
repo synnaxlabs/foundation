@@ -4,5 +4,7 @@
 #![cfg(test)]
 
 mod common;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod files;
 mod shards;
 mod threads;
