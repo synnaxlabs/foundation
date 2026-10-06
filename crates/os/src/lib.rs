@@ -11,6 +11,7 @@ pub mod memory;
 mod shards;
 mod thread;
 mod threads;
+mod unwind;
 
 /// Shards on OS threads, each with its own Tokio runtime. The core count is read once
 /// from the thread that calls this. On Linux it is the size of the affinity set, and
