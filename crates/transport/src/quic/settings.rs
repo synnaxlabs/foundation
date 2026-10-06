@@ -181,7 +181,7 @@ fn transport(config: &Config) -> TransportConfig {
     let idle_ms = idle_ms(config.idle);
     let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
     let streams = VarInt::from_u32(config.streams_max.get());
-    // One more slot for the peer's hello. The limit drops back when it opens.
+    // One more for the peer's hello, whose credit does not come back when it ends.
     let uni = u64::from(config.streams_max.get()) + 1;
     let uni = VarInt::from_u64(uni).expect("invariant: a u32 and one fit a varint");
     let mut mtu = MtuDiscoveryConfig::default();

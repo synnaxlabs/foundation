@@ -118,7 +118,7 @@ impl Peer {
     }
 
     /// Takes `event` of `inner` toward the hello: accepts the peer's first one-way
-    /// stream, lowers the peer's one-way stream limit by the hello's slot, and reads
+    /// stream, keeps its credit from coming back to the peer when it ends, and reads
     /// the stream. Gives the hello once its stream ended. Ignores every other event.
     ///
     /// # Errors
@@ -145,8 +145,8 @@ impl Peer {
             (None, &StreamEvent::Opened { dir: Dir::Uni }) => {
                 let id = inner.streams().accept(Dir::Uni);
                 let id = *stream.insert(id.expect("invariant: a stream opened"));
-                // The limit counts the hello's slot until the hello frees it, and must
-                // not give it back.
+                // Set before the hello stream ends, so noq-proto gives the peer no
+                // credit for it.
                 let limit = inner.max_concurrent_streams(Dir::Uni) - 1;
                 let limit = VarInt::from_u64(limit);
                 let limit = limit.expect("invariant: a smaller limit is a varint");
