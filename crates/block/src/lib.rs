@@ -1113,7 +1113,7 @@ mod tests {
 
         #[test]
         fn is_aligned_and_zeroed() {
-            for len in [1, ALIGN, ALIGN + 1, 200, 4_097] {
+            for len in (1..=512).chain([4_097]) {
                 let heap = Heap::new(len);
                 assert_eq!(heap.base().addr().get() % ALIGN, 0, "{len}");
                 assert_eq!(heap.len(), len);
@@ -1125,6 +1125,12 @@ mod tests {
                     assert_eq!(byte, 0, "{len} at {offset}");
                 }
             }
+        }
+
+        #[test]
+        #[should_panic(expected = "heap memory of 9223372036854775807 bytes is too")]
+        fn panics_when_the_padded_layout_is_too_large() {
+            drop(Heap::new(isize::MAX as usize));
         }
     }
 
