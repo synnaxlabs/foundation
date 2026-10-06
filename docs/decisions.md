@@ -957,13 +957,14 @@ How to read this record:
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
   bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. Decided on 2026-10-05 (#352
-  item 2). When the term of the last entry is above `hard.term`, `Raft::new` starts at
-  that term with no vote. The node sends nothing before its write, so no peer counted a
-  vote or an answer that a lost `hard` held. The caller writes `hard` and `entries` in
-  any order, with no atomic write. Lost: the `Ready` doc requires `hard` before
-  `entries`, a patch that each caller must keep and that shows only at a restart. The
-  person decided on 2026-10-05 ("I approve long term fix on 522"), #522.
+  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
+  `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
+  before its write, so no peer counted a vote or an answer that a lost `hard` held. The
+  caller writes `hard` and `entries` in any order, with no atomic write. Lost: the
+  `Ready` doc requires `hard` before `entries`, a patch that each caller must keep and
+  that shows only at a restart. The person decided on 2026-10-05 ("I approve long term
+  fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -980,7 +981,8 @@ How to read this record:
   node other than the leader it knows is `Error::SecondLeader`: one term has one
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after a restart or
-  its vote, takes the first (#391). A bad message changes nothing.
+  its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
+  #391). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -998,7 +1000,8 @@ How to read this record:
   loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
   shows the error in its status (#648). Lost: the leader sends again from below what
   it counted, which lowers its count under a commit that a quorum may no longer
-  hold. Decided on 2026-10-05 (#352 item 3). Later, at low priority: the leader
+  hold. The person left the choice to the coordinator on 2026-10-05 ("your choice",
+  #352 item 3), and the coordinator chose this. Later, at low priority: the leader
   learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
