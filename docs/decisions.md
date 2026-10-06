@@ -360,11 +360,14 @@ How to read this record:
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
   Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
-  on a 4096-byte boundary so a commit never rewrites a synced block. The CRC covers
-  `len`, `kind`, and the body. It continues from the record before (a chain), so
-  bytes of an earlier chain never read as the next record.
+  on a 4096-byte boundary so a commit never rewrites a synced block, except the
+  restart record of an open, which may go over a restart or wrap record that no data
+  record follows (#649). The CRC covers `len`, `kind`, and the body. It continues from
+  the record before (a chain), so bytes of an earlier chain never read as the next
+  record.
   Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
-  not used and the next record is at its start; restart (3), written at each open,
+  not used and the next record is at its start; restart (3), written at each open
+  right after the last data record the walk reads, or at the tail when it reads none,
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area

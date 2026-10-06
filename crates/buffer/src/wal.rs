@@ -415,6 +415,8 @@ pub(crate) struct Cursor {
     layout: Layout,
     tail: u64,
     at: Position,
+    /// The boundary after the last data record read, or the tail.
+    head: Position,
     piece: usize,
     phase: Phase,
     ended: bool,
@@ -438,6 +440,7 @@ impl Cursor {
             layout,
             tail: tail.offset,
             at: tail,
+            head: tail,
             piece,
             phase: Phase::Head,
             ended: false,
@@ -592,12 +595,18 @@ impl Cursor {
             offset: next,
             chain,
         };
+        if let Step::Data(_) = step {
+            self.head = self.at;
+        }
         Ok(step)
     }
 
-    /// Makes the writer that continues the ring from the head, with the records
-    /// before the offset `tail` released, and seals its restart record with
-    /// `chain`, a new random value, as the body. The chain continues from `chain`.
+    /// Makes the writer that continues the ring after the last data record walked,
+    /// or from the tail when the walk read none, with the records before the offset
+    /// `tail` released, and seals its restart record with `chain`, a new random
+    /// value, as the body. The chain continues from `chain`. The restart record
+    /// goes over the restart and wrap records after the last data record, which
+    /// hold nothing.
     ///
     /// # Errors
     ///
@@ -617,12 +626,12 @@ impl Cursor {
         let mut writer = Writer {
             layout: self.layout,
             tail: self.tail,
-            head: self.at.offset,
+            head: self.head.offset,
         };
         writer.release(tail);
         let plan = writer.append(RESTART_LEN)?;
         let body = chain.to_le_bytes();
-        let (sealed, _) = plan.headers(self.at.chain, Kind::Restart, [&body[..]]);
+        let (sealed, _) = plan.headers(self.head.chain, Kind::Restart, [&body[..]]);
         Ok((writer, sealed))
     }
 }
@@ -794,17 +803,28 @@ mod tests {
             data.filter_map(|live| live.data.clone()).collect()
         }
 
+        /// The boundary after the last live data record: the start of the restart
+        /// records after it, or the head.
+        fn after_data(&self) -> Position {
+            let restarts = self.live.iter().rev().take_while(|l| l.data.is_none());
+            restarts.last().map_or(self.head, |live| live.start)
+        }
+
         fn walk(&self) -> (Vec<Vec<u8>>, Cursor) {
             walk(&self.area, self.tail).expect("a valid ring")
         }
 
         /// Drops the writer, as a crash does, walks the area, and continues with a
-        /// new writer. Gives the data that the walk found.
+        /// new writer. Its restart record goes over the restart records after the
+        /// last data record. Gives the data that the walk found.
         fn reopen(&mut self, chain: u32) -> Result<Vec<Vec<u8>>, Full> {
             let (data, cursor) = self.walk();
             let (writer, sealed) = cursor.writer(self.tail.offset, chain)?;
+            while self.live.back().is_some_and(|live| live.data.is_none()) {
+                self.live.pop_back();
+            }
             self.writer = writer;
-            self.head = cursor.at;
+            self.head = cursor.head;
             self.restart(&sealed, chain);
             Ok(data)
         }
@@ -833,16 +853,23 @@ mod tests {
         prop::collection::vec(op, 0..40)
     }
 
-    /// Runs `ops` and checks each refusal and each reopen against the model.
+    /// Runs `ops` and checks each refusal and each reopen against the model. A
+    /// ring with no live data takes any record.
     fn run(ring: &mut Ring, ops: &[Op]) {
         for op in ops {
             let head = ring.writer.head();
-            let free = AREA - (head - ring.tail.offset);
+            let after = ring.after_data();
+            let free = match op {
+                Op::Reopen(_) => AREA - (after.offset - ring.tail.offset),
+                _ => AREA - (head - ring.tail.offset),
+            };
             let live = ring.data();
             let result = match op {
                 Op::Append(body) => ring.append(body).map(drop),
                 Op::Reopen(chain) => ring.reopen(*chain).map(|data| {
                     assert_eq!(data, live, "data found at a reopen");
+                    let restart = ring.live.back().map(|live| live.start);
+                    assert_eq!(restart, Some(after), "the restart record's place");
                 }),
                 Op::Release(count) => {
                     ring.release(*count);
@@ -853,6 +880,7 @@ mod tests {
                 assert_eq!(full.free, free, "free bytes at {op:?}");
                 assert!(full.needed > free, "a record that fits was refused");
                 assert_eq!(ring.writer.head(), head, "a refusal moved the head");
+                assert!(!live.is_empty(), "a ring with no data refused {op:?}");
             }
         }
     }
@@ -1224,6 +1252,46 @@ mod tests {
             assert_eq!(cursor.writer(0, 1).map(drop), Err(full));
             let (writer, sealed) = cursor.writer(4096, 1).expect("one block is free");
             assert_eq!((sealed.record.place, writer.head()), (0, 9 * 4096));
+        }
+
+        /// Each open writes its restart record right after the last data record,
+        /// over the restart record of the open before it.
+        #[test]
+        fn starts_a_writer_after_the_last_data_record() {
+            let mut ring = Ring::new();
+            ring.append(b"one").expect("the ring has room");
+            for chain in [5, 6] {
+                assert_eq!(ring.reopen(chain), Ok(vec![b"one".to_vec()]));
+                assert_eq!(ring.writer.head(), 3 * 4096, "the open of {chain}");
+            }
+            let (data, cursor) = walk(&ring.area, START).expect("a valid ring");
+            assert_eq!((data, cursor.at), (vec![b"one".to_vec()], at(3, 6)));
+        }
+
+        /// A ring of the smallest area holds one restart record after any number
+        /// of opens with no data, so it takes its largest record.
+        #[test]
+        fn takes_the_largest_record_after_opens_with_no_data() {
+            let layout = Layout::new(2 * 4096, 4087).expect("the smallest area");
+            let mut area = vec![0; 2 * 4096];
+            for chain in 1..=3 {
+                let mut cursor = Cursor::new(layout, START, PIECE);
+                loop {
+                    let Window { place, len } = cursor.window();
+                    match cursor.next(&area[index(place)..index(place) + len]) {
+                        Ok(Step::Moved) => {}
+                        Ok(Step::End) => break,
+                        other => panic!("the open of {chain} read {other:?}"),
+                    }
+                }
+                let (mut writer, sealed) = cursor.writer(0, chain).expect("it fits");
+                let place = index(sealed.record.place);
+                area[place..place + HEADER_LEN].copy_from_slice(&sealed.record.header);
+                area[place + HEADER_LEN..place + HEADER_LEN + RESTART_LEN]
+                    .copy_from_slice(&chain.to_le_bytes());
+                let appended = writer.append(4087).map(drop);
+                assert_eq!(appended, Ok(()), "the open of {chain}");
+            }
         }
 
         /// The log is cut at a damaged record and reopened. A new record with the
