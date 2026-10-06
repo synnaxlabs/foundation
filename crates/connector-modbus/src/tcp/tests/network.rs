@@ -433,7 +433,12 @@ fn gives_the_reply_that_does_not_match_the_request() {
     let got = network.client(1 << 16, |mut client, _| async move {
         said(client.exchange(UNIT, &read(Table::Coils, 0, 1)).await)
     });
-    assert!(matches!(got, Err(Failure::Frame(_))), "{got:?}");
+    let error = Failure::Frame(Error::Answer { want: 1, got: 3 });
+    assert_eq!(got, Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "a reply of function 3 to a request of function 1"
+    );
 }
 
 #[test]
@@ -480,20 +485,98 @@ fn serves_the_next_stream_after_one_ends_or_is_out_of_step() {
     });
     let (first, end, last) = got;
     assert_eq!(first, Ok(Said::Registers(vec![4])));
-    assert!(end.is_err(), "the device reset the bad stream: {end:?}");
+    assert_eq!(end, Err(net::Error::Reset { remote }));
     assert_eq!(last, Ok(Said::Registers(vec![4])));
 }
 
 #[test]
 fn wraps_the_transaction_number_past_65535() {
     let mut network = Network::new(12);
-    network.serve(&device());
-    let last = network.client(1 << 16, |mut client, _| async move {
-        let request = read(Table::HoldingRegisters, 7, 1);
-        for _ in 0..u16::MAX {
-            said(client.exchange(UNIT, &request).await).expect("the device answers");
+    let exchanges = usize::from(u16::MAX) + 2;
+    network.raw(move |mut stream, _| async move {
+        for _ in 0..exchanges {
+            let header = request(&mut stream).await;
+            write(&mut stream, &registers(header, &[header.transaction])).await;
         }
+        stream
+    });
+    let last = network.client(1 << 16, move |mut client, _| async move {
+        let request = read(Table::HoldingRegisters, 0, 1);
+        let mut numbers = Vec::new();
+        for _ in 0..exchanges {
+            numbers.push(said(client.exchange(UNIT, &request).await));
+        }
+        numbers.split_off(exchanges - 3)
+    });
+    let numbers: Vec<_> = [u16::MAX, 0, 1]
+        .into_iter()
+        .map(|number| Ok(Said::Registers(vec![number])))
+        .collect();
+    assert_eq!(last, numbers);
+}
+
+#[test]
+fn drops_a_request_that_timed_out_before_any_byte_left() {
+    let mut network = Network::new(13);
+    let device = device();
+    let served = Arc::clone(&device);
+    network.on_device(64, move |listener, clock| async move {
+        clock.sleep(ms(1_000)).await;
+        let error = modbus::serve(listener, UNIT, &served).await;
+        panic!("the listener failed: {error}");
+    });
+    let (first, second, read) = network.client(64, |mut client, clock| async move {
+        let write = Request::WriteRegisters {
+            start: 0,
+            values: vec![7; 100],
+        };
+        let first = said(client.exchange(UNIT, &write).await);
+        let write = Request::WriteRegister {
+            address: 99,
+            value: 0xDEAD,
+        };
+        let second = said(client.exchange(UNIT, &write).await);
+        clock.sleep(ms(1_000)).await;
+        let read = read(Table::HoldingRegisters, 99, 1);
+        (first, second, said(client.exchange(UNIT, &read).await))
+    });
+    assert_eq!(first, Err(Failure::Timeout));
+    assert_eq!(second, Err(Failure::Timeout));
+    assert_eq!(read, Ok(Said::Registers(vec![7])));
+}
+
+#[test]
+fn serves_a_client_that_comes_back_after_a_power_cut() {
+    let mut network = Network::new(14);
+    network.serve(&device());
+    let request = read(Table::HoldingRegisters, 4, 1);
+    let sent = request.clone();
+    let first = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&first);
+    let (net, clock) = (network.client.net(), network.client.clock());
+    let config = tcp::Config {
+        remote: network.remote(),
+        options: options(1 << 16),
+    };
+    let handle = network
+        .client
+        .shards()
+        .start(shard("first"), move |_| async move {
+            let mut client = Client::connect(&net, &config, clock.clone(), TIMEOUT)
+                .await
+                .expect("the device listens");
+            let got = said(client.exchange(UNIT, &sent).await);
+            *slot.lock().expect("no panic under the lock") = Some(got);
+            // The stream stays open until the power cut ends it with no segment.
+            clock.sleep(Span::HOUR).await;
+        });
+    network.handles.push(handle.expect("the shard starts"));
+    network.sim.run_for(Span::SECOND).expect("the run ends");
+    let first = first.lock().expect("no panic under the lock").take();
+    assert_eq!(first, Some(Ok(Said::Registers(vec![4]))));
+    network.sim.crash(&network.client, sim::Crash::Power);
+    let again = network.client(1 << 16, move |mut client, _| async move {
         said(client.exchange(UNIT, &request).await)
     });
-    assert_eq!(last, Ok(Said::Registers(vec![7])));
+    assert_eq!(again, Ok(Said::Registers(vec![4])));
 }

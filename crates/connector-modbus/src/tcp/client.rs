@@ -18,12 +18,14 @@ pub struct Client {
     timeout: Span,
     /// The transaction number of the last request.
     transaction: u16,
-    /// Request bytes not yet sent: the rest of a dropped exchange's, then the next.
+    /// Request bytes not yet sent.
     unsent: Vec<u8>,
+    /// The bytes at the front of `unsent` that must go out: the rest of requests
+    /// that left in part. The bytes after them belong to a request none of which
+    /// left, and the next exchange drops them.
+    owed: usize,
     /// Bytes read and not yet used.
     received: Vec<u8>,
-    /// The length of the last reply given, at the front of `received`.
-    given: usize,
 }
 
 impl Client {
@@ -43,24 +45,25 @@ impl Client {
         Ok(Self {
             stream,
             clock,
-            timeout: timeout.max(Span::ZERO),
+            timeout,
             transaction: 0,
             unsent: Vec::new(),
+            owed: 0,
             received: Vec::new(),
-            given: 0,
         })
     }
 
     /// Sends `request` to `unit` and reads its reply. Each request gets the next
     /// transaction number, and a reply with another number is dropped.
     ///
-    /// It is safe to drop. The next exchange first sends the rest of a dropped
-    /// request, so the stream stays in step, and the dropped request's reply is
-    /// dropped by its number.
+    /// It is safe to drop. A request none of which left is dropped with it. The next
+    /// exchange first sends the rest of a request that left in part, so the stream
+    /// stays in step, and that request's reply is dropped by its number.
     ///
     /// # Errors
     ///
-    /// - [`Failure::Timeout`] when no whole reply came within the timeout.
+    /// - [`Failure::Timeout`] when no whole reply came within the timeout. The
+    ///   request can still take effect, unless none of it left.
     /// - [`Failure::Frame`] with the codec error of a reply that does not match the
     ///   request.
     /// - [`Failure::Request`] with the error of [`encode`](super::encode) for a
@@ -77,8 +80,7 @@ impl Client {
         unit: u8,
         request: &Request,
     ) -> Result<Reply<'_>, Failure> {
-        self.received.drain(..self.given);
-        self.given = 0;
+        self.unsent.truncate(self.owed);
         let header = Header {
             transaction: self.transaction.wrapping_add(1),
             unit,
@@ -89,7 +91,6 @@ impl Client {
         let deadline = self.clock.now().checked_add(self.timeout);
         self.send(deadline).await?;
         let (got, len) = self.receive(header.transaction, deadline).await?;
-        self.given = len;
         if got != unit {
             return Err(Failure::Unit { want: unit, got });
         }
@@ -107,12 +108,15 @@ impl Client {
             });
             let n = write.await.ok_or(Failure::Timeout)??;
             self.unsent.drain(..n);
+            // Once a byte of the last request leaves, all of it must.
+            self.owed = self.owed.checked_sub(n).unwrap_or(self.unsent.len());
         }
         Ok(())
     }
 
     /// Reads until a whole reply to `transaction` is at the front of `received`, and
-    /// gives its unit and length. It drops the replies to other requests before it.
+    /// gives its unit and length. It drops the replies to other requests before it,
+    /// the last exchange's included.
     async fn receive(
         &mut self,
         transaction: u16,

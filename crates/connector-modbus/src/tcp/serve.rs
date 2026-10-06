@@ -1,5 +1,6 @@
 use std::future::poll_fn;
 use std::io::IoSlice;
+use std::pin::pin;
 use std::sync::Mutex;
 
 use env::net::{self, Listener, Tcp};
@@ -7,12 +8,13 @@ use env::net::{self, Listener, Tcp};
 use crate::device::Device;
 use crate::pdu::Exception;
 
-/// Accepts streams on `listener`, one at a time, and answers each request frame on
-/// them from `device`, until the listener fails, and gives that error. A frame for
-/// another unit than `unit` gets the exception "gateway target failed to respond",
-/// as a gateway gives. A stream that ends, fails, or is out of step is dropped, and
-/// the next one is accepted. Tests and simulations use it as the far side of a
-/// connection.
+/// Accepts streams on `listener` and answers each request frame on the newest from
+/// `device`, until the listener fails, and gives that error. A new stream drops the
+/// one before it, as a device with one connection does, so that a client that lost
+/// its stream with no close gets an answer when it comes back. A frame for another
+/// unit than `unit` gets the exception "gateway target failed to respond", as a
+/// gateway gives. A stream that fails or is out of step is dropped. Tests and
+/// simulations use it as the far side of a connection.
 ///
 /// # Panics
 ///
@@ -22,9 +24,25 @@ pub async fn serve(
     unit: u8,
     device: &Mutex<Device>,
 ) -> net::Error {
+    let first = match poll_fn(|cx| listener.poll_accept(cx)).await {
+        Ok(stream) => stream,
+        Err(error) => return error,
+    };
+    let mut answering = pin!(answer(first, unit, device));
+    let mut ended = false;
     loop {
-        match poll_fn(|cx| listener.poll_accept(cx)).await {
-            Ok(stream) => answer(stream, unit, device).await,
+        let accepted = poll_fn(|cx| {
+            if !ended {
+                ended = answering.as_mut().poll(cx).is_ready();
+            }
+            listener.poll_accept(cx)
+        })
+        .await;
+        match accepted {
+            Ok(stream) => {
+                answering.set(answer(stream, unit, device));
+                ended = false;
+            }
             Err(error) => return error,
         }
     }
