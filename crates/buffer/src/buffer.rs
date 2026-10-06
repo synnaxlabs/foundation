@@ -436,6 +436,9 @@ impl Buffer {
                 .append(slot, header)
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
         }
+        if state.idle() {
+            return Ok(());
+        }
         let parked = state.parked.take();
         drop(guard);
         if let Some(waker) = parked {
@@ -570,11 +573,11 @@ fn small_record(
     Ok(block.freeze().skip(start))
 }
 
-/// The commit task. It parks while the state idles; a push, a `Commit` poll, or
-/// the drop wakes it. Each deadline takes the closed groups and the open one,
-/// seals them in order from `chain`, the value of the restart record, writes
-/// them, syncs once, and wakes the waiters. A failed file call or the drop ends
-/// the task.
+/// The commit task. It parks while the state idles; a push that takes an entry, a
+/// `Commit` poll, or the drop wakes it. Each deadline takes the closed groups and
+/// the open one, seals them in order from `chain`, the value of the restart record,
+/// writes them, syncs once, and wakes the waiters. A failed file call or the drop
+/// ends the task.
 async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();

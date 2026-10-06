@@ -435,11 +435,11 @@ mod tests {
         usize::try_from(value).expect("an offset in the test area fits in usize")
     }
 
-    /// The smallest body a header can open holds one entry of no bytes.
+    /// The smallest body a header can open holds one entry of 4032 bytes.
     #[test]
-    fn a_ring_that_a_header_opens_holds_one_entry() {
+    fn a_ring_that_a_header_opens_holds_one_entry_of_4032_bytes() {
         use crate::header;
-        let small = Layout::new(AREA, table_len(1)).expect("the sizes make a ring");
+        let small = Layout::new(AREA, 4087).expect("the sizes make a ring");
         let block = header::Header::new(small, CHAIN).encode();
         let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
         let bytes = vec![0; index(AREA)];
@@ -450,8 +450,10 @@ mod tests {
         let (writer, _) = cursor
             .writer(opened.tail.offset(), 1)
             .expect("the ring is empty");
-        let entry = entry(header(1, Path::Live, 0), Parts::default());
-        let pushed = Group::default().push(&pool(1 << 20), &writer, &mut vec![entry]);
+        let memory = pool(1 << 20);
+        let parts = parts(&memory, &[&[7; 4032]]);
+        let entry = entry(header(1, Path::Live, 0), parts);
+        let pushed = Group::default().push(&memory, &writer, &mut vec![entry]);
         assert_eq!(pushed, Ok(0..1));
     }
 
@@ -1048,7 +1050,7 @@ mod tests {
         /// byte more.
         #[test]
         fn one_entry_alone_takes_the_entry_max(
-            body_max in prop_oneof![Just(table_len(1)), table_len(1)..=60_000usize],
+            body_max in prop_oneof![Just(4087), 4087..=60_000usize],
         ) {
             let area = Area::with_body_max(body_max);
             let max = area.layout.entry_max();
