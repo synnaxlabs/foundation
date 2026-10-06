@@ -1574,8 +1574,9 @@ How to read this record:
   tree key is `<name>.@access` (for example `site_a.operators.@access`). The person
   approved the name on 2026-10-06 ("Yes I confirm", #729). Actions: read, write, plan,
   apply, secret, admin. No groups or roles; a group is a selector over subject names. A
-  connector may write channels under its own name by default. `plan` lists access
-  changes separately. SSO comes later.
+  connector may write channels under its own name by default. The connector default
+  caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
+  access changes separately. SSO comes later.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
