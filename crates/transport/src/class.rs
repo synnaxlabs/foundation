@@ -23,3 +23,15 @@ pub enum Class {
     /// The lowest, for bulk that waits for spare capacity.
     CatchUp,
 }
+
+impl Class {
+    /// The class's place in priority order: 0 for the highest.
+    pub(crate) fn rank(self) -> usize {
+        match self {
+            Self::Command => 0,
+            Self::Latest => 1,
+            Self::Complete => 2,
+            Self::CatchUp => 3,
+        }
+    }
+}

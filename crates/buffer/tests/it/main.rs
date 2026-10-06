@@ -330,6 +330,35 @@ fn an_idle_buffer_wakes_no_task() {
     handle.join().expect("the shard ended");
 }
 
+/// Runs a buffer that idles while its shard wakes every one and a half commits,
+/// with `empty` empty appends at each wake. Returns the digest of the run.
+fn idle_with_wakes(empty: usize) -> u64 {
+    let (mut sim, handle) = start(27, Memory::default(), move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        for _ in 0..8 {
+            shard.clock.sleep(commits(3)).await;
+            for _ in 0..empty {
+                buffer.append(Vec::new()).expect("takes an empty batch");
+            }
+        }
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Empty appends on an idle buffer wake no task: the run goes as one with no
+/// appends.
+#[test]
+fn empty_appends_wake_no_task() {
+    assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
+}
+
 #[test]
 fn committed_on_an_idle_buffer_resolves_after_one_commit() {
     run(21, Memory::default(), |shard| async move {
@@ -665,6 +694,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             failed
         );
+        assert_eq!(buffer.append(Vec::new()), failed, "an empty append");
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
         assert_eq!(buffer.committed().await, failed);
         assert_eq!(shard.memory.syncs(), 2, "the task ended at the failed sync");
@@ -1325,6 +1355,25 @@ fn a_header_with_sizes_that_make_no_ring_is_unfit() {
                 body_max: 0
             }))
         );
+    });
+}
+
+/// A header whose `body_max` is under one block less the record header makes no
+/// ring.
+#[test]
+fn a_header_with_a_body_under_one_block_is_unfit() {
+    run(28, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let body_max = BODY_MAX - 1;
+        let small = u32::try_from(body_max).expect("a small size");
+        shard.tamper(BODY_MAX_AT, &small.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area: AREA,
+            body_max,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
     });
 }
 

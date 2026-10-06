@@ -111,13 +111,15 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - An internal invariant that breaks panics. Bad outside input never panics: it returns
   an error. Panic and assert messages state what broke and the values (r16 20).
 - `Drop` never panics. It never blocks unless the type also gives a call that does
-  not block (r16 23).
+  not block (r16 23). One exception: `sim::Sim` (SIM DROP in `docs/decisions.md`).
 
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, `counting`, and later FFI connectors. Such a module uses
-  `#[expect(unsafe_code, reason = "...")]` and runs under Miri (r16 24).
+  `block`, `ring`, `counting`, the `memory` module of `os`, and later FFI connectors.
+  Such a module uses `#[expect(unsafe_code, reason = "...")]` and runs under Miri
+  (r16 24). `os::memory` only calls the OS, which Miri cannot run, so tests on the
+  real OS check it, and `cargo xtask miri` skips `os` (BLOCK MEMORY).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
