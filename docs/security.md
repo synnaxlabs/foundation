@@ -135,10 +135,10 @@ state on `main`.
   asks to change RAFT SURFACE for replies.
 - A node that may send to a group and lies can stop the group for good with one
   message in term `u64::MAX`: each node writes that term to disk, and none can
-  campaign. Only the caller's check of the sender bounds who can (RAFT SURFACE):
-  `mesh` must give `raft` a message only from a voter of the region (#654). No change
-  in `raft`, by decision (#352 item 2): no bound on a term jump spares an honest node
-  that was down.
+  campaign. Only a voter can: `mesh` admits a `raft` message only from a voter of the
+  newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
+  also break safety, because a false `AppendReply` counts as held, so `raft` trusts
+  its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
