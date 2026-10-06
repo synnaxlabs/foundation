@@ -144,9 +144,10 @@ fn main() {
                 "index 1 has two entries before its skip"
             );
             assert_eq!(
-                allocations, 6,
-                "the entries, and one boxed file call per entry and per table: the two \
-                 records with an entry, and the one where the skip ahead starts"
+                allocations, 7,
+                "the entries, the entries of a record to give, and one boxed file call \
+                 per entry and per table: the two records with an entry, and the one \
+                 where the skip ahead starts"
             );
         })
         .expect("the shard starts");

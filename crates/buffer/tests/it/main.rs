@@ -2403,15 +2403,18 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
 
 /// `append` refuses an entry whose parts, joined, no block of the shard's pool
 /// holds, with `Limit::Block` for the first such entry, and takes nothing. An entry
-/// of the largest block commits, and an open recovers it.
+/// of the largest block, which takes the whole budget, commits, a read gives it,
+/// and an open recovers it.
 #[test]
 fn an_entry_over_the_largest_pool_block_is_large() {
     run(155, Memory::default(), |mut shard| async move {
-        let largest = 114_688;
+        let largest = 1 << 17;
         let over = Parts::from([shard.block(largest), shard.block(1)]);
         let more = Parts::from([shard.block(largest), shard.block(2)]);
         let fits = Parts::from(shard.block(largest));
-        let config = block::Config { budget: 1 << 17 };
+        let config = block::Config {
+            budget: block::footprint(largest),
+        };
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), largest);
@@ -2430,8 +2433,8 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         assert_eq!(large, Err(Rejected::Large(limit)));
         assert_eq!(
             Rejected::Large(limit).to_string(),
-            "an entry has 114689 bytes of parts, and a block of the pool holds at \
-             most 114688"
+            "an entry has 131073 bytes of parts, and a block of the pool holds at \
+             most 131072"
         );
         assert_eq!(buffer.tail(a, Path::Live), tail(0, None));
         buffer
@@ -2439,6 +2442,10 @@ fn an_entry_over_the_largest_pool_block_is_large() {
             .expect("queues");
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        let read = buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await;
+        let lens =
+            read.map(|read| read.entries.iter().map(|e| e.bytes.len()).collect());
+        assert_eq!(lens, Ok(vec![largest]));
         drop(buffer);
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
@@ -3389,8 +3396,10 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
         let second = entry(1, a, Path::Live, 3, 2, Some(50), shard.block(12).into());
         buffer.append([second]).expect("queues");
         buffer.committed().await.expect("commits");
-        let table = shard.pool.alloc(4096).expect("a block for one table");
-        let bytes = shard.pool.alloc(10).expect("a block for one entry");
+        let one = shard
+            .pool
+            .alloc(4096)
+            .expect("a block for a table, then an entry");
         let mut held = Vec::new();
         let mut len = shard.pool.largest();
         while len > 0 {
@@ -3399,7 +3408,7 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
             }
             len -= len.div_ceil(16);
         }
-        drop((table, bytes));
+        drop(one);
         let read = buffer
             .read(a, Path::Live, Mark::at(0), usize::MAX)
             .await
