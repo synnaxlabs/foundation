@@ -370,26 +370,9 @@ mod tests {
         use proptest::prelude::*;
 
         use super::*;
-        use crate::world::{ERROR_NS, TIME_NS, truechimer, world};
-
-        const OFFSET_NS: i64 = 1 << 50;
-
-        /// A target with an offset and error small enough that every estimate is
-        /// valid.
-        fn target() -> impl Strategy<Value = Measurement> {
-            let parts = (0..TIME_NS, -OFFSET_NS..OFFSET_NS, 0..ERROR_NS);
-            parts.prop_map(|(at, offset, error)| estimate(at, offset, error))
-        }
-
-        fn slew() -> impl Strategy<Value = Slew> {
-            (0..TIME_NS, -OFFSET_NS..OFFSET_NS, target()).prop_map(
-                |(start, from, target)| Slew {
-                    start: Monotonic(start),
-                    from: Span::from_nanos(from),
-                    target,
-                },
-            )
-        }
+        use crate::world::{
+            ERROR_NS, SLEW_OFFSET_NS, TIME_NS, slew, target, truechimer, world,
+        };
 
         /// Mesh time at `now`: `now` plus the offset served there.
         fn mesh(slew: Slew, now: u64, drift: Drift) -> i128 {
@@ -457,7 +440,7 @@ mod tests {
             fn holds_the_truth_when_the_target_does(
                 (w, target) in world().prop_flat_map(|w| (Just(w), truechimer(w))),
                 start in 0..TIME_NS,
-                from in -OFFSET_NS..OFFSET_NS,
+                from in -SLEW_OFFSET_NS..SLEW_OFFSET_NS,
                 now in 0..TIME_NS,
             ) {
                 let (start, from) = (Monotonic(start), Span::from_nanos(from));

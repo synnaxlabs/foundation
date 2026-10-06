@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 
 use env::thread;
 use sim::shard::Fault;
+use types::time::Span;
 
 use crate::{Config, Error, Node};
 
@@ -14,19 +15,26 @@ struct Run {
 
 /// Starts a node on `cores` cores of a `sim` host, after `faults` aim at its shards.
 fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
+    let host = sim::node::Config {
+        cores: NonZeroUsize::new(cores).unwrap(),
+        ..sim::node::Config::default()
+    };
+    start_on(seed, host, faults)
+}
+
+fn start_on(seed: u64, host: sim::node::Config, faults: &[(usize, Fault)]) -> Run {
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
     });
-    let host = sim.node(sim::node::Config {
-        cores: NonZeroUsize::new(cores).unwrap(),
-        ..sim::node::Config::default()
-    });
+    let host = sim.node(host);
     for &(core, fault) in faults {
         host.fail_shard(core, fault);
     }
     let node = Node::start(Config {
         shards: host.shards(),
+        clock: host.clock(),
+        wall: host.wall(),
     });
     Run {
         seed,
@@ -52,16 +60,32 @@ fn named(cores: &[usize]) -> Vec<(String, Option<usize>)> {
 fn starts_one_pinned_shard_per_core_and_runs_until_stopped() {
     let mut run = start(7, 3, &[]);
     assert_eq!(starts(&run), named(&[0, 1, 2]));
-    assert_eq!(
-        run.sim.run(),
-        Err(sim::Error::Stuck {
-            threads: vec!["shard-0".into(), "shard-1".into(), "shard-2".into()],
-            seed: 7,
-        })
-    );
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    assert_eq!(run.node.stop.waiting(), 3);
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn shard_0_runs_the_mesh_clock_on_the_os_clock() {
+    let mut run = start(7, 3, &[]);
+    run.host.set_wall_error(Some(Span::from_nanos(-1)));
+    assert_eq!(
+        run.sim.run(),
+        Err(sim::Error::Panicked {
+            thread: "shard-0".into(),
+            message: "invariant: the OS error bound -1ns is negative".into(),
+            seed: 7,
+        })
+    );
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(
+        run.node.join(),
+        Err(Error::Panicked(thread::Panicked {
+            name: "shard-0".into()
+        }))
+    );
 }
 
 #[test]
@@ -184,4 +208,23 @@ fn join_gives_a_shard_that_could_not_start_over_one_that_panicked() {
             "seed {seed}"
         );
     }
+}
+
+#[test]
+fn a_host_that_cannot_pin_starts_shards_on_no_core() {
+    let host = sim::node::Config {
+        cores: NonZeroUsize::new(2).unwrap(),
+        unpinnable: true,
+        ..sim::node::Config::default()
+    };
+    let mut run = start_on(7, host, &[]);
+    assert_eq!(
+        starts(&run),
+        [("shard-0".to_string(), None), ("shard-1".to_string(), None)]
+    );
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    assert_eq!(run.node.stop.waiting(), 2);
+    run.node.stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
 }

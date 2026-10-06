@@ -15,6 +15,11 @@ dependencies = [
 [[package]]
 name = "access"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "spec",
+ "types",
+]
 
 [[package]]
 name = "aead"
@@ -983,7 +988,9 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "env",
  "rustix",
+ "tokio",
 ]
 
 [[package]]

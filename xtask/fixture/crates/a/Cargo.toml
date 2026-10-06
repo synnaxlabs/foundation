@@ -4,6 +4,9 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+twin = { package = "a", path = "../../twin/a" }
+
 [[test]]
 name = "conformance"
 path = "../../oracles/a/main.rs"

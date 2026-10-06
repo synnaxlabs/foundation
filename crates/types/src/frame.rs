@@ -1,14 +1,16 @@
-//! Frames and the key sets they point at.
+//! Frames, the key sets they point at, and the views that readers get.
 //!
 //! A frame is one pool block: a header, a range for each present index group, a
 //! descriptor for each present series, and the series bytes. It holds offsets, never
 //! pointers.
 
 pub mod key_set;
+mod view;
 
 use std::{fmt, iter, mem};
 
 use key_set::KeySet;
+pub use view::{Mask, View};
 
 /// Bytes of the header.
 const HEAD: usize = 16;
@@ -114,12 +116,15 @@ pub struct Range {
 impl Range {
     /// The range of `group` in the frame `bytes`, or `None` when it is absent.
     fn find(bytes: &[u8], group: u32) -> Option<Self> {
-        let (ranges, ..) = split(bytes);
-        let range = &ranges[search(ranges, group)?];
-        Some(Self {
-            seq: u64::from_le_bytes(get(range, at::range::SEQ)),
-            count: u32::from_le_bytes(get(range, at::range::COUNT)),
-        })
+        let (ranges, ..) = parts(bytes);
+        Some(Self::read(&ranges[search(ranges, group)?]))
+    }
+
+    fn read(record: &[u8; RANGE]) -> Self {
+        Self {
+            seq: u64::from_le_bytes(get(record, at::range::SEQ)),
+            count: u32::from_le_bytes(get(record, at::range::COUNT)),
+        }
     }
 }
 
@@ -219,7 +224,7 @@ impl Draft {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        let (ranges, descriptors, body) = split_mut(&mut block);
+        let (ranges, descriptors, body) = parts_mut(&mut block);
         let indexes = series
             .iter()
             .map(|&(entry, _)| entry)
@@ -242,7 +247,7 @@ impl Draft {
     /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Time is
     /// logarithmic in the number of present series.
     pub fn series_mut(&mut self, entry: usize) -> Option<&mut [u8]> {
-        let (_, descriptors, body) = split_mut(&mut self.0);
+        let (_, descriptors, body) = parts_mut(&mut self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
         Some(&mut body[start..end])
@@ -250,7 +255,7 @@ impl Draft {
 
     /// Each present entry and its series bytes, to fill, in entry order.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
-        let (_, descriptors, mut body) = split_mut(&mut self.0);
+        let (_, descriptors, mut body) = parts_mut(&mut self.0);
         let mut offset = 0_usize;
         spans(ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
@@ -262,8 +267,8 @@ impl Draft {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, descriptors, body) = split(&self.0);
-        series(body, ends(descriptors))
+        let (_, descriptors, body) = parts(&self.0);
+        split(body, ends(descriptors))
     }
 
     /// The key set the draft's entries number into.
@@ -283,6 +288,15 @@ impl Draft {
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
         Range::find(&self.0, group)
+    }
+
+    /// Each present group and its range, in group order. Time is linear in the
+    /// number of present groups.
+    pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> {
+        let (ranges, ..) = parts(&self.0);
+        ranges
+            .iter()
+            .map(|record| (lead(record), Range::read(record)))
     }
 
     /// Sets how many samples each series of group `group` holds.
@@ -309,7 +323,7 @@ impl Draft {
     }
 
     fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
-        let (ranges, ..) = split_mut(&mut self.0);
+        let (ranges, ..) = parts_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
         };
@@ -358,7 +372,7 @@ impl Frame {
     /// in the number of present series.
     #[must_use]
     pub fn series(&self, entry: usize) -> Option<&[u8]> {
-        let (_, descriptors, body) = split(&self.0);
+        let (_, descriptors, body) = parts(&self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
         Some(&body[start..end])
@@ -366,22 +380,21 @@ impl Frame {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, _, body) = split(&self.0);
-        series(body, self.ends())
+        let (_, _, body) = parts(&self.0);
+        split(body, self.ends())
     }
 
     /// The credit that sending the frame to a reader spends: the bytes a block of the
     /// frame's length takes from its pool. It depends only on that length.
     #[must_use]
     pub fn charge(&self) -> u64 {
-        to_u64(block::footprint(self.0.len()))
+        charge_of(self.0.len())
     }
 
-    /// The series bytes of every present entry, as one view that shares the frame's
-    /// block, from the first series to the end. [`Frame::ends`] gives where each
-    /// series ends in this view. Copies nothing. Until it drops, the
-    /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
-    /// length.
+    /// The series bytes of every present entry, from the first series to the end, as
+    /// a block that shares the frame's memory. [`Frame::ends`] gives where each series
+    /// ends in it. Copies nothing. Until it drops, it keeps the frame's whole block in
+    /// use: [`Frame::charge`] bytes of the pool, not its length.
     #[must_use]
     pub fn body(&self) -> block::Block {
         let (ranges, series) = counts(&self.0);
@@ -390,9 +403,9 @@ impl Frame {
 
     /// Each present entry and the end of its series, as `(entry, end)`, in the order
     /// of [`Frame::iter`]. `end` counts from the start of [`Frame::body`], and
-    /// [`series`] reads each series back from the body and these ends.
+    /// [`split`] cuts the body at these ends.
     pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
-        let (_, descriptors, _) = split(&self.0);
+        let (_, descriptors, _) = parts(&self.0);
         ends(descriptors)
     }
 }
@@ -402,10 +415,11 @@ impl Frame {
 ///
 /// # Panics
 ///
-/// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
-/// one frame never panic. Run [`check`] once on a body and ends from another node
-/// before the first read.
-pub fn series<T>(
+/// The iterator panics at the first end that [`check`] refuses. When the body runs past
+/// the last end, it panics only once it runs out. The body and ends of one frame never
+/// panic. Run [`check`] once on a body and ends from another node before the first
+/// [`split`].
+pub fn split<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
 ) -> impl Iterator<Item = (T, &[u8])> {
@@ -423,7 +437,7 @@ pub fn series<T>(
     })
 }
 
-/// Checks that `ends` fit `body`, so that [`series`] reads them without a panic.
+/// Checks that `ends` fit `body`, so that [`split`] cuts at them without a panic.
 ///
 /// # Errors
 ///
@@ -566,22 +580,32 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
                 *memo = index;
             }
         }
-        bytes = bytes
-            .checked_next_multiple_of(SERIES_ALIGN)
-            .map_or(usize::MAX, |start| start.saturating_add(len));
+        bytes = next_end(bytes, len);
     }
     absent.map_or(Ok((groups, bytes)), Err)
 }
 
+/// Where a series of `len` bytes ends when it follows series bytes that end at
+/// `last`. Saturates at `usize::MAX`, which no pool holds.
+fn next_end(last: usize, len: usize) -> usize {
+    last.checked_next_multiple_of(SERIES_ALIGN)
+        .map_or(usize::MAX, |start| start.saturating_add(len))
+}
+
+/// The charge of a frame of `len` bytes (CREDIT RULES).
+fn charge_of(len: usize) -> u64 {
+    to_u64(block::footprint(len))
+}
+
 /// A frame's ranges, its descriptors, and its series bytes.
-fn split(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
+fn parts(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
     let (ranges, series) = counts(bytes);
     let (head, body) = bytes.split_at(body_start(ranges, series));
     let (ranges, descriptors) = head[HEAD..].split_at(RANGE * ranges);
     (ranges.as_chunks().0, descriptors.as_chunks().0, body)
 }
 
-fn split_mut(
+fn parts_mut(
     bytes: &mut [u8],
 ) -> (&mut [[u8; RANGE]], &mut [[u8; DESCRIPTOR]], &mut [u8]) {
     let (ranges, series) = counts(bytes);
@@ -669,12 +693,12 @@ mod tests {
     const F64: Type = Type::Scalar(Scalar::F64);
     const U8: Type = Type::Scalar(Scalar::U8);
 
-    fn key(n: u32) -> channel::Key {
+    pub(super) fn key(n: u32) -> channel::Key {
         channel::Key::from_u128(u128::from(n))
     }
 
     /// An interner where key `n` has slot `n`, for each `n` below 1000.
-    fn interner() -> Interner {
+    pub(super) fn interner() -> Interner {
         let mut interner = Interner::new();
         for n in 0..1000 {
             interner.slots().assign(key(n));
@@ -682,7 +706,7 @@ mod tests {
         interner
     }
 
-    fn pool(budget: usize) -> block::Pool {
+    pub(super) fn pool(budget: usize) -> block::Pool {
         let config = block::Config { budget };
         let memory = block::Heap::new(config.reservation());
         block::Pool::new(config, memory)
@@ -697,7 +721,7 @@ mod tests {
     }
 
     /// Two groups: index key 1 with key 2, and index key 3 with key 4.
-    fn two_groups() -> std::sync::Arc<KeySet> {
+    pub(super) fn two_groups() -> std::sync::Arc<KeySet> {
         interner().intern(&[
             Group {
                 index: key(1),
@@ -870,13 +894,13 @@ mod tests {
         assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
         let body = frame.body();
         assert_eq!(check(&body, ends.iter().copied()), Ok(()));
-        let read: Vec<_> = series(&body, ends).collect();
+        let read: Vec<_> = split(&body, ends).collect();
         assert_eq!(read, [(0, [1; 3].as_slice()), (1, &[]), (2, &[2; 9])]);
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         let empty = empty.freeze(Path::Live);
         assert_eq!(empty.ends().count(), 0);
         assert_eq!(check(&empty.body(), empty.ends()), Ok(()));
-        assert_eq!(series(&empty.body(), empty.ends()).count(), 0);
+        assert_eq!(split(&empty.body(), empty.ends()).count(), 0);
     }
 
     /// Tags `ends` with their positions.
@@ -928,19 +952,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "the end 5 is past the body of 4 bytes")]
     fn panics_on_an_end_past_the_body() {
-        series(&[0; 4], tagged(&[5])).for_each(drop);
+        split(&[0; 4], tagged(&[5])).for_each(drop);
     }
 
     #[test]
     #[should_panic(expected = "the end 2 is before 8, the start of its series")]
     fn panics_on_an_end_before_the_start_of_its_series() {
-        series(&[0; 16], tagged(&[3, 2])).for_each(drop);
+        split(&[0; 16], tagged(&[3, 2])).for_each(drop);
     }
 
     #[test]
     #[should_panic(expected = "the last end 8 is not the end of the body of 17 bytes")]
     fn panics_when_the_ends_stop_before_the_body() {
-        series(&[1; 17], tagged(&[3, 8])).for_each(drop);
+        split(&[1; 17], tagged(&[3, 8])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 0 is not the end of the body of 16 bytes")]
+    fn panics_on_a_body_with_no_ends() {
+        split(&[1; 16], tagged(&[])).for_each(drop);
     }
 
     #[test]
@@ -1249,6 +1279,34 @@ mod tests {
     }
 
     #[test]
+    fn gives_only_the_present_ranges() {
+        let pool = pool(1 << 16);
+        let set = two_groups();
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        assert_eq!(empty.ranges().count(), 0);
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap();
+        draft.set_count(1, 1);
+        draft.set_seq(1, 7);
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(ranges, [(1, Range { seq: 7, count: 1 })]);
+    }
+
+    #[test]
+    fn gives_a_present_range_without_samples() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (2, 0)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(ranges, [(0, Range::default()), (1, Range::default())]);
+        draft.set_seq(1, 5);
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(
+            ranges,
+            [(0, Range::default()), (1, Range { seq: 5, count: 0 })]
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "group 1 is absent from the frame")]
     fn refuses_a_count_for_an_absent_group() {
         let pool = pool(1 << 16);
@@ -1267,7 +1325,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct Case {
+    pub(super) struct Case {
         /// Data channels per group.
         data: Vec<usize>,
         /// Whether each group is present.
@@ -1286,7 +1344,7 @@ mod tests {
 
     /// Up to 4 groups of up to 40 data channels, with data slots on both sides of the
     /// index slot.
-    fn cases() -> impl Strategy<Value = Case> {
+    pub(super) fn cases() -> impl Strategy<Value = Case> {
         (1_usize..5)
             .prop_flat_map(|n| {
                 (
@@ -1349,6 +1407,17 @@ mod tests {
         (set, series)
     }
 
+    /// The key set of `case` and a frame of it, with each series filled with its
+    /// pattern.
+    pub(super) fn frame_of(case: &Case) -> (std::sync::Arc<KeySet>, Frame) {
+        let (set, series) = shape(case);
+        let mut draft = Draft::new(&pool(1 << 20), &set, case.form, &series).unwrap();
+        for (entry, bytes) in draft.iter_mut() {
+            bytes.copy_from_slice(&pattern(entry, bytes.len()));
+        }
+        (set, draft.freeze(case.path))
+    }
+
     /// Fills each series of `draft` with its pattern, through `iter_mut` or by entry.
     fn fill(
         draft: &mut Draft,
@@ -1381,18 +1450,12 @@ mod tests {
         Ok(())
     }
 
-    /// Writes a frame of `case`, then checks that every read gives back what it wrote.
-    fn round_trip(case: &Case) -> Result<(), TestCaseError> {
-        let (set, series) = shape(case);
-        let entries = set.entries().len();
-        let pool = pool(1 << 20);
-        let before = pool.committed();
-        let mut draft = Draft::new(&pool, &set, case.form, &series)
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        let taken = to_u64(pool.committed() - before);
-        prop_assert_eq!(draft.key_set(), set.key());
-        prop_assert_eq!(draft.form(), case.form);
-        fill(&mut draft, &series, entries, case.in_order)?;
+    /// Sets the range of each present group of `case` and checks the reads. Returns
+    /// each group's range, `None` when the group is absent.
+    fn set_ranges(
+        draft: &mut Draft,
+        case: &Case,
+    ) -> Result<Vec<Option<Range>>, TestCaseError> {
         let mut ranges = Vec::new();
         for ((group, &(seq, count, seq_first)), &present) in
             (0_u32..).zip(&case.ranges).zip(&case.groups)
@@ -1408,6 +1471,27 @@ mod tests {
             prop_assert_eq!(draft.range(group), range);
             ranges.push(range);
         }
+        let present: Vec<(u32, Range)> = (0_u32..)
+            .zip(&ranges)
+            .filter_map(|(group, range)| range.map(|range| (group, range)))
+            .collect();
+        prop_assert_eq!(draft.ranges().collect::<Vec<_>>(), present);
+        Ok(ranges)
+    }
+
+    /// Writes a frame of `case`, then checks that every read gives back what it wrote.
+    fn round_trip(case: &Case) -> Result<(), TestCaseError> {
+        let (set, series) = shape(case);
+        let entries = set.entries().len();
+        let pool = pool(1 << 20);
+        let before = pool.committed();
+        let mut draft = Draft::new(&pool, &set, case.form, &series)
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let taken = to_u64(pool.committed() - before);
+        prop_assert_eq!(draft.key_set(), set.key());
+        prop_assert_eq!(draft.form(), case.form);
+        fill(&mut draft, &series, entries, case.in_order)?;
+        let mut ranges = set_ranges(&mut draft, case)?;
         ranges.push(None);
         let written: Vec<(usize, Vec<u8>)> = series
             .iter()
@@ -1446,7 +1530,7 @@ mod tests {
         prop_assert_eq!(&*frame.body(), body.as_slice());
         let view = frame.body();
         prop_assert_eq!(check(&view, frame.ends()), Ok(()));
-        let from_ends: Vec<(usize, Vec<u8>)> = super::series(&view, frame.ends())
+        let from_ends: Vec<(usize, Vec<u8>)> = super::split(&view, frame.ends())
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
         prop_assert_eq!(&from_ends, &written);
