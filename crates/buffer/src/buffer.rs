@@ -429,8 +429,9 @@ impl Buffer {
     /// # Errors
     ///
     /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool
-    /// has no block for the first entry or its table; the buffer goes on. After a
-    /// failed sync, the error that ended the buffer.
+    /// has no block for the first entry or its table; the buffer goes on. When a
+    /// commit's file call fails before the read ends, the error that ended the
+    /// buffer.
     pub async fn read(
         &self,
         slot: Slot,
@@ -442,14 +443,23 @@ impl Buffer {
             file, pool, layout, ..
         } = &*self.shared;
         let mut reading = Reading::new(file, pool, *layout, path, from, budget);
+        let walked = self.walk(&mut reading, slot, path).await;
+        // After the walk: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        walked.map(|()| reading.finish())
+    }
+
+    /// Gives `reading` the records of `path` of the index at `slot` until it ends.
+    async fn walk(
+        &self,
+        reading: &mut Reading<'_>,
+        slot: Slot,
+        path: Path,
+    ) -> Result<(), Error> {
         while let Some(from) = reading.next() {
-            let found = {
-                let state = self.shared.state.borrow();
-                if let Some(failed) = &state.failed {
-                    return Err(Error::Files(failed.clone()));
-                }
-                state.logs.run(slot, path, from)
-            };
+            let found = self.shared.state.borrow().logs.run(slot, path, from);
             let Some((index, run)) = found else {
                 break;
             };
@@ -457,7 +467,7 @@ impl Buffer {
                 break;
             }
         }
-        Ok(reading.finish())
+        Ok(())
     }
 
     /// How many group commits ended since the open. It moves before the [`Commit`]
@@ -487,7 +497,7 @@ impl Buffer {
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
     /// `first`, and the tail, when `first + len` passes `u64::MAX`, or when an
-    /// entry's slot held another index before.
+    /// entry's slot held another index on its path before.
     pub fn append(
         &self,
         entries: impl IntoIterator<Item = Entry>,

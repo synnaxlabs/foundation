@@ -3242,6 +3242,47 @@ fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
     });
 }
 
+/// Reads run back to back while a commit's sync fails. Each read gives its 20
+/// durable entries or, once the sync failed, the error that ended the buffer, also
+/// a read in flight when the sync failed.
+#[test]
+fn a_read_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    let (mut sim, node) = one_node(160);
+    let errors = sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let batch: Vec<Entry> = (0..20)
+            .map(|first| {
+                let bytes = pool.alloc(8).expect("a block").freeze();
+                entry(1, a, Path::Live, first, 1, None, Parts::from(bytes))
+            })
+            .collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::Sync);
+        buffer
+            .append([entry(1, a, Path::Live, 20, 1, None, Parts::default())])
+            .expect("queues");
+        let mut errors = Vec::new();
+        while errors.len() < 2 {
+            match buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await {
+                Ok(read) => assert_eq!(read.entries.len(), 20),
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
+    });
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::Sync,
+        code: 5,
+    });
+    assert_eq!(errors.expect("the run ends"), [failed.clone(), failed]);
+}
+
 /// A read that holds entries ends where the pool has no block for the next one,
 /// as at its budget, and the next read goes on from there.
 #[test]

@@ -293,7 +293,8 @@ impl Logs {
     ///
     /// # Panics
     ///
-    /// When the log of `slot` holds another index than the header's.
+    /// When the log of `slot` on the header's path holds another index than the
+    /// header's.
     fn change(
         &mut self,
         slot: Slot,
