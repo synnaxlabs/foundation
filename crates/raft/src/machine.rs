@@ -371,10 +371,15 @@ impl Raft {
                 self.send(from, self.term, Body::VoteReply { granted });
             }
             Body::PreVoteReply { granted } => {
-                // A grant carries the term that its pre-campaign asks for, so one of
-                // another term answers an earlier pre-campaign.
-                let current = !granted || self.term.next() == Some(term);
-                if self.role == Role::PreCandidate && current {
+                // The PreVote arm sends a grant with the term asked for and a
+                // refusal with its own term. A grant of another term answers a
+                // pre-campaign of an earlier term, or comes from a faulty node.
+                let asked = if granted {
+                    self.term.next()
+                } else {
+                    Some(self.term)
+                };
+                if self.role == Role::PreCandidate && asked == Some(term) {
                     self.poll(from, granted);
                 }
             }
@@ -1822,7 +1827,7 @@ mod tests {
             assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
         }
 
-        // A grant of term 1 answers a pre-campaign from term 0.
+        // A grant of term 1 answers a pre-campaign from term 0. No node asks for 3.
         #[test]
         fn counts_a_grant_only_for_the_term_it_asks_for() {
             let mut raft = raft(&[1, 2, 3], at_term(1));

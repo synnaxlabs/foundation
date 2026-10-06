@@ -105,7 +105,7 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
 // A grant carries the term that its pre-campaign asks for. A grant of the current
 // term is a late answer to a pre-campaign from the term before.
 #[test]
-fn a_late_prevote_grant_does_not_make_a_cut_off_node_depose_the_leader() {
+fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let agreed = network.settle(&[]).unwrap();
     let (cut, other) = ((agreed.0 + 1) % 3, (agreed.0 + 2) % 3);
