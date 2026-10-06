@@ -704,3 +704,64 @@ fn times_out_at_once_with_a_timeout_below_zero() {
     assert_eq!(got, Some(Err(Failure::Timeout)));
     assert_eq!(spent, Span::ZERO);
 }
+
+#[test]
+fn sends_nothing_when_the_quiet_ends_at_the_deadline() {
+    // 10 bits a character at 9,600 baud: 3.5 characters take 3.65 ms.
+    let quiet = Span::from_nanos(3_645_833);
+    let mut bus = Bus::new(13, settings(9_600, None), line::Config::default());
+    let device = device();
+    bus.serve(UNIT, &device);
+    let (serial, clock) = (bus.client.serial(), bus.client.clock());
+    let config = config(CLIENT, bus.settings);
+    let got = bus.on_client(move || async move {
+        let mut client = Client::open(&serial, &config, clock.clone(), quiet)
+            .await
+            .expect("the port opens");
+        let write = Request::WriteRegister {
+            address: 3,
+            value: 7,
+        };
+        let got = said(client.exchange(UNIT, &write).await);
+        clock.sleep(ms(100)).await;
+        got
+    });
+    assert_eq!(got, Err(Failure::Timeout));
+    let device = device.lock().expect("no panic");
+    assert_eq!(device.holding_registers[3], 3, "the write was not sent");
+}
+
+/// Gives the bytes that arrive in `span`.
+async fn listen(port: &mut Port, clock: &Clock, span: Span) -> Vec<u8> {
+    let mut sleep = clock.sleep(span);
+    let mut heard = Vec::new();
+    let mut buffer = [0; 64];
+    poll_fn(|cx| {
+        while let Poll::Ready(n) = port.poll_read(cx, &mut buffer) {
+            heard.extend_from_slice(&buffer[..n.expect("the read works")]);
+        }
+        std::pin::Pin::new(&mut sleep).poll(cx)
+    })
+    .await;
+    heard
+}
+
+#[test]
+fn drops_a_cut_frame_once_the_line_is_quiet() {
+    let mut bus = Bus::new(14, settings(9_600, None), line::Config::default());
+    let device = device();
+    bus.serve(UNIT, &device);
+    let (serial, clock) = (bus.client.serial(), bus.client.clock());
+    let config = config(CLIENT, bus.settings);
+    let heard = bus.on_client(move || async move {
+        let mut port = serial.open(&config).await.expect("the port opens");
+        let mut request = Vec::new();
+        rtu::encode(17, &read(Table::HoldingRegisters, 3, 1), &mut request)
+            .expect("valid");
+        write(&mut port, &request[..5]).await;
+        clock.sleep(ms(15)).await;
+        write(&mut port, &request).await;
+        listen(&mut port, &clock, ms(100)).await
+    });
+    assert_eq!(heard, framed(&[17, 0x03, 0x02, 0x00, 0x03]));
+}

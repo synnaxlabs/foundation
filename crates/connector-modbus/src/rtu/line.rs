@@ -92,7 +92,7 @@ impl Line {
 
     /// Drops the bytes that arrive until `after`, and then until the line was quiet
     /// long enough to end a frame. Call it before each frame sent. Gives `false`
-    /// when the line cannot be quiet by `deadline`.
+    /// when the line cannot be quiet before `deadline`.
     pub(crate) async fn rest(
         &mut self,
         after: Option<Monotonic>,
@@ -102,7 +102,7 @@ impl Line {
         loop {
             let rested = self.rested();
             let until = after.map_or(rested, |after| after.max(rested));
-            if deadline.is_some_and(|deadline| until > deadline) {
+            if deadline.is_some_and(|deadline| until >= deadline) {
                 return Ok(false);
             }
             if !self.read(&mut dropped, Some(until)).await? {

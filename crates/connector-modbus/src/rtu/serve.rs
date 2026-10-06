@@ -31,7 +31,7 @@ pub async fn serve(
     let (mut bytes, mut reply) = (Vec::new(), Vec::new());
     let mut bad = false;
     loop {
-        let deadline = (bad || !bytes.is_empty()).then(|| line.rested());
+        let deadline = (!bytes.is_empty()).then(|| line.rested());
         match line.read(&mut bytes, deadline).await {
             Ok(true) => {}
             Ok(false) => {
