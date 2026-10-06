@@ -1,6 +1,7 @@
 //! `os::files` on the real disk, through `env::files`.
 
 use std::future::poll_fn;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::task::Poll;
@@ -134,6 +135,17 @@ fn create_makes_a_zeroed_file_of_its_length_in_the_data_directory() {
         assert_eq!(read(&file, &pool, 0, 12 * 1_024).await, vec![0; 12 * 1_024]);
         let found = std::fs::metadata(data.join("ring/0")).unwrap();
         assert_eq!(found.len(), 12 * KIB);
+    });
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "#931")]
+fn create_allocates_each_byte_of_the_file() {
+    const LEN: u64 = 64 << 20;
+    run(|files, data| async move {
+        create(&files, "a", LEN).await.close().await;
+        let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
+        assert!(allocated >= LEN, "{allocated} of {LEN} bytes");
     });
 }
 
@@ -318,17 +330,28 @@ fn a_sync_after_a_write_succeeds() {
 }
 
 #[test]
-fn free_drops_by_the_bytes_of_a_synced_write() {
+#[cfg_attr(target_os = "macos", ignore = "#931")]
+fn free_drops_by_the_bytes_of_a_created_file() {
     const LEN: u64 = 64 << 20;
+    // Other jobs on the host write to the same disk, and an attempt counts their bytes
+    // too.
+    const ATTEMPTS: usize = 8;
     run(|files, _| async move {
-        let pool = pool();
-        let part = block(&pool, &vec![1; 512 << 10]);
-        let before = files.free().await.unwrap();
-        let file = create(&files, "a", LEN).await;
-        file.write_at(0, &vec![part; 128]).await.unwrap();
-        file.sync().await.unwrap();
-        let taken = before.saturating_sub(files.free().await.unwrap());
-        assert!(taken.abs_diff(LEN) < LEN / 4, "{taken} is not {LEN}");
+        let mut seen = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            let path = attempt.to_string();
+            let before = files.free().await.unwrap();
+            let file = create(&files, &path, LEN).await;
+            let after = files.free().await.unwrap();
+            file.close().await;
+            let taken = before.saturating_sub(after);
+            if taken.abs_diff(LEN) < LEN / 4 {
+                return;
+            }
+            files.remove(Path::new(&path)).await.unwrap();
+            seen.push(taken);
+        }
+        panic!("{seen:?} are not {LEN}");
     });
 }
 

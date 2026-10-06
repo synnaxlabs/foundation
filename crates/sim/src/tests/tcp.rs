@@ -458,6 +458,29 @@ fn a_stream_whose_acceptor_closed_first_ends_with_no_reset() {
 }
 
 #[test]
+fn a_read_after_the_peer_finished_and_went_ends_with_no_reset() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        close(&mut tcp).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        let first = read(&mut tcp, 4_096).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        let (rest, end) = read_all(&mut tcp).await;
+        (first.len() + rest.len(), end)
+    });
+    let remote = at(&b, 4433);
+    start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, &pattern(10_000)).await.unwrap();
+        close(&mut tcp).await.unwrap();
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), (10_000, Ok(())));
+}
+
+#[test]
 fn a_drop_before_close_resets_the_peer_after_the_bytes_that_arrived() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
