@@ -217,8 +217,9 @@ impl From<header::Error> for Error {
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
 /// `tasks`. The task idles while nothing is queued. A drop ends the task at once
-/// when it idles, else at its next deadline. Entries queued and not yet committed
-/// at the drop are not written.
+/// when it idles, else at its next deadline, after it wrote the entries queued at
+/// the drop. A [`Commit`] held past the drop resolves once the task ended, so await
+/// it before a reopen.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -264,7 +265,7 @@ struct State {
     wakers: Vec<Waker>,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
-    /// Whether the handle dropped. The task ends when it next decides.
+    /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
@@ -484,9 +485,9 @@ impl Buffer {
     /// Gives the file error that ended the buffer when it ended before they were
     /// durable.
     #[must_use]
-    pub fn committed(&self) -> Commit<'_> {
+    pub fn committed(&self) -> Commit {
         Commit {
-            shared: &self.shared,
+            shared: Rc::clone(&self.shared),
             until: self.shared.state.borrow().durable_at(),
         }
     }
@@ -636,7 +637,8 @@ fn small_record(
 /// The commit task. It parks while the state idles; a push that takes an entry or
 /// the drop wakes it. Each deadline takes the closed groups and the open one, seals
 /// them in order from `chain`, the value of the restart record, writes them, syncs
-/// once, and wakes the waiters. A failed file call or the drop ends the task.
+/// once, and wakes the waiters. A failed file call ends the task, and so does the
+/// drop once nothing is queued.
 async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
@@ -647,11 +649,11 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut idled = false;
         let ended = poll_fn(|cx| {
             let mut state = shared.state.borrow_mut();
-            if state.closed {
-                return Poll::Ready(true);
-            }
             if !state.idle() {
                 return Poll::Ready(false);
+            }
+            if state.closed {
+                return Poll::Ready(true);
             }
             state.parked = Some(cx.waker().clone());
             idled = true;
@@ -670,9 +672,6 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         sleep.reset(clock.now() + commit);
         {
             let mut state = shared.state.borrow_mut();
-            if state.closed {
-                return;
-            }
             state.taken += 1;
             if !state.open.is_empty() {
                 state.close_open();
@@ -712,15 +711,16 @@ async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
     shared.file.sync().await
 }
 
-/// The future of [`Buffer::committed`].
+/// The future of [`Buffer::committed`]. It does not borrow the buffer, and it holds
+/// the ring open until it drops.
 #[derive(Debug)]
-pub struct Commit<'a> {
-    shared: &'a Shared,
+pub struct Commit {
+    shared: Rc<Shared>,
     /// The count of `commits` that resolves it.
     until: u64,
 }
 
-impl Future for Commit<'_> {
+impl Future for Commit {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

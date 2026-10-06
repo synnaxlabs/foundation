@@ -328,7 +328,7 @@ impl Shard {
     /// Gives the error that ended the buffer when it ended before they were on disk.
     /// Commits run without this future, so a caller may drop it. Call
     /// [`woken`](Self::woken) after it resolves.
-    pub(crate) fn committed(&self) -> buffer::Commit<'_> {
+    pub(crate) fn committed(&self) -> buffer::Commit {
         self.buffer.committed()
     }
 
