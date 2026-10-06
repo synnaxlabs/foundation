@@ -2,11 +2,11 @@ use std::fmt::Write as _;
 
 use document::encoding::{self, TooDeep};
 use document::value::{Call, Kind, Value};
-use document::{Attribute, Block, Document, Map, Span};
+use document::{Attribute, Block, Document, Map};
 
+use crate::Unwritable;
 use crate::lex;
 use crate::parse::{opens_for, reference};
-use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
 const WIDTH: usize = 88;
@@ -37,19 +37,16 @@ pub(crate) enum After {
 /// a key.
 ///
 /// A text of more than `u32::MAX` bytes is written too, and `read` refuses it with
-/// [`Error::TooLarge`].
+/// [`Error::TooLarge`](crate::Error::TooLarge).
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unwritable`] for each part that HCL text cannot hold, in
-/// Document order. A Document nested deeper than [`encoding::DEPTH_MAX`] gives only
-/// [`Unwritable::Depth`], at the first level past the limit.
-pub fn write(document: &Document) -> Result<String, Vec<Error>> {
+/// Returns each part that HCL text cannot hold, in Document order. A Document nested
+/// deeper than [`encoding::DEPTH_MAX`] gives only [`Unwritable::Depth`], at the first
+/// level past the limit.
+pub fn write(document: &Document) -> Result<String, Vec<Unwritable>> {
     if let Err(TooDeep { span }) = encoding::check(document) {
-        return Err(vec![Error::Unwritable {
-            span,
-            part: Unwritable::Depth,
-        }]);
+        return Err(vec![Unwritable::Depth { span }]);
     }
     let mut writer = Writer::default();
     writer.body(document.attributes.iter(), &document.blocks, 0, false);
@@ -100,7 +97,7 @@ impl<'a> Items<'a> {
 #[derive(Default)]
 pub(crate) struct Writer<'a> {
     out: String,
-    errors: Vec<Error>,
+    errors: Vec<Unwritable>,
     /// What each line starts with, before its indent.
     margin: &'a str,
     /// The column where the first line starts.
@@ -119,7 +116,7 @@ impl<'a> Writer<'a> {
     }
 
     /// The text written, or each part that HCL text cannot hold.
-    pub(crate) fn finish(self) -> Result<String, Vec<Error>> {
+    pub(crate) fn finish(self) -> Result<String, Vec<Unwritable>> {
         if self.errors.is_empty() {
             Ok(self.out)
         } else {
@@ -141,7 +138,9 @@ impl<'a> Writer<'a> {
         for attribute in attributes {
             self.pad(indent);
             if !lex::identifier(&attribute.key) {
-                self.refuse(attribute.key_span, Unwritable::Key);
+                self.errors.push(Unwritable::Key {
+                    span: attribute.key_span,
+                });
             }
             self.out.push_str(&attribute.key);
             self.out.push_str(" = ");
@@ -164,7 +163,9 @@ impl<'a> Writer<'a> {
     /// levels in.
     pub(crate) fn block(&mut self, block: &Block, indent: usize) {
         if !lex::identifier(&block.keyword) {
-            self.refuse(block.keyword_span, Unwritable::Keyword);
+            self.errors.push(Unwritable::Keyword {
+                span: block.keyword_span,
+            });
         }
         self.out.push_str(&block.keyword);
         for label in &block.labels {
@@ -260,7 +261,7 @@ impl<'a> Writer<'a> {
             Kind::String(text) => return quoted(&mut self.out, text),
             Kind::Reference(name) => {
                 if !reference(name) {
-                    self.refuse(value.span, Unwritable::Reference);
+                    self.errors.push(Unwritable::Reference { span: value.span });
                 }
                 return self.out.push_str(name.as_str());
             }
@@ -307,17 +308,15 @@ impl<'a> Writer<'a> {
             }
             Items::Call(call) => {
                 if !lex::identifier(&call.function) {
-                    self.refuse(call.function_span, Unwritable::Function);
+                    self.errors.push(Unwritable::Function {
+                        span: call.function_span,
+                    });
                 }
                 self.out.push_str(&call.function);
                 self.out.push('(');
             }
             Items::Map(_) => self.out.push('{'),
         }
-    }
-
-    fn refuse(&mut self, span: Option<Span>, part: Unwritable) {
-        self.errors.push(Error::Unwritable { span, part });
     }
 
     /// Refuses the first item of a list at its first word when HCL reads that word
@@ -338,7 +337,7 @@ impl<'a> Writer<'a> {
             | Kind::List(_)
             | Kind::Map(_) => return,
         };
-        self.refuse(span, Unwritable::For);
+        self.errors.push(Unwritable::For { span });
     }
 
     /// Writes the blank line between an item and a block after it.
@@ -434,13 +433,13 @@ fn opens_template(c: char, next: Option<&char>) -> bool {
 #[cfg(test)]
 mod tests {
     use document::value::Float;
-    use document::{Label, Position, Source};
+    use document::{Label, Position, Source, Span};
     use proptest::prelude::*;
     use types::name::Name;
 
     use super::*;
     use crate::arbitrary::document;
-    use crate::read;
+    use crate::{Error, read};
 
     fn on(start: u32, end: u32) -> Span {
         let at = |offset| Position {
@@ -542,10 +541,7 @@ mod tests {
             let expected = if read(Source(0), &text).as_ref() == Ok(&document) {
                 Ok(text)
             } else {
-                Err(vec![Error::Unwritable {
-                    span: None,
-                    part: Unwritable::Reference,
-                }])
+                Err(vec![Unwritable::Reference { span: None }])
             };
             prop_assert_eq!(write(&document), expected);
         }
@@ -787,18 +783,18 @@ mod tests {
                 )
             }],
         };
-        let unwritable = |span, part| Error::Unwritable { span, part };
+        let at = |start, end| Some(on(start, end));
         assert_eq!(
             write(&document),
             Err(vec![
-                unwritable(Some(on(21, 24)), Unwritable::Function),
-                unwritable(Some(on(25, 27)), Unwritable::Reference),
-                unwritable(Some(on(0, 6)), Unwritable::Key),
-                unwritable(Some(on(9, 13)), Unwritable::Reference),
-                unwritable(Some(on(30, 38)), Unwritable::Keyword),
-                unwritable(None, Unwritable::Reference),
-                unwritable(None, Unwritable::Reference),
-                unwritable(None, Unwritable::Reference),
+                Unwritable::Function { span: at(21, 24) },
+                Unwritable::Reference { span: at(25, 27) },
+                Unwritable::Key { span: at(0, 6) },
+                Unwritable::Reference { span: at(9, 13) },
+                Unwritable::Keyword { span: at(30, 38) },
+                Unwritable::Reference { span: None },
+                Unwritable::Reference { span: None },
+                Unwritable::Reference { span: None },
             ])
         );
 
@@ -810,8 +806,8 @@ mod tests {
         assert_eq!(
             write(&words),
             Err(vec![
-                unwritable(None, Unwritable::Key),
-                unwritable(None, Unwritable::Keyword),
+                Unwritable::Key { span: None },
+                Unwritable::Keyword { span: None },
             ])
         );
     }
@@ -823,10 +819,7 @@ mod tests {
             let document = attributes(vec![("a", reference(name))]);
             assert_eq!(
                 write(&document),
-                Err(vec![Error::Unwritable {
-                    span: None,
-                    part: Unwritable::Reference,
-                }]),
+                Err(vec![Unwritable::Reference { span: None }]),
                 "{name:?}"
             );
         }
@@ -862,10 +855,7 @@ mod tests {
         ];
         for (items, span) in cases {
             let document = attributes(vec![("a", Kind::List(items))]);
-            let error = Error::Unwritable {
-                span: Some(span),
-                part: Unwritable::For,
-            };
+            let error = Unwritable::For { span: Some(span) };
             assert_eq!(write(&document), Err(vec![error]), "{document:?}");
         }
     }
@@ -873,10 +863,7 @@ mod tests {
     #[test]
     fn refuses_a_list_that_starts_with_the_call_for_x_once_for_its_function() {
         let document = attributes(vec![("a", list(vec![call("for.x", Vec::new())]))]);
-        let error = Error::Unwritable {
-            span: None,
-            part: Unwritable::Function,
-        };
+        let error = Unwritable::Function { span: None };
         assert_eq!(write(&document), Err(vec![error]));
     }
 
@@ -920,9 +907,8 @@ mod tests {
             })
         };
         written(&nest(63, "a"));
-        let refused = Err(vec![Error::Unwritable {
+        let refused = Err(vec![Unwritable::Depth {
             span: Some(on(1, 2)),
-            part: Unwritable::Depth,
         }]);
         assert_eq!(write(&nest(64, "a")), refused);
         // A key too long for `[]` to fit on its line.
@@ -958,12 +944,7 @@ mod tests {
         for _ in 0..64 {
             lists = value(Kind::List(vec![lists]));
         }
-        let refused = |span| {
-            Err(vec![Error::Unwritable {
-                span: Some(span),
-                part: Unwritable::Depth,
-            }])
-        };
+        let refused = |span| Err(vec![Unwritable::Depth { span: Some(span) }]);
         let document = Document {
             attributes: Map::new(vec![Attribute {
                 key: "a".into(),
@@ -1064,9 +1045,8 @@ mod tests {
         };
         assert_eq!(
             write(&document),
-            Err(vec![Error::Unwritable {
-                span: Some(on(64, 65)),
-                part: Unwritable::Depth,
+            Err(vec![Unwritable::Depth {
+                span: Some(on(64, 65))
             }])
         );
     }
@@ -1083,9 +1063,8 @@ mod tests {
             std::mem::forget(document);
             assert_eq!(
                 written,
-                Err(vec![Error::Unwritable {
-                    span: Some(on(64, 65)),
-                    part: Unwritable::Depth,
+                Err(vec![Unwritable::Depth {
+                    span: Some(on(64, 65))
                 }]),
                 "{level:?}"
             );

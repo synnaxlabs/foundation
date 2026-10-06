@@ -21,7 +21,11 @@ fuzz_target!(|input: &str| {
     let own = match config_hcl::read(Source(0), old) {
         Ok(own) => own,
         Err(problems) => {
-            assert_eq!(updated, Err(problems), "not the problems `read` gives");
+            assert_eq!(
+                updated,
+                Err(config_hcl::Refusal::Text(problems)),
+                "not the problems `read` gives"
+            );
             return;
         }
     };
