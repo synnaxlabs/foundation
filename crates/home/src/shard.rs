@@ -383,11 +383,13 @@ impl Shard {
     }
 
     /// Raises the credit of a complete reader to `limit_bytes` since it opened. A
-    /// limit that is not higher changes nothing.
+    /// limit that is not higher changes nothing, and so does a grant to a reader that
+    /// is not open: a grant can arrive after its reader closes.
     ///
     /// # Panics
     ///
-    /// If the complete reader is not open.
+    /// If the shard does not carry the reader's index, or its readers never gave the
+    /// reader's session.
     pub(crate) fn grant(&mut self, key: reader::Key, limit_bytes: u64) {
         self.index(key).readers.grant(key.session, limit_bytes);
     }
@@ -2093,6 +2095,19 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1), seq(2, 1)]);
+            });
+        }
+
+        #[test]
+        fn ignores_a_grant_to_a_closed_complete_reader() {
+            run(46, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let one = Mode::Complete { limit_bytes: 1 };
+                let reader = shard.open_reader(Slot::new(0), one, MESH);
+                shard.close_reader(reader, MESH);
+                shard.grant(reader, CREDIT);
+                let after = shard.open_reader(Slot::new(0), one, MESH);
+                assert_ne!(after, reader);
             });
         }
 
