@@ -1008,32 +1008,40 @@ How to read this record:
   message can wait for bytes of a lower class to be acknowledged (#797). The QUIC send
   window, not the send budget, bounds what QUIC holds. A message that QUIC does not take
   in full waits its turn, by class, then oldest first. Only the first sender in turn
-  writes, and only it wakes when QUIC has room. A write of a higher class than every
+  writes, and only it wakes when QUIC has room. A write of a class ahead of every
   waiter goes first; any other write waits, and a `try_send` gives the message back.
   Stream credit is twice the connection window, so a stream never waits on its own
   credit while the connection has room. This relies on reader-granted credits (B3): a
   node takes every byte it granted credit for. A peer that gives less stalls only its
-  own connection (#819). `Complete` gets a guaranteed minimum share of the turn (#819,
-  before the alpha). Lost: a connection per class, because four handshakes and four
-  congestion controllers compete on one path (#55). Settled by the advisor and the
-  coordinator under the person's delegation (#789). A node resets a stream with the
-  stop's code when the stop arrives. A peer breaks the protocol when it sends another
-  class byte, ends a stream inside a message, sends a message over the limit, or resets
-  or stops a stream with a code over 32 bits. The node then closes the connection with
-  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
-  Each connection keeps two budgets, which count
-  the length of each message. A sender starts a message only when the messages it
-  started and the streams have not taken in full stay within the peer's `window_bytes`;
-  else the write waits for `Writable`. A message starts only when it fits and no stream
-  of its class or a higher class waits for room. Room that frees goes to the waiting
-  streams highest class first, then oldest first, until the next one does not fit, and
-  only those streams wake (#611). A send that does not wait (`try_send`) starts a
-  message only by the same rule and when, after a flush, the stream holds no part of an
-  earlier one; else it gives the message back with no byte of it sent, and the stream
-  does not wait for room (#597). A receiver takes a block by the same rule, within
-  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable` (#611). So
-  bytes that wait for a block never use up the credit that a started message needs, and
-  a peer that breaks the send rule holds at most the receive budget and stops only its
+  own connection (#819). The turn goes `Command`, then `Latest` and `Complete` by share,
+  then `CatchUp`. While streams of both `Latest` and `Complete` hold a message to send,
+  QUIC takes 3 bytes of `Complete` for each byte of `Latest`, within about one window:
+  `Complete` goes ahead while it is owed bytes. A class alone makes no debt and no
+  credit, and pays off what it owes or is owed. Room that a stream got and its caller
+  has not taken counts for neither class, and a message that `try_send` gave back is not
+  held. The send budget gives room in the order of the turn. Room that a message of the
+  owed class frees waits for that class's next message while the other class holds room,
+  so neither class can take the share through the budget (#819). Lost: a connection per
+  class, because four handshakes and four congestion controllers compete on one path
+  (#55). Settled by the advisor and the coordinator under the person's delegation
+  (#789). A node resets a stream with the stop's code when the stop arrives. A peer
+  breaks the protocol when it sends another class byte, ends a stream inside a message,
+  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
+  The node then closes the connection with application code 2^32 and the reason as text,
+  and the caller gets `Error::Broken`.
+  Each connection keeps two budgets, which count the length of each message. A sender
+  starts a message only when the messages it started and the streams have not taken in
+  full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
+  message starts only when it fits and no stream of its class or a class ahead of it
+  waits for room. Room that frees goes to the waiting streams by class in that order,
+  then oldest first, until the next one does not fit, and only those streams wake
+  (#611). A send that does not wait (`try_send`) starts a message only by the same rule
+  and when, after a flush, the stream holds no part of an earlier one; else it gives the
+  message back with no byte of it sent, and the stream does not wait for room (#597). A
+  receiver takes a block by the same rule, highest class first, within `window_bytes`
+  plus `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that
+  wait for a block never use up the credit that a started message needs, and a peer that
+  breaks the send rule holds at most the receive budget and stops only its
   own connection. Each node's first one-way stream is its hello, with no class byte:
   (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
   0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
@@ -3095,7 +3103,8 @@ conclusion together". Each one is listed below.
   (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
   Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection, the retry
-  interval of a read that waits for a block (RECV WAITS).
+  interval of a read that waits for a block (RECV WAITS), the `Complete` share of the
+  turn (3 to 1, `LATEST_COST`).
 - Compression and reduction defaults; retention defaults; disk budget defaults.
 - Benchmark reruns owed: r1 handoff, r10 codecs, r11 memory on Linux x86-64 (pinned)
   and Raspberry Pi 4; `sim` binary size against P1 (BQ19); binary size and idle memory
