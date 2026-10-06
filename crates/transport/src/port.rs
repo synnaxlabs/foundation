@@ -17,9 +17,10 @@ const BUFFER_BYTES: usize = 1 << 21;
 /// use std::net::SocketAddr;
 /// use std::num::NonZeroUsize;
 ///
+/// use env::net::{Error, Net};
 /// use transport::{Port, port};
 ///
-/// fn bind(net: &env::net::Net, at: SocketAddr) -> Result<Vec<port::Shard>, env::net::Error> {
+/// fn bind(net: &Net, at: SocketAddr) -> Result<Vec<port::Shard>, Error> {
 ///     let port = Port::bind(net, at)?;
 ///     let _ = port.addresses();
 ///     Ok(port.split(NonZeroUsize::MIN))
@@ -88,7 +89,7 @@ pub struct Shard {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
     use std::num::NonZeroUsize;
 
     use super::Port;
@@ -99,12 +100,14 @@ mod tests {
     const FREE: u16 = 49152;
 
     #[test]
-    fn a_bind_of_port_0_gives_the_port_it_took() {
+    fn a_bind_of_port_0_gives_the_port_it_took_and_keeps_the_ip() {
         testing::run(0, |shard| {
-            let port = Port::bind(shard.net(), SocketAddr::new(shard.ip(), 0));
-            let bound = SocketAddr::new(shard.ip(), FREE);
-            let port = port.expect("a port");
-            assert_eq!(port.addresses(), [Address::Udp(bound)]);
+            for ip in [shard.ip(), IpAddr::V6(Ipv6Addr::UNSPECIFIED)] {
+                let port = Port::bind(shard.net(), SocketAddr::new(ip, 0));
+                let port = port.expect("a port");
+                let bound = SocketAddr::new(ip, FREE);
+                assert_eq!(port.addresses(), [Address::Udp(bound)], "{ip}");
+            }
         });
     }
 
