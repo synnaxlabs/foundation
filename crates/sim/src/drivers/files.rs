@@ -177,12 +177,39 @@ impl env::files::Descriptor for Descriptor {
         };
         self.node.request(&self.path, call, drop)
     }
+
+    fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(Close(Some(*self)))
+    }
 }
 
 impl Drop for Descriptor {
     fn drop(&mut self) {
-        lock(&self.node.shared)
+        let unused = lock(&self.node.shared)
             .files()
-            .close(self.node.node, self.handle);
+            .release(self.node.node, self.handle);
+        drop(unused);
+    }
+}
+
+/// The close of a descriptor, which ends when its calls end. A drop closes it at once.
+struct Close(Option<Descriptor>);
+
+impl Future for Close {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let descriptor =
+            (self.0.as_ref()).expect("invariant: a close is not polled after it ends");
+        let waker = cx.waker().clone();
+        let (poll, unused) = lock(&descriptor.node.shared)
+            .files()
+            .poll_close(descriptor.handle, waker);
+        drop(unused);
+        if poll.is_ready() {
+            // The drop closes the descriptor, which locks the state.
+            drop(self.0.take());
+        }
+        poll
     }
 }

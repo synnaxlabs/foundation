@@ -164,7 +164,7 @@ mod tests {
             let series = [(0, stamps.len() * 8)];
             let mut draft = Draft::new(&self.pool, &self.set, Form::Raw, &series)
                 .expect("the pool has room");
-            let bytes = draft.series(0).expect("the index is present");
+            let bytes = draft.series_mut(0).expect("the index is present");
             bytes.copy_from_slice(stamps.as_flattened());
             let count = u32::try_from(stamps.len()).expect("a short test frame");
             draft.set_count(0, count);

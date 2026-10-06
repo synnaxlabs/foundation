@@ -42,7 +42,7 @@ fn main() {
         for (entry, bytes) in draft.iter_mut() {
             bytes.fill(u8::try_from(entry).expect("entries are small"));
         }
-        draft.series(0).expect("entry 0 is present").fill(1);
+        draft.series_mut(0).expect("entry 0 is present").fill(1);
         draft.set_count(0, 2);
         draft.set_seq(0, 9);
         let drafted: usize = draft.iter().map(|(_, bytes)| bytes.len()).sum();

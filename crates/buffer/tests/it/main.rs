@@ -507,13 +507,14 @@ fn a_batch_is_queued_whole_or_not_at_all() {
     run(6, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, 8183), &mut slots)
+            .open(layout(4 * BLOCK, 8183), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
+        let first = Parts::from(shard.block(5000));
         let parts = Parts::from(shard.block(3900));
         buffer
-            .append([entry(1, a, Path::Live, 0, 1, None, parts.clone())])
+            .append([entry(1, a, Path::Live, 0, 1, None, first)])
             .expect("the first record has room");
         let full = buffer.append([
             entry(1, a, Path::Live, 1, 1, None, parts.clone()),
@@ -532,7 +533,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, 8183), &mut slots)
+            .open(layout(4 * BLOCK, 8183), &mut slots)
             .await
             .expect("reopens");
         assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(1, None));
@@ -556,7 +557,7 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
             .expect("the record has room");
         let empty = Parts::from(shard.block(0));
         let two = Parts::from([shard.block(0), shard.block(0)]);
-        let body = Parts::from(shard.block(BODY_MAX - 54));
+        let body = Parts::from(shard.block(buffer.layout().entry_max() + 1));
         let cases = [
             (
                 vec![entry(1, a, Path::Live, 1, 1, None, empty.clone()); 1024],
@@ -1786,5 +1787,30 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         let opened = shard.open(ring, &mut slots).await;
         let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(3, Some(3))));
+    });
+}
+
+/// A batch of one entry with `entry_max` bytes of parts commits after an entry that
+/// opened a group, and is recovered at the next open.
+#[test]
+fn one_entry_of_the_entry_max_commits_and_is_recovered() {
+    run(110, Memory::default(), |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let small = Parts::from(shard.block(10));
+        let max = Parts::from(shard.block(buffer.layout().entry_max()));
+        assert_eq!(buffer.layout().entry_max(), 4032);
+        let appended = buffer.append([entry(1, a, Path::Live, 0, 1, None, small)]);
+        assert_eq!(appended, Ok(()));
+        let appended = buffer.append([entry(1, a, Path::Live, 1, 1, Some(1), max)]);
+        assert_eq!(appended, Ok(()));
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(2, Some(1))));
     });
 }
