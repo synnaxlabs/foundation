@@ -36,8 +36,8 @@ pub enum Discipline {
 }
 
 impl Discipline {
-    /// The change that `estimate`, a result of [`combine::combine`] with `drift`, makes.
-    /// The first estimate is served at once, and later ones are slewed toward. An error
+    /// The change that `estimate`, from [`combine::combine`] with `drift`, makes. The
+    /// first estimate is served at once, and later ones are slewed toward. An error
     /// keeps the slew in holdover, or stays unsynced before the first estimate. An
     /// unknown estimate ([`Measurement::unknown`]) never replaces a known one: it keeps
     /// the slew in holdover while the slew's target, grown by `drift` to the estimate's
@@ -160,7 +160,7 @@ mod tests {
         prop_oneof![slew(), unknown_slew()]
     }
 
-    /// A discipline that has a slew from `slew`, held over for a cause from `cause`, and
+    /// A discipline with a slew from `slew`, held over for a cause from `cause`, and
     /// the slew.
     fn slewing<S: Strategy<Value = Slew>>(
         slew: impl Fn() -> S,
@@ -184,7 +184,8 @@ mod tests {
             now in 0..TIME_NS,
             drift in drift(),
         ) {
-            let change = Discipline::Unsynced(error).next(Ok(m), drift).expect("a change");
+            let unsynced = Discipline::Unsynced(error);
+            let change = unsynced.next(Ok(m), drift).expect("a change");
             let synced = Discipline::Synced(Slew::new(m));
             prop_assert_eq!(change.at(Monotonic(now), drift), synced);
         }
@@ -196,7 +197,8 @@ mod tests {
             now in 0..TIME_NS,
             drift in drift(),
         ) {
-            let change = Discipline::Unsynced(error).next(Ok(m), drift).expect("a change");
+            let unsynced = Discipline::Unsynced(error);
+            let change = unsynced.next(Ok(m), drift).expect("a change");
             let synced = Discipline::Synced(Slew::new(m));
             prop_assert_eq!(change.at(Monotonic(now), drift), synced);
         }
