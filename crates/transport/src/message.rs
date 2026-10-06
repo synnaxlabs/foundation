@@ -9,53 +9,11 @@
 )]
 
 use std::mem;
-use std::ops::Deref;
 use std::task::Poll;
 
 use block::{Block, Pool, Unique};
 
-use crate::Error;
-
-/// The length prefix of one message, in the fewest bytes.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Prefix {
-    bytes: [u8; 8],
-    size: usize,
-}
-
-impl Prefix {
-    /// The prefix of a message of `len` bytes.
-    ///
-    /// # Panics
-    ///
-    /// When `len` is 2^62 or more, which no varint holds.
-    pub(crate) fn new(len: usize) -> Self {
-        let value = u64::try_from(len)
-            .ok()
-            .filter(|&value| value < 1 << 62)
-            .unwrap_or_else(|| {
-                panic!("a message of {len} bytes is over the varint limit")
-            });
-        let (tag, size, shift) = match value {
-            0..64 => (0, 1, 56),
-            64..16_384 => (0x40 << 56, 2, 48),
-            16_384..1_073_741_824 => (0x80 << 56, 4, 32),
-            _ => (0xc0 << 56, 8, 0),
-        };
-        let bytes = (value.wrapping_shl(shift) | tag).to_be_bytes();
-        Self { bytes, size }
-    }
-}
-
-impl Deref for Prefix {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        self.bytes
-            .get(..self.size)
-            .expect("invariant: a prefix is at most 8 bytes")
-    }
-}
+use crate::{Error, varint};
 
 /// Splits a stream's bytes into whole messages, each in one block from a pool.
 #[derive(Debug)]
@@ -67,7 +25,7 @@ pub(crate) struct Reader {
 #[derive(Debug)]
 enum State {
     /// A length prefix, with `have` of its `size` bytes. `size` is 1 until the first
-    /// byte gives it. The bytes after `have` are zero.
+    /// byte gives it.
     Prefix {
         bytes: [u8; 8],
         have: usize,
@@ -136,17 +94,10 @@ impl Reader {
                         Poll::Ready(true) => {}
                     }
                     let [first, ..] = *bytes;
-                    let (full, shift, mask) = match first >> 6 {
-                        0 => (1, 56, 0x3f),
-                        1 => (2, 48, 0x3fff),
-                        2 => (4, 32, 0x3fff_ffff),
-                        _ => (8, 0, 0x3fff_ffff_ffff_ffff),
-                    };
-                    *size = full;
-                    if *have == full {
-                        let value =
-                            u64::from_be_bytes(*bytes).wrapping_shr(shift) & mask;
-                        self.state = State::Sized(value);
+                    *size = varint::size(first);
+                    if *have == *size {
+                        let prefix = bytes.get(..*size).expect("invariant: size <= 8");
+                        self.state = State::Sized(varint::value(prefix));
                     }
                 }
                 State::Sized(value) => {
@@ -260,6 +211,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::varint::Varint;
 
     fn pool(budget: usize) -> Pool {
         let config = Config { budget };
@@ -271,7 +223,8 @@ mod tests {
     fn encode(messages: &[Vec<u8>]) -> Vec<u8> {
         let mut stream = Vec::new();
         for message in messages {
-            stream.extend_from_slice(&Prefix::new(message.len()));
+            let prefix = Varint::new(message.len()).expect("a varint");
+            stream.extend_from_slice(&prefix);
             stream.extend_from_slice(message);
         }
         stream
@@ -334,45 +287,6 @@ mod tests {
                 Poll::Ready(None) => return Ok(messages),
                 Poll::Pending => panic!("a source that is not open is never pending"),
             }
-        }
-    }
-
-    mod prefix {
-        use super::*;
-
-        #[test]
-        fn takes_the_fewest_bytes() {
-            let lens = [
-                (0, 1),
-                (63, 1),
-                (64, 2),
-                (16_383, 2),
-                (16_384, 4),
-                ((1 << 30) - 1, 4),
-                (1 << 30, 8),
-                ((1 << 62) - 1, 8),
-            ];
-            for (len, bytes) in lens {
-                assert_eq!(Prefix::new(len).len(), bytes, "{len}");
-            }
-        }
-
-        #[test]
-        fn matches_rfc_9000() {
-            // RFC 9000 appendix A.1.
-            assert_eq!(
-                &*Prefix::new(151_288_809_941_952_652),
-                [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c]
-            );
-            assert_eq!(&*Prefix::new(494_878_333), [0x9d, 0x7f, 0x3e, 0x7d]);
-            assert_eq!(&*Prefix::new(15_293), [0x7b, 0xbd]);
-            assert_eq!(&*Prefix::new(37), [0x25]);
-        }
-
-        #[test]
-        #[should_panic(expected = "a message of 4611686018427387904 bytes")]
-        fn panics_at_2_to_the_62() {
-            let _ = Prefix::new(1 << 62);
         }
     }
 
@@ -636,7 +550,8 @@ mod tests {
             let pool = pool(2 * block::footprint(bytes_max));
             let mut readers = Vec::new();
             for _ in 0..2 {
-                let mut source = Source::new(Prefix::new(bytes_max).to_vec(), 64);
+                let mut source =
+                    Source::new(Varint::new(bytes_max).expect("a varint").to_vec(), 64);
                 source.open = true;
                 let mut reader = Reader::new(bytes_max);
                 assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));

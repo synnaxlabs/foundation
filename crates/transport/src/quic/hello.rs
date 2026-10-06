@@ -1,16 +1,16 @@
 //! The hello: the limits a node sends on its first one-way stream, which its peer
 //! obeys. It is (id, value) pairs, both QUIC varints, ids strictly increasing.
 
-use noq_proto::coding::{Decodable, Encodable};
 use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
 use super::connection::Fault;
+use crate::varint::{self, Varint};
 
 /// The most bytes a hello takes.
 pub(super) const BYTES_MAX: usize = 256;
 
-const WINDOW: VarInt = VarInt::from_u32(0);
-const MESSAGE: VarInt = VarInt::from_u32(1);
+const WINDOW: u64 = 0;
+const MESSAGE: u64 = 1;
 
 /// The limits of the node that sends the hello.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,12 +28,10 @@ impl Hello {
             (WINDOW, self.window_bytes),
             (MESSAGE, self.message_bytes_max),
         ];
-        let mut bytes = Vec::with_capacity(4 * VarInt::MAX_SIZE);
+        let mut bytes = Vec::with_capacity(4 * Varint::MAX.len());
         for (id, value) in pairs {
-            id.encode(&mut bytes);
-            VarInt::try_from(value)
-                .unwrap_or(VarInt::MAX)
-                .encode(&mut bytes);
+            bytes.extend_from_slice(&Varint::new(id).expect("an id is a varint"));
+            bytes.extend_from_slice(&Varint::new(value).unwrap_or(Varint::MAX));
         }
         bytes
     }
@@ -52,8 +50,8 @@ impl Hello {
         }
         let (mut window, mut message, mut last) = (None, None, None);
         while !bytes.is_empty() {
-            let (Ok(id), Ok(value)) =
-                (VarInt::decode(&mut bytes), VarInt::decode(&mut bytes))
+            let (Some(id), Some(value)) =
+                (varint::take(&mut bytes), varint::take(&mut bytes))
             else {
                 return Err(Fault("a hello that ends inside a pair".to_owned()));
             };
@@ -61,7 +59,7 @@ impl Hello {
                 return Err(Fault(format!("a hello with id {id} after id {last}")));
             }
             last = Some(id);
-            let value = usize::try_from(value.into_inner()).unwrap_or(usize::MAX);
+            let value = usize::try_from(value).unwrap_or(usize::MAX);
             match id {
                 WINDOW => window = Some(value),
                 MESSAGE => message = Some(value),
@@ -180,6 +178,7 @@ impl Peer {
 
 #[cfg(test)]
 mod tests {
+    use noq_proto::coding::Encodable;
     use proptest::prelude::*;
 
     use super::*;

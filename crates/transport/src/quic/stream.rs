@@ -16,7 +16,8 @@ use noq_proto::{
 use super::connection::{self, Fault};
 use super::hello::{self, Hello};
 use super::{Body, Event};
-use crate::message::{Prefix, Reader};
+use crate::message::Reader;
+use crate::varint::Varint;
 use crate::{Class, Code, Error};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
@@ -180,7 +181,8 @@ impl Sender {
     /// Takes `message` as the message in hand, after its header. The sender holds no
     /// part of a message and is not finished.
     pub(super) fn load(&mut self, message: Block) {
-        let prefix = Prefix::new(message.len());
+        let prefix = Varint::new(message.len())
+            .expect("invariant: a message is under 2^62 bytes");
         let start = usize::from(self.started);
         self.started = true;
         self.header[1..=prefix.len()].copy_from_slice(&prefix);
@@ -1423,7 +1425,7 @@ mod tests {
     /// Opens `count` raw `Complete` streams on the client, and sends on each only the
     /// prefix of a message of [`MESSAGE_MAX`] bytes. Gives the streams.
     fn prefixes(pair: &mut Pair, count: u32) -> Vec<StreamId> {
-        let prefix = Prefix::new(MESSAGE_MAX);
+        let prefix = Varint::new(MESSAGE_MAX).expect("a varint");
         let header = [[byte(Class::Complete)].as_slice(), &*prefix].concat();
         let mut ids = Vec::new();
         for _ in 0..count {
@@ -1824,8 +1826,11 @@ mod tests {
     fn a_read_wakes_a_waiting_stream_only_when_the_room_fits_its_message() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            let small =
-                [[byte(Class::Complete)].as_slice(), &*Prefix::new(100)].concat();
+            let small = [
+                [byte(Class::Complete)].as_slice(),
+                &*Varint::new(100).expect("a varint"),
+            ]
+            .concat();
             let ids = [
                 raw(pair.client.connection(), Dir::Uni, &small, false),
                 raw(pair.client.connection(), Dir::Uni, &small, false),
