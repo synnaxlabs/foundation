@@ -670,6 +670,8 @@ mod tests {
                 socket(&node).err(),
                 Some(env::net::Error::AddressInUse { local })
             );
+            // The task waits on the socket, so only the drop can wake it.
+            node.clock().sleep(Span::MILLISECOND).await;
             drop(carrier);
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(socket(&node).err(), None);
