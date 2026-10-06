@@ -98,6 +98,12 @@ struct Pending<'d> {
     blocks: Vec<&'d Block>,
 }
 
+impl Pending<'_> {
+    fn is_empty(&self) -> bool {
+        self.attributes.is_empty() && self.blocks.is_empty()
+    }
+}
+
 /// A text that `read` takes, with its tokens. Between two tokens there are only
 /// spaces and comments, so a line whose only token is its new line holds only
 /// comments, or nothing.
@@ -156,8 +162,10 @@ impl<'a> File<'a> {
     }
 
     /// Widens a run of cut lines to take blank lines around it, so one blank line
-    /// stays between the items left and none at the start or end of the body.
-    fn widen(&self, run: Range<usize>, body: &Body) -> Range<usize> {
+    /// stays between the items left and none at the start or end of the body. When
+    /// `appended`, new items go at the end of the body, and a blank line above the
+    /// run stays to keep a comment there apart from them.
+    fn widen(&self, run: Range<usize>, body: &Body, appended: bool) -> Range<usize> {
         let (mut above, mut below) = (run.start, run.end);
         while let Some(line) = self.blank_above(above) {
             above = line;
@@ -165,7 +173,7 @@ impl<'a> File<'a> {
         while let Some(line) = self.blank_below(below) {
             below = line;
         }
-        if above == body.start || below == body.end {
+        if above == body.start || below == body.end && !appended {
             above..below
         } else if above < run.start {
             run.start..below
@@ -335,8 +343,9 @@ impl Diff<'_, '_> {
             }
         }
         let at = pending.anchor.unwrap_or(body.end);
+        let appended = at == body.end && !pending.is_empty();
         self.place(body, &mut pending, at, false);
-        self.cut(cuts, body);
+        self.cut(cuts, body, appended);
     }
 
     /// Puts the waiting items after the anchor, or else before the kept item at
@@ -359,7 +368,7 @@ impl Diff<'_, '_> {
     /// kept item below. A blank line goes before the first block when a kept item
     /// ends at `at`, and after the items when `gap`.
     fn place(&mut self, body: &Body, pending: &mut Pending<'_>, at: usize, gap: bool) {
-        if pending.attributes.is_empty() && pending.blocks.is_empty() {
+        if pending.is_empty() {
             return;
         }
         let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
@@ -376,8 +385,9 @@ impl Diff<'_, '_> {
         });
     }
 
-    /// Cuts the lines of removed items, as runs that merge across blank lines.
-    fn cut(&mut self, mut cuts: Vec<Range<usize>>, body: &Body) {
+    /// Cuts the lines of removed items, as runs that merge across blank lines. New
+    /// items go at the end of the body when `appended`.
+    fn cut(&mut self, mut cuts: Vec<Range<usize>>, body: &Body, appended: bool) {
         let file = self.file;
         cuts.sort_by_key(|cut| cut.start);
         let mut runs: Vec<Range<usize>> = Vec::new();
@@ -388,7 +398,7 @@ impl Diff<'_, '_> {
             }
         }
         self.edits.extend(runs.into_iter().map(|run| Edit {
-            range: file.widen(run, body),
+            range: file.widen(run, body, appended),
             text: String::new(),
             below: false,
         }));
@@ -876,10 +886,27 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_comment_apart_from_new_items_after_a_cut() {
+        assert_eq!(updated("# c\n\na = 1\n\n", "b = 2"), "# c\n\nb = 2\n");
+        assert_eq!(updated("# c\n\na = 1\n", "b = 2"), "# c\n\nb = 2\n");
+        assert_eq!(
+            updated("a = 1\n\n# c\n\nb = 2\n\n", "x = 3"),
+            "# c\n\nx = 3\n"
+        );
+        assert_eq!(
+            updated("x {\n  # c\n\n  a = 1\n\n}\n", "x { b = 2 }"),
+            "x {\n  # c\n\n  b = 2\n}\n"
+        );
+    }
+
+    #[test]
     fn leaves_no_blank_line_at_the_edges_of_a_body() {
         assert_eq!(updated("a = 1\n\nb = 2\n\n", "a = 1"), "a = 1\n");
         assert_eq!(updated("a = 1\nb = 2\n\n", "a = 1"), "a = 1\n");
         assert_eq!(updated("a {}\nb {}\n\n", "a {}"), "a {}\n");
+        assert_eq!(updated("a = 1\n\nb = 2\n\n\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("a = 1\n\n\nb = 2\n\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("# c\n\na = 1\n", ""), "# c\n");
         assert_eq!(updated("\n\na = 1\n\nb = 2\n", "b = 2"), "b = 2\n");
         assert_eq!(
             updated("x {\n  a = 1\n  b = 2\n\n}\n", "x { a = 1 }"),
