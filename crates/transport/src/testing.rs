@@ -63,7 +63,7 @@ impl Shard {
     }
 
     /// The part of a port at a free port of the node.
-    pub(crate) fn port(&self) -> port::Shard {
+    pub(crate) fn part(&self) -> port::Part {
         part(&self.net, SocketAddr::new(self.ip, 0))
     }
 
@@ -112,7 +112,7 @@ pub(crate) fn address(node: &Node) -> SocketAddr {
 }
 
 /// The one part of a port bound at `at`.
-pub(crate) fn part(net: &Net, at: SocketAddr) -> port::Shard {
+pub(crate) fn part(net: &Net, at: SocketAddr) -> port::Part {
     let port = Port::bind(net, at).expect("a port");
     let mut parts = port.split(NonZeroUsize::MIN);
     parts.pop().expect("one part")

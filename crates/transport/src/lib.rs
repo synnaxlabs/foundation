@@ -83,15 +83,15 @@ pub use session::{Peer, Session};
 const PAYLOAD_IPV4: u16 = 1472;
 
 /// The sessions of one shard. It dials peers and accepts the sessions the node
-/// routes to this shard. It stays on the thread that made it. The node's sockets
-/// belong to one [`Port`] that every shard shares.
+/// routes to this shard. It stays on the thread that made it. `node` binds one
+/// [`Port`] and splits it into one part for each shard.
 pub struct Transport {
     carrier: quic::Carrier,
 }
 
 impl Transport {
-    /// Starts this shard's part of the transport on `port`, the shard's part of the
-    /// node's [`Port`].
+    /// Starts this shard's transport on `part`, the shard's part of the node's
+    /// [`Port`].
     ///
     /// # Errors
     ///
@@ -102,14 +102,14 @@ impl Transport {
     /// ```
     /// use transport::{Config, Error, Transport, port};
     ///
-    /// fn start(config: Config, port: port::Shard) -> Result<Transport, Error> {
-    ///     Transport::new(config, port)
+    /// fn start(config: Config, part: port::Part) -> Result<Transport, Error> {
+    ///     Transport::new(config, part)
     /// }
     /// ```
-    pub fn new(config: Config, port: port::Shard) -> Result<Self, Error> {
+    pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         config.check()?;
         Ok(Self {
-            carrier: quic::Carrier::new(config, port),
+            carrier: quic::Carrier::new(config, part),
         })
     }
 
@@ -312,7 +312,7 @@ mod tests {
         testing::run(0, |shard| {
             for message in [1472, largest(shard)] {
                 let config = config(shard, Span::NANOSECOND, message, message);
-                let new = Transport::new(config, shard.port());
+                let new = Transport::new(config, shard.part());
                 let shown = new.map(|transport| format!("{transport:?}"));
                 assert_eq!(shown, Ok("Transport { .. }".into()), "{message} bytes");
             }
@@ -333,7 +333,7 @@ mod tests {
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
-                    Transport::new(config, shard.port()).err(),
+                    Transport::new(config, shard.part()).err(),
                     Some(error),
                     "idle {idle:?}, window {window}, message {message}"
                 );
@@ -354,7 +354,7 @@ mod tests {
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
-                    Transport::new(config, shard.port()).err(),
+                    Transport::new(config, shard.part()).err(),
                     Some(error),
                     "idle {idle:?}, window {window}, message {message}"
                 );
@@ -373,7 +373,7 @@ mod tests {
                 let mut config = config(shard, Span::SECOND, message, message);
                 config.pool = Rc::clone(&pool);
                 assert_eq!(
-                    Transport::new(config, shard.port()).err(),
+                    Transport::new(config, shard.part()).err(),
                     Some(error),
                     "{message} bytes"
                 );

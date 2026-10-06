@@ -39,12 +39,12 @@ impl Carrier {
     /// # Panics
     ///
     /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(config: Config, port: port::Shard) -> Self {
-        let port::Shard {
+    pub(crate) fn new(config: Config, part: port::Part) -> Self {
+        let port::Part {
             index,
             sender,
             receiver,
-        } = port;
+        } = part;
         let endpoint = Endpoint::new(&config, index, sender.batch_max());
         let Config { clock, tasks, .. } = config;
         let state = Rc::new(RefCell::new(State {

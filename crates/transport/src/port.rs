@@ -20,7 +20,7 @@ const BUFFER_BYTES: usize = 1 << 21;
 /// use env::net::{Error, Net};
 /// use transport::{Port, port};
 ///
-/// fn bind(net: &Net, at: SocketAddr) -> Result<Vec<port::Shard>, Error> {
+/// fn bind(net: &Net, at: SocketAddr) -> Result<Vec<port::Part>, Error> {
 ///     let port = Port::bind(net, at)?;
 ///     let _ = port.addresses();
 ///     Ok(port.split(NonZeroUsize::MIN))
@@ -63,13 +63,13 @@ impl Port {
     /// When `shards` is over 1: a port serves one shard until it routes packets
     /// between shards (#77).
     #[must_use]
-    pub fn split(self, shards: NonZeroUsize) -> Vec<Shard> {
+    pub fn split(self, shards: NonZeroUsize) -> Vec<Part> {
         assert!(
             shards == NonZeroUsize::MIN,
             "a port serves one shard until it routes packets between shards (#77), not \
              {shards}"
         );
-        vec![Shard {
+        vec![Part {
             index: 0,
             sender: self.sender,
             receiver: self.receiver,
@@ -80,7 +80,7 @@ impl Port {
 /// The part of a [`Port`] that one shard owns. It can move to the shard's thread,
 /// where [`Transport::new`](crate::Transport::new) takes it.
 #[derive(Debug)]
-pub struct Shard {
+pub struct Part {
     /// The shard's index, which each connection ID it issues starts with.
     pub(crate) index: u8,
     pub(crate) sender: udp::Sender,
@@ -92,7 +92,7 @@ mod tests {
     use std::net::{IpAddr, Ipv6Addr, SocketAddr};
     use std::num::NonZeroUsize;
 
-    use super::Port;
+    use super::{Part, Port};
     use crate::Address;
     use crate::testing;
 
@@ -122,6 +122,13 @@ mod tests {
             drop(parts);
             assert_eq!(Port::bind(shard.net(), local).err(), None);
         });
+    }
+
+    #[test]
+    fn a_port_and_its_parts_move_between_threads() {
+        fn movable<T: Send>() {}
+        movable::<Port>();
+        movable::<Part>();
     }
 
     #[test]
