@@ -171,6 +171,60 @@ fn a_sleep_does_not_wake_its_task_before_the_deadline() {
 }
 
 #[test]
+fn a_sleep_moved_out_of_its_tail_does_not_wake_its_task_at_the_old_deadline() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let counter = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut sleep = pin!(clock.sleep(millis(1)));
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+        sleep.reset(clock.now() + millis(500));
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+        clock.sleep(millis(20)).await;
+        assert_eq!(counter.0.load(SeqCst), 0);
+    });
+}
+
+#[test]
+fn a_sleep_moved_into_its_tail_does_not_wake_its_task_at_the_old_deadline() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let old = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&old));
+        let mut sleep = pin!(clock.sleep(millis(10)));
+        assert_eq!(
+            sleep.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+        sleep.reset(clock.now() + millis(1));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+        clock.sleep(millis(20)).await;
+        assert_eq!(old.0.load(SeqCst), 0);
+    });
+}
+
+#[test]
+fn a_sleep_moved_out_of_its_tail_after_its_timer_fired_completes_at_the_new_deadline() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        for _ in 0..50 {
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut sleep = pin!(clock.sleep(Span::from_nanos(100_000)));
+            assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+            let fired = clock.now() + millis(1);
+            while clock.now() < fired {}
+            let deadline = clock.now() + millis(5);
+            sleep.reset(deadline);
+            assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+            sleep.await;
+            assert!(clock.now() >= deadline, "early: {:?}", clock.now());
+        }
+    });
+}
+
+#[test]
 fn a_sleep_past_a_second_wakes_each_second() {
     let clock = os::clock();
     on_a_thread(move || async move {

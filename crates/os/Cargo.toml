@@ -33,5 +33,9 @@ harness = false
 name = "lateness"
 harness = false
 
+[[bench]]
+name = "wake"
+harness = false
+
 [lints]
 workspace = true

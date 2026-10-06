@@ -1554,17 +1554,25 @@ How to read this record:
 - **OS TIMER (2026-10-06)** A sleep of the `os` clock waits on a Tokio sleep until
   2 ms before its deadline, then on an OS timer: a `timerfd` on `CLOCK_MONOTONIC` on
   Linux, and a kqueue `EVFILT_TIMER` with `NOTE_CRITICAL` on macOS. Each sleep makes
-  its timer at its first tail and closes it when it drops. The fd waits in the Tokio
-  reactor, so each `os` runtime enables Tokio's I/O driver, which the UDP and TCP
-  drivers (#119, #120) also use. Each wake reads the boot clock again, so a sleep
-  never completes early. When the OS gives no fd, the Tokio sleep covers the tail. A
-  sequence of sleeps on an Apple M3 Max at load 7 to 14 has a median lateness of 32
-  us at 1 kHz and 5 us at 10 kHz, against 1134 us and 631 us on the Tokio sleep
-  alone (`crates/os/benches/lateness.rs`). Lost: a spin window (it holds the core),
-  an OS timer for every sleep (an fd and syscalls also for the many sleeps that reset
-  before their deadline), and one OS timer per shard (a second timer wheel in `os`).
-  Windows is #682. Decided by the `memory` builder in the plan on #379, after
-  `/eb-review`.
+  its timer at its first tail and closes it when it drops. When a reset moves a
+  deadline into or out of the tail, the sleep disarms the timer it leaves, so an old
+  arm never wakes the task. The fd waits in the Tokio reactor, so each `os` runtime
+  enables Tokio's I/O driver, which the UDP and TCP drivers (#119, #120) also use.
+  Each wake reads the boot clock again, so a sleep never completes early. When the OS
+  has no fd or memory (`EMFILE`, `ENFILE`, `ENOMEM`, `ENOSPC`), the Tokio sleep covers
+  the tail. Any other refusal panics. Measured against `main` on an Apple M3 Max,
+  macOS 27, load 8 to 13 (`crates/os/benches/`): median lateness 28 to 31 us at
+  1 kHz and 5 us at 10 kHz, against 1239 to 1276 us and 648 to 651 us. The poll that
+  arms a reused sleep costs about 310 ns (`main`: 111 to 217 ns), and a new sleep
+  about 1.5 us (`main`: 173 to 336 ns). A wake from another thread does not change.
+  With the I/O driver, each park of a runtime for no time is an OS poll. On macOS an
+  empty poll costs about 13 us, so a yield of a task with nothing else to run costs
+  12.9 us (`main`: 115 ns), and a busy shard pays it once each 61 task polls. Linux
+  is not measured. Lost: a spin window (it holds the core), an OS timer for every
+  sleep (an fd and syscalls also for the many sleeps that reset before their
+  deadline), one OS timer per shard (a second timer wheel in `os`), and no disarm (a
+  stale fire costs a full poll of the task, more than the disarm call). Windows is
+  #682. Decided by the `memory` builder in the plan on #379, after `/eb-review`.
 
 ### 1.11 Config as code
 
