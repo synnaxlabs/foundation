@@ -785,6 +785,25 @@ mod tests {
         }
 
         #[test]
+        fn counts_only_the_pattern_after_the_exclamation_mark() {
+            let body = "b".repeat(Name::MAX_BYTES);
+            let s = Selector::new(["**", &format!("!{body}")]).unwrap();
+            assert_eq!(s.matches(&name(&body)), None);
+            assert_eq!(
+                Selector::new(["a", &format!("!b{body}")]),
+                Err(Error::Long { bytes: 256 })
+            );
+            assert_eq!(
+                Selector::new(["a", &format!("!{}", "b".repeat(300))]),
+                Err(Error::Long { bytes: 300 })
+            );
+            assert_eq!(
+                Selector::new(["a", &format!("!{}", "é".repeat(128))]),
+                Err(Error::Long { bytes: 256 })
+            );
+        }
+
+        #[test]
         fn keeps_the_patterns_as_written() {
             let s = Selector::new(["a.**.**", "!a.b"]).unwrap();
             assert_eq!(format!("{s:?}"), r#"["a.**.**", "!a.b"]"#);
