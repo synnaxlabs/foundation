@@ -12,7 +12,9 @@ use types::name::Name;
 pub(crate) const TAG: u8 = 1;
 
 /// The most bytes in the body of a handoff: the authority and the longest subject.
+/// One entry of a record holds it alone, since `Layout::entry_max` is at least 4032.
 pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
+const _: () = assert!(MAX_BYTES <= 4032, "a handoff fits one entry of any ring");
 
 /// The parts of the buffer entry that records `handoff`: a block from `pool`, or `None`
 /// when no writer holds control.
