@@ -1,6 +1,5 @@
 //! Dedicated threads on OS threads, each with a current-thread Tokio runtime.
 
-use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::task::{Context, Wake, Waker};
 
@@ -10,7 +9,7 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::Notify;
 
 use crate::cores::Cores;
-use crate::thread;
+use crate::{thread, unwind};
 
 /// Starts each dedicated thread on its own OS thread.
 pub(crate) struct Driver(Arc<Cores>);
@@ -51,18 +50,18 @@ fn serve(runtime: &Runtime, body: Body) -> bool {
     let waker = Waker::from(Arc::clone(&signal));
     let mut cx = Context::from_waker(&waker);
     let _entered = runtime.enter();
-    let Ok(mut task) = panic::catch_unwind(AssertUnwindSafe(body)) else {
+    let Some(mut task) = unwind::catch(body) else {
         return true;
     };
-    let polled = panic::catch_unwind(AssertUnwindSafe(|| {
+    let polled = unwind::catch(|| {
         while task.as_mut().poll(&mut cx).is_pending() {
             runtime.block_on(signal.0.notified());
         }
-    }));
+    });
     // Apart from the poll, so that a panic in the drop does not abort the unwind of a
     // panic in the poll.
-    let dropped = panic::catch_unwind(AssertUnwindSafe(|| drop(task)));
-    polled.is_err() || dropped.is_err()
+    let dropped = unwind::catch(|| drop(task));
+    polled.is_none() || dropped.is_none()
 }
 
 /// The waker of a body: it ends the wait of its thread, from any thread.

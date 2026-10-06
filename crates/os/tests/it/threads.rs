@@ -1,6 +1,7 @@
 //! Dedicated threads on real threads: their body, their blocking, and their panics.
 
 use std::future::{Ready, poll_fn};
+use std::panic::panic_any;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -10,7 +11,7 @@ use std::time::Duration;
 use env::threads::Threads;
 use tokio::task::yield_now;
 
-use crate::common::{Bomb, assert_joins, panicked};
+use crate::common::{Bomb, Relay, Relayed, assert_joins, panicked};
 
 fn threads() -> Threads {
     os::threads().expect("the OS gives the cores of this process")
@@ -227,4 +228,24 @@ fn a_thread_started_on_a_pinned_shard_runs_on_every_cpu_of_the_set() {
     let handle = started.lock().unwrap().take();
     assert_joins(handle.unwrap().unwrap(), Ok(()));
     assert_eq!(*seen.lock().unwrap(), cpus);
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_the_call_of_the_body_gives_panicked() {
+    let body = || -> Ready<()> { panic_any(Relay(2)) };
+    let handle = threads().start("thread-8", body).unwrap();
+    assert_joins(handle, panicked("thread-8"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_the_poll_of_the_body_gives_panicked() {
+    let body = || async { panic_any(Relay(2)) };
+    let handle = threads().start("thread-9", body).unwrap();
+    assert_joins(handle, panicked("thread-9"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_the_drop_of_the_body_gives_panicked() {
+    let handle = threads().start("thread-10", || Relayed).unwrap();
+    assert_joins(handle, panicked("thread-10"));
 }
