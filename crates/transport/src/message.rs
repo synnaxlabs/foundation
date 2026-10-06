@@ -629,5 +629,33 @@ mod tests {
                 })
             );
         }
+
+        #[test]
+        fn when_readers_that_hold_large_blocks_drop_a_small_message_reads() {
+            let bytes_max = 1 << 10;
+            let pool = pool(2 * block::footprint(bytes_max));
+            let mut readers = Vec::new();
+            for _ in 0..2 {
+                let mut source = Source::new(Prefix::new(bytes_max).to_vec(), 64);
+                source.open = true;
+                let mut reader = Reader::new(bytes_max);
+                assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+                readers.push(reader);
+            }
+            let mut source = Source::new(encode(&[vec![1; 10]]), 64);
+            let mut reader = Reader::new(bytes_max);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Err(Error::Pool {
+                    bytes: 10,
+                    available: 0
+                })
+            );
+            drop(readers);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Ok(vec![vec![1; 10]])
+            );
+        }
     }
 }
