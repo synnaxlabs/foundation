@@ -3,12 +3,14 @@
 //!
 //! One [`Sim`] runs every node of a mesh on the calling thread. A seeded scheduler
 //! polls one ready task at a time, and true time moves only when no task is ready: to
-//! the next timer, datagram arrival, or end of a file call. Datagrams cross [`link`]s
-//! with delay and faults. The same seed and the same calls give the same run.
+//! the next timer, arrival, or end of a file call. Datagrams cross [`link`]s with
+//! delay and faults, and bytes cross serial [`line`](mod@line)s at the line rate.
+//! The same seed and the same calls give the same run.
 //!
 //! A task panic becomes [`Error::Panicked`] only in a build that unwinds on panic, as
 //! tests do. A build with `panic = "abort"` ends the process at the panic.
 
+pub mod line;
 pub mod link;
 pub mod node;
 pub mod shard;
@@ -18,6 +20,7 @@ mod disk;
 mod drivers;
 mod files;
 mod net;
+mod serial;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -26,6 +29,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -37,6 +41,7 @@ use types::time::{Monotonic, Span};
 use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
+use crate::serial::Serial;
 use crate::state::{Futures, Next, Outcome, Shared, Start, State, lock};
 
 /// Settings for one run. Build it with `..Config::default()`: fields get added.
@@ -111,7 +116,8 @@ impl Sim {
         let scheduler = Rng::from_seed(streams.next_u64());
         let net = Network::new(config.link, Rng::from_seed(streams.next_u64()));
         let files = Files::new(Rng::from_seed(streams.next_u64()));
-        let state = State::new(Instant::now(), net, files);
+        let serial = Serial::new(Rng::from_seed(streams.next_u64()));
+        let state = State::new(Instant::now(), net, files, serial);
         Self {
             config,
             shared: Arc::new(Mutex::new(state)),
@@ -142,31 +148,73 @@ impl Sim {
         lock(&self.shared).net().link(from, to, config);
     }
 
+    /// Sets the line that joins port `a_path` of `a` and port `b_path` of `b`, for the
+    /// bytes sent from now on. An open of either path on its node opens that end.
+    ///
+    /// - Byte `k` of a run of bytes sent back to back, from 1, arrives
+    ///   [`rate.span(k)`](types::time::Rate::span) after the run starts, where
+    ///   `rate` is the [`rate`](env::serial::Settings::rate) of the sender's
+    ///   settings.
+    /// - A byte arrives intact only when both ends have the same settings. Otherwise
+    ///   it arrives as a random byte.
+    /// - Each line draws its faults from its own stream as each byte is sent.
+    ///   Setting the line again keeps its ends and draws a new stream.
+    ///
+    /// # Panics
+    ///
+    /// When a node belongs to another run, when the two ends are one, when an end
+    /// is on another line, or when `config` has a chance outside 0 to 1.
+    pub fn line(
+        &mut self,
+        a: &Node,
+        a_path: &Path,
+        b: &Node,
+        b_path: &Path,
+        config: line::Config,
+    ) {
+        let a = (self.own(a), a_path.to_path_buf());
+        let b = (self.own(b), b_path.to_path_buf());
+        let (node, path) = (a.0, a.1.display());
+        assert!(
+            a != b,
+            "port {path} of node {node} cannot be both ends of a line"
+        );
+        config.check();
+        let joined = lock(&self.shared).serial().join(a, b, config);
+        if let Err((node, path)) = joined {
+            let path = path.display();
+            panic!("port {path} of node {node} is on another line");
+        }
+    }
+
     /// Crashes `node` now, between runs. Each thread of the node ends at once: no
     /// task of it polls again, its futures and its threads that have not run drop,
-    /// so its sockets close and its timers stop, and
-    /// [`env::thread::Handle::join`] on one of them panics. The node keeps its disk
-    /// and its addresses: start new threads on it to restart it.
+    /// so its sockets and ports close and its timers stop, and
+    /// [`env::thread::Handle::join`] on one of them panics. A thread that one of
+    /// these drops starts on the node also ends in the crash and never runs. The
+    /// node keeps its disk and its addresses: start new threads on it to restart it.
     ///
     /// # Panics
     ///
     /// - When `node` belongs to another run.
-    /// - When the drop of a future panics. The crash still ends, and the panic gives
-    ///   each message as [`Error::Panicked`] does.
+    /// - When the drop of a future or of a thread that has not run panics. The crash
+    ///   still ends, and the panic gives each message as [`Error::Panicked`] does:
+    ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
         let (tasks, starts) = lock(&self.shared).stop(node);
-        let panics = self.drop_futures(&tasks);
-        drop(starts);
+        let mut panics = self.drop_futures(&tasks);
+        panics.extend(drop_each(starts));
         let orphans = lock(&self.shared).crash(node, crash);
         drop(orphans);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 
-    /// A hash of every scheduler pick, every datagram event, and every end of a file
-    /// call so far: the time, addresses, length, and fate of a datagram, and the
-    /// time, kind, and success of a call, never the bytes. In one build, the same
-    /// seed and the same calls give the same digest.
+    /// A hash of every scheduler pick, every datagram event, every byte arrival on a
+    /// line, and every end of a file call so far: the time, addresses, length, and
+    /// fate of a datagram, the time, end, and fate of a byte, and the time, kind,
+    /// and success of a call, never the bytes. In one build, the same seed and the
+    /// same calls give the same digest.
     #[must_use]
     pub fn digest(&self) -> u64 {
         lock(&self.shared).digest()
@@ -366,20 +414,23 @@ impl Sim {
     }
 
     /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
-    /// Returns the message of each drop that panicked, in order. Each future drops on
-    /// its own, as a second panic in one unwind aborts the process.
+    /// Returns the message of each drop that panicked, in order.
     fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
         let futures = self.futures.borrow_mut().remove(tasks);
-        (futures.into_iter())
-            .filter_map(|future| {
-                panic::catch_unwind(AssertUnwindSafe(|| drop(future))).err()
-            })
-            .map(|payload| message(&*payload))
-            .collect()
+        drop_each(futures)
     }
 }
 
-/// What joins the messages of two panics of one thread.
+/// Drops each item on its own, as a second panic in one unwind aborts the process.
+/// Returns the message of each drop that panicked, in order.
+fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
+    (items.into_iter())
+        .filter_map(|item| panic::catch_unwind(AssertUnwindSafe(|| drop(item))).err())
+        .map(|payload| message(&*payload))
+        .collect()
+}
+
+/// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
 
 /// The message of a panic payload.

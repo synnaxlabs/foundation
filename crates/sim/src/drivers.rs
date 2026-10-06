@@ -2,6 +2,7 @@
 
 mod files;
 mod net;
+mod serial;
 
 use std::cell::RefCell;
 use std::future::poll_fn;
@@ -32,7 +33,9 @@ pub(crate) struct Node {
 impl Node {
     /// Adds a thread that runs when the scheduler picks its first task.
     fn thread(&self, name: String, start: Start) -> Handle {
-        let thread = lock(&self.shared).start(self.node, name, start);
+        let (thread, crashed) = lock(&self.shared).start(self.node, name, start);
+        // After the lock: the drop may start a thread.
+        drop(crashed);
         let (shared, node) = (Arc::clone(&self.shared), self.node);
         Handle::new(move || {
             let state = lock(&shared);

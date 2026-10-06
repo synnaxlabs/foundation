@@ -45,7 +45,7 @@ fn monotonic() -> env::clock::Clock {
 /// Pushes one measurement from one source.
 fn push(clock: &mut Clock, source: clock::source::Key, monotonic: &env::clock::Clock) {
     let m = Measurement::new(monotonic.now(), Span::HOUR, Span::MILLISECOND);
-    let _ = clock.push(source, m.expect("at most 36500 days"));
+    clock.push(source, m.expect("at most 36500 days"));
 }
 
 fn read_all(reader: &Reader) {
@@ -79,6 +79,19 @@ fn now(bencher: Bencher<'_, '_>) {
         .bench_local(|| read_all(&reader));
 }
 
+/// Reads in holdover: one source of two has pushed.
+#[divan::bench(sample_count = 20)]
+fn now_in_holdover(bencher: Bencher<'_, '_>) {
+    let monotonic = monotonic();
+    let (mut clock, reader) = Clock::new(monotonic.clone());
+    let source = clock.add();
+    push(&mut clock, source, &monotonic);
+    let _ = clock.add();
+    bencher
+        .counter(divan::counter::ItemsCount::new(READS))
+        .bench_local(|| read_all(&reader));
+}
+
 /// Reads on 1, 4, and 8 threads at once.
 #[divan::bench(sample_count = 20, threads = [1, 4, 8])]
 fn now_on_many_threads(bencher: Bencher<'_, '_>) {
@@ -99,13 +112,17 @@ fn now_beside_a_writer(bencher: Bencher<'_, '_>, pause: Duration) {
     push(&mut clock, source, &monotonic);
     let stopped = AtomicBool::new(false);
     thread::scope(|scope| {
+        let (stopped, monotonic) = (&stopped, &monotonic);
         #[expect(
             clippy::disallowed_methods,
             reason = "a benchmark paces its writer with a real clock"
         )]
-        scope.spawn(|| {
+        scope.spawn(move || {
+            // The writer owns the clock, as `run` does on its shard. A clock on the
+            // reader's stack can share a cache line with the reader.
+            let mut clock = clock;
             while !stopped.load(Relaxed) {
-                push(&mut clock, source, &monotonic);
+                push(&mut clock, source, monotonic);
                 if !pause.is_zero() {
                     thread::sleep(pause);
                 }
