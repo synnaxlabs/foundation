@@ -1,14 +1,16 @@
-//! Frames and the key sets they point at.
+//! Frames, the key sets they point at, and the views that readers get.
 //!
 //! A frame is one pool block: a header, a range for each present index group, a
 //! descriptor for each present series, and the series bytes. It holds offsets, never
 //! pointers.
 
 pub mod key_set;
+mod view;
 
 use std::{fmt, iter, mem};
 
 use key_set::KeySet;
+pub use view::{Mask, View};
 
 /// Bytes of the header.
 const HEAD: usize = 16;
@@ -374,14 +376,13 @@ impl Frame {
     /// frame's length takes from its pool. It depends only on that length.
     #[must_use]
     pub fn charge(&self) -> u64 {
-        to_u64(block::footprint(self.0.len()))
+        charge_of(self.0.len())
     }
 
-    /// The series bytes of every present entry, as one view that shares the frame's
-    /// block, from the first series to the end. [`Frame::ends`] gives where each
-    /// series ends in this view. Copies nothing. Until it drops, the
-    /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
-    /// length.
+    /// The series bytes of every present entry, from the first series to the end, as
+    /// a block that shares the frame's memory. [`Frame::ends`] gives where each series
+    /// ends in it. Copies nothing. Until it drops, it keeps the frame's whole block in
+    /// use: [`Frame::charge`] bytes of the pool, not its length.
     #[must_use]
     pub fn body(&self) -> block::Block {
         let (ranges, series) = counts(&self.0);
@@ -567,11 +568,21 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
                 *memo = index;
             }
         }
-        bytes = bytes
-            .checked_next_multiple_of(SERIES_ALIGN)
-            .map_or(usize::MAX, |start| start.saturating_add(len));
+        bytes = next_end(bytes, len);
     }
     absent.map_or(Ok((groups, bytes)), Err)
+}
+
+/// Where a series of `len` bytes ends when it follows series bytes that end at
+/// `last`. Saturates at `usize::MAX`, which no pool holds.
+fn next_end(last: usize, len: usize) -> usize {
+    last.checked_next_multiple_of(SERIES_ALIGN)
+        .map_or(usize::MAX, |start| start.saturating_add(len))
+}
+
+/// The charge of a frame of `len` bytes (CREDIT RULES).
+fn charge_of(len: usize) -> u64 {
+    to_u64(block::footprint(len))
 }
 
 /// A frame's ranges, its descriptors, and its series bytes.
@@ -670,12 +681,12 @@ mod tests {
     const F64: Type = Type::Scalar(Scalar::F64);
     const U8: Type = Type::Scalar(Scalar::U8);
 
-    fn key(n: u32) -> channel::Key {
+    pub(super) fn key(n: u32) -> channel::Key {
         channel::Key::from_u128(u128::from(n))
     }
 
     /// An interner where key `n` has slot `n`, for each `n` below 1000.
-    fn interner() -> Interner {
+    pub(super) fn interner() -> Interner {
         let mut interner = Interner::new();
         for n in 0..1000 {
             interner.slots().assign(key(n));
@@ -683,7 +694,7 @@ mod tests {
         interner
     }
 
-    fn pool(budget: usize) -> block::Pool {
+    pub(super) fn pool(budget: usize) -> block::Pool {
         let config = block::Config { budget };
         let memory = block::Heap::new(config.reservation());
         block::Pool::new(config, memory)
@@ -698,7 +709,7 @@ mod tests {
     }
 
     /// Two groups: index key 1 with key 2, and index key 3 with key 4.
-    fn two_groups() -> std::sync::Arc<KeySet> {
+    pub(super) fn two_groups() -> std::sync::Arc<KeySet> {
         interner().intern(&[
             Group {
                 index: key(1),
@@ -1274,7 +1285,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct Case {
+    pub(super) struct Case {
         /// Data channels per group.
         data: Vec<usize>,
         /// Whether each group is present.
@@ -1293,7 +1304,7 @@ mod tests {
 
     /// Up to 4 groups of up to 40 data channels, with data slots on both sides of the
     /// index slot.
-    fn cases() -> impl Strategy<Value = Case> {
+    pub(super) fn cases() -> impl Strategy<Value = Case> {
         (1_usize..5)
             .prop_flat_map(|n| {
                 (
@@ -1354,6 +1365,17 @@ mod tests {
             .map(|entry| (entry, case.lens[entry]))
             .collect();
         (set, series)
+    }
+
+    /// The key set of `case` and a frame of it, with each series filled with its
+    /// pattern.
+    pub(super) fn frame_of(case: &Case) -> (std::sync::Arc<KeySet>, Frame) {
+        let (set, series) = shape(case);
+        let mut draft = Draft::new(&pool(1 << 20), &set, case.form, &series).unwrap();
+        for (entry, bytes) in draft.iter_mut() {
+            bytes.copy_from_slice(&pattern(entry, bytes.len()));
+        }
+        (set, draft.freeze(case.path))
     }
 
     /// Fills each series of `draft` with its pattern, through `iter_mut` or by entry.
