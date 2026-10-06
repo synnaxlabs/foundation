@@ -636,7 +636,7 @@ fn debug_names_the_config_and_the_node() {
         format!("{sim:?}"),
         "Sim { config: Config { seed: 0, steps_max: 10000, link: Config { \
          delay: Span(250000), jitter: Span(0), loss: 0.0, duplication: 0.0, \
-         mtu: 1500 } }, .. }"
+         mtu: 1500, rate: None } }, .. }"
     );
     assert_eq!(format!("{node:?}"), "Node(0)");
 }

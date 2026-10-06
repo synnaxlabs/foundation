@@ -12,12 +12,10 @@ use env::net::{Error, tcp};
 use types::time::Monotonic;
 
 use super::wire::{Packet, Wire};
-use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, node, receives};
+use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, ip_header, node, receives};
 
-/// The IPv4 and TCP header bytes of a segment.
-const V4_HEADERS: usize = 40;
-/// The IPv6 and TCP header bytes of a segment.
-const V6_HEADERS: usize = 60;
+/// The bytes of the TCP header of a segment, with no options.
+const HEADER: usize = 20;
 /// The least segment size, as Linux clamps it (`tcp_min_snd_mss`).
 const MSS_MIN: usize = 48;
 /// The Linux code for a write after a close (`EPIPE`).
@@ -199,9 +197,9 @@ struct Lanes {
 }
 
 impl Lanes {
-    /// Puts a segment of `kind` of `stream` from end `from` in flight at true time
-    /// `now`. It arrives after the delay and a jitter draw of its link, and not
-    /// before a segment in flight in its direction.
+    /// Sends a segment of `kind` of `stream` from end `from` at true time `now`. It
+    /// leaves its link as [`Wire::depart`] gives, then arrives after the delay and a
+    /// jitter draw of the link, and not before a segment in flight in its direction.
     fn send(
         &mut self,
         wire: &mut Wire,
@@ -211,26 +209,58 @@ impl Lanes {
         kind: Kind,
     ) {
         let node = node(from.local.ip()).expect("invariant: an end is on a node");
-        let link = wire.path(node, from.peer.ip());
-        if link.loss > 0.0 {
+        let path = wire.path(node, from.peer.ip());
+        if path.link.loss > 0.0 {
             self.yet.get_or_insert(LOSSY);
         }
         let (source, destination) = (from.local, from.peer);
         let tag = mem::discriminant(&kind);
         wire.record((now, source, destination, tag, kind.len(), Fate::Sent));
-        let Some(at) = wire.draw(now, &link) else {
+        let bytes = kind.len() + header(destination);
+        let Some(departure) = wire.depart(now, &path, bytes) else {
             return;
         };
-        let floor = self.floors.entry((source, destination)).or_insert((at, 0));
-        floor.0 = floor.0.max(at);
-        floor.1 += 1;
+        let Some(at) = wire.draw(&path, departure) else {
+            return;
+        };
+        let at = self.raise(source, destination, at);
         let segment = Segment {
             source,
             destination,
             stream,
             kind,
         };
-        wire.put(floor.0, Packet::Segment(segment));
+        wire.put(&path, departure, at, Packet::Segment(segment));
+    }
+
+    /// Adds a segment in flight from `source` to `destination` that arrives at true
+    /// time `at`, and gives when it arrives: at `at`, or with the last segment in
+    /// flight in its direction if that one arrives later.
+    fn raise(
+        &mut self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        at: Monotonic,
+    ) -> Monotonic {
+        let floor = self.floors.entry((source, destination)).or_insert((at, 0));
+        floor.0 = floor.0.max(at);
+        floor.1 += 1;
+        floor.0
+    }
+
+    /// Counts again the segments that `node` has in flight, after its power cut
+    /// dropped those that had not left it.
+    fn cut(&mut self, wire: &Wire, node: usize) {
+        let own = addresses(node);
+        self.floors
+            .retain(|(source, _), _| !own.contains(&source.ip()));
+        for (at, packet) in wire.flights() {
+            if let Packet::Segment(segment) = packet
+                && own.contains(&segment.source.ip())
+            {
+                self.raise(segment.source, segment.destination, at);
+            }
+        }
     }
 
     /// Notes the arrival of a segment from `source` to `destination`.
@@ -314,13 +344,13 @@ pub(crate) struct Tcp<'a> {
 /// The largest data segment from `from` on its link.
 fn mss(wire: &Wire, from: Pair) -> usize {
     let node = node(from.local.ip()).expect("invariant: an end is on a node");
-    let header = if from.peer.is_ipv4() {
-        V4_HEADERS
-    } else {
-        V6_HEADERS
-    };
-    let mtu = wire.path(node, from.peer.ip()).mtu;
-    mtu.saturating_sub(header).max(MSS_MIN)
+    let mtu = wire.path(node, from.peer.ip()).link.mtu;
+    mtu.saturating_sub(header(from.peer)).max(MSS_MIN)
+}
+
+/// The bytes of the IP and TCP headers of a segment to `peer`.
+fn header(peer: SocketAddr) -> usize {
+    HEADER + ip_header(peer.ip())
 }
 
 impl<'a> Tcp<'a> {
@@ -572,10 +602,12 @@ impl<'a> Tcp<'a> {
     }
 
     /// Ends the streams and the listeners of `node`, whose power was cut, with no
-    /// segment. A connect that a driver holds is refused, and a stream that a driver
-    /// holds is reset; the rest go. Returns their wakers, for the caller to drop after
-    /// it releases the lock.
+    /// segment, after the wire dropped the segments that had not left the node. A
+    /// connect that a driver holds is refused, and a stream that a driver holds is
+    /// reset; the rest go. Returns their wakers, for the caller to drop after it
+    /// releases the lock.
     pub(crate) fn cut_power(&mut self, node: usize) -> Vec<Waker> {
+        self.sockets.lanes.cut(self.wire, node);
         let own = addresses(node);
         let ended: Vec<u64> = (self.sockets.ends.iter())
             .filter(|(_, end)| own.contains(&end.pair.local.ip()))
