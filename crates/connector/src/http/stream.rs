@@ -10,8 +10,8 @@ use hyper::rt::{Read, ReadBufCursor, Write};
 /// The most bytes one read copies into `hyper`'s buffer.
 const READ_MAX: usize = 8192;
 
-/// A TCP stream that `hyper` reads and writes. Its errors carry the `env` error, so
-/// the client can give it back.
+/// A TCP stream that `hyper` reads and writes. Its errors wrap the `env` error, so
+/// the client's error sources reach it.
 pub(super) struct Stream(pub(super) Tcp);
 
 fn io(error: net::Error) -> io::Error {

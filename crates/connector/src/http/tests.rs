@@ -32,6 +32,8 @@ struct Network {
     client: node::Node,
     server: node::Node,
     handles: Vec<Handle>,
+    /// How long the last `send` took.
+    elapsed: Option<Span>,
 }
 
 impl Network {
@@ -48,6 +50,7 @@ impl Network {
             client,
             server,
             handles: Vec::new(),
+            elapsed: None,
         }
     }
 
@@ -93,7 +96,8 @@ impl Network {
         seen
     }
 
-    /// Sends `request` from the client node and gives the outcome.
+    /// Sends `request` from the client node and gives the outcome. The client shard
+    /// lives on after the send, so the connection task ends on its own.
     #[expect(clippy::unwrap_in_result, reason = "a test may panic")]
     fn send(&mut self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
         let (net, clock) = (self.client.net(), self.client.clock());
@@ -105,18 +109,26 @@ impl Network {
                 .start(shard("client"), move |tasks| async move {
                     let client = Client::new(Config {
                         net,
-                        clock,
+                        clock: clock.clone(),
                         tasks,
                         timeout: TIMEOUT,
                         body_max: BODY_MAX,
                     });
+                    let start = clock.now();
                     let outcome = client.send(request).await;
-                    *slot.lock().expect("no panic under the lock") = Some(outcome);
+                    let elapsed = Span::from_nanos(
+                        i64::try_from(clock.now().0 - start.0).expect("a short run"),
+                    );
+                    *slot.lock().expect("no panic under the lock") =
+                        Some((outcome, elapsed));
+                    clock.sleep(Span::MINUTE).await;
                 });
         self.handles.push(handle.expect("the shard starts"));
         self.sim.run_for(Span::MINUTE).expect("the run ends");
-        let outcome = out.lock().expect("no panic under the lock").take();
-        outcome.expect("send returned within a minute")
+        let out = out.lock().expect("no panic under the lock").take();
+        let (outcome, elapsed) = out.expect("send returned within a minute");
+        self.elapsed = Some(elapsed);
+        outcome
     }
 }
 
@@ -174,6 +186,17 @@ fn get(url: &str) -> Request<Bytes> {
     Request::get(url)
         .body(Bytes::new())
         .expect("a valid request")
+}
+
+/// The messages of the error's sources, outermost first.
+fn chain(error: &Error) -> String {
+    let mut messages = Vec::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        messages.push(cause.to_string());
+        source = cause.source();
+    }
+    messages.join(" <- ")
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -263,6 +286,69 @@ fn refuses_a_body_over_the_cap() {
 }
 
 #[test]
+fn refuses_chunks_that_together_pass_the_cap() {
+    let mut network = Network::new(13);
+    let chunk = "x".repeat(40);
+    let response: &'static str = format!(
+        "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n\
+         28\r\n{chunk}\r\n28\r\n{chunk}\r\n0\r\n\r\n"
+    )
+    .leak();
+    network.serve(reply(response));
+    let error = network
+        .send(get(&network.url("/")))
+        .expect_err("over the cap");
+    assert!(
+        matches!(error, Error::TooLarge { max: BODY_MAX }),
+        "{error:?}"
+    );
+}
+
+/// Answers with `response`, then reads until the client ends the stream, and gives
+/// what that read saw.
+fn reply_then_read(
+    response: &'static [u8],
+    end: &Arc<Mutex<Option<String>>>,
+) -> impl FnOnce(Tcp, Vec<u8>, Clock) -> Answer + Send + 'static {
+    let slot = Arc::clone(end);
+    move |mut stream, _, _| {
+        Box::pin(async move {
+            write(&mut stream, response).await;
+            let mut buffer = [0; 16];
+            let read = poll_fn(|cx| stream.poll_read(cx, &mut buffer)).await;
+            *slot.lock().expect("no panic under the lock") = Some(format!("{read:?}"));
+            Some(stream)
+        })
+    }
+}
+
+#[test]
+fn closes_the_stream_after_the_exchange() {
+    let mut network = Network::new(14);
+    let end = Arc::new(Mutex::new(None));
+    network.serve(reply_then_read(
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+        &end,
+    ));
+    network
+        .send(get(&network.url("/")))
+        .expect("the server answers");
+    let end = end.lock().expect("no panic under the lock").take();
+    assert_eq!(end.as_deref(), Some("Ok(0)"));
+}
+
+#[test]
+fn closes_the_stream_after_a_timeout() {
+    let mut network = Network::new(15);
+    let end = Arc::new(Mutex::new(None));
+    network.serve(reply_then_read(b"", &end));
+    let error = network.send(get(&network.url("/"))).expect_err("no answer");
+    assert!(matches!(error, Error::TimedOut), "{error:?}");
+    let end = end.lock().expect("no panic under the lock").take();
+    assert_eq!(end.as_deref(), Some("Ok(0)"));
+}
+
+#[test]
 fn times_out_when_the_server_never_answers() {
     let mut network = Network::new(6);
     network.serve(|stream, _, clock| {
@@ -274,6 +360,7 @@ fn times_out_when_the_server_never_answers() {
     let error = network.send(get(&network.url("/"))).expect_err("no answer");
     assert!(matches!(error, Error::TimedOut), "{error:?}");
     assert_eq!(error.to_string(), "the exchange timed out");
+    assert_eq!(network.elapsed, Some(TIMEOUT));
 }
 
 #[test]
@@ -329,16 +416,12 @@ fn gives_the_stream_error_when_the_server_drops_the_stream() {
     let error = network
         .send(get(&network.url("/")))
         .expect_err("a dropped stream");
-    assert!(
-        matches!(error, Error::Net(net::Error::Reset { remote: r }) if r == remote),
-        "{error:?}"
-    );
+    assert!(matches!(error, Error::Protocol(_)), "{error:?}");
+    assert_eq!(error.to_string(), "the exchange failed: connection error");
     assert_eq!(
-        error.to_string(),
-        format!("the stream failed: {remote} reset the stream")
+        chain(&error),
+        format!("connection error <- {remote} reset the stream")
     );
-    let source = std::error::Error::source(&error).expect("the env error");
-    assert_eq!(source.to_string(), format!("{remote} reset the stream"));
 }
 
 #[test]
@@ -355,12 +438,21 @@ fn gives_the_connect_error_when_nothing_listens() {
         ),
         "{error:?}"
     );
+    assert_eq!(
+        error.to_string(),
+        format!("the connect failed: {remote} refused the connection")
+    );
 }
 
 #[test]
 fn refuses_a_uri_it_cannot_reach() {
     let mut network = Network::new(10);
-    for uri in ["https://10.0.0.2/", "http://influx:8086/", "/write"] {
+    for uri in [
+        "https://10.0.0.2/",
+        "http://influx:8086/",
+        "/write",
+        "http://admin:secret@10.0.0.2:8086/",
+    ] {
         let error = network.send(get(uri)).expect_err("not reachable");
         assert!(
             matches!(&error, Error::Uri { uri: u } if u == uri),
@@ -371,35 +463,4 @@ fn refuses_a_uri_it_cannot_reach() {
             format!("{uri} is not an http URI with an IP host")
         );
     }
-}
-
-#[test]
-fn shows_the_settings_in_debug() {
-    let mut network = Network::new(12);
-    let (net, clock) = (network.client.net(), network.client.clock());
-    let out = Arc::new(Mutex::new(String::new()));
-    let slot = Arc::clone(&out);
-    let handle =
-        network
-            .client
-            .shards()
-            .start(shard("client"), move |tasks| async move {
-                let config = Config {
-                    net,
-                    clock,
-                    tasks,
-                    timeout: TIMEOUT,
-                    body_max: BODY_MAX,
-                };
-                let shown = format!("{config:?}");
-                *slot.lock().expect("no panic under the lock") =
-                    format!("{shown} {:?}", Client::new(config));
-            });
-    network.handles.push(handle.expect("the shard starts"));
-    network.sim.run_for(Span::SECOND).expect("the run ends");
-    assert_eq!(
-        *out.lock().expect("no panic under the lock"),
-        "Config { timeout: Span(2000000000), body_max: 64, .. } \
-         Client { timeout: Span(2000000000), body_max: 64, .. }",
-    );
 }

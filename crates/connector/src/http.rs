@@ -43,6 +43,7 @@ const OPTIONS: tcp::Options = tcp::Options {
 ///     Ok(client.send(request).await?.status().as_u16())
 /// }
 /// ```
+#[derive(Debug)]
 pub struct Client {
     net: Net,
     clock: Clock,
@@ -52,6 +53,7 @@ pub struct Client {
 }
 
 /// What a [`Client`] needs.
+#[derive(Debug)]
 pub struct Config {
     /// Connects streams.
     pub net: Net,
@@ -60,7 +62,8 @@ pub struct Config {
     /// Runs each connection's I/O.
     pub tasks: Tasks,
     /// The longest a request may take, from the connect to the last body byte. A
-    /// timeout below zero acts as zero.
+    /// timeout below zero acts as zero. One that passes the end of the clock never
+    /// fires.
     pub timeout: Span,
     /// The largest response body the client reads.
     pub body_max: usize,
@@ -85,13 +88,13 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// - [`Error::Uri`] when the scheme is not `http` or the host is not an IP
-    ///   address.
+    /// - [`Error::Uri`] when the scheme is not `http`, the URI has user info, or the
+    ///   host is not an IP address.
     /// - [`Error::Connect`] when the host did not take the connection.
-    /// - [`Error::Net`] when the stream failed after the connect.
     /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
     /// - [`Error::TooLarge`] when the response body is larger than the cap.
-    /// - [`Error::Protocol`] when the server broke HTTP or closed early.
+    /// - [`Error::Protocol`] when the stream failed, the server broke HTTP, or the
+    ///   server closed early.
     pub async fn send(
         &self,
         request: Request<Bytes>,
@@ -147,24 +150,6 @@ impl Client {
     }
 }
 
-impl fmt::Debug for Client {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client")
-            .field("timeout", &self.timeout)
-            .field("body_max", &self.body_max)
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for Config {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Config")
-            .field("timeout", &self.timeout)
-            .field("body_max", &self.body_max)
-            .finish_non_exhaustive()
-    }
-}
-
 /// The address `uri` names.
 fn remote(uri: &Uri) -> Result<SocketAddr, Error> {
     let fail = || Error::Uri { uri: uri.clone() };
@@ -172,6 +157,9 @@ fn remote(uri: &Uri) -> Result<SocketAddr, Error> {
         return Err(fail());
     }
     let authority = uri.authority().ok_or_else(fail)?;
+    if authority.as_str().contains('@') {
+        return Err(fail());
+    }
     let host = authority.host();
     let host = host
         .strip_prefix('[')
@@ -205,15 +193,14 @@ fn origin_form(parts: &mut http::request::Parts) {
 /// Why an exchange failed.
 #[derive(Debug)]
 pub enum Error {
-    /// The scheme is not `http`, or the host is not an IP address.
+    /// The scheme is not `http`, the URI has user info, or the host is not an IP
+    /// address.
     Uri {
         /// The URI of the request.
         uri: Uri,
     },
     /// The host did not take the connection.
     Connect(net::Error),
-    /// The stream failed after the connect.
-    Net(net::Error),
     /// The exchange took longer than the timeout.
     TimedOut,
     /// The response body is larger than the cap.
@@ -221,24 +208,18 @@ pub enum Error {
         /// The cap, in bytes.
         max: usize,
     },
-    /// The server broke HTTP, or closed the stream early.
-    Protocol(hyper::Error),
+    /// The stream failed, the server broke HTTP, or the server closed early.
+    Protocol(Failure),
 }
+
+/// What went wrong in an exchange after the connect. Its sources reach the `env`
+/// error when the stream failed.
+#[derive(Debug)]
+pub struct Failure(hyper::Error);
 
 impl From<hyper::Error> for Error {
     fn from(error: hyper::Error) -> Self {
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            if let Some(net) = cause
-                .downcast_ref::<std::io::Error>()
-                .and_then(|io| io.get_ref())
-                .and_then(|inner| inner.downcast_ref::<net::Error>())
-            {
-                return Self::Net(net.clone());
-            }
-            source = cause.source();
-        }
-        Self::Protocol(error)
+        Self::Protocol(Failure(error))
     }
 }
 
@@ -247,12 +228,11 @@ impl fmt::Display for Error {
         match self {
             Self::Uri { uri } => write!(f, "{uri} is not an http URI with an IP host"),
             Self::Connect(error) => write!(f, "the connect failed: {error}"),
-            Self::Net(error) => write!(f, "the stream failed: {error}"),
             Self::TimedOut => write!(f, "the exchange timed out"),
             Self::TooLarge { max } => {
                 write!(f, "the response body is larger than {max} bytes")
             }
-            Self::Protocol(error) => write!(f, "the exchange failed: {error}"),
+            Self::Protocol(failure) => write!(f, "the exchange failed: {failure}"),
         }
     }
 }
@@ -260,10 +240,22 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Connect(error) | Self::Net(error) => Some(error),
-            Self::Protocol(error) => Some(error),
+            Self::Connect(error) => Some(error),
+            Self::Protocol(failure) => Some(failure),
             Self::Uri { .. } | Self::TimedOut | Self::TooLarge { .. } => None,
         }
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Failure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
     }
 }
 
