@@ -522,37 +522,52 @@ fn a_crash_keeps_the_port_of_another_node_open() {
 
 #[test]
 fn a_port_from_before_a_crash_drops_and_leaves_the_next_port_open() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, _b) = pair(0, line::Config::default());
+        let config = config(A, 9_600, None);
+        let old = open(&a, &config).unwrap();
+        sim.crash(&a, crash);
+        let next = open(&a, &config).unwrap();
+        drop(old);
+        let results = write_once(&mut sim, &a, next);
+        assert_eq!(*results.lock().unwrap(), [Ok(1)], "{crash:?}");
+    }
+}
+
+/// What `poll` gives on a port of node A from before a `crash`, after a read on
+/// thread `first` when `polled`.
+fn stale(crash: Crash, polled: bool, poll: fn(&mut env::serial::Port)) -> crate::Error {
     let (mut sim, a, _b) = pair(0, line::Config::default());
-    let config = config(A, 9_600, None);
-    let old = open(&a, &config).unwrap();
-    sim.crash(&a, Crash::Process);
-    let next = open(&a, &config).unwrap();
-    drop(old);
-    assert_eq!(*write_once(&mut sim, &a, next).lock().unwrap(), [Ok(1)]);
+    let mut port = open(&a, &config(A, 9_600, None)).unwrap();
+    if polled {
+        port = read_on_first(&mut sim, &a, port);
+    }
+    sim.crash(&a, crash);
+    let _after = a.shards().start(shard("after"), move |_| async move {
+        poll(&mut port);
+    });
+    sim.run().unwrap_err()
 }
 
 #[test]
 fn a_port_from_before_a_crash_panics_when_it_polls() {
-    for polled in [false, true] {
-        let (mut sim, a, _b) = pair(0, line::Config::default());
-        let mut port = open(&a, &config(A, 9_600, None)).unwrap();
-        if polled {
-            port = read_on_first(&mut sim, &a, port);
+    let write = |port: &mut env::serial::Port| {
+        let cx = &mut Context::from_waker(Waker::noop());
+        assert_eq!(port.poll_write(cx, &[1]), Poll::Ready(Ok(1)));
+    };
+    let message = "a serial port of node 0 polls after a crash of the node";
+    let panicked = crate::Error::Panicked {
+        thread: "after".into(),
+        message: message.into(),
+        seed: 0,
+    };
+    for crash in [Crash::Process, Crash::Power] {
+        for polled in [false, true] {
+            for poll in [read_once, write] {
+                let error = stale(crash, polled, poll);
+                assert_eq!(error, panicked, "{crash:?}, polled: {polled}");
+            }
         }
-        sim.crash(&a, Crash::Process);
-        let _after = a.shards().start(shard("after"), move |_| async move {
-            read_once(&mut port);
-        });
-        let message = "a serial port of node 0 polls after a crash of the node";
-        assert_eq!(
-            sim.run().unwrap_err(),
-            crate::Error::Panicked {
-                thread: "after".into(),
-                message: message.into(),
-                seed: 0,
-            },
-            "polled: {polled}"
-        );
     }
 }
 
