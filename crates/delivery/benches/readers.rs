@@ -20,7 +20,7 @@ fn opened(sessions: usize) -> (Readers, Vec<Key>) {
     });
     let mut readers = Readers::new(0);
     let keys = (0..sessions)
-        .map(|_| readers.open(Reader::Unnamed, start).key)
+        .map(|_| readers.open(Reader::Unnamed, start, 0).key)
         .collect();
     (readers, keys)
 }
