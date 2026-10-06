@@ -600,10 +600,12 @@ fn a_timeout_below_zero_acts_as_zero() {
             options: options(1 << 16),
         };
         let timeout = Span::from_nanos(i64::MIN);
-        let mut client = Client::connect(&net, &config, clock, timeout)
+        let mut client = Client::connect(&net, &config, clock.clone(), timeout)
             .await
             .expect("the device listens");
-        said(client.exchange(UNIT, &read(Table::Coils, 0, 1)).await)
+        let start = clock.now();
+        let got = said(client.exchange(UNIT, &read(Table::Coils, 0, 1)).await);
+        (got, clock.now() - start)
     });
-    assert_eq!(got, Err(Failure::Timeout));
+    assert_eq!(got, (Err(Failure::Timeout), Span::ZERO));
 }
