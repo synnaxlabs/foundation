@@ -1447,6 +1447,15 @@ How to read this record:
   runtime-loaded bindings, NI functions declared by hand. Codecs: built. Crypto: rustls
   with aws-lc-rs and blake3. Tooling: clap, schemars, toml_edit, tracing. Our own thin
   MCP server, Prometheus text output, and InfluxDB line protocol. FIPS build later.
+  HTTP: one client for all connectors, on `hyper` (HTTP/1.1 and HTTP/2) over the `env`
+  network seam with `rustls`, in the connector component library. InfluxDB, a general
+  HTTP connector, alarms, webhooks, and remote write use it. No HTTP parser of our own.
+  Every clock read and name lookup of the client goes through `env`, and no Tokio
+  feature of `hyper` or `hyper-util` is on. Lost: a sans-I/O HTTP/1.1 module in
+  `connector-influx`. The person decided on 2026-10-06 ("Approved." "Adding a bunch of
+  crates is fine. Making a binary larger is fine." "we should be careful about writing
+  raw HTTP transports.", relayed by `advisor`; "Yes I approve", to the coordinator)
+  (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
