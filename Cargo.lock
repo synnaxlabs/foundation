@@ -277,6 +277,7 @@ dependencies = [
  "ring 0.0.0",
  "sim",
  "types",
+ "wire",
 ]
 
 [[package]]
