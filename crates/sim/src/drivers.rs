@@ -2,6 +2,7 @@
 
 mod files;
 mod net;
+mod serial;
 
 use std::cell::RefCell;
 use std::future::poll_fn;

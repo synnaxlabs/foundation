@@ -73,6 +73,38 @@ fn has_no_time_until_a_majority_agrees() {
 }
 
 #[test]
+fn the_status_follows_each_add_before_the_first_estimate() {
+    let (_sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    assert_eq!(reader.status(), Status::Unsynced(Error::NoSources));
+    let _ = [clock.add(), clock.add()];
+    let empty = Error::NoMajority {
+        sources: 2,
+        agreeing: 0,
+        empty: 2,
+    };
+    assert_eq!(reader.status(), Status::Unsynced(empty));
+}
+
+#[test]
+fn an_add_after_the_first_estimate_holds_over_at_once() {
+    let (_sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let source = clock.add();
+    let first = measure(&node, Span::HOUR, ms(2));
+    let _ = clock.push(source, first);
+    assert_eq!(reader.status(), Status::Synced(first));
+    let _ = clock.add();
+    let alone = Error::NoMajority {
+        sources: 2,
+        agreeing: 1,
+        empty: 1,
+    };
+    assert_eq!(reader.status(), Status::Holdover(first, alone));
+    assert_eq!(reader.now(), Some(first.interval()));
+}
+
+#[test]
 fn a_source_that_pushes_first_cannot_set_mesh_time() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
@@ -141,12 +173,14 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
         clock.push(c, behind),
         holdover(&node, Span::ZERO, grown, split)
     );
+    assert_eq!(reader.status(), holdover(&node, Span::ZERO, grown, split));
     assert_eq!(
         read(&node, &reader),
         Some(measure(&node, Span::ZERO, grown))
     );
     sim.run_for(Span::SECOND).expect("the run ends");
     let grown = us(1_400);
+    assert_eq!(reader.status(), holdover(&node, Span::ZERO, grown, split));
     assert_eq!(
         clock.push(b, measure(&node, Span::SECOND, ms(1))),
         holdover(&node, Span::ZERO, grown, split)
@@ -159,6 +193,26 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
         clock.push(c, measure(&node, Span::ZERO, ms(1))),
         synced(&node, Span::ZERO, ms(1))
     );
+    assert_eq!(reader.status(), synced(&node, Span::ZERO, ms(1)));
+}
+
+#[test]
+fn keeps_its_slew_in_holdover() {
+    let (mut sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let source = clock.add();
+    let _ = clock.push(source, measure(&node, Span::ZERO, Span::ZERO));
+    let _ = clock.push(source, measure(&node, us(400), Span::ZERO));
+    let _ = clock.add();
+    let alone = Error::NoMajority {
+        sources: 2,
+        agreeing: 1,
+        empty: 1,
+    };
+    assert_eq!(reader.status(), holdover(&node, Span::ZERO, us(400), alone));
+    sim.run_for(ms(400)).expect("the run ends");
+    assert_eq!(reader.status(), holdover(&node, us(200), us(280), alone));
+    assert_eq!(read(&node, &reader), Some(measure(&node, us(200), us(280))));
 }
 
 #[test]
@@ -228,8 +282,13 @@ fn a_remove_follows_the_sources_left_then_holds_over_with_none() {
     // The earliest offset b allows is 999.5 ms; its latest is 1 ms above.
     let stepped = us(999_500);
     assert_eq!(clock.remove(a), synced(&node, stepped, ms(1)));
+    assert_eq!(reader.status(), synced(&node, stepped, ms(1)));
     assert_eq!(
         clock.remove(b),
+        holdover(&node, stepped, ms(1), Error::NoSources)
+    );
+    assert_eq!(
+        reader.status(),
         holdover(&node, stepped, ms(1), Error::NoSources)
     );
     assert_eq!(read(&node, &reader), Some(measure(&node, stepped, ms(1))));
@@ -313,12 +372,23 @@ async fn steer(monotonic: env::clock::Clock, mut clock: Clock, truth: Truth) {
     }
 }
 
-/// Every 1 to 1000 us, reads mesh time and checks it against the truth.
+/// Every 1 to 1000 us, reads mesh time and the status and checks them against the
+/// truth.
 async fn check(monotonic: env::clock::Clock, reader: Reader, truth: Truth, core: u64) {
     let mut rng = env::rng::Rng::from_seed(core);
     let end = monotonic.now() + RUN;
     let mut last = None;
     while monotonic.now() < end {
+        match reader.status() {
+            Status::Synced(m) => {
+                let time = i128::from(m.at().0) + truth.offset(m.at());
+                let (low, high) = (m.interval().earliest, m.interval().latest);
+                let (low, high) = (i128::from(low.nanos()), i128::from(high.nanos()));
+                assert!((low..=high).contains(&time), "{m:?} misses {time}ns");
+            }
+            Status::Unsynced(_) => assert_eq!(last, None, "unsynced after mesh time"),
+            status @ Status::Holdover(..) => panic!("{status:?}"),
+        }
         if let Some(interval) = reader.now() {
             let now = monotonic.now();
             let time = i128::from(now.0) + truth.offset(now);

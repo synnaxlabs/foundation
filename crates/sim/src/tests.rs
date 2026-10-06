@@ -5,6 +5,7 @@ mod crash;
 mod files;
 mod net;
 mod run_on;
+mod serial;
 mod shards;
 
 use std::collections::BTreeSet;
