@@ -2403,9 +2403,20 @@ How to read this record:
   each tick, so with no session the leader cannot be reached. A try gets no position
   when no leader is known, when the group has no session to the leader, when the leader
   refuses the proposal, when the stream fails, when the pool has no block for the
-  proposal or this node's group gives `Error::Pool`, and when no answer comes in one
-  election timeout. The call then waits one tick and starts the next try. So a call that
-  waits for an answer gives a stop of the group at most 11 ticks late. With a position,
+  proposal or this node's group gives `Error::Pool`, and when this node's `raft` names
+  another leader or term before the answer. The call then waits one tick and starts the
+  next try. A try that waits for the answer has no time limit: the leader answers each
+  forwarded proposal or ends its stream, and a session that fails one way ends at the
+  timeout of `transport`. `Group` wakes each call at each change of the leader or the
+  term, and at a stop, so a stop ends the wait at once. A limit of one election timeout
+  on the answer lost: on a link with a round trip above it, `raft` keeps its leader,
+  and each try gave up after the leader took its proposal, so the call appended one
+  entry for each try and never returned (decided by `laptop.architect`,
+  2026-10-07T22:40:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6048332653).
+  Supersedes the limit of one election timeout in the plan that this approval took:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407. With a
+  position,
   the call waits with no time limit until this node applied the entry of that term at
   that index, or until the log has a different entry there, and then it proposes again:
   a new leader commits an entry of its term, which decides each older position. A time

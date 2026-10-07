@@ -391,7 +391,7 @@ const HALF: Span = Span::from_nanos(5 * TICK.nanos());
 /// each 300 ms.
 struct Leader {
     peer: Peer,
-    /// Whether node 2 sends no more heartbeat.
+    /// Whether node 2 sends no heartbeat now.
     silent: Rc<Cell<bool>>,
     /// The session that node 2 dialed, for its `raft` messages.
     dialed: Session,
@@ -410,10 +410,12 @@ impl Leader {
         let silent = Rc::new(Cell::new(false));
         let ended = Rc::clone(&silent);
         peer.tasks.spawn(async move {
-            while !ended.get() {
-                let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                let beat = block(&pool, &Message::Raft(beat).encode()).unwrap();
-                beats.send(beat).await.unwrap();
+            loop {
+                if !ended.get() {
+                    let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                    let beat = block(&pool, &Message::Raft(beat).encode()).unwrap();
+                    beats.send(beat).await.unwrap();
+                }
                 clock.sleep(BEAT).await;
             }
         });
@@ -560,29 +562,37 @@ async fn set(mesh: Mesh) -> (Result<(), Error>, Option<node::Key>) {
     (set, mesh.watch(INDEX).next().await.unwrap())
 }
 
+// Node 2 holds its answer for 3 s and leads, so the try waits. It then sends no
+// heartbeat, and node 1 has no leader after its election timeout.
 #[test]
-fn a_proposal_with_no_answer_goes_again_on_a_new_stream_after_one_election_timeout() {
+fn a_proposal_with_no_answer_goes_again_only_after_node_1_has_no_leader() {
     let call = |_, mesh| set(mesh);
-    let (set, (changes, gap, late, ends)) = run(call, |mut leader| async move {
+    let (set, (changes, early, gap, late, ends)) = run(call, |mut leader| async move {
         let clock = leader.clock();
         let (first, mut old) = leader.proposal().await;
+        let early = leader.proposal_within(seconds(3)).await;
+        leader.silent.set(true);
         let start = clock.now();
-        let (second, mut asked) = leader.proposal().await;
+        let end = old.end().await;
         let gap = clock.now() - start;
         let late = leader.answer(&mut old, at(1)).await;
+        leader.silent.set(false);
+        let (second, mut asked) = leader.proposal().await;
         leader.answer(&mut asked, at(1)).await.unwrap();
         leader.append(&home(1), at(1)).await;
         leader.rest(seconds(2)).await;
-        let ends = [old.end().await, asked.end().await];
-        ([first, second], gap, late, ends)
+        let early = early.map(|(change, _)| change);
+        ([first, second], early, gap, late, [end, asked.end().await])
     });
     assert_eq!(set, (Ok(()), Some(key(1))));
     assert_eq!(changes, [home(1), home(1)]);
-    // The answer has one election timeout, and the next try starts one tick later.
+    assert_eq!(early, None);
+    // The last heartbeat came at most 300 ms before, and an election timeout is 1 s
+    // to 2 s.
     let ms = gap.nanos() / Span::MILLISECOND.nanos();
     assert!(
-        (1100..1200).contains(&ms),
-        "{ms} ms between the two proposals"
+        (700..2100).contains(&ms),
+        "the try ended {ms} ms after the last heartbeat"
     );
     assert_eq!(late, Err(transport::Error::Stopped { code: Code(0) }));
     // The try that gave up took its proposal back, and the other ended its stream.
@@ -662,17 +672,22 @@ fn a_dropped_call_that_waits_for_the_answer_stops_its_stream() {
 // Node 2 sends no heartbeat after the stop: `accept` takes no stream that the group
 // refuses.
 #[test]
-fn a_call_that_waits_for_the_answer_gets_the_cause_after_the_group_stops() {
-    let call = |node: sim::node::Node, mesh: Mesh| async move {
-        let clock = node.clock();
+fn a_call_that_waits_for_the_answer_gets_the_cause_when_the_group_stops() {
+    let call = |_, mesh: Mesh| async move {
         let mut watch = mesh.watch(INDEX);
         assert_eq!(watch.next().await, Ok(None));
         let mut call = pin!(mesh.set_home(INDEX, key(1)));
-        let stopped = next_before(&mut watch, call.as_mut()).await;
-        let start = clock.now();
-        (stopped, call.await, clock.now() - start)
+        let mut next = pin!(watch.next());
+        poll_fn(
+            |cx| match (next.as_mut().poll(cx), call.as_mut().poll(cx)) {
+                (Poll::Pending, Poll::Pending) => Poll::Pending,
+                (Poll::Ready(stopped), Poll::Ready(set)) => Poll::Ready((stopped, set)),
+                (stopped, set) => panic!("only one returned: {stopped:?}, {set:?}"),
+            },
+        )
+        .await
     };
-    let ((stopped, set, waited), end) = run(call, |mut leader| async move {
+    let ((stopped, set), end) = run(call, |mut leader| async move {
         let (_, mut asked) = leader.proposal().await;
         leader.silent.set(true);
         leader.rest(BEAT).await;
@@ -683,12 +698,6 @@ fn a_call_that_waits_for_the_answer_gets_the_cause_after_the_group_stops() {
     let cause = Stopped::Change { at: at(1), cause };
     assert_eq!(stopped, Err(cause.clone()));
     assert_eq!(set, Err(Error::Stopped(cause)));
-    // The try has one election timeout, and the next one starts a tick later.
-    let limit = Span::from_nanos(11 * TICK.nanos());
-    assert!(
-        waited <= limit,
-        "the call returned {waited:?} after the stop"
-    );
     // The group dropped its sessions at the stop, so the try held the last handle
     // of this one.
     assert_eq!(end, Err(transport::Error::PeerClosed { code: Code(0) }));
@@ -929,5 +938,102 @@ fn a_try_that_gave_up_sets_no_home_after_a_later_call_returned() {
         assert_eq!(board.set.len(), 2, "run {run}");
         let homes = IDS.map(|id| last(&board, id));
         assert_eq!(homes, [Some(key(third)); 3], "run {run}");
+    }
+}
+
+impl Cluster {
+    /// Sets the delay of each datagram between `node` and each other node.
+    fn delay_each(&mut self, node: u8, delay: Span) {
+        let config = link::Config {
+            delay,
+            ..link::Config::default()
+        };
+        for other in IDS.into_iter().filter(|&id| id != node) {
+            let (a, b) = (self.node(node).clone(), self.node(other).clone());
+            self.sim.link(&a, &b, config);
+            self.sim.link(&b, &a, config);
+        }
+    }
+
+    /// Starts a call on a follower whose datagrams take 600 ms each way, and runs for
+    /// `wait` after. Gives the leader, the follower, and the position of the last
+    /// entry before the call.
+    fn asked(run: u64, wait: Span) -> (Self, u8, u8, Position) {
+        let (mut cluster, leader, follower, at) = Self::led(run);
+        cluster.delay_each(follower, ticks(6));
+        cluster.run(seconds(5));
+        cluster.set(follower, follower);
+        cluster.run(wait);
+        (cluster, leader, follower, at)
+    }
+}
+
+fn ticks(count: i64) -> Span {
+    Span::from_nanos(TICK.nanos().checked_mul(count).unwrap())
+}
+
+// The answer comes 1.2 s after the proposal, which is more than the shortest election
+// timeout. The leader leads all the time, so the call waits for the answer.
+#[test]
+fn a_call_puts_one_entry_in_the_log_when_the_answer_of_the_leader_is_slow() {
+    let (mut cluster, leader, follower, at) = Cluster::asked(0, seconds(30));
+    let board = cluster.board();
+    assert_eq!(board.set, [(follower, Some(key(follower)), Ok(()))]);
+    cluster.script(|_| home(9));
+    cluster.run(seconds(10));
+    let board = cluster.board();
+    assert_eq!((board.led, board.at), (vec![leader], vec![after(at, 2)]));
+}
+
+// The leader crashes 300 ms after the call, before it gets the proposal, or 900 ms
+// after, when its answer is in flight. Each datagram takes the default time from the
+// crash, so that the two nodes that run elect a leader.
+#[test]
+fn a_call_returns_through_the_next_leader_when_the_leader_crashes() {
+    for (run, wait) in [(0, 3), (1, 3), (0, 9), (1, 9)] {
+        let (mut cluster, leader, follower, at) = Cluster::asked(run, ticks(wait));
+        let node = cluster.node(leader).clone();
+        cluster.sim.crash(&node, Crash::Power);
+        cluster.link_each(follower, 0.0);
+        cluster.run(seconds(20));
+        let board = cluster.board();
+        let set = [(follower, Some(key(follower)), Ok(()))];
+        assert_eq!(board.set, set, "run {run}, {wait} ticks");
+        cluster.script(|_| home(9));
+        cluster.run(seconds(10));
+        let board = cluster.board();
+        let next: Vec<u8> = IDS.into_iter().filter(|&id| id != leader).collect();
+        assert!(matches!(board.led[..], [led] if next.contains(&led)));
+        // The leader of the next term appends an entry of its own, and the call
+        // appends one.
+        let indexes: Vec<u64> = board.at.iter().map(|at| at.index).collect();
+        assert_eq!(indexes, [after(at, 3).index], "run {run}, {wait} ticks");
+    }
+}
+
+// The leader gets the proposal, and the cut drops its answer. The first try ends when
+// the follower hears no leader, and the call proposes again after the heal.
+#[test]
+fn a_call_that_is_cut_off_while_it_waits_for_the_answer_returns_after_the_heal() {
+    for run in 0..4 {
+        let (mut cluster, leader, follower, at) = Cluster::asked(run, ticks(3));
+        cluster.link_each(follower, 1.0);
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        assert_eq!(board.set, [], "run {run}");
+        assert_eq!(board.homes[&leader], [Some(key(follower))], "run {run}");
+        cluster.link_each(follower, 0.0);
+        cluster.run(seconds(10));
+        let board = cluster.board();
+        assert_eq!(
+            board.set,
+            [(follower, Some(key(follower)), Ok(()))],
+            "run {run}"
+        );
+        cluster.script(|_| home(9));
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        let took = (board.led, board.at);
+        assert_eq!(took, (vec![leader], vec![after(at, 3)]), "run {run}");
     }
 }

@@ -1,17 +1,15 @@
 //! Sets the home of an index through the leader of the group.
 
 use std::future::poll_fn;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::task::Poll;
 
 use block::Pool;
-use env::clock::Clock;
 use raft::Position;
 use transport::{Class, Session};
-use types::time::Span;
 use types::{channel, node};
 
-use super::{Mesh, TICK, election, header};
+use super::{Mesh, TICK, header};
 use crate::applied::{Floor, Outcome};
 use crate::bytes::block;
 use crate::change::Change;
@@ -46,7 +44,7 @@ impl Mesh {
             if self.group.borrow().state.member(home).is_none() {
                 return Err(Error::NotMember(home));
             }
-            let Some(at) = self.place(Change::Home { index, home }).await? else {
+            let Some(at) = attempt.place(Change::Home { index, home }).await? else {
                 drop(attempt);
                 self.clock.sleep(TICK).await;
                 continue;
@@ -69,28 +67,6 @@ impl Mesh {
             slot: group.slot(),
             floor: group.applied.open(),
         })
-    }
-
-    // Gives `change` to the leader, and gives the position of its entry there, or
-    // `None` when no leader took it.
-    async fn place(&self, change: Change) -> Result<Option<Position>, Error> {
-        let leader = match self.propose(change.clone()).await {
-            Ok(at) => return Ok(Some(at)),
-            Err(Error::Raft(raft::Error::NotLeader { leader })) => leader,
-            // The group takes a proposal again when the write of its log ends.
-            Err(Error::Pool(_)) => None,
-            Err(error) => return Err(error),
-        };
-        // Only the task that sends to the leader dials it. A follower sends to its
-        // leader in each tick, so with no session the leader cannot be reached.
-        let session = leader
-            .and_then(|leader| self.group.borrow().sessions.get(&leader).cloned());
-        let Some(session) = session else {
-            return Ok(None);
-        };
-        // A new leader can take the change after one election timeout.
-        let forward = forward(&session, &self.pool, change);
-        Ok(within(&self.clock, election(), forward).await.flatten())
     }
 }
 
@@ -115,23 +91,6 @@ async fn forward(session: &Session, pool: &Pool, change: Change) -> Option<Posit
     }
 }
 
-// What `future` gives, or `None` when it waits for longer than `limit`.
-pub(super) async fn within<F: Future>(
-    clock: &Clock,
-    limit: Span,
-    future: F,
-) -> Option<F::Output> {
-    let mut future = pin!(future);
-    let mut end = clock.sleep(limit);
-    poll_fn(|cx| {
-        if let Poll::Ready(output) = future.as_mut().poll(cx) {
-            return Poll::Ready(Some(output));
-        }
-        Pin::new(&mut end).poll(cx).map(|()| None)
-    })
-    .await
-}
-
 // One try of a call. It holds its floor in the group until it drops.
 struct Try<'a> {
     mesh: &'a Mesh,
@@ -141,6 +100,46 @@ struct Try<'a> {
 }
 
 impl Try<'_> {
+    // Gives `change` to the leader, and gives the position of its entry there, or
+    // `None` when no leader took it.
+    async fn place(&self, change: Change) -> Result<Option<Position>, Error> {
+        let mesh = self.mesh;
+        match mesh.propose(change.clone()).await {
+            Ok(at) => return Ok(Some(at)),
+            Err(Error::Raft(raft::Error::NotLeader { .. })) => {}
+            // The group takes a proposal again when the write of its log ends.
+            Err(Error::Pool(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        // Only the task that sends to the leader dials it. A follower sends to its
+        // leader in each tick, so with no session the leader cannot be reached.
+        let (lead, session) = {
+            let group = mesh.group.borrow();
+            let lead = (group.raft.leader(), group.raft.term());
+            let session = lead.0.and_then(|leader| group.sessions.get(&leader));
+            let Some(session) = session.cloned() else {
+                return Ok(None);
+            };
+            (lead, session)
+        };
+        let mut forward = pin!(forward(&session, &mesh.pool, change));
+        // The leader answers or ends the stream while it leads, so only a change of
+        // the lead ends the wait with no answer.
+        poll_fn(|cx| {
+            if let Poll::Ready(at) = forward.as_mut().poll(cx) {
+                return Poll::Ready(Ok(at));
+            }
+            let mut group = mesh.group.borrow_mut();
+            group.running()?;
+            if (group.raft.leader(), group.raft.term()) != lead {
+                return Poll::Ready(Ok(None));
+            }
+            group.calls.insert(self.slot, cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+
     // Waits until this node knows what became of the entry at `at`, and gives
     // whether it applied that entry.
     async fn applied(&self, at: Position) -> Result<bool, Error> {

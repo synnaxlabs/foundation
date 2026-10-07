@@ -41,10 +41,6 @@ mod stream;
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
-/// The shortest election timeout.
-fn election() -> Span {
-    Span::from_nanos(TICK.nanos().saturating_mul(i64::from(ELECTION_TICKS)))
-}
 
 /// The header that goes first on each stream that this node opens.
 fn header(pool: &Pool) -> Result<Block, block::Error> {
@@ -279,7 +275,7 @@ impl Mesh {
             return Err(Error::NotVoter { from });
         }
         claim::check(&group.raft, &message, public_key)?;
-        group.raft.step(message)?;
+        group.input(|raft| raft.step(message))?;
         group.wake();
         Ok(())
     }
@@ -541,6 +537,16 @@ impl Group {
         incoming.contains(&key) || outgoing.contains(&key)
     }
 
+    // Gives `raft` an input, and wakes each call when the leader or the term changes.
+    fn input<T>(&mut self, input: impl FnOnce(&mut Raft) -> T) -> T {
+        let lead = (self.raft.leader(), self.raft.term());
+        let output = input(&mut self.raft);
+        if lead != (self.raft.leader(), self.raft.term()) {
+            self.wake_calls();
+        }
+        output
+    }
+
     fn slot(&mut self) -> u64 {
         let slot = self.slots;
         self.slots = slot.wrapping_add(1);
@@ -737,7 +743,7 @@ async fn run(
             // A tick that a slow write hides is lost, so the group's time only
             // slows.
             while Pin::new(&mut tick).poll(cx).is_ready() {
-                group.raft.tick(rng.next_u64());
+                group.input(|raft| raft.tick(rng.next_u64()));
                 tick = clock.sleep(TICK);
             }
             let ready = group.raft.ready();
@@ -813,7 +819,6 @@ mod tests {
     use types::node::SealKey;
     use wire::Protocol;
 
-    use super::home::within;
     use super::*;
     use crate::card;
     use crate::change::Unknown;
@@ -1502,6 +1507,23 @@ mod tests {
 
     fn term(mesh: &Mesh) -> Term {
         mesh.group.borrow().raft.term()
+    }
+
+    /// What `future` gives, or `None` when it waits for longer than `limit`.
+    async fn within<F: Future>(
+        clock: &Clock,
+        limit: Span,
+        future: F,
+    ) -> Option<F::Output> {
+        let mut future = pin!(future);
+        let mut end = clock.sleep(limit);
+        poll_fn(|cx| {
+            if let Poll::Ready(output) = future.as_mut().poll(cx) {
+                return Poll::Ready(Some(output));
+            }
+            Pin::new(&mut end).poll(cx).map(|()| None)
+        })
+        .await
     }
 
     /// Gives the output of `future` when it does not wait.
