@@ -556,10 +556,21 @@ How to read this record:
   takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
   for monotonic and mesh time. `home::Error` holds only what `write` gives, and each
   other call has its own error. Conversions from `control` errors are private. The `hub`
-  row stays as it is. Lost: the lost designs of the plan
+  row stays as it is. `Shard` gives no stored seq until a caller needs one (architect
+  review, https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6031908363).
+  Lost: the lost designs of the plan
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
+- **HOME TYPE REFUSAL (#963)** `Shard::open_writer` refuses a key set with a series of
+  a type the home does not write yet, with `writer::Error::Type` (the slot and the type
+  of the first such series). It decides after `Unsynced` and `Lease`, and changes no
+  state. `hub` adds no check of its own; it maps the variant to its own error and names
+  the channel. This is a patch: #1145 makes the home write every `sample::Type` and
+  removes the variant. Lost: a documented precondition on `hub` (a user can break it,
+  and each `hub` caller must keep it); a refusal in `config check` (a second place that
+  must track the home). Decided by the architect, #963
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps

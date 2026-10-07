@@ -320,8 +320,9 @@ impl Shard {
     /// # Errors
     ///
     /// In this order: [`writer::Error::Unsynced`] before the node first has mesh
-    /// time, and [`writer::Error::Lease`] for a lease that is not longer than zero.
-    /// Neither changes the shard.
+    /// time, [`writer::Error::Lease`] for a lease that is not longer than zero, and
+    /// [`writer::Error::Type`] for the first series of the key set with a type the
+    /// home does not write yet. None changes the shard.
     ///
     /// # Panics
     ///
@@ -338,6 +339,12 @@ impl Shard {
         } = writer;
         let (now, mesh) = self.now().ok_or(writer::Error::Unsynced)?;
         let lease = lease.map(writer::lease).transpose()?;
+        if let Some(&key_set::Entry {
+            slot, data_type, ..
+        }) = split::unwritten(&set)
+        {
+            return Err(writer::Error::Type { slot, data_type });
+        }
         let control = control::Writer { subject, authority };
         let entries = set.entries();
         let mut claims = Vec::with_capacity(set.groups().len());
@@ -391,9 +398,8 @@ impl Shard {
     /// # Panics
     ///
     /// If the writer is not open or `key` is of another shard, before any error. If
-    /// the frame is not of the writer's key set or holds a series of a type the home
-    /// does not write, unless it is labeled resend: the shard does not read a resend
-    /// frame.
+    /// the frame is not of the writer's key set, unless it is labeled resend: the
+    /// shard does not read a resend frame.
     pub fn write(
         &mut self,
         key: writer::Key,
@@ -473,25 +479,16 @@ impl Shard {
         Commit(self.buffer.committed())
     }
 
-    /// The first seq on `path` of the index at `slot` that is not on disk. An applied
-    /// range is stored when this is at least its `seq + count`. A lost range is never
-    /// stored.
-    ///
-    /// # Panics
-    ///
-    /// If the shard does not carry `slot`.
-    pub fn stored(&self, slot: Slot, path: Path) -> u64 {
-        self.place(slot);
-        self.buffer.durable(slot, path).seq
-    }
-
     /// Opens an unnamed complete reader on the index at `slot`, with a credit of
     /// `limit_bytes`. From the index's live tail on, it gets each live frame after
-    /// the commit that holds it, while it has credit for the frame.
+    /// the commit that holds it, while it has credit for the frame. It does not get
+    /// the first frame that it has no credit for, nor any later frame, and no grant
+    /// changes that: close it and open a new reader.
     ///
     /// # Panics
     ///
     /// If the shard does not carry `slot`.
+    #[must_use = "the reader stays open until `close_reader` gets its key"]
     pub fn open_complete(
         &mut self,
         slot: Slot,
@@ -509,6 +506,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard does not carry `slot`.
+    #[must_use = "the reader stays open until `close_reader` gets its key"]
     pub fn open_latest(&mut self, slot: Slot) -> reader::Key {
         let session = self.readers.open_latest(self.place(slot)).into();
         reader::Key { slot, session }
@@ -527,7 +525,8 @@ impl Shard {
     }
 
     /// Takes the next frame of the reader `key`, or `None` when none waits or the
-    /// reader is closed.
+    /// reader is closed. A complete reader that misses a frame for lack of credit
+    /// gets the frames before it, and then `None`.
     ///
     /// # Panics
     ///
@@ -1209,11 +1208,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn panics_at_stored_of_an_index_it_does_not_carry() {
-        check_not_carried(100, |shard| {
-            shard.stored(Slot::new(3), Path::Live);
-        });
+    /// The first seq on `path` of the index at `slot` that the ring does not hold
+    /// on disk.
+    fn stored(shard: &Shard, slot: Slot, path: Path) -> u64 {
+        shard.buffer.durable(slot, path).seq
     }
 
     #[test]
@@ -1233,11 +1231,11 @@ mod tests {
             );
             let one = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
             assert_eq!(shard.write(a, LIVE, one), Ok(&[applied(0, 2, 1)][..]));
-            assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
             shard.committed().await.expect("the commit ends");
-            assert_eq!(shard.stored(Slot::new(0), Path::Live), 3);
-            assert_eq!(shard.stored(Slot::new(2), Path::Live), 1);
-            assert_eq!(shard.stored(Slot::new(0), Path::Backfill), 0);
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 3);
+            assert_eq!(stored(&shard, Slot::new(2), Path::Live), 1);
+            assert_eq!(stored(&shard, Slot::new(0), Path::Backfill), 0);
         });
     }
 
@@ -1619,7 +1617,7 @@ mod tests {
             );
             drop((twin, blocks));
             shard.committed().await.expect("the commit ends");
-            assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
         });
     }
 
@@ -2187,7 +2185,7 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let stored = [Path::Live, Path::Backfill]
-                .map(|path| shard.stored(Slot::new(0), path));
+                .map(|path| stored(&shard, Slot::new(0), path));
             assert_eq!(stored, [2, 1]);
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let before = frame(&test.pool, &set, &[(0, &[15]), (1, &[3])]);
@@ -2231,7 +2229,7 @@ mod tests {
             let test = Test::new(node, tasks);
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            assert_eq!(shard.stored(Slot::new(0), Path::Live), 2);
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 2);
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(0, &[25]), (1, &[3])]);
             assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 2, 1)][..]));
@@ -2543,7 +2541,7 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10, 20]);
                 write(&test, &mut shard, a, &[30]);
-                assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(2, 1)]);
                 let late = latest(&mut shard, Slot::new(0));
@@ -2584,7 +2582,7 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(SYNC).await;
-                assert_eq!(shard.stored(Slot::new(0), Path::Live), 0, "a sync runs");
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0, "a sync runs");
                 write(&test, &mut shard, a, &[20]);
                 assert_eq!(woken(&mut shard), [latest]);
                 assert_eq!(taken(&mut shard, latest, 0), [seq(1, 1)]);
@@ -2776,12 +2774,12 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(SYNC).await;
-                assert_eq!(shard.stored(Slot::new(0), Path::Live), 0, "a sync runs");
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0, "a sync runs");
                 write(&test, &mut shard, a, &[20]);
-                while shard.stored(Slot::new(0), Path::Live) == 0 {
+                while stored(&shard, Slot::new(0), Path::Live) == 0 {
                     test.clock.sleep(Span::from_nanos(1_000)).await;
                 }
-                assert_eq!(shard.stored(Slot::new(0), Path::Live), 1);
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.committed().await.expect("the commit ends");
@@ -2800,7 +2798,7 @@ mod tests {
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(SYNC).await;
                 write(&test, &mut shard, a, &[20]);
-                while shard.stored(Slot::new(0), Path::Live) == 0 {
+                while stored(&shard, Slot::new(0), Path::Live) == 0 {
                     test.clock.sleep(Span::from_nanos(1_000)).await;
                 }
                 let place = shard.place(Slot::new(0));
@@ -2903,7 +2901,7 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(Span::from_nanos(100_000_000)).await;
-                assert_eq!(shard.stored(Slot::new(0), Path::Live), 1);
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
             });
@@ -2958,14 +2956,14 @@ mod tests {
         #[test]
         fn panics_at_the_open_of_a_latest_reader_of_an_index_it_does_not_carry() {
             check_not_carried(29, |shard| {
-                shard.open_latest(Slot::new(3));
+                let _key = shard.open_latest(Slot::new(3));
             });
         }
 
         #[test]
         fn panics_at_the_open_of_a_complete_reader_of_an_index_it_does_not_carry() {
             check_not_carried(99, |shard| {
-                shard.open_complete(Slot::new(3), CREDIT);
+                let _key = shard.open_complete(Slot::new(3), CREDIT);
             });
         }
 
@@ -3072,7 +3070,7 @@ mod tests {
             let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
             assert_eq!(shard.write(a, LIVE, second), Ok(&[applied(0, 1, 1)][..]));
             commit.await.expect("the commit ends");
-            assert_eq!(shard.stored(Slot::new(0), Path::Live), 2);
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 2);
         });
     }
 
@@ -3291,45 +3289,56 @@ mod tests {
         );
     }
 
-    /// Writes a frame of one stamp at `count` and a `String` series after it, and
-    /// gives the run.
-    fn write_of_a_string_series(seed: u64, count: u32) -> Result<(), sim::Error> {
-        let (mut sim, _handle) = start(seed, move |test| async move {
-            let set = interner().intern(&[Group {
-                index: key(Slot::new(2)),
-                data: &[(key(Slot::new(3)), Type::String)],
-            }]);
+    /// A key set of the index at slot 2 with a `String` series.
+    fn string_series() -> Arc<KeySet> {
+        interner().intern(&[Group {
+            index: key(Slot::new(2)),
+            data: &[(key(Slot::new(3)), Type::String)],
+        }])
+    }
+
+    #[test]
+    fn refuses_a_key_set_with_a_series_of_a_type_the_home_does_not_write() {
+        run(87, |test| async move {
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let mut write = frame(&test.pool, &set, &[(0, &[10]), (1, &[0])]);
-            write.set_count(0, count);
-            drop(shard.write(a, LIVE, write));
+            let refused = shard.open_writer(writer("a", 2, &string_series()));
+            assert_eq!(
+                refused,
+                Err(writer::Error::Type {
+                    slot: Slot::new(3),
+                    data_type: Type::String,
+                })
+            );
+            let set = two_indexes();
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
         });
-        sim.run()
     }
 
     #[test]
-    fn panics_on_a_write_of_a_series_of_a_type_the_home_does_not_write() {
-        assert_eq!(
-            write_of_a_string_series(87, 1),
-            Err(sim::Error::Panicked {
-                thread: DIR.into(),
-                message: "home does not write a series of String yet".into(),
-                seed: 87,
-            })
-        );
+    fn refuses_a_lease_of_zero_before_the_type_of_a_series() {
+        run(88, |test| async move {
+            let mut shard = test.shard(AREA).await;
+            let zero = Writer {
+                lease: Some(Span::ZERO),
+                ..writer("a", 1, &string_series())
+            };
+            assert_eq!(
+                shard.open_writer(zero),
+                Err(writer::Error::Lease { span: Span::ZERO })
+            );
+        });
     }
 
     #[test]
-    fn panics_on_a_series_of_such_a_type_after_an_index_that_does_not_fit() {
-        assert_eq!(
-            write_of_a_string_series(88, 2),
-            Err(sim::Error::Panicked {
-                thread: DIR.into(),
-                message: "home does not write a series of String yet".into(),
-                seed: 88,
-            })
-        );
+    fn refuses_the_type_of_a_series_as_unsynced_before_the_node_has_mesh_time() {
+        run(101, |test| async move {
+            let mut shard = test.unsynced().await;
+            shard.carry(Slot::new(2));
+            let a = shard.open_writer(writer("a", 1, &string_series()));
+            assert_eq!(a, Err(writer::Error::Unsynced));
+        });
     }
 
     #[test]

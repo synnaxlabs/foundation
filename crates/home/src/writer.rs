@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use control::lease::Lease;
 use types::authority::Authority;
+use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::name::Name;
+use types::sample::Type;
 use types::time::Span;
 
 /// What a writer opens with.
@@ -54,22 +56,42 @@ impl Key {
 /// Why a writer did not open. Nothing changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The node has no mesh time yet. Open the writer again later.
+    /// The node has no mesh time yet.
     Unsynced,
     /// A control lease must be longer than zero.
     Lease {
         /// The span that was asked for.
         span: Span,
     },
+    /// The key set has a series of a type the home does not write yet.
+    Type {
+        /// The slot of the series' channel.
+        slot: Slot,
+        /// The type of the series.
+        data_type: Type,
+    },
+}
+
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(self) -> &'static str {
+        match self {
+            Self::Unsynced => "Open the writer again later",
+            Self::Lease { .. } => "Give a lease longer than zero, or none",
+            Self::Type { .. } => "Give the channel a type the home writes (a scalar)",
+        }
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Unsynced => f.write_str(
-                "the node has no mesh time yet: open the writer again later",
-            ),
+            Self::Unsynced => f.write_str("the node has no mesh time yet"),
             Self::Lease { span } => control::lease::Error { span }.fmt(f),
+            Self::Type { data_type, .. } => {
+                write!(f, "the home does not write a series of {data_type:?} yet")
+            }
         }
     }
 }
@@ -90,18 +112,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn says_what_to_do_for_each_error() {
+    fn says_what_is_wrong_and_what_to_do_for_each_error() {
         let lease = Error::Lease {
             span: Span::from_nanos(-3),
         };
+        let series = Error::Type {
+            slot: Slot::new(3),
+            data_type: Type::String,
+        };
 
-        assert_eq!(
-            Error::Unsynced.to_string(),
-            "the node has no mesh time yet: open the writer again later"
-        );
+        assert_eq!(Error::Unsynced.to_string(), "the node has no mesh time yet");
+        assert_eq!(Error::Unsynced.fix(), "Open the writer again later");
         assert_eq!(
             lease.to_string(),
             "control lease must be longer than zero, got -3ns"
+        );
+        assert_eq!(lease.fix(), "Give a lease longer than zero, or none");
+        assert_eq!(
+            series.to_string(),
+            "the home does not write a series of String yet"
+        );
+        assert_eq!(
+            series.fix(),
+            "Give the channel a type the home writes (a scalar)"
         );
     }
 

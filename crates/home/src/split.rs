@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 
 use types::channel;
-use types::frame::key_set::KeySet;
+use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Draft, Form};
 use types::sample::{Scalar, Type};
 
@@ -417,11 +417,18 @@ fn series(draft: &mut Draft, entry: usize) -> &[u8] {
         .expect("invariant: a checked series is in the frame")
 }
 
+/// The first entry of `set` with a type the home does not write, if it has one.
+pub(crate) fn unwritten(set: &KeySet) -> Option<&key_set::Entry> {
+    set.entries()
+        .iter()
+        .find(|entry| !matches!(entry.data_type, Type::Scalar(_)))
+}
+
 /// The scalar of a series of `data_type`.
 ///
 /// # Panics
 ///
-/// If the home does not write a series of `data_type`.
+/// If the home does not write a series of `data_type`: [`unwritten`] gives its entry.
 fn scalar(data_type: Type) -> Scalar {
     match data_type {
         Type::Scalar(scalar) => scalar,
@@ -1301,15 +1308,14 @@ mod tests {
                 drop(split.frame(&pool, 1));
             }
 
-            #[test]
-            #[should_panic(expected = "home does not write a series of String yet")]
-            fn on_a_series_of_a_type_the_home_does_not_write() {
+            /// Splits a frame of one stamp at `count` and a `String` series after it.
+            fn split_a_string_series(count: u32) {
                 let set = interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::String)],
                 }]);
                 let samples = Samples {
-                    count: 1,
+                    count,
                     series: BTreeMap::from([
                         (0, 5_u64.to_le_bytes().to_vec()),
                         (1, b"text".to_vec()),
@@ -1319,6 +1325,52 @@ mod tests {
                 let pool = pool(1 << 16);
 
                 Scratch::default().split(&set, draft(&pool, &set, Form::Raw, &write));
+            }
+
+            #[test]
+            #[should_panic(expected = "home does not write a series of String yet")]
+            fn on_a_series_of_a_type_the_home_does_not_write() {
+                split_a_string_series(1);
+            }
+
+            #[test]
+            #[should_panic(expected = "home does not write a series of String yet")]
+            fn on_a_series_of_such_a_type_after_an_index_that_does_not_fit() {
+                split_a_string_series(2);
+            }
+        }
+    }
+
+    mod unwritten {
+        use super::*;
+
+        #[test]
+        fn gives_none_for_a_key_set_of_scalars() {
+            assert_eq!(unwritten(&two_groups()), None);
+        }
+
+        #[test]
+        fn gives_the_first_entry_of_each_type_that_is_not_a_scalar() {
+            let element = Scalar::F32;
+            let types = [
+                Type::Array { element, len: 3 },
+                Type::List { element, max: 3 },
+                Type::String,
+                Type::Bytes,
+            ];
+            for data_type in types {
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[
+                        (key(Slot::new(2)), Type::Scalar(Scalar::U8)),
+                        (key(Slot::new(4)), data_type),
+                        (key(Slot::new(5)), Type::Bytes),
+                    ],
+                }]);
+
+                let entry = unwritten(&set).expect("an entry");
+
+                assert_eq!((entry.slot, entry.data_type), (Slot::new(4), data_type));
             }
         }
     }
