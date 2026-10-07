@@ -255,8 +255,8 @@ How to read this record:
   named complete session needs mesh time to close: `Readers::close_named` and
   `Readers::open_named_latest` take a stamp, and no other open or close does, so the
   home opens unnamed readers before the first estimate. A named complete session has a
-  `complete::Key`, and the wrong close panics; the architect decided (#1024).
-  Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+  `complete::Key`, and the wrong close of an open session panics; the architect decided
+  (#1024). Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
