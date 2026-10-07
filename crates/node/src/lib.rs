@@ -42,7 +42,8 @@ pub struct Config<M> {
     /// once for each shard, in order of core.
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
     /// Makes the files of the node's data directory. Each shard calls it once on its
-    /// own thread, because a `Files` cannot leave the thread that made it.
+    /// own thread, because a `Files` cannot leave the thread that made it. `node`
+    /// opens the buffer of shard `i` in directory `shard-<i>` inside them.
     pub files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
@@ -260,7 +261,8 @@ impl Open {
                     core: self.core,
                     error,
                 };
-                (self.failed.set(error))
+                self.failed
+                    .set(error)
                     .expect("invariant: a shard opens its buffer once");
                 None
             }
