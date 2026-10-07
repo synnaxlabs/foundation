@@ -77,8 +77,8 @@ Labels:
 - `blocked` -> waiting on another issue, linked in the body.
 - `security` -> a security finding.
 
-Builders file the next issues for their machine's crates from `docs/decisions.md` and
-the milestone, and the coordinator admits them. One task is in progress per crate.
+Builders file the next issues on the milestone path from `docs/decisions.md`, and the
+coordinator admits them. Any builder takes any crate. One task is in progress per crate.
 
 ## Pull requests
 
@@ -111,7 +111,7 @@ dependency:
 3. After the merge, the architect files an issue for each crate that must follow the
    change.
 
-A builder may change anything private inside its own crates without asking.
+A builder may change anything private inside the crates of its issue without asking.
 
 Two cases skip the interface issue:
 

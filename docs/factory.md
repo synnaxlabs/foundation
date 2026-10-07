@@ -41,8 +41,10 @@ and then `/build`.
 
 ## Workstreams
 
-Each machine owns a set of crates that change together, so most messages stay on one
-machine. The coordinator keeps this table current.
+Each machine is home to a set of crates: its engineer approves PRs to its risk crates.
+A home is not a limit. Any builder takes a `ready` issue in any crate, so work goes to
+idle builders and every account spends its budget. One issue is in progress per crate.
+The coordinator keeps this table current.
 
 | Machine | Host | Crates |
 | --- | --- | --- |
