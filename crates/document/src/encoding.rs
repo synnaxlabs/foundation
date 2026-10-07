@@ -585,6 +585,13 @@ mod tests {
                 let again = decode(&checked.encode()).unwrap();
                 prop_assert_eq!(again.encode(), checked.encode());
             }
+
+            #[test]
+            fn gives_back_the_document_it_checked(document in document()) {
+                let checked = Checked::new(document.clone()).unwrap();
+                prop_assert_eq!(checked.document(), &document);
+                prop_assert_eq!(checked.into_document(), document);
+            }
         }
     }
 
