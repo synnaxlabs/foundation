@@ -449,7 +449,7 @@ impl Endpoint {
     /// acknowledges the reset. A stream this side opened that resets before its first
     /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
     /// [`Error::Reset`] with code 0. Does nothing when the connection ended. Each
-    /// later call with `sender` panics.
+    /// later write or finish with `sender` panics.
     pub(crate) fn reset(&mut self, now: Monotonic, sender: &mut Sender, code: Code) {
         sender.end();
         let key = sender.key().connection;
