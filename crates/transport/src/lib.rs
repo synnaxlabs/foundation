@@ -176,6 +176,29 @@ impl Transport {
     pub async fn accept(&self) -> Result<Session, Error> {
         self.carrier.accept().await.map(Session::new)
     }
+
+    /// What this transport counted since [`Transport::new`].
+    ///
+    /// ```
+    /// fn refusals(transport: &transport::Transport) -> u64 {
+    ///     transport.status().refusals
+    /// }
+    /// ```
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.carrier.status()
+    }
+}
+
+/// What a [`Transport`] counted since [`Transport::new`]. `node` publishes it on
+/// status channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// The time that at least one stream read waited for a block from the shard's
+    /// pool, up to the call.
+    pub waited: Span,
+    /// The block commits that the system refused.
+    pub refusals: u64,
 }
 
 impl fmt::Debug for Transport {

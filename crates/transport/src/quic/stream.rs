@@ -16,11 +16,11 @@ use noq_proto::{
 use super::connection::{self, Fault};
 use super::hello::{self, Hello};
 use super::{Body, Event};
-use crate::message::{self, Reader};
+use crate::message::{self, Miss, Reader};
 use crate::{Class, Code, Error, varint};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Key {
     pub(super) connection: connection::Key,
     pub(super) id: StreamId,
@@ -307,6 +307,17 @@ impl Receiver {
     /// The stream this receiver reads.
     pub(crate) fn key(&self) -> Key {
         self.key
+    }
+
+    /// The stream's class.
+    pub(crate) fn class(&self) -> Class {
+        self.claim.class
+    }
+
+    /// Why the last read found no block for the next message, when it gave `Pending`
+    /// for that reason.
+    pub(crate) fn miss(&self) -> Option<Miss> {
+        self.reader.miss()
     }
 
     /// What each read gives after the stream ended, once it has.
@@ -986,15 +997,15 @@ impl Streams {
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
     /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
-    /// yet, or the next has no room in the receive budget or waits behind a stream of
-    /// its class or a higher class. The receivers that get the freed room get
+    /// yet, the next has no room in the receive budget or waits behind a stream of
+    /// its class or a higher class, or `pool` has no block for it now
+    /// ([`Receiver::miss`]). The receivers that get the freed room get
     /// [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
-    /// [`Error::Reset`] when the peer reset the stream, [`Error::Pool`] when `pool`
-    /// has no room now, and [`Error::Broken`] when the peer broke the framing or
-    /// reset with a code over 32 bits.
+    /// [`Error::Reset`] when the peer reset the stream, and [`Error::Broken`] when the
+    /// peer broke the framing or reset with a code over 32 bits.
     #[expect(
         clippy::unwrap_in_result,
         reason = "a receiver never reads its stream after the end"
@@ -1030,7 +1041,8 @@ impl Streams {
         {
             result = Err(reset_error(error));
         }
-        if !matches!(result, Ok(Poll::Pending)) {
+        // A message with no block holds no room.
+        if !matches!(result, Ok(Poll::Pending)) || reader.miss().is_some() {
             receiving.release(claim, Order::RANK, |stream| {
                 events.push_back(Event::Readable { stream });
             });
@@ -1601,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn with_a_full_pool_fail_the_read_until_a_block_frees() {
+    fn with_a_full_pool_a_read_waits_until_a_block_frees() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             // A 100-byte block takes 192 bytes of the budget, and `_filled` leaves 300.
@@ -1636,12 +1648,9 @@ mod tests {
             let mut incoming = accept(&mut pair.server);
             let held = pool.alloc(100).expect("room");
             let now = pair.now();
-            let full = Error::Pool {
-                bytes: 100,
-                available: 108,
-            };
             let read_full = next(&mut pair.server, now, &mut incoming.receiver);
-            assert_eq!(read_full, Err(full));
+            assert_eq!(read_full, Ok(Poll::Pending));
+            assert_eq!(incoming.receiver.miss(), Some(Miss::Exhausted));
             drop(held);
             let read = drain(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, (vec![vec![9; 100]], true));
@@ -1785,12 +1794,11 @@ mod tests {
             for receiver in &mut receivers[..2] {
                 assert_eq!(next(&mut pair.server, now, receiver), Ok(Poll::Pending));
             }
-            let full = Err(Error::Pool {
-                bytes: MESSAGE_MAX,
-                available: block::footprint(MESSAGE_MAX) - 1,
-            });
-            assert_eq!(next(&mut pair.server, now, &mut receivers[2]), full);
-            assert_eq!(next(&mut pair.server, now, &mut receivers[2]), full);
+            for _ in 0..2 {
+                let read = next(&mut pair.server, now, &mut receivers[2]);
+                assert_eq!(read, Ok(Poll::Pending));
+                assert_eq!(receivers[2].miss(), Some(Miss::Exhausted));
+            }
         });
     }
 

@@ -1232,31 +1232,35 @@ How to read this record:
   WAITS. Proposed by `network` in #55; approved by the coordinator on #55, and the
   `datagram` doc on #565.
 - **RECV WAITS (#581, 2026-10-05)** `stream::Receiver::recv` waits while it has no
-  block, because the pool has no room or the system refused a commit. It gives the
-  next message, `None` at the end, `Error::Reset` when the sender cancelled the
-  stream, or the error that ended the session. It never returns `Error::Pool`, and a
-  refused commit gets no error variant. Its doc says that it waits. The message stays
-  queued, and the carrier's per-stream flow control holds the peer, as a read already
-  waits for `Readable` (STREAM WIRE); TLS over TCP must do the same (TRANSPORT SHAPE
-  LOCKED). One timer for each `Transport` retries all of its waiting reads, for both
-  causes; each retry's `alloc` takes back the blocks returned since the last try. The
-  retry interval is a `transport` constant that simulation tunes (5.3). The waiting
-  reads of one `Transport` take blocks highest class first, then oldest first, so
-  `CatchUp` reads cannot starve `Command` reads; other users of the shard pool (M4)
-  are not in this order. `transport` counts the time that reads wait and each refused
-  commit, and `node` publishes them on status channels (BQ11b); the new counts go
-  through the interface process in #68. A caller ends a wait when it drops the future;
-  it can then call `stop`. `datagram::Receiver::recv` never returns `Error::Pool`
-  either: a datagram with no block drops and is counted, and the read waits for the
-  next one. `hub` writes no retry for a read. B5 on the remote hop: the writer's `hub`
-  never waits on a live send. When the stream cannot take a live frame now, `hub`
-  drops it and adds its samples and stamps to one pending gap for each index. When the
-  stream can take a message again, `hub` sends the pending gap first, and the home
-  records it and warns. The writer gets the same answer as for a frame the home
-  dropped, and never resends it (B7). Backfill waits. The live send is
-  `stream::Sender::try_send` (#597). `block` gets no wake when a block returns until
-  simulation shows that the resume latency matters; then `memory` proposes one wake,
-  which home backfill shares. Until then, home backfill also retries on a timer.
+  block, because the pool has no room or the system refused a commit. It gives the next
+  message, `None` at the end, `Error::Reset` when the sender cancelled the stream, or
+  the error that ended the session. A full pool and a refused commit get no error:
+  `transport::Error` has no `Pool` variant, and the read path's "no room now" is a
+  private type (architect, #68:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032721674). Its doc
+  says that it waits. The message stays queued, and the carrier's per-stream flow
+  control holds the peer, as a read already waits for `Readable` (STREAM WIRE); TLS over
+  TCP must do the same (TRANSPORT SHAPE LOCKED). One timer for each `Transport` retries
+  all of its waiting reads, for both causes; each retry's `alloc` takes back the blocks
+  returned since the last try. The retry interval is a `transport` constant that
+  simulation tunes (5.3). The waiting reads of one `Transport` take blocks highest class
+  first, then oldest first, so `CatchUp` reads cannot starve `Command` reads; other
+  users of the shard pool (M4) are not in this order. `transport` counts the time that
+  reads wait and each refused commit, and `node` publishes them on status channels
+  (BQ11b). `Transport::status` gives `Status { waited, refusals }`, pulled, not pushed:
+  `waited` is the time that at least one read waited, not the sum over reads (architect,
+  #68: https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032541901). A
+  caller ends a wait when it drops the future; it can then call `stop`.
+  `datagram::Receiver::recv` gives no such error either: a datagram with no block drops
+  and is counted, and the read waits for the next one. `hub` writes no retry for a read.
+  B5 on the remote hop: the writer's `hub` never waits on a live send. When the stream
+  cannot take a live frame now, `hub` drops it and adds its samples and stamps to one
+  pending gap for each index. When the stream can take a message again, `hub` sends the
+  pending gap first, and the home records it and warns. The writer gets the same answer
+  as for a frame the home dropped, and never resends it (B7). Backfill waits. The live
+  send is `stream::Sender::try_send` (#597). `block` gets no wake when a block returns
+  until simulation shows that the resume latency matters; then `memory` proposes one
+  wake, which home backfill shares. Until then, home backfill also retries on a timer.
   Rejected: each caller retries (each caller writes the same timer, and the pool's
   states leak into `hub`), and the stream ends (memory pressure becomes stream churn and
   lost messages, and `Command` streams drop first). Decided by the advisor under the

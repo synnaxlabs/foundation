@@ -10,6 +10,7 @@ mod pair;
 mod settings;
 mod stateless;
 pub(crate) mod stream;
+mod wait;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -434,15 +435,15 @@ impl Endpoint {
 
     /// The next whole message of `receiver`'s stream, in one block from the pool.
     /// `Ready(None)` after the last one, and on each call after that. `Pending` when
-    /// no whole message is here yet ([`Event::Readable`] follows), or once the
-    /// connection drained.
+    /// no whole message is here yet ([`Event::Readable`] follows), when the pool has
+    /// no block for the next one now ([`Receiver::miss`] says why, and no event
+    /// follows: call again once a block may have freed), or once the connection
+    /// drained.
     ///
     /// # Errors
     ///
     /// - [`Error::Reset`] when the peer reset the stream. Each later read gives it
     ///   too.
-    /// - [`Error::Pool`] when the pool has no room for the message now. Call again
-    ///   when it has.
     /// - The error of the connection's [`Event::Closed`] when it ended, until it
     ///   drains.
     pub(crate) fn read(

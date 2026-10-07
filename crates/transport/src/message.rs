@@ -42,10 +42,20 @@ enum State {
         have: usize,
         len: usize,
     },
-    /// A message of this many bytes, with no block yet.
-    Sized(u64),
+    /// A message of `len` bytes, with no block yet. `miss` says why the last try
+    /// to take one failed.
+    Sized { len: u64, miss: Option<Miss> },
     /// A message's block, with `have` of its bytes.
     Body { block: Unique, have: usize },
+}
+
+/// Why a [`Reader`] has no block for the next message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Miss {
+    /// The pool's budget has no room for it now.
+    Exhausted,
+    /// The system refused memory for its block.
+    Refused,
 }
 
 const START: State = State::Prefix {
@@ -69,17 +79,16 @@ impl Reader {
     /// `None` when the stream has ended. The reader never asks for a byte past the
     /// current message, so later messages stay with the source.
     ///
-    /// Returns the message, `Pending` when `admit` refuses the message or the source
-    /// has no more bytes now, or `None` when the stream ended between two messages.
-    /// After `Pending`, the next call goes on where this one stopped. After an error
-    /// inside a message's body, the reader holds no block.
+    /// Returns the message, `Pending` when `admit` refuses the message, `pool` has
+    /// no block for it now ([`Reader::miss`] says why), or the source has no more
+    /// bytes now, or `None` when the stream ended between two messages. After
+    /// `Pending`, the next call goes on where this one stopped. After an error inside
+    /// a message's body, the reader holds no block.
     ///
     /// # Errors
     ///
     /// - [`Error::Broken`] when the peer breaks the framing: a message over
     ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
-    /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
-    ///   with the source; call again when the pool has room.
     /// - The source's error.
     ///
     /// # Panics
@@ -108,10 +117,14 @@ impl Reader {
                     *len = varint::len(first);
                     if *have == *len {
                         let prefix = bytes.get(..*len).expect("invariant: len <= 8");
-                        self.state = State::Sized(varint::value(prefix));
+                        self.state = State::Sized {
+                            len: varint::value(prefix),
+                            miss: None,
+                        };
                     }
                 }
-                State::Sized(value) => {
+                State::Sized { len: value, miss } => {
+                    *miss = None;
                     let Some(len) = usize::try_from(*value)
                         .ok()
                         .filter(|&len| len <= self.bytes_max)
@@ -126,8 +139,13 @@ impl Reader {
                     if !admit(len) {
                         return Ok(Poll::Pending);
                     }
-                    let block = alloc(pool, len)?;
-                    self.state = State::Body { block, have: 0 };
+                    match alloc(pool, len) {
+                        Ok(block) => self.state = State::Body { block, have: 0 },
+                        Err(cause) => {
+                            *miss = Some(cause);
+                            return Ok(Poll::Pending);
+                        }
+                    }
                 }
                 State::Body { block, have } => {
                     if *have < block.len() {
@@ -154,31 +172,27 @@ impl Reader {
             }
         }
     }
+
+    /// Why the last [`Reader::read`] found no block for the next message, if it
+    /// gave `Pending` for that reason.
+    pub(crate) fn miss(&self) -> Option<Miss> {
+        match self.state {
+            State::Sized { miss, .. } => miss,
+            State::Prefix { .. } | State::Body { .. } => None,
+        }
+    }
 }
 
-/// A block of `len` bytes from `pool`.
-///
-/// # Errors
-///
-/// [`Error::Pool`] when the pool has no room now.
+/// A block of `len` bytes from `pool`, or why it has none now.
 ///
 /// # Panics
 ///
 /// When the pool cannot hold `len` bytes.
-fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
+fn alloc(pool: &Pool, len: usize) -> Result<Unique, Miss> {
     match pool.alloc(len) {
         Ok(block) => Ok(block),
-        Err(block::Error::Exhausted {
-            requested,
-            available,
-        }) => Err(Error::Pool {
-            bytes: requested,
-            available,
-        }),
-        Err(block::Error::Refused { requested }) => Err(Error::Pool {
-            bytes: requested,
-            available: 0,
-        }),
+        Err(block::Error::Exhausted { .. }) => Err(Miss::Exhausted),
+        Err(block::Error::Refused { .. }) => Err(Miss::Refused),
         Err(error @ block::Error::TooLarge { .. }) => {
             panic!("the pool cannot hold a message of `bytes_max`: {error}")
         }
@@ -218,6 +232,7 @@ fn pull<B: AsRef<[u8]>>(
 mod tests {
     use std::collections::VecDeque;
 
+    use block::testing::Scarce;
     use block::{Config, Heap};
     use proptest::prelude::*;
 
@@ -414,25 +429,59 @@ mod tests {
         }
 
         #[test]
-        fn when_pool_is_full_it_fails_then_goes_on() {
+        fn when_pool_is_full_it_waits_then_goes_on() {
             // A 100-byte block takes 192 bytes of the budget.
             let pool = pool(300);
             let held = pool.alloc(100).expect("room");
             let mut source = Source::new(encode(&[vec![9; 100]]), 64);
             let mut reader = Reader::new(1_000);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Err(Error::Pool {
-                    bytes: 100,
-                    available: 108
-                })
-            );
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.miss(), Some(Miss::Exhausted));
             assert_eq!(source.given, 2);
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.miss(), Some(Miss::Exhausted));
             drop(held);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
                 Ok(vec![vec![9; 100]])
             );
+        }
+
+        #[test]
+        fn when_the_system_refuses_the_commit_it_waits_then_goes_on() {
+            let config = Config { budget: 1 << 16 };
+            let (memory, switch) = Scarce::new(config.reservation());
+            let pool = Pool::new(config, memory);
+            let mut source = Source::new(encode(&[vec![3; 9000]]), 4096);
+            let mut reader = Reader::new(10_000);
+            switch.refuse();
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.miss(), Some(Miss::Refused));
+            switch.allow();
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Ok(vec![vec![3; 9000]])
+            );
+            assert_eq!(reader.miss(), None);
+        }
+
+        #[test]
+        fn a_later_wait_for_the_budget_or_the_source_is_no_miss() {
+            let pool = pool(300);
+            let held = pool.alloc(100).expect("room");
+            let mut source = Source::new(encode(&[vec![9; 100]]), 64);
+            source.open = true;
+            let mut reader = Reader::new(1_000);
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.miss(), Some(Miss::Exhausted));
+            let refused = reader.read(&pool, |_| false, |max| Ok(source.take(max)));
+            assert!(matches!(refused, Ok(Poll::Pending)), "{refused:?}");
+            assert_eq!(reader.miss(), None);
+            drop(held);
+            let message = read(&mut reader, &pool, &mut source);
+            assert_eq!(message, Ok(Poll::Ready(Some(vec![9; 100]))));
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.miss(), None);
         }
 
         #[test]
@@ -573,13 +622,8 @@ mod tests {
             }
             let mut source = Source::new(encode(&[vec![1; 10]]), 64);
             let mut reader = Reader::new(bytes_max);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Err(Error::Pool {
-                    bytes: 10,
-                    available: 0
-                })
-            );
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.miss(), Some(Miss::Exhausted));
             drop(readers);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
