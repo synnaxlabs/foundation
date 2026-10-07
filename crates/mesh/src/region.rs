@@ -1,6 +1,6 @@
 //! The region state that the voters agree on, and the change records that move it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use types::channel;
@@ -25,6 +25,11 @@ pub(crate) struct State {
     members: BTreeMap<node::Key, Member>,
     tickets: BTreeMap<[u8; 32], Record>,
     homes: BTreeMap<channel::Key, node::Key>,
+    // Each name that a member holds, its card name and each status channel name, in
+    // ASCII lower case, so that two names that differ only in case collide (A3).
+    names: BTreeMap<String, node::Key>,
+    // Each status channel key that a member holds.
+    status: BTreeSet<channel::Key>,
 }
 
 impl State {
@@ -34,18 +39,21 @@ impl State {
     /// # Errors
     ///
     /// [`Refused::Reserved`], [`Refused::Outside`], or [`Refused::Long`] when the
-    /// region cannot hold a member, and [`Refused::Duplicate`] when two of `members`
-    /// have one key.
+    /// region cannot hold a member, and [`Refused::Duplicate`], [`Refused::Taken`], or
+    /// [`Refused::Reused`] when two of `members` have one key, one name, or one status
+    /// channel key.
     pub(crate) fn new(region: Name, members: Vec<Member>) -> Result<Self, Refused> {
         let mut state = Self {
             region,
             members: BTreeMap::new(),
             tickets: BTreeMap::new(),
             homes: BTreeMap::new(),
+            names: BTreeMap::new(),
+            status: BTreeSet::new(),
         };
         for member in members {
-            state.fits(&member.card, &member.status)?;
-            state.members.insert(member.card.key(), member);
+            let names = state.fits(&member.card, &member.status)?;
+            state.insert(member, names);
         }
         Ok(state)
     }
@@ -91,7 +99,7 @@ impl State {
     // Admits the node of `join`. The ticket counts a use only when all checks pass.
     fn join(&mut self, join: Join) -> Result<(), Refused> {
         let card = join.card.check().map_err(Refused::Forged)?;
-        self.fits(&card, &join.status)?;
+        let names = self.fits(&card, &join.status)?;
         let record =
             self.tickets
                 .get_mut(&join.ticket.to_bytes())
@@ -107,8 +115,16 @@ impl State {
             ephemeral: record.options.ephemeral,
             status: join.status,
         };
-        self.members.insert(member.card.key(), member);
+        self.insert(member, names);
         Ok(())
+    }
+
+    // Adds `member`, whose names `fits` gave.
+    fn insert(&mut self, member: Member, names: Vec<String>) {
+        let key = member.card.key();
+        self.names.extend(names.into_iter().map(|name| (name, key)));
+        self.status.extend(member.status.values());
+        self.members.insert(key, member);
     }
 
     fn record(
@@ -130,12 +146,13 @@ impl State {
         Ok(())
     }
 
-    // The one check of a member against the region, at open and at each join.
+    // The one check of a member against the region, at open and at each join. Gives
+    // the member's names in ASCII lower case.
     fn fits(
         &self,
         card: &card::Signed,
         status: &BTreeMap<Name, channel::Key>,
-    ) -> Result<(), Refused> {
+    ) -> Result<Vec<String>, Refused> {
         let name = &card.card().name;
         if name.reserved() {
             return Err(Refused::Reserved { name: name.clone() });
@@ -146,6 +163,7 @@ impl State {
                 region: self.region.clone(),
             });
         }
+        let mut names = vec![name.clone()];
         for status in status.keys() {
             // Two names joined by a dot fail to parse only on length.
             let Ok(full) = format!("{name}.{status}").parse::<Name>() else {
@@ -157,12 +175,30 @@ impl State {
             if full.reserved() {
                 return Err(Refused::Reserved { name: full });
             }
+            names.push(full);
         }
         let key = card.key();
         if self.members.contains_key(&key) {
             return Err(Refused::Duplicate { key });
         }
-        Ok(())
+        let mut lower = Vec::with_capacity(names.len());
+        for name in names {
+            let folded = name.as_str().to_ascii_lowercase();
+            if let Some(&holder) = self.names.get(&folded) {
+                return Err(Refused::Taken { name, key: holder });
+            }
+            if lower.contains(&folded) {
+                return Err(Refused::Taken { name, key });
+            }
+            lower.push(folded);
+        }
+        let mut keys = BTreeSet::new();
+        for &key in status.values() {
+            if self.status.contains(&key) || !keys.insert(key) {
+                return Err(Refused::Reused { key });
+            }
+        }
+        Ok(lower)
     }
 }
 
@@ -349,6 +385,19 @@ pub(crate) enum Refused {
         /// The node.
         key: node::Key,
     },
+    /// A member's name, or the name of one of its status channels, equals a name that
+    /// a member holds, ignoring ASCII case.
+    Taken {
+        /// The name.
+        name: Name,
+        /// The member that holds it, or the node itself when it holds the name twice.
+        key: node::Key,
+    },
+    /// A status channel key of a member is held by a member, or twice by this one.
+    Reused {
+        /// The status channel key.
+        key: channel::Key,
+    },
     /// No ticket with the public key of a `Join` is recorded.
     Unknown {
         /// The public key.
@@ -386,6 +435,12 @@ impl fmt::Display for Refused {
                 Name::MAX_BYTES
             ),
             Self::Duplicate { key } => write!(f, "node {key} is already a member"),
+            Self::Taken { name, key } => {
+                write!(f, "the name {name} is taken by node {key}")
+            }
+            Self::Reused { key } => {
+                write!(f, "the status channel key {key} is already in use")
+            }
             Self::Unknown { public_key } => {
                 write!(f, "no ticket {public_key} is recorded")
             }
@@ -723,6 +778,126 @@ mod tests {
         assert_eq!(apply_join(&mut state, longest), Ok(None));
     }
 
+    // Member 1 is `plant.node1`. Ticket 8 admits any node under `plant`.
+    fn open_state() -> State {
+        let mut state = state();
+        assert_eq!(state.apply(record(8, options("plant", true))), Ok(None));
+        state
+    }
+
+    fn with_status(mut join: Join, status: &[(&str, u128)]) -> Join {
+        join.status = status
+            .iter()
+            .map(|&(text, key)| (name(text), index(key)))
+            .collect();
+        join
+    }
+
+    #[test]
+    fn a_join_with_a_name_that_a_member_holds_is_refused() {
+        let mut state = open_state();
+        let before = state.clone();
+        let cases = [
+            (join(8, 3, "plant.node1"), "plant.node1", 1),
+            (join(8, 3, "plant.Node1"), "plant.Node1", 1),
+            (join(8, 3, "plant.NODE2"), "plant.NODE2", 2),
+        ];
+        for (join, taken, holder) in cases {
+            assert_eq!(
+                apply_join(&mut state, join),
+                Err(Refused::Taken {
+                    name: name(taken),
+                    key: node(holder)
+                })
+            );
+            assert_eq!(state, before);
+        }
+        assert_eq!(state.ticket(public(8)).map(|record| record.uses), Some(0));
+    }
+
+    #[test]
+    fn a_join_whose_status_channel_name_a_member_holds_is_refused() {
+        let mut state = open_state();
+        let first = with_status(join(8, 3, "plant.a"), &[("b.c", 20)]);
+        assert_eq!(apply_join(&mut state, first), Ok(None));
+        let before = state.clone();
+        let cases = [
+            (
+                with_status(join(8, 4, "plant.a.b"), &[("c", 21)]),
+                "plant.a.b.c",
+            ),
+            (
+                with_status(join(8, 4, "plant.a.B"), &[("C", 21)]),
+                "plant.a.B.C",
+            ),
+            (join(8, 4, "plant.a.b.C"), "plant.a.b.C"),
+        ];
+        for (join, taken) in cases {
+            assert_eq!(
+                apply_join(&mut state, join),
+                Err(Refused::Taken {
+                    name: name(taken),
+                    key: node(3)
+                })
+            );
+            assert_eq!(state, before);
+        }
+        let other = with_status(join(8, 4, "plant.a.b"), &[("d", 21)]);
+        assert_eq!(apply_join(&mut state, other), Ok(None));
+    }
+
+    #[test]
+    fn a_join_with_two_status_names_that_differ_in_case_is_refused() {
+        let mut state = open_state();
+        let before = state.clone();
+        let join = with_status(join(8, 3, "plant.a"), &[("Disk", 20), ("disk", 21)]);
+        assert_eq!(
+            apply_join(&mut state, join),
+            Err(Refused::Taken {
+                name: name("plant.a.disk"),
+                key: node(3)
+            })
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_join_with_a_status_key_in_use_is_refused() {
+        let mut state = open_state();
+        let first = with_status(join(8, 3, "plant.a"), &[("disk", 20)]);
+        assert_eq!(apply_join(&mut state, first), Ok(None));
+        let before = state.clone();
+        let held = with_status(join(8, 4, "plant.b"), &[("disk", 20)]);
+        let twice = with_status(join(8, 4, "plant.b"), &[("cpu", 21), ("disk", 21)]);
+        for (join, key) in [(held, 20), (twice, 21)] {
+            assert_eq!(
+                apply_join(&mut state, join),
+                Err(Refused::Reused { key: index(key) })
+            );
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn new_refuses_two_members_with_one_name_or_one_status_key() {
+        let mut taken = members(&[1, 2]);
+        taken[1].card = signed(2, "plant.NODE1");
+        assert_eq!(
+            State::new(name("plant"), taken),
+            Err(Refused::Taken {
+                name: name("plant.NODE1"),
+                key: node(1)
+            })
+        );
+        let mut reused = members(&[1, 2]);
+        reused[0].status = BTreeMap::from([(name("disk"), index(20))]);
+        reused[1].status = BTreeMap::from([(name("disk"), index(20))]);
+        assert_eq!(
+            State::new(name("plant"), reused),
+            Err(Refused::Reused { key: index(20) })
+        );
+    }
+
     // Each join fails more than one check, and the refusal names the first.
     #[test]
     fn a_join_refusal_names_the_first_check_that_fails() {
@@ -762,6 +937,17 @@ mod tests {
                 join(8, 1, "plant.edge.a"),
                 Refused::Duplicate { key: node(1) },
             ),
+            (
+                with_status(join(7, 3, "plant.node2"), &[("disk", 9), ("x", 9)]),
+                Refused::Taken {
+                    name: name("plant.node2"),
+                    key: node(2),
+                },
+            ),
+            (
+                with_status(join(8, 3, "plant.edge.a"), &[("disk", 9), ("x", 9)]),
+                Refused::Reused { key: index(9) },
+            ),
         ];
         let before = state.clone();
         for (join, refused) in cases {
@@ -796,6 +982,17 @@ mod tests {
             (
                 Refused::Duplicate { key: node(1) },
                 format!("node {} is already a member", node(1)),
+            ),
+            (
+                Refused::Taken {
+                    name: name("plant.a"),
+                    key: node(1),
+                },
+                format!("the name plant.a is taken by node {}", node(1)),
+            ),
+            (
+                Refused::Reused { key: index(9) },
+                format!("the status channel key {} is already in use", index(9)),
             ),
             (
                 Refused::Unknown { public_key: key7 },
