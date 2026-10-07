@@ -521,9 +521,9 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
     });
 }
 
-/// Writes during a commit wake the commit task once, not once per write.
+/// Writes during a commit do not wake the commit task, which the commit wakes.
 #[test]
-fn wakes_the_commit_task_once_for_the_writes_during_a_commit() {
+fn does_not_wake_the_commit_task_for_the_writes_during_a_commit() {
     run(23, |test| async move {
         let _reader = test.reader(&["value"], Mode::Complete).await;
         let mut writer = test.writer("a", &["value"]).await;
@@ -533,7 +533,11 @@ fn wakes_the_commit_task_once_for_the_writes_during_a_commit() {
             write(&mut writer, &[test.now()], &[value]);
             test.clock.sleep(Span::from_nanos(1)).await;
         }
-        assert_eq!(test.polls.get() - before, 2, "one wait, then one wake");
+        assert_eq!(
+            test.polls.get() - before,
+            1,
+            "one wake, for the first write"
+        );
     });
 }
 
@@ -554,7 +558,10 @@ fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
             ..
         } = test;
         clock.sleep(Span::from_nanos(1)).await;
-        drop((hub, reader, writer));
+        // A dropped writer wakes the task, so the last drop is not a writer.
+        drop(writer);
+        clock.sleep(Span::from_nanos(1)).await;
+        drop((hub, reader));
         clock.sleep(Span::from_nanos(1)).await;
         assert_eq!(ended.get(), 1, "the commit task ended before the commit");
         clock.sleep(SETTLE).await;
@@ -612,6 +619,8 @@ fn gives_each_reader_the_error_of_a_failed_sync_on_each_later_call() {
             assert_eq!(complete.next().await.err(), Some(failed.clone()));
             assert_eq!(latest.next().await.err(), Some(failed.clone()));
         }
+        test.clock.sleep(SETTLE).await;
+        assert_eq!(test.ended.get(), 1, "the commit task ended with the buffer");
         assert_eq!(
             failed.to_string(),
             "the buffer of the shard failed: sync of shard-0/ring failed with OS error 5"

@@ -13,16 +13,19 @@ use std::task::{Poll, Waker};
 pub(crate) struct Signal {
     /// Whether a home call may have appended since the task last waited for a commit.
     pub(crate) due: bool,
+    /// Whether the task waits for a commit, which wakes it when it resolves.
+    committing: bool,
     /// The task's waker, kept while it sleeps and while it waits for a commit.
     pub(crate) task: Option<Waker>,
 }
 
 impl Signal {
     /// Notes a home call that may have appended to the buffer: a write, also a failed
-    /// one, and the handoff of a writer open or close. Wakes the task once per commit
-    /// at most.
+    /// one, and the handoff of a writer open or close. Wakes the task only when it
+    /// sleeps, once.
     pub(crate) fn appended(&mut self) {
         if !mem::replace(&mut self.due, true)
+            && !self.committing
             && let Some(task) = &self.task
         {
             task.wake_by_ref();
@@ -55,6 +58,7 @@ pub(crate) async fn run(state: Weak<RefCell<super::State>>) {
                     return Poll::Pending;
                 };
                 commit = None;
+                state.commit.committing = false;
                 match committed {
                     Ok(()) => state.wake(),
                     Err(error) => {
@@ -68,6 +72,7 @@ pub(crate) async fn run(state: Weak<RefCell<super::State>>) {
             if !mem::take(&mut state.commit.due) {
                 return Poll::Pending;
             }
+            state.commit.committing = true;
             commit = Some(state.home.committed());
         }
     })
