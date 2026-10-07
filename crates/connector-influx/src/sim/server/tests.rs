@@ -347,3 +347,32 @@ fn stores_a_content_encoding_list_of_identity_only() {
     );
     assert_eq!(network.times("m"), [1, 2, 3]);
 }
+
+#[test]
+fn checks_the_path_then_the_method_then_the_content_encoding_then_the_query() {
+    let mut network = Network::new();
+    let gzip = |mut request: Request<Bytes>| {
+        let value = HeaderValue::from_static("gzip");
+        request.headers_mut().append(CONTENT_ENCODING, value);
+        request
+    };
+    let mut get = network.post("/write?db=edge", "m v=1 1");
+    *get.method_mut() = Method::GET;
+    let requests = vec![
+        gzip(network.post("/nowhere", "m v=1 1")),
+        gzip(get),
+        gzip(network.post("/write", "m v=2 2")),
+    ];
+    assert_eq!(
+        network.send(vec![requests]),
+        [
+            answer(StatusCode::NOT_FOUND, "no endpoint at /nowhere"),
+            answer(StatusCode::METHOD_NOT_ALLOWED, "/write takes POST, not GET"),
+            answer(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "the store decodes no content-encoding, not \"gzip\""
+            ),
+        ]
+    );
+    assert_eq!(network.times("m"), [0_i64; 0]);
+}

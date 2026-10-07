@@ -22,8 +22,10 @@ use super::Store;
 /// `/api/v2/write` with a missing or empty `org` and `orgID`, or a `precision` other
 /// than `ns` gives 400 and stores nothing; a missing or empty `precision` is `ns`.
 /// Any other path gives 404, and another method on a write path gives 405. A request
-/// with a `content-encoding` other than `identity` gets 415 and stores nothing. It
-/// checks no token.
+/// whose `content-encoding` names a coding other than `identity` gets 415 and stores
+/// nothing. It checks the path, then the method, then the `content-encoding`, then
+/// the query, and gives the answer of the first check that fails. It checks no
+/// token.
 ///
 /// It runs until the listener fails, and returns that error.
 pub async fn serve(

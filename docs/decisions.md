@@ -2618,16 +2618,20 @@ How to read this record:
   line, and 400 with the text of the store's error when it refuses one. A missing or
   empty `db` or `bucket`, or on `/api/v2/write` a missing or empty `org` and `orgID`,
   gives 400; a `db` or `bucket` other than `database` gives 404, as InfluxDB gives for
-  one that does not exist. `precision` is `ns` only, and a missing or empty one is `ns`; another
-  gives 400, where InfluxDB scales it, because our writer writes nanoseconds only and a
-  wrong precision must fail loud. Another path gives 404, and another method on a write
-  path 405. A `content-encoding` other than `identity` gets 415 and stores nothing, as
-  the store decodes no body. It checks no token. `database` stays out of `Store`: the
-  404 is an answer of the HTTP front. It compares names as the query writes them, with
-  no percent-decoding, until the first PR of `connector-influx` that writes a name into
-  a query (#1530). Decided by architect-2
-  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  one that does not exist. `precision` is `ns` only, and a missing or empty one is
+  `ns`; another gives 400, where InfluxDB scales it, because our writer writes
+  nanoseconds only and a wrong precision must fail loud. Another path gives 404, and
+  another method on a write path 405. A `content-encoding` that names a coding other
+  than `identity` gets 415 and stores nothing, as the store decodes no body. The route
+  checks the path, then the method, then the `content-encoding`, then the query. It
+  checks no token. `database` stays out of `Store`: the 404 is an answer of the HTTP
+  front. It compares names as the query writes them, with no percent-decoding, until
+  the first PR of `connector-influx` that writes a name into a query (#1530). Decided
+  by architect-2 (2026-10-07T16:33:22Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  2026-10-07T16:41:29Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
+  2026-10-07T17:22:21Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777).
 - **HTTP SIM SERVER (#1151)** `connector::http::sim::serve(listener, tasks, answer)`,
   behind the `connector` cargo feature `sim`, off by default, is the one HTTP/1.1
@@ -2636,19 +2640,26 @@ How to read this record:
   its whole body. A request that breaks HTTP gets 400, or 414 when its URI is too long
   and 431 when its head is too long, and ends its stream; an HTTP/2 preface ends it
   with no answer. Each simulator answers a `content-encoding` in its own route. It
-  returns the listener's error, so a test server that cannot accept
-  fails loud. `hyper`'s server reads OS wall time on each poll (hyper 1.12.0,
-  `common/date.rs`) only for the `date` header, which is off. A timer reads its own
-  `Instant` to arm the header read timeout, which is off too
-  (`header_read_timeout(None)`). The person approved the server on the condition that
-  it gets no timer. Lost: our own server on `httparse`, which the person refused; and a
-  copy of the server in each kind crate. Decided by architect-2
-  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  returns the listener's error, so a test server that cannot accept fails loud.
+  `hyper`'s server reads OS wall time on each poll (hyper 1.12.0, `common/date.rs`)
+  only for the `date` header, which is off. A timer reads its own `Instant` to arm the
+  header read timeout, which is off too (`header_read_timeout(None)`). The person
+  approved the server on the condition that it gets no timer. Lost: our own server on
+  `httparse`, which the person refused; and a copy of the server in each kind crate.
+  Decided by architect-2 (2026-10-07T16:33:22Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  2026-10-07T16:41:29Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
+  2026-10-07T17:08:29Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816,
+  2026-10-07T17:22:21Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777) and the
-  person (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353),
-  which supersedes 6042446508 in its clause that the server parses with `httparse`.
+  person (2026-10-07T17:04:29Z
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353). The
+  person's ruling supersedes the clause of 6042446508 that the server parses with
+  `httparse`, and 6043097777 its item 9, that the shell answers 415. Supersedes:
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508 (the
+  `httparse` clause and item 9).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
