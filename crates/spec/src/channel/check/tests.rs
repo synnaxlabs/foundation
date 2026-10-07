@@ -118,6 +118,59 @@ fn refuses_two_channels_with_one_key() {
 }
 
 #[test]
+fn refuses_one_name_given_twice_with_one_key() {
+    let channels = [
+        ("a.time", index(1, None, None)),
+        ("a.time", index(1, None, None)),
+    ];
+    let shared = Problem::Shared {
+        key: key(1),
+        first: name("a.time"),
+        second: name("a.time"),
+    };
+    assert_eq!(check_all(&channels), [shared]);
+}
+
+#[test]
+fn gives_only_the_shared_key_for_an_edge_to_it() {
+    let channels = [
+        ("c.time", index(1, None, None)),
+        ("a.x", data(1, 1, None, f64())),
+        ("b.p", data(2, 1, None, f64())),
+    ];
+    let shared = Problem::Shared {
+        key: key(1),
+        first: name("a.x"),
+        second: name("c.time"),
+    };
+    assert_eq!(check_all(&channels), [shared]);
+}
+
+#[test]
+fn checks_the_edges_of_each_channel_with_a_shared_key() {
+    let channels = [
+        ("a.time", index(1, None, None)),
+        ("b.x", data(1, 99, None, f64())),
+    ];
+    let shared = Problem::Shared {
+        key: key(1),
+        first: name("a.time"),
+        second: name("b.x"),
+    };
+    let dangling = Problem::Dangling {
+        from: name("b.x"),
+        edge: Edge::Index,
+        to: key(99),
+    };
+    assert_eq!(check_all(&channels), [shared, dangling]);
+}
+
+#[test]
+fn finds_no_problem_in_no_channels() {
+    assert_eq!(check_all(&[]), []);
+}
+
+#[test]
 fn gives_each_problem_a_message_and_a_fix() {
     let from = name("a.pressure");
     let to = name("a.time");

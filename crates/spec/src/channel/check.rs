@@ -10,8 +10,8 @@ use super::{Channel, DataType, Kind};
 
 /// Checks the edges between `channels`, each with its name: a data channel's index is
 /// an index channel, its quality is a data channel of type quality, an index's error
-/// and control channels are data channels, and no two channels share a key. Each name
-/// appears once, as in the spec tree.
+/// and control channels are data channels, and no two channels share a key. An
+/// edge to a shared key gives only the [`Problem::Shared`].
 ///
 /// Gives every problem, in name order.
 pub fn check<'a>(
@@ -20,17 +20,18 @@ pub fn check<'a>(
     let mut channels: Vec<_> = channels.into_iter().collect();
     channels.sort_by_key(|(name, _)| *name);
     let mut keys = BTreeMap::new();
-    for &(name, channel) in &channels {
-        keys.entry(channel.key).or_insert((name, channel));
+    for (at, &(_, channel)) in channels.iter().enumerate() {
+        keys.entry(channel.key)
+            .and_modify(|(_, shared)| *shared = true)
+            .or_insert((at, false));
     }
     let mut problems = Vec::new();
-    for &(name, channel) in &channels {
-        if let Some(&(first, _)) = keys.get(&channel.key)
-            && first != name
-        {
+    for (at, &(name, channel)) in channels.iter().enumerate() {
+        let (first, _) = keys[&channel.key];
+        if first != at {
             problems.push(Problem::Shared {
                 key: channel.key,
-                first: first.clone(),
+                first: channels[first].0.clone(),
                 second: name.clone(),
             });
         }
@@ -41,11 +42,11 @@ pub fn check<'a>(
                     edge,
                     to,
                 }),
-                Some(&(target, channel)) if !edge.fits(&channel.kind) => {
+                Some(&(target, false)) if !edge.fits(&channels[target].1.kind) => {
                     problems.push(Problem::Wrong {
                         from: name.clone(),
                         edge,
-                        to: target.clone(),
+                        to: channels[target].0.clone(),
                     });
                 }
                 Some(_) => {}
@@ -68,7 +69,8 @@ fn edges(kind: &Kind) -> [Option<(Edge, channel::Key)>; 2] {
     }
 }
 
-/// One edge that points at the wrong channel. `Display` gives the message: a
+/// A problem across channels: an edge to a missing or wrong channel, or one key on
+/// two channels. `Display` gives the message: a
 /// lower-case clause with no final period. [`Problem::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
@@ -107,11 +109,7 @@ impl Problem {
     pub const fn fix(&self) -> &'static str {
         match self {
             Self::Dangling { .. } => "Point it at a channel that exists",
-            Self::Wrong { edge, .. } => match edge {
-                Edge::Index => "Point it at an index channel",
-                Edge::Quality => "Point it at a data channel of type quality",
-                Edge::Error | Edge::Control => "Point it at a data channel",
-            },
+            Self::Wrong { edge, .. } => edge.need().1,
             Self::Shared { .. } => "Give each channel its own key",
         }
     }
@@ -124,11 +122,7 @@ impl fmt::Display for Problem {
                 write!(f, "the {edge} of `{from}` is {to}, which no channel has")
             }
             Self::Wrong { from, edge, to } => {
-                let need = match edge {
-                    Edge::Index => "an index channel",
-                    Edge::Quality => "a data channel of type quality",
-                    Edge::Error | Edge::Control => "a data channel",
-                };
+                let need = edge.need().0;
                 write!(f, "the {edge} of `{from}` is `{to}`, which is not {need}")
             }
             Self::Shared { key, first, second } => {
@@ -161,6 +155,20 @@ impl Edge {
             (Self::Index, Kind::Index { .. })
             | (Self::Error | Self::Control, Kind::Data(_)) => true,
             _ => false,
+        }
+    }
+
+    /// The kind of channel the edge needs, and the fix that points it there.
+    const fn need(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Index => ("an index channel", "Point it at an index channel"),
+            Self::Quality => (
+                "a data channel of type quality",
+                "Point it at a data channel of type quality",
+            ),
+            Self::Error | Self::Control => {
+                ("a data channel", "Point it at a data channel")
+            }
         }
     }
 }
