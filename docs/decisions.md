@@ -469,9 +469,12 @@ How to read this record:
   `Invalid` after that write. Each statement about a record holds only when no CRC gives
   a false match. Decided by the architect (#1049,
   https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
-  `Invalid` gives offset 0 for a header block, which is also the offset of the first
-  record of a ring, until #1093 gives the header its own error. Decided by the architect
-  (#1049, https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031051950).
+  `Unaligned` says that the header block that the open takes holds a tail off a block
+  boundary, and gives that tail. An open that gives `Unaligned` also leaves the ring as
+  read. The open does not check the tail of the other block. `Invalid` names a record
+  only: the first record of a ring is at offset 0. Lost: the tail in `Unfit`, which is
+  also the error of `Layout::new`, where a tail has no value. Decided by the architect
+  (#1093, https://github.com/synnaxlabs/foundation/issues/1093#issuecomment-6031034712).
   The restart record needs one free block: an open of a full ring first moves records at
   the tail to a segment. The walk holds one pool block at a time and reads a longer
   record in pieces of the pool's largest block, so the pool puts no bound on `body_max`.
@@ -1739,25 +1742,38 @@ How to read this record:
   turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
   person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
-  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an
-  `httparse` reader) closed: the person told `connector` to use the `hyper` client on
-  2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
-  HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
-  HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
-  Decided by the coordinator with `advisor` on 2026-10-06 (#341). The client keeps one
-  idle connection for each origin. It does not reuse one that is idle longer than 90 s
-  (the `hyper-util` default), read on the `env` clock, and the next send closes it: the
-  client sends no keep-alive, and a firewall or NAT may drop the state of an idle
-  stream. Decided by the coordinator with `advisor` on 2026-10-06
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an `httparse`
+  reader) closed: the person told `connector` to use the `hyper` client on 2026-10-06.
+  `httparse` comes in only as a dependency of `hyper`. The client is HTTP/1.1 only for
+  now: `h2` 0.4 reads the OS clock to expire a reset stream, so HTTP/2 turns on only
+  when `h2` takes its clock through `env`, by an upstream change. Decided by the
+  coordinator with `advisor` on 2026-10-06 (#341). The client keeps one idle connection
+  for each origin. It does not reuse one that is idle longer than 90 s (the `hyper-util`
+  default), read on the `env` clock, and the next send closes it: the client sends no
+  keep-alive, and a firewall or NAT may drop the state of an idle stream. Decided by the
+  coordinator with `advisor` on 2026-10-06
   (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). A
-  request that fails on a reused connection before its response goes once more on a
-  new connection, when the connection did not write it, or when its method is
-  idempotent and no byte of a response came (RFC 9112, as in Go). The pool key is the
-  origin: scheme, host, and port. Today the client takes only `http` with an IP
-  address, so the socket address is the origin. With TLS or name lookup, the key keeps
-  the host name, because a TLS connection is verified for one name and must never
+  request that fails on a reused connection before its response goes once more on a new
+  connection, when the connection did not write it, or when its method is idempotent and
+  no byte of a response came (RFC 9112, as in Go). The pool key is the origin, and it
+  keeps the host name, because a TLS connection is verified for one name and must never
   carry a request for another. Decided by the architect on #1111
-  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223).
+  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223). The key
+  is the host name in lower case and the port. `influx.` and `influx` are two keys,
+  because a resolver may expand a name with no final dot. The client takes only `http`
+  today; with TLS, the key also holds the scheme. A new connection looks up the host
+  through `env` and tries each address in order, as Go does: each address gets an equal
+  share of the time left to the deadline, but at least 2 s or all that is left. A
+  refused address moves the dial to the next at once, and no connect starts once the
+  time is up. A reused connection does no lookup. Lost: Happy Eyeballs (RFC 8305), which
+  needs more code and streams; a separate error variant for a failed lookup, which a
+  caller handles as a failed connect; no limit for each address, where one that drops
+  the SYN uses the whole timeout. Decided by `connector` in the plan on #341
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051) and in
+  the review of #1135 on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -2640,7 +2656,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls it; commits). Two channels with one key are a defect and panic (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
 | Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |

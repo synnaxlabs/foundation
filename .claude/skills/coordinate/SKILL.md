@@ -9,7 +9,7 @@ description:
 # Coordinate
 
 You keep the board on the path to the next acceptance scenario. You do not merge, gate,
-review, build, or relay messages. Interfaces and contracts belong to `laptop.architect`.
+review, build, or relay messages. Interfaces and contracts belong to the architects.
 Never read the whole decisions file: read only the section that an issue names.
 
 ## Start

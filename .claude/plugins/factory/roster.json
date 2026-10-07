@@ -4,6 +4,7 @@
   "names": [
     "laptop.coordinator",
     "laptop.architect",
+    "laptop.architect-2",
     "laptop.integrator-1",
     "laptop.integrator-2",
     "laptop.director",
@@ -21,6 +22,7 @@
   ],
   "turnCaps": {
     "laptop.coordinator": 600,
-    "laptop.architect": 600
+    "laptop.architect": 600,
+    "laptop.architect-2": 600
   }
 }
