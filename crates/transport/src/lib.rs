@@ -35,6 +35,8 @@ mod code;
 pub mod datagram;
 mod dial;
 mod error;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod message;
 pub mod port;
 #[cfg_attr(

@@ -15,7 +15,7 @@ use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use types::channel;
-use types::name::Name;
+use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
@@ -42,8 +42,8 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// The prefix of the region's names.
-    pub(crate) region: Name,
+    /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
+    pub(crate) region: Prefix,
     /// Each member of the region, this node included, one record for each node. A
     /// member's peer proves the public key of its card, and that key signs the member's
     /// grants.
@@ -186,13 +186,13 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
     ///   voter of this node's configuration.
-    /// - [`Error::Grant`] when a grant in the message does not hold.
+    /// - [`Error::Grant`] when a claim in the message does not hold.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
     ///
-    /// When a grant in `message` has no signature. A decoded message gives each
-    /// grant one.
+    /// When a claim in `message` has no signature. A decoded message gives each
+    /// claim one.
     pub(crate) fn receive(
         &self,
         peer: PublicKey,
@@ -1434,10 +1434,7 @@ mod tests {
                 };
                 let append = Body::Append {
                     prev: Position::default(),
-                    entries: vec![Entry {
-                        at,
-                        data: Data::Voters(joint),
-                    }],
+                    entries: vec![common::change(2, at, joint)],
                     commit: 0,
                 };
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
@@ -1745,11 +1742,11 @@ mod tests {
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 let proof = heartbeat.proof.as_mut().unwrap();
                 proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
-                let forged = Error::Grant(grant::Error::Forged { voter: key(3) });
+                let forged = Error::Grant(grant::Error::Forged { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(forged.clone()));
                 assert_eq!(
                     forged.to_string(),
-                    format!("the grant of voter {} is forged", key(3))
+                    format!("the claim of node {} is forged", key(3))
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
@@ -1762,7 +1759,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                let refused = Error::Grant(grant::Error::NotMember { voter: key(3) });
+                let refused = Error::Grant(grant::Error::NotMember { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
             });
         }
@@ -1782,7 +1779,7 @@ mod tests {
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
                 let not_voter = Error::NotVoter { from: key(3) };
                 assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
-                let grant = Error::Grant(grant::Error::Forged { voter: key(1) });
+                let grant = Error::Grant(grant::Error::Forged { signer: key(1) });
                 assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
             });
         }
@@ -1801,10 +1798,7 @@ mod tests {
                 };
                 let append = Body::Append {
                     prev: Position::default(),
-                    entries: vec![Entry {
-                        at,
-                        data: Data::Voters(joint),
-                    }],
+                    entries: vec![common::change(2, at, joint)],
                     commit: 0,
                 };
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
@@ -1813,6 +1807,44 @@ mod tests {
                 let mut pre_vote = message(3, 1, Body::PreVote { last: at });
                 pre_vote.term = Term(common::TERM.0 + 1);
                 assert_eq!(mesh.receive(public(3), pre_vote), Ok(()));
+            });
+        }
+
+        #[test]
+        fn refuses_an_append_whose_change_is_forged_before_it_steps() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let at = Position {
+                    term: common::TERM,
+                    index: 1,
+                };
+                let joint = Voters {
+                    incoming: [key(1), key(2)].into(),
+                    outgoing: [key(1), key(2), key(3)].into(),
+                };
+                let mut entry = common::change(2, at, joint);
+                let Data::Voters(change) = &mut entry.data else {
+                    unreachable!("a change is a voters entry");
+                };
+                change.signature.as_mut().unwrap().0[63] ^= 1;
+                let append = Body::Append {
+                    prev: Position::default(),
+                    entries: vec![entry],
+                    commit: 0,
+                };
+                let forged = Error::Grant(grant::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Err(forged));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 2).await);
+                assert_eq!(term(&mesh), Term(0));
+                let probe = Body::Append {
+                    prev: at,
+                    entries: Vec::new(),
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, probe)), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::AppendReject { hint: 0 }));
             });
         }
 
@@ -2155,7 +2187,7 @@ mod tests {
                 (
                     public(2),
                     forged,
-                    Error::Grant(grant::Error::Forged { voter: key(3) }),
+                    Error::Grant(grant::Error::Forged { signer: key(3) }),
                 ),
             ];
             assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
@@ -2593,7 +2625,12 @@ mod tests {
         let Change::Join(join) = join else {
             panic!("{join:?} is not a join")
         };
-        let given: Vec<_> = join.status.as_map().keys().map(Name::as_str).collect();
+        let given: Vec<_> = join
+            .status
+            .as_map()
+            .keys()
+            .map(types::name::Name::as_str)
+            .collect();
         assert_eq!(given, names);
         let admitted = Member {
             status: join.status,
@@ -2844,6 +2881,49 @@ mod tests {
         });
     }
 
+    // The root region holds each name: a ticket and a join under any prefix.
+    #[test]
+    fn the_root_region_takes_a_join_of_a_node_with_any_name() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                region: Prefix::ROOT,
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let Change::Ticket {
+                public_key,
+                mut options,
+            } = ticket()
+            else {
+                unreachable!()
+            };
+            options.prefix = "site_a".parse().unwrap();
+            lead(
+                &mesh,
+                &node.clock(),
+                Change::Ticket {
+                    public_key,
+                    options,
+                },
+            )
+            .await;
+            let card = common::signed(4, "site_a.pt_1");
+            let Change::Join(mut join) = join(4) else {
+                unreachable!()
+            };
+            join.card.card = card.card().clone();
+            join.card.signature = *card.signature();
+            join.admission = common::ticket(7).admission(&card);
+            mesh.propose(Change::Join(join)).await.unwrap();
+            mesh.propose(home(1)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(card));
+        });
+    }
+
     #[test]
     fn open_refuses_a_node_or_a_voter_that_is_not_a_member() {
         solo(|node, tasks| async move {
@@ -2984,8 +3064,7 @@ mod tests {
                 term: Term(1),
                 index: 1,
             };
-            let data = Data::Voters(Voters::default());
-            let entries = [Entry { at, data }];
+            let entries = [common::change(1, at, Voters::default())];
             let proof = Proof {
                 grant: Grant::Vote,
                 candidate: key(1),

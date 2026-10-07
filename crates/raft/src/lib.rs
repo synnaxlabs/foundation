@@ -19,7 +19,7 @@ use std::fmt;
 use types::node;
 
 pub use config::{Config, Start};
-pub use log::{Data, Entry};
+pub use log::{Change, Data, Entry};
 pub use machine::{Raft, Ready, Role};
 pub use message::{Answer, Body, Claim, Grant, Message, Proof, Signature};
 pub use voters::Voters;

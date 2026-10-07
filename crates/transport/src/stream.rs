@@ -3,7 +3,6 @@
 use std::future::poll_fn;
 use std::ops::Range;
 use std::rc::Rc;
-use std::task::Poll;
 
 use block::Block;
 
@@ -11,9 +10,6 @@ use crate::class::Class;
 use crate::code::Code;
 use crate::error::Error;
 use crate::quic;
-
-/// What a [`Sender`] gives after a dropped send future reset its stream.
-const CANCELLED: Error = Error::Reset { code: Code(0) };
 
 /// Bytes of a block to send, then zeros.
 ///
@@ -51,9 +47,7 @@ pub struct Part {
 pub struct Sender {
     session: Rc<quic::Session>,
     class: Class,
-    bytes_max: usize,
-    /// `None` once a dropped send future reset the stream.
-    stream: Option<quic::stream::Sender>,
+    stream: quic::stream::Sender,
 }
 
 impl Sender {
@@ -65,8 +59,7 @@ impl Sender {
         Self {
             session,
             class,
-            bytes_max: stream.bytes_max(),
-            stream: Some(stream),
+            stream,
         }
     }
 
@@ -92,21 +85,23 @@ impl Sender {
     /// ```
     #[must_use]
     pub fn bytes_max(&self) -> usize {
-        self.bytes_max
+        self.stream.bytes_max()
     }
 
     /// Sends `message` whole. It waits while the peer's flow control has no room,
     /// and returns once the stream holds the message, not when the peer has it. If the
-    /// future drops after the stream took the message and before it completes, the
-    /// stream resets with `Code(0)`, because part of the message may be sent. If it
-    /// drops before that, nothing is sent.
+    /// future drops after the stream sent a byte of the message and before it
+    /// completes, the stream resets with `Code(0)`, because the peer would get part of
+    /// the message. If it drops before that, nothing is sent and the stream stays
+    /// open.
     ///
     /// # Errors
     ///
     /// [`Error::TooLarge`] when `message` is over the peer's
     /// [`Config::message_bytes_max`](crate::Config::message_bytes_max),
     /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
-    /// `Code(0)` after a dropped send future, or the error that ended the session.
+    /// `Code(0)` after a dropped send future reset the stream, or the error that
+    /// ended the session.
     ///
     /// # Panics
     ///
@@ -120,21 +115,20 @@ impl Sender {
     /// }
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
-        let bytes_max = self.bytes_max;
         let mut sending = Sending {
             session: &self.session,
-            stream: &mut self.stream,
+            stream: &self.stream,
+            message: Some(message),
             done: false,
         };
-        let mut message = Some(message);
         let sent = poll_fn(|cx| {
-            let Some(stream) = sending.stream else {
-                // Only a dropped send future resets the stream, so this is the first
-                // poll, and the message is in hand.
-                let bytes = message.as_ref().map_or(0, |message| message.len());
-                return Poll::Ready(cancelled(bytes, bytes_max));
-            };
-            sending.session.poll_write(cx, stream, &mut message)
+            let Sending {
+                session,
+                stream,
+                message,
+                ..
+            } = &mut sending;
+            session.poll_write(cx, stream, message)
         })
         .await;
         sending.done = true;
@@ -171,11 +165,7 @@ impl Sender {
     /// }
     /// ```
     pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
-        if self.stream.is_none() {
-            return cancelled(message.len(), self.bytes_max);
-        }
-        drop(message);
-        todo!("#68")
+        self.session.try_write(&self.stream, message)
     }
 
     /// Sends one message: for each of `parts`, in order, the bytes of its range of
@@ -211,7 +201,6 @@ impl Sender {
         block: Block,
         parts: &[Part],
     ) -> Result<(), Error> {
-        self.stream.as_mut().ok_or(CANCELLED)?;
         drop((block, parts));
         todo!("#68")
     }
@@ -242,7 +231,6 @@ impl Sender {
         block: Block,
         parts: &[Part],
     ) -> Result<Option<Block>, Error> {
-        self.stream.as_mut().ok_or(CANCELLED)?;
         drop((block, parts));
         todo!("#68")
     }
@@ -254,7 +242,8 @@ impl Sender {
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
-    /// `Code(0)` after a dropped send future, or the error that ended the session.
+    /// `Code(0)` after a dropped send future reset the stream, or the error that
+    /// ended the session.
     ///
     /// ```
     /// use transport::{Error, stream::Sender};
@@ -264,8 +253,7 @@ impl Sender {
     /// }
     /// ```
     pub fn finish(&mut self) -> Result<(), Error> {
-        let stream = self.stream.as_mut().ok_or(CANCELLED)?;
-        self.session.finish(stream)
+        self.session.finish(&mut self.stream)
     }
 
     /// Cancels the stream: messages the peer does not have yet drop, and the peer
@@ -278,43 +266,32 @@ impl Sender {
     /// }
     /// ```
     pub fn reset(mut self, code: Code) {
-        if let Some(stream) = self.stream.take() {
-            self.session.reset(stream, code);
-        }
+        self.session.reset(&mut self.stream, code);
     }
-}
-
-/// What a send of a message of `bytes` gives after a dropped send future reset the
-/// stream: the size error first, as on an open stream.
-fn cancelled<T>(bytes: usize, bytes_max: usize) -> Result<T, Error> {
-    quic::stream::check_size(bytes, bytes_max)?;
-    Err(CANCELLED)
 }
 
 impl Drop for Sender {
     fn drop(&mut self) {
-        if let Some(stream) = self.stream.take()
-            && !stream.finished()
-        {
-            self.session.reset(stream, Code(0));
+        if !self.stream.ended() {
+            self.session.reset(&mut self.stream, Code(0));
         }
     }
 }
 
-/// A [`Sender::send`] in progress. Dropping it before it is done resets the stream,
-/// because the stream may hold part of the message.
+/// A [`Sender::send`] in progress. Dropping it before it is done cancels the message
+/// once the stream took it.
 struct Sending<'a> {
     session: &'a quic::Session,
-    stream: &'a mut Option<quic::stream::Sender>,
+    stream: &'a quic::stream::Sender,
+    /// `None` once the stream took it.
+    message: Option<Block>,
     done: bool,
 }
 
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
-        if !self.done
-            && let Some(stream) = self.stream.take()
-        {
-            self.session.reset(stream, Code(0));
+        if !self.done && self.message.is_none() {
+            self.session.cancel(self.stream);
         }
     }
 }
@@ -506,7 +483,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::task::{Context, Waker};
 
     use std::future::poll_fn;
@@ -829,14 +806,6 @@ mod tests {
                 assert_eq!(sender.send(side.block(b"a")).await, Err(CANCELLED));
                 let tried = sender.try_send(side.block(b"a")).map(|_| ());
                 assert_eq!(tried, Err(CANCELLED));
-                let part = [super::Part {
-                    range: 0..1,
-                    zeros: 0,
-                }];
-                let sent = sender.send_parts(side.block(b"a"), &part).await;
-                assert_eq!(sent, Err(CANCELLED));
-                let tried = sender.try_send_parts(side.block(b"a"), &part);
-                assert_eq!(tried.map(|_| ()), Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
                 assert_eq!(sender.bytes_max(), MESSAGE_BYTES_MAX);
                 let closed = Error::PeerClosed { code: Code(4) };
@@ -884,13 +853,182 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    #[test]
-    fn a_message_over_the_peers_largest_is_too_large_after_a_dropped_send() {
-        let small = |config| Config {
+    /// A window of two of the largest messages, of 1472 bytes.
+    fn small(config: Config) -> Config {
+        Config {
             message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
             window_bytes: 2 * 1472,
             ..config
-        };
+        }
+    }
+
+    #[test]
+    fn a_send_future_dropped_while_it_waits_behind_another_stream_sends_nothing() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            small,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut first = opened.expect("a stream");
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut second = opened.expect("a stream");
+                let body = vec![7; 1472];
+                let mut count = 0;
+                let held = loop {
+                    let mut sending = Box::pin(first.send(side.block(&body)));
+                    count += 1;
+                    match poll_once(sending.as_mut()).await {
+                        Some(done) => done.expect("sent"),
+                        None => break sending,
+                    }
+                };
+                let waiting = poll_once(pin!(second.send(side.block(b"c")))).await;
+                assert_eq!(waiting, None, "the second stream waits");
+                held.await.expect("sent");
+                assert!(count > 1, "{count}");
+                assert_eq!(second.send(side.block(b"c")).await, Ok(()));
+                first.finish().expect("finished");
+                second.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                let mut incoming = side.session.accept().await.expect("a stream");
+                loop {
+                    let read = bytes(incoming.receiver.recv().await).expect("read");
+                    match read {
+                        Some(message) => assert_eq!(message, vec![7; 1472]),
+                        None => break,
+                    }
+                }
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let read = incoming.receiver.recv().await;
+                assert_eq!(bytes(read), Ok(Some(b"c".to_vec())));
+                assert_eq!(bytes(incoming.receiver.recv().await), Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// Sends messages of 1472 bytes on `sender` with `try_send` until one comes back,
+    /// which the stream gives back while it holds part of the one before. Gives the
+    /// count it took.
+    fn try_fill(side: &testing::Side, sender: &mut super::Sender) -> usize {
+        let body = vec![7; 1472];
+        for count in 0.. {
+            let message = side.block(&body);
+            let address = message.as_ptr();
+            if let Some(given) = sender.try_send(message).expect("sent") {
+                assert_eq!((given.as_ptr(), &*given), (address, body.as_slice()));
+                assert!(count > 0, "the first message is not given back");
+                return count;
+            }
+        }
+        unreachable!("a window holds no more than 3 messages")
+    }
+
+    /// Reads `count` messages of 1472 bytes from `receiver`.
+    async fn read_filled(receiver: &mut super::Receiver, count: usize) {
+        for _ in 0..count {
+            let read = bytes(receiver.recv().await);
+            assert_eq!(read, Ok(Some(vec![7; 1472])));
+        }
+    }
+
+    /// What a sender does after [`try_fill`].
+    #[derive(Clone, Copy, Debug)]
+    enum Then {
+        Send,
+        Finish,
+        /// Drops a send that waits behind the rest, then finishes.
+        DropSend,
+        Drop,
+    }
+
+    #[test]
+    fn a_try_send_taken_in_part_goes_whole_unless_the_sender_drops() {
+        for then in [Then::Send, Then::Finish, Then::DropSend, Then::Drop] {
+            let counted = Arc::new(AtomicUsize::new(0));
+            let read = Arc::clone(&counted);
+            let (mut sim, ..) = testing::sessions(
+                0,
+                small,
+                move |side| async move {
+                    let opened = side.session.open_sender(Class::Complete).await;
+                    let mut sender = opened.expect("a stream");
+                    counted.store(try_fill(&side, &mut sender), Ordering::Relaxed);
+                    match then {
+                        Then::Send => {
+                            assert_eq!(sender.send(side.block(b"c")).await, Ok(()));
+                            sender.finish().expect("finished");
+                        }
+                        Then::Finish => sender.finish().expect("finished"),
+                        Then::DropSend => {
+                            let send = sender.send(side.block(b"c"));
+                            let waiting = poll_once(pin!(send)).await;
+                            assert_eq!(waiting, None, "the send waits");
+                            sender.finish().expect("finished");
+                        }
+                        Then::Drop => {
+                            // The first message reaches the peer first, as the peer
+                            // drops a stream reset before it.
+                            side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                            drop(sender);
+                        }
+                    }
+                    let closed = Error::PeerClosed { code: Code(4) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+                move |side| async move {
+                    let mut incoming = side.session.accept().await.expect("a stream");
+                    side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                    let receiver = &mut incoming.receiver;
+                    if let Then::Drop = then {
+                        assert_eq!(until_error(receiver).await, CANCELLED);
+                    } else {
+                        read_filled(receiver, read.load(Ordering::Relaxed)).await;
+                        if let Then::Send = then {
+                            let message = bytes(receiver.recv().await);
+                            assert_eq!(message, Ok(Some(b"c".to_vec())));
+                        }
+                        assert_eq!(bytes(receiver.recv().await), Ok(None));
+                    }
+                    side.session.close(Code(4));
+                },
+            );
+            assert_eq!(sim.run(), Ok(()), "then {then:?}");
+        }
+    }
+
+    #[test]
+    fn a_try_send_on_an_ended_session_gives_why_it_ended() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                let closed = Error::PeerClosed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
+                let tried = sender.try_send(side.block(b"b")).map(|_| ());
+                assert_eq!(tried, Err(closed.clone()));
+                side.node.clock().sleep(spans(Span::SECOND, 10)).await;
+                let tried = sender.try_send(side.block(b"b")).map(|_| ());
+                assert_eq!(tried, Err(closed));
+            },
+            |side| async move {
+                let _incoming = side.session.accept().await.expect("a stream");
+                side.session.close(Code(5));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_over_the_peers_largest_is_too_large_after_a_dropped_send() {
         let (mut sim, ..) = testing::sessions(
             0,
             small,
@@ -1046,7 +1184,7 @@ mod tests {
         );
         let panicked = sim::Error::Panicked {
             thread: "transport".into(),
-            message: "a sender is used after finish".into(),
+            message: "a sender is used after finish or reset".into(),
             seed: 0,
         };
         assert_eq!(sim.run(), Err(panicked));

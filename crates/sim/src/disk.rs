@@ -204,7 +204,17 @@ impl Disk {
         if writable && file.writers > 0 {
             return Err(Cause::Busy);
         }
-        let len = file.len;
+        // A crash between the create and the allocation leaves an empty file on `os`.
+        if let Mode::Create { len } = mode
+            && file.len == 0
+        {
+            if let Err(cause) = self.take(len) {
+                self.remove(path)?;
+                return Err(cause);
+            }
+            self.file(inode).len = len;
+        }
+        let len = self.file(inode).len;
         let handle = Handle {
             inode,
             writable,

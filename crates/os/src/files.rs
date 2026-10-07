@@ -236,29 +236,39 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
         Mode::Write => OFlags::RDWR,
         Mode::Create { .. } => OFlags::RDWR.union(OFlags::CREATE),
     };
-    let fd =
-        fs::openat(data, path, flags.union(OFlags::CLOEXEC), FILE).map_err(&failed)?;
-    if mode != Mode::Read {
-        match fs::flock(&fd, FlockOperation::NonBlockingLockExclusive) {
-            Err(Errno::WOULDBLOCK) => {
-                return Err(Error::Busy {
-                    path: path.to_path_buf(),
-                });
+    let (fd, stat) = loop {
+        let fd = fs::openat(data, path, flags.union(OFlags::CLOEXEC), FILE)
+            .map_err(&failed)?;
+        if mode != Mode::Read {
+            match fs::flock(&fd, FlockOperation::NonBlockingLockExclusive) {
+                Err(Errno::WOULDBLOCK) => {
+                    return Err(Error::Busy {
+                        path: path.to_path_buf(),
+                    });
+                }
+                locked => locked.map_err(&failed)?,
             }
-            locked => locked.map_err(&failed)?,
         }
-    }
-    let stat = fs::fstat(&fd).map_err(&failed)?;
+        let stat = fs::fstat(&fd).map_err(&failed)?;
+        if mode == Mode::Read || named(data, path, &stat).map_err(&failed)? {
+            break (fd, stat);
+        }
+    };
     if FileType::from_raw_mode(stat.st_mode).is_dir() {
         return Err(failed(Errno::ISDIR));
     }
     let found = stat.st_size.cast_unsigned();
     match mode {
-        // Not atomic: a crash before the allocation leaves an empty file, which this
-        // allocates.
+        // Not atomic: a crash before `allocate` sets the length leaves an empty file,
+        // which this allocates.
         Mode::Create { len } if found == 0 && len != 0 => {
             allocate(&fd, len)
                 .and_then(|()| sync_all(&fd))
+                // The blocks are free once `fd` closes. A failed create leaves no file,
+                // so a later write open gives `NotFound`, not an empty file.
+                .or_else(|errno| {
+                    fs::unlinkat(data, path, AtFlags::empty()).and(Err(errno))
+                })
                 .map_err(&failed)?;
             Ok((fd, len))
         }
@@ -347,11 +357,25 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
     return fs::fcntl_fullfsync(fd);
 }
 
-/// Allocates the first `len` bytes of the empty file `fd` on disk and sets its length
-/// to `len`.
+/// Whether `path` names the file of `stat`. A failed create of another handle unlinks
+/// its file, also after a write open found it and before that open locked it.
+fn named(data: &OwnedFd, path: &Path, stat: &fs::Stat) -> io::Result<bool> {
+    match fs::statat(data, path, AtFlags::empty()) {
+        Ok(found) => Ok((found.st_dev, found.st_ino) == (stat.st_dev, stat.st_ino)),
+        Err(Errno::NOENT) => Ok(false),
+        Err(errno) => Err(errno),
+    }
+}
+
+/// Allocates the first `len` bytes of the empty file `fd` on disk, all or none, and
+/// sets its length to `len`.
 fn allocate(fd: &OwnedFd, len: u64) -> io::Result<()> {
+    // The length stays 0 until each block is there, also after a crash. The first
+    // `ftruncate` frees the blocks that such a crash left past the end.
     #[cfg(target_os = "linux")]
-    return fs::fallocate(fd, fs::FallocateFlags::empty(), 0, len);
+    return fs::ftruncate(fd, 0)
+        .and_then(|()| fs::fallocate(fd, fs::FallocateFlags::KEEP_SIZE, 0, len))
+        .and_then(|()| fs::ftruncate(fd, len));
     #[cfg(target_os = "macos")]
     return crate::allocate::all(fd, len);
 }
