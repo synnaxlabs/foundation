@@ -25,7 +25,7 @@ struct Idle {
 
 impl Pool {
     /// Drops each connection idle longer than 90 s at `now`, then takes the one for
-    /// `origin` when it is ready for a request.
+    /// `origin`.
     pub(super) fn take(&self, origin: &Origin, now: Monotonic) -> Option<Connection> {
         let mut idle = self.0.borrow_mut();
         idle.retain(|_, idle| {
@@ -33,9 +33,7 @@ impl Pool {
                 .checked_add(IDLE_MAX)
                 .is_none_or(|end| now <= end)
         });
-        idle.remove(origin)
-            .map(|idle| idle.connection)
-            .filter(|connection| connection.sender.is_ready())
+        idle.remove(origin).map(|idle| idle.connection)
     }
 
     /// Keeps `connection` as the idle one for `origin`, from `now`. It drops the
