@@ -128,7 +128,6 @@ impl Node {
                 let error = Error::Disk {
                     disk: config.disk,
                     cores,
-                    // Past a `u64`, no budget meets `min`, as with the largest.
                     min: types::byte::Size::from_bytes(small.min.saturating_mul(count)),
                 };
                 Self {
@@ -424,14 +423,14 @@ pub enum Error {
     /// A file call that reads or records the shard count of the data directory
     /// failed.
     Directory(env::files::Error),
-    /// The disk budget is less than `min`, the least budget that holds a ring on each
-    /// of `cores` shards.
+    /// The disk budget holds no ring on each of `cores` shards.
     Disk {
         /// The disk budget that was given.
         disk: types::byte::Size,
         /// The count of shards.
         cores: usize,
-        /// The least disk budget that holds a ring on each shard.
+        /// The least disk budget that holds a ring on each shard, capped at the largest
+        /// `Size`.
         min: types::byte::Size,
     },
 }

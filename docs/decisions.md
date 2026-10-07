@@ -2141,7 +2141,8 @@ How to read this record:
   ring file: `node` takes the largest ring whose file fits each part
   (`buffer::Layout::fit`), so the format stays in `buffer`. When a part holds no
   ring, no shard starts, and `join` gives `Error::Disk` with the budget, the shard
-  count, and the least budget (`n` times the least ring that `fit` gives); `config`
+  count, and the least budget (`n` times the least ring that `fit` gives, capped at
+  the largest `Size`); `config`
   cannot check it, as for the pool part (NODE SETTINGS). The ring is the whole store.
   A ring already there keeps its size, which can be more than its part, until
   `Buffer::resize` exists (#451). So oldest first (B1) holds per shard, not per node.
@@ -2155,8 +2156,9 @@ How to read this record:
   Decided by the architect, #342:
   https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
   https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187,
-  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257, and
-  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672.
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672, and
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a

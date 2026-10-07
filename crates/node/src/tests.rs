@@ -695,20 +695,21 @@ mod buffer {
     }
 
     /// The core count comes from the host. With 2^43 cores no `u64` budget holds a
-    /// ring on each shard, so `min` is the largest budget.
+    /// ring on each shard, the largest too, so `min` is the largest budget.
     #[test]
     fn a_least_disk_budget_past_a_u64_is_the_largest_budget() {
         let cores = 1_usize << 43;
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let host = host(&mut sim, cores);
-        let disk = Size::from_bytes(1 << 30);
-        let node = Node::start(Config {
-            disk,
-            ..config(&host, 1 << 20, Box::new(heap))
-        });
-        assert_eq!(host.shard_starts(), []);
         let min = Size::from_bytes(u64::MAX);
-        assert_eq!(node.join(), Err(Error::Disk { disk, cores, min }));
+        for disk in [Size::from_bytes(1 << 30), min] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, cores);
+            let node = Node::start(Config {
+                disk,
+                ..config(&host, 1 << 20, Box::new(heap))
+            });
+            assert_eq!(host.shard_starts(), []);
+            assert_eq!(node.join(), Err(Error::Disk { disk, cores, min }));
+        }
     }
 
     /// `node` calls the maker on the start thread just before it starts each shard,
