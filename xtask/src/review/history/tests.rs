@@ -980,6 +980,55 @@ fn a_base_move_of_a_path_that_only_a_merged_branch_changes_does_not_count() {
 }
 
 #[test]
+fn a_base_move_after_a_modify_delete_of_two_merge_bases_counts() {
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let unreviewed = format!("fn unreviewed() {{}}\n{text}");
+    let repo = Repo::new("move-modify-delete");
+    let o = repo.commit_tree(&[(b"a.txt", "base\n"), (b"a.md", text)], &[]);
+    // The PR changes `a.md`; main removes it.
+    let b1 = repo.commit_tree(&[(b"a.txt", "base\n"), (b"a.md", &unreviewed)], &[&o]);
+    let b2 = repo.commit_tree(&[(b"a.txt", "base\n"), (b"m.txt", "m\n")], &[&o]);
+    // The PR merges main and keeps its `a.md`.
+    let first = repo.commit_tree(
+        &[
+            (b"a.txt", "base\n"),
+            (b"a.md", &unreviewed),
+            (b"m.txt", "m\n"),
+        ],
+        &[&b1, &b2],
+    );
+    // Main merges the PR's commit and keeps `a.md` removed, then adds `a.rs`.
+    let m = repo.commit_tree(&[(b"a.txt", "base\n"), (b"m.txt", "m\n")], &[&b2, &b1]);
+    let base = repo.commit_tree(
+        &[(b"a.txt", "base\n"), (b"m.txt", "m\n"), (b"a.rs", text)],
+        &[&m],
+    );
+    repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    repo.git(&["reset", "--quiet", "--hard", &first]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.head();
+    assert_eq!(
+        repo.git(&["merge-base", "--all", &first, &base])
+            .lines()
+            .count(),
+        2
+    );
+    // The merge moves the PR's text of `a.md` into the code file `a.rs`.
+    assert_eq!(
+        repo.git(&["show", "HEAD:a.rs"]).lines().next(),
+        Some("fn unreviewed() {}")
+    );
+    assert_eq!(
+        repo.code_change(&first, &end),
+        Ok(Some(
+            "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
+                .to_string()
+        ))
+    );
+    assert_eq!(repo.reaches(&first, &end), Ok(false));
+}
+
+#[test]
 fn a_base_move_from_code_or_to_text_does_not_count() {
     let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
     for (old, new) in [("a.md", "b.md"), ("a.rs", "b.rs")] {
