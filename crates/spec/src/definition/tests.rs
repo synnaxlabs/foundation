@@ -1339,3 +1339,29 @@ fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
         })
     );
 }
+
+#[test]
+fn decodes_the_placement_and_unknown_kind_fuzz_inputs_to_their_readers() {
+    let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/placement");
+    let overlap =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/placement_overlap");
+    let unknown = include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind");
+    let nodes = placement::Nodes {
+        home: None,
+        standby: Some(name("n_1")),
+        copies: vec![name("n_2"), name("n_3")],
+    };
+    let policy = placement::Policy::new(selector(&["site_a.**"]), nodes).unwrap();
+    assert_eq!(Definition::decode(valid), Ok(Definition::Placement(policy)));
+    assert_eq!(
+        Definition::decode(overlap),
+        Err(Error::Placement {
+            at: 28,
+            error: placement::Error::Overlap(name("n_2")),
+        })
+    );
+    assert_eq!(
+        Definition::decode(unknown),
+        Err(Error::Kind { at: 1, tag: 0 })
+    );
+}
