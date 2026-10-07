@@ -4,7 +4,10 @@
 use std::rc::Rc;
 
 use block::Pool;
-use raft::{Answer, Body, Grant, Message, Proof, Ready, Signature, Term};
+use raft::{
+    Answer, Body, Change, Data, Entry, Grant, Message, Position, Proof, Ready,
+    Signature, Term, Voters,
+};
 use transport::Address;
 use types::channel;
 use types::name::Name;
@@ -12,8 +15,8 @@ use types::node::{self, PrivateKey, PublicKey, SealKey};
 
 use crate::bytes::{put_channel, put_count, put_name};
 use crate::card::{self, Card};
+use crate::claim::Signer;
 use crate::ed25519;
-use crate::grant::Signer;
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{Ticket, Voter};
@@ -193,4 +196,29 @@ pub(crate) fn proven_at(
     };
     signer(leader).sign(&mut ready);
     ready.messages.remove(0)
+}
+
+/// The configuration entry `voters` that `leader` wrote at `at`, with its votes from
+/// 1, 2 and 3, signed as `sign` signs a change.
+///
+/// # Panics
+///
+/// When `leader` is not 1, 2 or 3, as [`proven`].
+pub(crate) fn change(leader: u8, at: Position, voters: Voters) -> Entry {
+    let to = if leader == 1 { 2 } else { 1 };
+    let proof = proven(leader, to, Body::HeartbeatReply).proof;
+    let entry = Entry {
+        at,
+        data: Data::Voters(Change {
+            voters,
+            votes: proof.expect("a proven message holds a proof"),
+            signature: None,
+        }),
+    };
+    let mut ready = Ready {
+        entries: vec![entry],
+        ..Ready::default()
+    };
+    signer(leader).sign(&mut ready);
+    ready.entries.remove(0)
 }

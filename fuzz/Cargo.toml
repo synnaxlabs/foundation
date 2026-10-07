@@ -14,6 +14,7 @@ cargo-fuzz = true
 block = { path = "../crates/block" }
 buffer = { path = "../crates/buffer" }
 codec = { path = "../crates/codec" }
+config = { path = "../crates/config" }
 config-hcl = { path = "../crates/config-hcl" }
 connector-modbus = { path = "../crates/connector-modbus" }
 crc32c = "0.6.8"
@@ -25,6 +26,7 @@ ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
 spec = { path = "../crates/spec" }
+transport = { path = "../crates/transport", features = ["fuzzing"] }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
@@ -45,6 +47,13 @@ bench = false
 [[bin]]
 name = "codec_series"
 path = "fuzz_targets/codec_series.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_check"
+path = "fuzz_targets/config_check.rs"
 test = false
 doc = false
 bench = false
@@ -108,6 +117,13 @@ bench = false
 [[bin]]
 name = "spec_definition"
 path = "fuzz_targets/spec_definition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_hello"
+path = "fuzz_targets/transport_hello.rs"
 test = false
 doc = false
 bench = false
@@ -178,6 +194,13 @@ bench = false
 [[bin]]
 name = "types_stamp"
 path = "fuzz_targets/types_stamp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_sample"
+path = "fuzz_targets/types_sample.rs"
 test = false
 doc = false
 bench = false

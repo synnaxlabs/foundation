@@ -13,7 +13,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
@@ -90,8 +90,8 @@ impl Shard {
         block.freeze()
     }
 
-    /// Makes the ring file with `len` zero bytes and no header.
-    async fn zeroed(&self, len: u64) {
+    /// Makes the ring file with `len` zero bytes and no header, when no file is there.
+    async fn create_zeroed(&self, len: u64) {
         self.memory
             .files()
             .open(FilePath::new(RING), Mode::Create { len })
@@ -235,6 +235,14 @@ fn tenths(count: i64) -> Span {
 
 fn layout(area: u64, body_max: usize) -> Layout {
     Layout::new(area, body_max).expect("the sizes make a ring")
+}
+
+/// The smallest ring whose records hold a body of at most `body_max` bytes.
+fn least(body_max: usize) -> Layout {
+    let min = Layout::fit(0, body_max)
+        .expect_err("no ring in no bytes")
+        .min;
+    Layout::fit(min, body_max).expect("the least length holds a ring")
 }
 
 fn key(index: u32) -> channel::Key {
@@ -395,6 +403,134 @@ where
     let (mut sim, handle) = start(seed, memory, main);
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
+}
+
+/// The result of a call to the memory driver, which ends at once.
+fn ready<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("a memory call ends at once"),
+    }
+}
+
+#[test]
+fn a_memory_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    let files = Memory::default().files();
+    let create = Mode::Create { len: 4_096 };
+    drop(ready(files.open(FilePath::new("b"), create)).unwrap());
+    let mut file = ready(files.open(FilePath::new("a"), create)).unwrap();
+    let found = ready(file.rename(FilePath::new("./b")));
+    assert_eq!(found, Err(FileError::Exists { path: "./b".into() }));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+    ready(file.rename(FilePath::new("./c"))).unwrap();
+    let reopened = ready(files.open(FilePath::new("c"), Mode::Read)).unwrap();
+    assert_eq!(reopened.len(), 4_096);
+}
+
+#[test]
+fn a_memory_path_spelled_with_a_dot_names_the_same_file_in_each_call() {
+    let memory = Memory::default();
+    let files = memory.files();
+    let create = Mode::Create { len: 4_096 };
+    let mut file = ready(files.open(FilePath::new("./a"), create)).unwrap();
+    drop(ready(files.open(FilePath::new("a"), create)).unwrap());
+    assert_eq!(memory.bytes("./a").len(), 4_096);
+    ready(file.rename(FilePath::new("b"))).unwrap();
+    ready(files.remove(FilePath::new("./b"))).unwrap();
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, Vec::<PathBuf>::new());
+}
+
+#[test]
+fn a_memory_path_with_a_trailing_slash_names_only_a_directory() {
+    let files = Memory::default().files();
+    drop(ready(files.open(FilePath::new("a"), Mode::Create { len: 1 })).unwrap());
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("a/", Mode::Write),
+        ("a/.", Mode::Read),
+        ("a//", Mode::Read),
+        ("a/", Mode::Create { len: 1 }),
+        ("b/", Mode::Create { len: 1 }),
+        ("b/", Mode::Read),
+        ("b/.", Mode::Read),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("a/"))));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(
+        names,
+        [PathBuf::from("a")],
+        "a refused remove keeps the file"
+    );
+    for path in ["b/", "a"] {
+        results.push(ready(files.remove(FilePath::new(path))));
+    }
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let expected = [
+        Err(io("a/", Operation::Open, 20)),
+        Err(io("a/.", Operation::Open, 20)),
+        Err(io("a//", Operation::Open, 20)),
+        Err(io("a/", Operation::Open, 21)),
+        Err(io("b/", Operation::Open, 21)),
+        Err(FileError::NotFound { path: "b/".into() }),
+        Err(FileError::NotFound { path: "b/.".into() }),
+        Err(io("a/", Operation::Remove, 20)),
+        Ok(()),
+        Ok(()),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_memory_path_of_the_data_directory_names_no_file() {
+    let files = Memory::default().files();
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("./", Mode::Read),
+        ("./", Mode::Write),
+        (".", Mode::Read),
+        (".", Mode::Create { len: 1 }),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("."))));
+    let expected = [
+        Err(io("./", Operation::Open, 21)),
+        Err(io("./", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Remove, 21)),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_memory_empty_path_names_no_file() {
+    let files = Memory::default().files();
+    let mut results = Vec::new();
+    for mode in [Mode::Read, Mode::Write, Mode::Create { len: 1 }] {
+        results.push(ready(files.open(FilePath::new(""), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new(""))));
+    let not_found = || FileError::NotFound { path: "".into() };
+    let expected = [Err(not_found()), Err(not_found()), Err(not_found()), Ok(())];
+    assert_eq!(results, expected);
+    assert_eq!(
+        ready(files.list(FilePath::new(""))).unwrap(),
+        Vec::<PathBuf>::new()
+    );
 }
 
 #[test]
@@ -740,18 +876,17 @@ fn a_full_ring_queues_nothing() {
     run(5, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, BODY_MAX), &mut slots)
+            .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
         let parts = Parts::from(shard.block(3900));
-        buffer
-            .append([entry(1, a, Path::Live, 0, 1, None, parts.clone())])
-            .expect("the first record has room");
-        buffer
-            .append([entry(1, a, Path::Live, 1, 1, None, parts.clone())])
-            .expect("the second record has room");
-        let full = buffer.append([entry(1, a, Path::Live, 2, 1, None, parts.clone())]);
+        for seq in 0..3 {
+            buffer
+                .append([entry(1, a, Path::Live, seq, 1, None, parts.clone())])
+                .expect("the record has room");
+        }
+        let full = buffer.append([entry(1, a, Path::Live, 3, 1, None, parts.clone())]);
         assert_eq!(
             full,
             Err(Rejected::Full {
@@ -759,9 +894,9 @@ fn a_full_ring_queues_nothing() {
                 free: 0
             })
         );
-        assert_eq!(buffer.tail(a, Path::Live), tail(2, None));
+        assert_eq!(buffer.tail(a, Path::Live), tail(3, None));
         buffer.committed().await.expect("commits");
-        assert_eq!(buffer.durable(a, Path::Live), tail(2, None));
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, None));
     });
 }
 
@@ -770,18 +905,20 @@ fn a_batch_is_queued_whole_or_not_at_all() {
     run(6, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(4 * BLOCK, 8183), &mut slots)
+            .open(layout(8 * BLOCK, 8183), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let first = Parts::from(shard.block(5000));
+        let long = Parts::from(shard.block(5000));
         let parts = Parts::from(shard.block(3900));
-        buffer
-            .append([entry(1, a, Path::Live, 0, 1, None, first)])
-            .expect("the first record has room");
+        for seq in 0..3 {
+            buffer
+                .append([entry(1, a, Path::Live, seq, 1, None, long.clone())])
+                .expect("the record has room");
+        }
         let full = buffer.append([
-            entry(1, a, Path::Live, 1, 1, None, parts.clone()),
-            entry(1, a, Path::Live, 2, 1, None, parts.clone()),
+            entry(1, a, Path::Live, 3, 1, None, parts.clone()),
+            entry(1, a, Path::Live, 4, 1, None, parts.clone()),
         ]);
         assert_eq!(
             full,
@@ -791,15 +928,15 @@ fn a_batch_is_queued_whole_or_not_at_all() {
             }),
             "the first entry alone has room, the batch does not"
         );
-        assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
+        assert_eq!(buffer.tail(a, Path::Live), tail(3, None));
         buffer.committed().await.expect("commits");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(4 * BLOCK, 8183), &mut slots)
+            .open(layout(8 * BLOCK, 8183), &mut slots)
             .await
             .expect("reopens");
-        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(1, None));
+        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(3, None));
     });
 }
 
@@ -1328,7 +1465,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
         let blocks = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
         let files = shard.memory.files();
         files.remove(FilePath::new(RING)).await.expect("removes");
-        shard.zeroed(AREA_START).await;
+        shard.create_zeroed(AREA_START).await;
         shard.memory.put(RING, 0, &blocks);
         let opened = shard
             .open(layout(2 * AREA, BODY_MAX), &mut Slots::new())
@@ -1346,7 +1483,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
 #[test]
 fn a_file_shorter_than_the_header_blocks_is_not_read() {
     run(17, Memory::default(), |shard| async move {
-        shard.zeroed(BLOCK).await;
+        shard.create_zeroed(BLOCK).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(
             opened.map(drop),
@@ -1361,7 +1498,7 @@ fn a_file_shorter_than_the_header_blocks_is_not_read() {
 #[test]
 fn a_file_with_no_header_is_missing() {
     run(11, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA).await;
+        shard.create_zeroed(AREA_START + AREA).await;
         shard.memory.put(RING, 0, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
@@ -1372,7 +1509,7 @@ fn a_file_with_no_header_is_missing() {
 #[test]
 fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
     run(11, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA).await;
+        shard.create_zeroed(AREA_START + AREA).await;
         shard.memory.put(RING, COVER, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
@@ -2695,7 +2832,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
 fn a_record_over_the_most_entries_is_invalid() {
     for (count, opens) in [(1023_u32, true), (1024, false)] {
         run(102, Memory::default(), move |shard| async move {
-            let ring = layout(64 * BLOCK, 100_000);
+            let ring = least(100_000);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
             let a = slots.assign(key(1));
@@ -3004,6 +3141,23 @@ fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
 }
 
 #[test]
+fn a_header_with_an_area_under_four_records_is_unfit() {
+    run(157, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = 3 * BLOCK;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area,
+            body_max: BODY_MAX,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
+    });
+}
+
+#[test]
 fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     let area = u64::MAX - 4095;
     assert_eq!(
@@ -3037,9 +3191,9 @@ fn each_open_starts_a_new_chain() {
 /// it has blocks opens and takes its largest record.
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
-    for area in [2 * BLOCK, AREA] {
+    for ring in [least(BODY_MAX), layout(AREA, BODY_MAX)] {
         run(24, Memory::default(), move |shard| async move {
-            let ring = layout(area, BODY_MAX);
+            let area = ring.area();
             for _ in 0..area / BLOCK {
                 drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
             }
@@ -3105,12 +3259,12 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
     run(21, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, BODY_MAX), &mut slots)
+            .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
         let parts = Parts::from(shard.block(3900));
-        for seq in 0..2 {
+        for seq in 0..3 {
             buffer
                 .append([entry(1, a, Path::Live, seq, 1, None, parts.clone())])
                 .expect("the record has room");
@@ -3118,7 +3272,7 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
         buffer.committed().await.expect("commits");
         drop(buffer);
         let opened = shard
-            .open(layout(3 * BLOCK, BODY_MAX), &mut Slots::new())
+            .open(layout(4 * BLOCK, BODY_MAX), &mut Slots::new())
             .await;
         assert_eq!(
             opened.map(drop),
@@ -3485,7 +3639,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
-        let ring = layout(128 * BLOCK, 150_000);
+        let ring = least(150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3519,7 +3673,7 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 512 << 10);
-        let ring = layout(320 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3566,7 +3720,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), largest);
-        let ring = layout(320 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3608,7 +3762,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
 #[test]
 fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
     run(156, Memory::default(), |mut shard| async move {
-        let ring = layout(320 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));

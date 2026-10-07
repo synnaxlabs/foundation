@@ -208,6 +208,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "clock"
+version = "0.0.0"
+dependencies = [
+ "env",
+ "estimate",
+ "ring 0.0.0",
+ "types",
+ "wire",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -220,6 +231,15 @@ dependencies = [
 name = "codec"
 version = "0.0.0"
 dependencies = [
+ "types",
+]
+
+[[package]]
+name = "config"
+version = "0.0.0"
+dependencies = [
+ "document",
+ "spec",
  "types",
 ]
 
@@ -363,6 +383,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "estimate"
+version = "0.0.0"
+dependencies = [
+ "types",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -405,6 +432,7 @@ dependencies = [
  "block",
  "buffer",
  "codec",
+ "config",
  "config-hcl",
  "connector-modbus",
  "crc32c",
@@ -416,6 +444,7 @@ dependencies = [
  "secret",
  "sim",
  "spec",
+ "transport",
  "types",
  "wire",
 ]
@@ -597,6 +626,7 @@ version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
  "block",
+ "clock",
  "env",
  "raft",
  "transport",
@@ -788,6 +818,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "ring"
+version = "0.0.0"
+dependencies = [
+ "loom",
+]
+
+[[package]]
+name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
@@ -846,7 +883,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
- "ring",
+ "ring 0.17.14",
  "rustls-pki-types",
  "untrusted",
 ]
@@ -1151,6 +1188,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "block",
+ "rustc-hash",
 ]
 
 [[package]]

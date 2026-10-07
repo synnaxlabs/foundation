@@ -501,11 +501,12 @@ impl Shard {
     /// samples after the commit that holds it, while the bytes it has spent are
     /// below its credit: a frame spends its [`Frame::charge`]. The first such frame
     /// that finds the credit spent is a miss: the reader gets neither it nor a later
-    /// frame, and no grant changes that. [`woken`](Self::woken) names the reader once
-    /// for a miss with no frame waiting, and not for a miss while frames wait. The
-    /// home does not read a missed frame back from disk yet. Close the reader and
-    /// open a new one. The new one starts at the live tail of its open, so the frames
-    /// from the miss to there reach neither reader.
+    /// frame, no grant changes that, and [`behind`](Self::behind) reports it.
+    /// [`woken`](Self::woken) names the reader once for a miss with no frame waiting,
+    /// and not for a miss while frames wait. The home does not read a missed frame
+    /// back from disk yet. Close the reader and open a new one. The new one starts at
+    /// the live tail of its open, so the frames from the miss to there reach neither
+    /// reader.
     ///
     /// # Panics
     ///
@@ -523,7 +524,8 @@ impl Shard {
     }
 
     /// Opens an unnamed latest reader on the index at `slot`. It gets the index's
-    /// newest live frame, before its commit.
+    /// newest live frame, before its commit. Take from it at once:
+    /// [`woken`](Self::woken) does not name it for a frame it can take at open.
     ///
     /// # Panics
     ///
@@ -558,6 +560,18 @@ impl Shard {
         self.readers.take(self.place(key.slot), key.session)
     }
 
+    /// Whether the complete reader `key` missed a live frame, so it gets no later
+    /// one, as it had no credit for the frame. [`woken`](Self::woken) names it once
+    /// when it misses one with no frame waiting. `false` for a closed reader.
+    ///
+    /// # Panics
+    ///
+    /// If the shard never gave `key`.
+    #[must_use]
+    pub fn behind(&self, key: reader::complete::Key) -> bool {
+        self.readers.behind(self.place(key.slot), key.session)
+    }
+
     /// Closes the reader `key`. Its waiting frames do not go out, and
     /// [`woken`](Self::woken) does not name it. A close of a closed reader changes
     /// nothing.
@@ -572,12 +586,14 @@ impl Shard {
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
     /// order and with the latest readers of an index first. Complete readers first get
     /// the live frames now on disk. A key is a hint: take from each until
-    /// [`take`](Self::take) gives `None`. A complete reader named for a miss
+    /// [`take`](Self::take) gives `None`, then check [`behind`](Self::behind) of a
+    /// complete reader before it waits: one named only for a miss
     /// ([`open_complete`](Self::open_complete)) has no frame to take. Call it after
     /// each write and each commit. When a commit ended since the last call, it reads
     /// each index with live frames queued for complete readers; else it reads none.
-    /// Pass the same `keys` each time: the shard swaps it for its own, so neither
-    /// allocates once both are large enough.
+    /// Called so, with the same `keys` each time, a call allocates only when it gives
+    /// more keys than each call before, or when more frames wait for one complete
+    /// reader than have waited for that reader before.
     pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
@@ -2868,8 +2884,54 @@ mod tests {
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(2, 1)]);
                 let late = latest(&mut shard, Slot::new(0));
-                assert_eq!(woken(&mut shard), [late]);
+                assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, late, 0), [seq(2, 1)]);
+            });
+        }
+
+        /// A reader replaced by one that takes the newest frame at open is named
+        /// once, so the keys keep their capacity.
+        #[test]
+        fn names_a_reader_that_took_at_open_once() {
+            run(35, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let mut readers: Vec<_> =
+                    (0..4).map(|_| latest(&mut shard, Slot::new(0))).collect();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                let mut keys = Vec::new();
+                shard.woken(&mut keys);
+                assert_eq!(keys.len(), 4);
+                let capacity = keys.capacity();
+                for &reader in &readers {
+                    assert_eq!(taken(&mut shard, reader, 0).len(), 1);
+                }
+                close(&mut shard, readers[3]);
+                readers[3] = latest(&mut shard, Slot::new(0));
+                assert_eq!(taken(&mut shard, readers[3], 0).len(), 1);
+                write(&test, &mut shard, a, &[20]);
+                shard.woken(&mut keys);
+                readers.sort_unstable();
+                assert_eq!(keys, readers);
+                assert_eq!(keys.capacity(), capacity);
+            });
+        }
+
+        #[test]
+        fn replaces_the_keys_it_gave_in_the_last_call() {
+            run(36, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                let mut keys = Vec::new();
+                shard.woken(&mut keys);
+                assert_eq!(keys, [reader]);
+                shard.woken(&mut keys);
+                assert_eq!(keys, []);
             });
         }
 
@@ -2967,8 +3029,10 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
+                assert!(!shard.behind(session));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
+                assert!(shard.behind(session));
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.grant(session, CREDIT);
                 write(&test, &mut shard, a, &[30]);
@@ -3054,7 +3118,7 @@ mod tests {
                 let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
                 assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(0, 1, 0)][..]));
                 let reader = latest(&mut shard, Slot::new(0));
-                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
             });
         }
@@ -3074,7 +3138,7 @@ mod tests {
                 );
                 drop(blocks);
                 let reader = latest(&mut shard, Slot::new(0));
-                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
             });
         }

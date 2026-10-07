@@ -598,7 +598,8 @@ mod buffer {
     /// takes first. A shard that waits for the interner does not open after it.
     #[test]
     fn a_shard_part_too_small_for_the_buffer_stops_the_node() {
-        let mut run = start_with(7, 32, &[], Size::MEBIBYTE, Box::new(heap));
+        let budget = Size::from_bytes(512 << 10);
+        let mut run = start_with(7, 16, &[], budget, Box::new(heap));
         assert_eq!(run.sim.run(), Ok(()));
         let e = run.node.join().unwrap_err();
         let pool = block::Error::TooLarge {
@@ -681,8 +682,8 @@ mod buffer {
     #[test]
     fn a_disk_budget_that_holds_no_ring_on_each_shard_starts_no_shard() {
         let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
-        let min = Size::from_bytes(4_227_072);
-        let cases = [(smallest, "2064KiB"), (2 * smallest - 1, "4227071B")];
+        let min = Size::from_bytes(8_437_760);
+        let cases = [(smallest, "4120KiB"), (2 * smallest - 1, "8437759B")];
         for (bytes, shown) in cases {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
@@ -707,7 +708,7 @@ mod buffer {
                 e.to_string(),
                 format!(
                     "the disk budget {shown} holds no ring on each of 2 shards; it \
-                     needs at least 4128KiB"
+                     needs at least 8240KiB"
                 )
             );
         }

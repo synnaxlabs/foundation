@@ -8,8 +8,8 @@ use crate::log::{Held, Log, Run};
 use crate::progress::Progress;
 use crate::voters::Tally;
 use crate::{
-    Answer, Body, Claim, Config, Data, Entry, Error, Grant, Hard, Message, Position,
-    Proof, Signature, Start, Term, Voters,
+    Answer, Body, Change, Claim, Config, Data, Entry, Error, Grant, Hard, Message,
+    Position, Proof, Signature, Start, Term, Voters,
 };
 
 /// What a node is doing in its term.
@@ -81,14 +81,19 @@ pub struct Ready {
 
 impl Ready {
     /// Gives each grant with no signature the signature that `sign` makes for its
-    /// claim: this node's entry in the hard proof and in each message's proof, and
-    /// each grant it sends. Another node's grant keeps the signature it came with, so
-    /// it has one when the caller checked its message (see [`Message::claims`]).
-    pub fn sign(&mut self, mut sign: impl FnMut(&Claim) -> Signature) {
+    /// claim: this node's entry in the hard proof and in each message's proof, each
+    /// grant it sends, and the votes and the signature of each change it wrote, in
+    /// `entries`, in `committed`, and in each append. Another node's grant or change
+    /// keeps the signature it came with, so it has one when the caller checked its
+    /// message (see [`Message::claims`]).
+    pub fn sign(&mut self, mut sign: impl FnMut(&Claim<'_>) -> Signature) {
         if let Some(hard) = &mut self.hard
             && let Some(proof) = &mut hard.proof
         {
             proof.sign(hard.term, &mut sign);
+        }
+        for entry in self.entries.iter_mut().chain(&mut self.committed) {
+            entry.sign(&mut sign);
         }
         for message in &mut self.messages {
             message.sign(&mut sign);
@@ -322,7 +327,17 @@ impl Raft {
             return Err(Error::ChangePending { at });
         }
         let joint = self.voters.enter(voters);
-        Ok(self.propose_entry(Data::Voters(joint)))
+        Ok(self.propose_entry(Data::Voters(self.change(joint))))
+    }
+
+    // A configuration change with this leader's votes as its proof.
+    fn change(&self, voters: Voters) -> Change {
+        let proof = self.votes.clone();
+        Change {
+            voters,
+            votes: proof.expect("invariant: only a leader writes a configuration"),
+            signature: None,
+        }
     }
 
     fn leading(&self) -> Result<(), Error> {
@@ -687,7 +702,8 @@ impl Raft {
             return;
         }
         let voters = self.voters.leave();
-        self.log.push(self.term, Data::Voters(voters));
+        let change = Data::Voters(self.change(voters));
+        self.log.push(self.term, change);
         self.sync_voters();
     }
 
@@ -1209,6 +1225,40 @@ mod tests {
         }
     }
 
+    // `voters` as a change that `leader` wrote with its own vote alone.
+    fn change(leader: u8, voters: Voters) -> Data {
+        Data::Voters(Change {
+            voters,
+            votes: Proof {
+                grant: Grant::Vote,
+                candidate: key(leader),
+                voters: [(key(leader), None)].into(),
+            },
+            signature: None,
+        })
+    }
+
+    // The configuration entry node 1 writes at `index` in `term` as the leader that
+    // the voters `elected` elected, before `Ready::sign`: its own vote is unsigned.
+    fn written(term: u64, index: u64, voters: Voters, elected: &[u8]) -> Entry {
+        let proof = Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: elected
+                .iter()
+                .map(|&id| (key(id), (id != 1).then(|| signature(Grant::Vote, id))))
+                .collect(),
+        };
+        Entry {
+            at: position(term, index),
+            data: Data::Voters(Change {
+                voters,
+                votes: proof,
+                signature: None,
+            }),
+        }
+    }
+
     fn append(prev: Position, entries: Vec<Entry>, commit: u64) -> Body {
         Body::Append {
             prev,
@@ -1692,10 +1742,13 @@ mod tests {
                     term: Term(1),
                     index: 1,
                 },
-                data: Data::Voters(Voters {
-                    incoming: [key(1)].into_iter().collect(),
-                    ..Voters::default()
-                }),
+                data: change(
+                    2,
+                    Voters {
+                        incoming: [key(1)].into_iter().collect(),
+                        ..Voters::default()
+                    },
+                ),
             };
             let append = Body::Append {
                 prev: Position::default(),
@@ -2186,7 +2239,7 @@ mod tests {
             let start = Start {
                 entries: vec![Entry {
                     at: position(1, 1),
-                    data: Data::Voters(leave),
+                    data: change(2, leave),
                 }],
                 ..start(&[1, 2, 3, 4], at_term(1))
             };
@@ -3104,7 +3157,7 @@ mod tests {
                         term: Term(1),
                         index: 2,
                     },
-                    data: Data::Voters(alone),
+                    data: change(3, alone),
                 }],
                 commit: 0,
             };
@@ -3503,7 +3556,8 @@ mod tests {
                 incoming: [1, 4, 5].into_iter().map(key).collect(),
                 outgoing: [1, 2, 3].into_iter().map(key).collect(),
             };
-            raft.propose_entry(Data::Voters(joint));
+            let joint = Data::Voters(raft.change(joint));
+            raft.propose_entry(joint);
             // Nodes 4 and 5 had one tick to answer a leader they did not know.
             tick_times(&mut raft, 1);
             assert_eq!(raft.role(), Role::Leader);
@@ -3519,7 +3573,7 @@ mod tests {
         fn config(term: u64, index: u64, voters: Voters) -> Entry {
             Entry {
                 at: position(term, index),
-                data: Data::Voters(voters),
+                data: change(2, voters),
             }
         }
 
@@ -3546,7 +3600,7 @@ mod tests {
             }
             sent(&mut raft);
             let new = voters(&[1, 2, 3, 4]);
-            let at = raft.propose_entry(Data::Voters(new.clone()));
+            let at = raft.propose_entry(Data::Voters(raft.change(new.clone())));
             assert_eq!(at.index, 2);
             assert_eq!(raft.voters(), &new);
             // The new peer gets one probe from the end of the log, then waits.
@@ -3568,7 +3622,7 @@ mod tests {
             assert_eq!(raft.ready().committed, []);
             raft.step(message(3, 1, Body::AppendReply { last: 2 }))
                 .unwrap();
-            assert_eq!(raft.ready().committed, [config(1, 2, new)]);
+            assert_eq!(raft.ready().committed, [written(1, 2, new, &[1, 2])]);
         }
 
         #[test]
@@ -3688,7 +3742,7 @@ mod tests {
         fn config(term: u64, index: u64, voters: Voters) -> Entry {
             Entry {
                 at: position(term, index),
-                data: Data::Voters(voters),
+                data: change(2, voters),
             }
         }
 
@@ -3737,20 +3791,20 @@ mod tests {
             let joint = voters(&[1, 2, 4], &[1, 2, 3]);
             assert_eq!(raft.voters(), &joint);
             let ready = raft.ready();
-            assert_eq!(ready.entries, [config(1, 2, joint.clone())]);
+            assert_eq!(ready.entries, [written(1, 2, joint.clone(), &[1, 2])]);
             assert_eq!(to(&ready.messages), [key(2), key(3), key(4)]);
             // Nodes 1 and 2 are a majority of each set.
             accept(&mut raft, &[2], 2);
             let new = voters(&[1, 2, 4], &[]);
             assert_eq!(raft.voters(), &new);
             let ready = raft.ready();
-            assert_eq!(ready.committed, [config(1, 2, joint)]);
-            assert_eq!(ready.entries, [config(1, 3, new.clone())]);
+            assert_eq!(ready.committed, [written(1, 2, joint, &[1, 2])]);
+            assert_eq!(ready.entries, [written(1, 3, new.clone(), &[1, 2])]);
             // Node 3 gets the leave; node 4 waits for the answer to its probe.
             assert_eq!(to(&ready.messages), [key(2), key(3)]);
             accept(&mut raft, &[2], 3);
             let ready = raft.ready();
-            assert_eq!(ready.committed, [config(1, 3, new)]);
+            assert_eq!(ready.committed, [written(1, 3, new, &[1, 2])]);
             // Node 3 stays a peer until it holds the leave.
             assert_eq!(to(&ready.messages), [key(2), key(3)]);
             raft.tick(0);
@@ -3830,7 +3884,7 @@ mod tests {
                 Err(Error::ChangePending { at: leave })
             );
             accept(&mut raft, &[2], 2);
-            assert_eq!(raft.ready().committed[1], config(1, 2, new));
+            assert_eq!(raft.ready().committed[1], written(1, 2, new, &[1, 2]));
         }
 
         #[test]
@@ -3844,8 +3898,8 @@ mod tests {
             assert_eq!(
                 committed,
                 [
-                    config(1, 2, voters(&[1], &[1])),
-                    config(1, 3, voters(&[1], &[]))
+                    written(1, 2, voters(&[1], &[1]), &[1]),
+                    written(1, 3, voters(&[1], &[]), &[1])
                 ]
             );
         }
@@ -3888,7 +3942,10 @@ mod tests {
             assert_eq!(sent(&mut raft), []);
             accept(&mut raft, &[2], 3);
             let ready = raft.ready();
-            assert_eq!(ready.committed, [config(1, 3, voters(&[1, 2, 4], &[]))]);
+            assert_eq!(
+                ready.committed,
+                [written(1, 3, voters(&[1, 2, 4], &[]), &[1, 2])]
+            );
             let to_3: Vec<&Body> = ready
                 .messages
                 .iter()
@@ -4369,7 +4426,7 @@ mod tests {
             let start = Start {
                 entries: vec![Entry {
                     at: position(1, 1),
-                    data: Data::Voters(joint.clone()),
+                    data: change(2, joint.clone()),
                 }],
                 ..start(outgoing, at_term(1))
             };
