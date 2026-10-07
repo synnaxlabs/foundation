@@ -15,8 +15,8 @@ use types::node::{self, PrivateKey, PublicKey, SealKey};
 
 use crate::bytes::{put_channel, put_count, put_name};
 use crate::card::{self, Card};
+use crate::claim::Signer;
 use crate::ed25519;
-use crate::grant::Signer;
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{Ticket, Voter};

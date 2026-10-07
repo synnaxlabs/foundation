@@ -158,6 +158,18 @@ How to read this record:
   as the default: `config` gives each edge as a name, and `plan` gives each name its
   key. `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
+  `types` owns the text of `sample::Type` both ways (`Display` and `FromStr`): exact
+  case, no leading zero in a count, and one space after the comma of a list; `Stamp` and
+  `Span` read and show as `timestamp` and `duration` (A9), so a text that reads shows as
+  itself. Decided by `laptop.architect` (2026-10-07T11:20:34Z):
+  https://github.com/synnaxlabs/foundation/issues/1208#issuecomment-6036837600, and
+  2026-10-07T14:40:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040351044, for the
+  variants, and 2026-10-07T14:55:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040630702, for the
+  scalar names and the `Lengths` fix, and 2026-10-07T15:17:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040868780, for a
+  scalar element with space around it as `Syntax`.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -790,6 +802,53 @@ How to read this record:
   and each `hub` caller must keep it); a refusal in `config check` (a second place that
   must track the home). Decided by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
+  row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
+  `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
+  nothing outside a Tokio runtime. A complete session that misses a frame (one that
+  comes when the frames it has not given back, held or untaken, reach a window) gets no
+  later frame, as there is no catch-up from the buffer yet. The director chose that
+  `delivery` reports the miss and wakes the session, and that `next` then ends with an
+  error (2026-10-07T06:01:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
+  `delivery::Readers::release` also names a session that missed a frame and has none
+  waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
+  forwards it until #274 removes it. `next` gives a waiting frame, then `Ended::Behind`,
+  then `Ended::Buffer`. Lost: an error from `take`, which every caller, latest readers
+  too, then handles; a `behind` list beside the woken keys, a second list to drain for
+  an event that happens once per session. A `delivery` model property test and a 32-seed
+  `sim` test stand in for loom and shuttle: the wake never crosses a thread. Decided by
+  `laptop.architect` (2026-10-07T06:36:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). A waiting
+  hub reader has given back every frame, as it grants at each `next` call, so no hub
+  test reaches the wake of a session that missed a frame with none waiting. The
+  `delivery` tests and the home `sim` test
+  `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
+  `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
+  miss while a frame waits gives no wake. The hub `sim` test is
+  `ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window`: one
+  commit of more than a window wakes a waiting reader, which gets each frame before the
+  miss, then `Ended::Behind`, with no hang. Decided by `laptop.architect`
+  (2026-10-07T07:24:41Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119). #1170
+  sizes the window to one commit. After a warmup, a write and `next` make no heap
+  allocation, while frames wait, while a reader waits, and in the write that wakes a
+  latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
+  does not count the commit task. `next` gives a `types::frame::View` of the reader's
+  channels and their index (M2), never the frame. The view borrows the reader, which
+  releases the frame at the next call, not at its first poll, and grants credit for it
+  there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
+  keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
+  A writer on a channel of a type the home does not write gets `writer::Error::Type`
+  with the channel's name (HOME TYPE REFUSAL). Decided by `laptop.architect`
+  (2026-10-07T05:53:24Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
+  2026-10-07T05:57:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
+  2026-10-07T07:12:40Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929). The
+  surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1635,11 +1694,21 @@ How to read this record:
   `Ready::sign` gives each `None` the signature that the caller's closure makes for
   its claim, in the hard proof, in each message, and in each change this node wrote
   (in `entries`, in `committed`, and in each append), before the write and the
-  sends. The caller checks each pair that `Message::claims` gives before `step` and
-  refuses a `None`: `step` keeps each signature as it came, so an unchecked `None`
-  of another voter reaches `Ready::sign`. `Message::claims` also gives each claim
-  of a change an append carries: its votes in the entry's term, then the change
-  (architect, #881,
+  sends. `raft` keeps each claim that it makes unsigned, and a claim that it reads at
+  start keeps its signature. So `Ready::sign` signs each copy of an unsigned claim that
+  a `Ready` holds, and a resend again. Ed25519 gives each copy the same bytes. A data
+  entry carries no claim, so the cost does not grow with the data rate. The most
+  frequent case is a leader with a voter that does not answer: each heartbeat to it
+  carries the votes, so the leader signs once for each tick (100 ms). A node that
+  campaigned for its term signs each refusal of a lower term in the same way, because
+  the refusal carries its own pre-votes. Lost: `raft` keeps the signed copy, which puts
+  the signer in `raft` and changes the conformance oracle (architect, #1187,
+  2026-10-07T15:25:42Z,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6041049761). The
+  caller checks each pair that `Message::claims` gives before `step` and refuses a
+  `None`: `step` keeps each signature as it came, so an unchecked `None` of another
+  voter reaches `Ready::sign`. `Message::claims` also gives each claim of a change an
+  append carries: its votes in the entry's term, then the change (architect, #881,
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
@@ -1842,7 +1911,7 @@ How to read this record:
   incoming keys, the outgoing keys (each an 8-byte count, then the keys in rising
   order), the votes in the proof form, and the leader's signature (64 bytes). No
   form holds a grant or a change with no signature: encode panics on one, because
-  the caller signs before each write and send. `mesh::grant` signs each claim with
+  the caller signs before each write and send. `mesh::claim` signs each claim with
   the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
   endian), and the candidate (16 bytes, little endian). A change signs
@@ -1939,7 +2008,7 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  (`Error::NotVoter`), and each claim holds (`Error::Claim`). So a node with a
   configuration refuses a leader that is not a voter of that configuration, when a
   change that the node does not hold made that leader a voter. The node does not get the
   log from that leader (a known defect, #1096, that #1107 fixes). A node with no
@@ -3012,7 +3081,17 @@ How to read this record:
   and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
   fixed hasher, so a simulated run replays. A map keyed by outside input will get a
   keyed hasher with its key from `env` randomness. Decided by the advisor under the
-  quality delegation.
+  quality delegation. The fixed hasher is the Fx hasher of `rustc-hash`
+  (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
+  8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
+  Iteration order never decides behavior, so a test that breaks on the new order shows a
+  defect in the code. Decided by `laptop.architect` (2026-10-07T09:59:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1321
+  "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
+  ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
+  are open, so a set of keys that collide costs the peer many streams and a lookup at
+  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
