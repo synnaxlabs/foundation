@@ -416,9 +416,9 @@ mod tests {
     /// one `config.unknown-block` diagnostic to what `check` gives without them.
     fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
         let mut policy = block(0, 0, keyword, &["edge"], attributes);
-        let Err(mut expected) = check(&[document(vec![policy.clone()])]) else {
-            panic!("{attributes:?} is valid");
-        };
+        let mut expected = check(&[document(vec![policy.clone()])])
+            .err()
+            .unwrap_or_default();
         for (offset, inner) in [(90, "inner"), (95, "other")] {
             policy.body.blocks.push(block(0, offset, inner, &[], &[]));
             expected.push(refused(
@@ -726,9 +726,10 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_block_inside_node_settings_with_each_bad_attribute() {
+    fn refuses_a_block_inside_node_settings_with_any_attributes() {
         let select = || ("select", string("site_a.*"));
         let cases = [
+            vec![select(), ("disk", string("1GiB"))],
             vec![],
             vec![("disk", string("1GiB"))],
             vec![("select", Kind::Integer(7)), ("disk", string("1GiB"))],
@@ -1365,9 +1366,10 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_placement_with_each_bad_attribute() {
+        fn refuses_a_block_inside_a_placement_with_any_attributes() {
             let select = || ("select", string("edge.*"));
             let cases = [
+                vec![select(), ("home", string("edge"))],
                 vec![],
                 vec![("home", string("edge"))],
                 vec![("select", Kind::Integer(7)), ("home", string("edge"))],
@@ -1597,9 +1599,10 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_retention_with_each_bad_attribute() {
+        fn refuses_a_block_inside_a_retention_with_any_attributes() {
             let select = || ("select", string("edge.**"));
             let cases = [
+                vec![select(), ("keep", string("3d"))],
                 vec![],
                 vec![("keep", string("3d"))],
                 vec![("select", Kind::Integer(7)), ("keep", string("3d"))],
