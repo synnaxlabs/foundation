@@ -125,13 +125,13 @@ impl Sender {
         let mut sending = Sending {
             session: &self.session,
             stream: &mut self.stream,
-            message: Some(message),
             done: false,
         };
+        let mut message = Some(message);
         let sent = poll_fn(|cx| {
             let invariant = "only a dropped send future resets a sender's stream";
             let stream = sending.stream.as_mut().expect(invariant);
-            sending.session.poll_write(cx, stream, &mut sending.message)
+            sending.session.poll_write(cx, stream, &mut message)
         })
         .await;
         sending.done = true;
@@ -298,21 +298,17 @@ impl Drop for Sender {
     }
 }
 
-/// A [`Sender::send`] in progress. Dropping it after the stream took the message and
-/// before it is done resets the stream, because the stream may hold part of the
-/// message.
+/// A [`Sender::send`] in progress. Dropping it before it is done resets the stream,
+/// because the stream may hold part of the message.
 struct Sending<'a> {
     session: &'a quic::Session,
     stream: &'a mut Option<quic::stream::Sender>,
-    /// `None` once the stream took it.
-    message: Option<Block>,
     done: bool,
 }
 
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
         if !self.done
-            && self.message.is_none()
             && let Some(stream) = self.stream.take()
         {
             self.session.reset(stream, Code(0));
