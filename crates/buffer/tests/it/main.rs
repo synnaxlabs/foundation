@@ -41,10 +41,12 @@ const COMMIT: Span = Span::from_nanos(10_000_000);
 const POOL: usize = 1 << 21;
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
-/// Where a header block keeps its version, its `body_max`, its tail, and its CRC.
+/// Where a header block keeps its version, its `body_max`, its tail offset, its tail
+/// chain, and its CRC.
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
 const TAIL_AT: usize = 22;
+const CHAIN_AT: usize = 30;
 const CRC_AT: usize = 42;
 /// The bytes the header CRC covers.
 const COVER: usize = 512;
@@ -108,13 +110,19 @@ impl Shard {
         }
     }
 
-    /// Opens a ring that holds bytes at `offset` that this build cannot read. The
-    /// open must give `Invalid`, leave the file as it was, and not sync it.
+    /// Opens a ring that holds a record at `offset` that this build cannot read. The
+    /// open must give `Invalid`, as [`Shard::open_refused`] says.
     async fn open_invalid(&self, layout: Layout, offset: u64) {
+        self.open_refused(layout, Error::Invalid { offset }).await;
+    }
+
+    /// Opens a ring that passes its CRCs and that this build cannot read. The open
+    /// must give `error`, leave the file as it was, and not sync it.
+    async fn open_refused(&self, layout: Layout, error: Error) {
         let before = self.memory.bytes(RING);
         let syncs = self.memory.syncs();
         let opened = self.open(layout, &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset }));
+        assert_eq!(opened.map(drop), Err(error));
         assert_eq!(self.memory.syncs(), syncs, "the open synced the ring");
         assert!(
             self.memory.bytes(RING) == before,
@@ -131,8 +139,8 @@ impl Shard {
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
-    /// the record before it, a restart record or a data record. The tail offset in
-    /// each header block must be 0.
+    /// the record before it, a restart record or a data record, or the tail chain of
+    /// the header. The tail offset in each header block must be 0.
     fn seal(&self, offset: u64) {
         let file = self.memory.bytes(RING);
         for block in [0, to_usize(BLOCK)] {
@@ -150,11 +158,15 @@ impl Shard {
             at += (9 + len_at(at)).next_multiple_of(to_usize(BLOCK));
         }
         assert_eq!(at, start, "no record starts at {offset}");
-        let before = before.expect("the first record of the area follows no record");
-        let chain = match file[before + 8] {
-            RESTART => u32_at(before + 9),
-            DATA => u32_at(before + 4),
-            kind => panic!("no chain value of kind {kind} before {offset}"),
+        let chain = match before.map(|before| (before, file[before + 8])) {
+            None => {
+                let chains = [0, to_usize(BLOCK)].map(|block| u32_at(block + CHAIN_AT));
+                assert_eq!(chains[0], chains[1], "the header holds two tail chains");
+                chains[0]
+            }
+            Some((before, RESTART)) => u32_at(before + 9),
+            Some((before, DATA)) => u32_at(before + 4),
+            Some((_, kind)) => panic!("no chain value of kind {kind} before {offset}"),
         };
         let crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
         let end = start + 9 + len_at(start);
@@ -2216,14 +2228,27 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
     });
 }
 
-/// The first record follows the chain value of the header, and the helper does not
-/// read that value.
+/// The first record follows the tail chain of the header, and a zero header block
+/// holds another one.
 #[test]
-#[should_panic(expected = "the first record of the area follows no record")]
-fn seal_refuses_the_first_record_of_the_area() {
+#[should_panic(expected = "the header holds two tail chains")]
+fn seal_refuses_the_first_record_under_two_tail_chains() {
     run(112, Memory::default(), |shard| async move {
         shard.create_two_records().await;
+        shard.memory.put(RING, 0, &[0; SECTOR]);
         shard.seal(0);
+    });
+}
+
+/// The offset of a record can be 0, so a header block has its own error.
+#[test]
+fn a_record_of_an_unknown_kind_at_the_start_of_the_ring_is_invalid() {
+    run(118, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        shard.memory.put(RING, to_usize(AREA_START) + 8, &[4]);
+        shard.seal(0);
+        shard.open_invalid(layout(AREA, BODY_MAX), 0).await;
     });
 }
 
@@ -2296,12 +2321,13 @@ fn a_block_of_kind_zero_that_follows_the_chain_ends_the_walk() {
 }
 
 #[test]
-fn an_open_that_finds_an_invalid_header_leaves_the_ring_as_read() {
+fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
     run(108, Memory::default(), |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
         shard.tamper(TAIL_AT, &(BLOCK + 1).to_le_bytes());
-        shard.open_invalid(layout(AREA, BODY_MAX), 0).await;
+        let unaligned = Error::Unaligned { tail: BLOCK + 1 };
+        shard.open_refused(layout(AREA, BODY_MAX), unaligned).await;
     });
 }
 
@@ -2555,6 +2581,10 @@ fn an_error_says_what_went_wrong() {
             unfit,
             "the ring header holds an area of 1 bytes and a body of at most 2 \
              bytes, which make no ring",
+        ),
+        (
+            Error::Unaligned { tail: 4097 },
+            "the ring header holds a tail at 4097, which is not on a block boundary",
         ),
         (
             Error::Invalid { offset: 4 },
