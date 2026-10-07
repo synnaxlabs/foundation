@@ -863,6 +863,59 @@ fn round_trips_an_array_or_list_of_each_size_bound() {
     }
 }
 
+/// A matrix of `rows` arrays of `columns` elements.
+fn matrix(element: Scalar, rows: u32, columns: u32) -> DataType {
+    DataType::Sample(sample::Type::Matrix(
+        Matrix::new(element, rows, columns).unwrap(),
+    ))
+}
+
+#[test]
+fn round_trips_a_matrix_of_each_size_bound() {
+    for element in [Scalar::F64, Scalar::Bool] {
+        let unit = (element == Scalar::F64).then_some("kPa");
+        for (rows, columns) in [(0, 0), (0, u32::MAX), (u32::MAX, 1), (65_535, 65_537)]
+        {
+            let definition = data(matrix(element, rows, columns), unit);
+            assert_eq!(Definition::decode(&definition.encode()), Ok(definition));
+        }
+    }
+}
+
+#[test]
+fn refuses_a_matrix_of_more_than_u32_max_elements() {
+    let mut rest = vec![6, 5];
+    rest.extend_from_slice(&65_536_u32.to_le_bytes());
+    rest.extend_from_slice(&65_536_u32.to_le_bytes());
+    rest.push(0);
+    let at = DATA_TYPE_AT + 2;
+    let error = Error::Matrix {
+        at,
+        error: sample::Error::Elements,
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the matrix at byte {at}: expected at most 4294967295 elements in a \
+             matrix"
+        )
+    );
+    assert_eq!(Definition::decode(&data_bytes(&rest)), Err(error));
+}
+
+#[test]
+fn refuses_a_matrix_that_ends_early() {
+    let bytes = data(matrix(Scalar::F32, 2, 3), None).encode();
+    let at = DATA_TYPE_AT + 16;
+    for (end, truncated) in [(at + 1, at + 1), (at + 2, at + 2), (at + 5, at + 2)] {
+        assert_eq!(
+            Definition::decode(&bytes[..end]),
+            Err(Error::Truncated { at: truncated }),
+            "{end}"
+        );
+    }
+}
+
 fn f64s(len: u32) -> DataType {
     DataType::Sample(sample::Type::Array {
         element: Scalar::F64,
@@ -913,6 +966,10 @@ fn writes_each_data_type_by_its_documented_bytes() {
         (DataType::Sample(sample::Type::String), &[3]),
         (DataType::Sample(sample::Type::Bytes), &[4]),
         (DataType::Quality, &[5]),
+        (
+            matrix(Scalar::F32, 2, 0x0102_0304),
+            &[6, 9, 2, 0, 0, 0, 4, 3, 2, 1],
+        ),
     ] {
         let bytes = data(data_type, None).encode();
         // `data` has a quality key.
@@ -961,9 +1018,17 @@ fn refuses_an_unknown_data_type_or_scalar() {
     let scalar_at = at + 1;
     for (rest, error, message) in [
         (
-            &[6][..],
-            Error::DataType { at, found: 6 },
-            format!("the data type 6 at byte {at} is not a known type"),
+            &[7][..],
+            Error::DataType { at, found: 7 },
+            format!("the data type 7 at byte {at} is not a known type"),
+        ),
+        (
+            &[6, 14],
+            Error::Scalar {
+                at: scalar_at,
+                found: 14,
+            },
+            format!("the scalar 14 at byte {scalar_at} is not a known scalar"),
         ),
         (
             &[0, 14],
@@ -1210,8 +1275,11 @@ fn data_type_strategy() -> impl Strategy<Value = DataType> {
         (scalar.clone(), any::<u32>()).prop_map(|(element, len)| {
             DataType::Sample(sample::Type::Array { element, len })
         }),
-        (scalar, any::<u32>()).prop_map(|(element, max)| {
+        (scalar.clone(), any::<u32>()).prop_map(|(element, max)| {
             DataType::Sample(sample::Type::List { element, max })
+        }),
+        (scalar, any::<u16>(), any::<u16>()).prop_map(|(element, rows, columns)| {
+            matrix(element, rows.into(), columns.into())
         }),
         Just(DataType::Sample(sample::Type::String)),
         Just(DataType::Sample(sample::Type::Bytes)),

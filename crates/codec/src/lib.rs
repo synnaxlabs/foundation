@@ -373,6 +373,11 @@ impl Shape {
                 element: Layout::of(element),
                 len: usize::try_from(len).expect("invariant: a usize holds a u32"),
             },
+            Type::Matrix(matrix) => Self::Fixed {
+                element: Layout::of(matrix.element()),
+                len: usize::try_from(matrix.elements())
+                    .expect("invariant: a usize holds a u32"),
+            },
             Type::List { element, max } => Self::Variable {
                 element: Layout::of(element),
                 max,
@@ -794,6 +799,7 @@ mod tests {
     use types::channel;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Form, Path};
+    use types::sample::Matrix;
 
     use super::*;
 
@@ -874,6 +880,9 @@ mod tests {
             scalar().prop_map(Type::Scalar),
             (scalar(), 0..4_u32)
                 .prop_map(|(element, len)| Type::Array { element, len }),
+            (scalar(), 0..3_u32, 0..3_u32).prop_map(|(element, rows, columns)| {
+                Type::Matrix(Matrix::new(element, rows, columns).unwrap())
+            }),
             (scalar(), 0..6_u32).prop_map(|(element, max)| Type::List { element, max }),
             Just(Type::String),
             Just(Type::Bytes),
@@ -1809,6 +1818,16 @@ mod tests {
             assert_eq!(
                 encode_type(array(Scalar::U16, 3), 1_000, &values),
                 encode(Scalar::U16, &values)
+            );
+        }
+
+        #[test]
+        fn encodes_a_matrix_as_the_array_of_its_elements() {
+            let matrix = Type::Matrix(Matrix::new(Scalar::F32, 2, 3).unwrap());
+            let values = bytes(4, (0..6_000).map(|n| n % 11));
+            assert_eq!(
+                encode_type(matrix, 1_000, &values),
+                encode_type(array(Scalar::F32, 6), 1_000, &values)
             );
         }
 

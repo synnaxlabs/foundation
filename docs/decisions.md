@@ -170,6 +170,18 @@ How to read this record:
   scalar names and the `Lengths` fix, and 2026-10-07T15:17:16Z,
   https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040868780, for a
   scalar element with space around it as `Syntax`.
+  Amended: `sample::Type::Matrix(Matrix)` holds `T[rows][columns]` (A13), row-major,
+  with the bytes of an array of `rows * columns` elements. `Matrix` has private fields,
+  and `Matrix::new` refuses more than `u32::MAX` elements (`Error::Elements`), so each
+  format reads a matrix only through it. Its text is `f32[2][3]`; `Error::Lengths` is
+  more than two lengths. Decided by `laptop.architect` (2026-10-07T16:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625.
+  The spec's data type code of a matrix is `MATRIX` 6, then the element code, `rows:
+  u32`, and `columns: u32`. A matrix that `Matrix::new` refuses is
+  `definition::Error::Matrix`, whose `at` is where `rows` starts. A matrix of a number
+  can have a unit, by the element's rule, as an array. Decided by architect-2
+  (`laptop.architect-2`, 2026-10-07T16:47:21Z):
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042559685.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -707,7 +719,9 @@ How to read this record:
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
   little-endian. `end` is as in FRAME LAYOUT. Kinds: scalar 0, array 1, list 2, string
-  3, bytes 4. `n` is the array length or the list maximum, else 0. `element` is the
+  3, bytes 4, matrix 5. `n` is the array length, the list maximum, or the matrix rows,
+  else 0. A `[columns: u32]` table follows the descriptors, one entry for each matrix
+  in descriptor order, so a body with no matrix has no table. `element` is the
   scalar (bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10,
   stamp 11, span 12, uuid 13), else 0. The type is the writer's type, so a reader
   decodes with it after an `apply` changes the channel's type (A15). The header is one
@@ -716,6 +730,10 @@ How to read this record:
   disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
   once where remote records enter (X43), and the read after it panics on a bad body.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+  Amended: kind 5 and the `columns` table. The descriptor stays 26 bytes, because 4
+  more bytes on each descriptor cost about 12% on bodies of one sample for each
+  series. Decided by `laptop.architect` (2026-10-07T16:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input

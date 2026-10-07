@@ -19,6 +19,7 @@
 //! kind          := 0 error:optional_key control:optional_key                index
 //!                | 1 index:key quality:optional_key data_type unit:optional  data
 //! data_type     := 0 scalar:u8 | 1 scalar:u8 len:u32 | 2 scalar:u8 max:u32 | 3 | 4 | 5
+//!                | 6 scalar:u8 rows:u32 columns:u32
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! text          := length:u64 UTF-8 bytes
@@ -48,10 +49,11 @@
 //!
 //! A retention `keep` is in nanoseconds, zero or more.
 //!
-//! A `data_type` is a scalar, an array, a list, a string, bytes, or quality, in that
-//! order from 0. A `scalar` is bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7,
-//! u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. Only a scalar from 1 to 10,
-//! or an array or list of one, has a unit.
+//! A `data_type` is a scalar, an array, a list, a string, bytes, quality, or a matrix,
+//! in that order from 0. A matrix has at most `u32::MAX` elements. A `scalar` is bool
+//! 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10, stamp 11,
+//! span 12, or uuid 13. Only a scalar from 1 to 10, or an array, list, or matrix of
+//! one, has a unit.
 
 #![deny(
     clippy::indexing_slicing,
@@ -67,7 +69,7 @@ use types::authority::Authority;
 use types::byte;
 use types::channel::Key;
 use types::name::{self, Name, Selector, Written};
-use types::sample::{self, Scalar};
+use types::sample::{self, Matrix, Scalar};
 use types::time::Span;
 
 use crate::access::{Action, Actions, Policy};
@@ -269,6 +271,7 @@ const LIST: u8 = 2;
 const STRING: u8 = 3;
 const BYTES: u8 = 4;
 const QUALITY: u8 = 5;
+const MATRIX: u8 = 6;
 
 /// The code of a scalar. [`scalar`] is its inverse.
 const fn code(scalar: Scalar) -> u8 {
@@ -323,6 +326,11 @@ fn data_type(out: &mut Vec<u8>, data_type: &DataType) {
         DataType::Sample(sample::Type::List { element, max }) => {
             out.extend_from_slice(&[LIST, code(element)]);
             out.extend_from_slice(&max.to_le_bytes());
+        }
+        DataType::Sample(sample::Type::Matrix(matrix)) => {
+            out.extend_from_slice(&[MATRIX, code(matrix.element())]);
+            out.extend_from_slice(&matrix.rows().to_le_bytes());
+            out.extend_from_slice(&matrix.columns().to_le_bytes());
         }
         DataType::Sample(sample::Type::String) => out.push(STRING),
         DataType::Sample(sample::Type::Bytes) => out.push(BYTES),
@@ -661,6 +669,15 @@ impl<'a> Reader<'a> {
             STRING => sample::Type::String,
             BYTES => sample::Type::Bytes,
             QUALITY => return Ok(DataType::Quality),
+            MATRIX => {
+                let element = self.scalar()?;
+                let at = self.at();
+                let (rows, columns) = (self.u32()?, self.u32()?);
+                sample::Type::Matrix(
+                    Matrix::new(element, rows, columns)
+                        .map_err(|error| Error::Matrix { at, error })?,
+                )
+            }
             found => return Err(Error::DataType { at, found }),
         };
         Ok(DataType::Sample(sample))
@@ -824,6 +841,14 @@ pub enum Error {
         /// The byte.
         found: u8,
     },
+    /// A matrix has more than `u32::MAX` elements. `error` is always
+    /// [`sample::Error::Elements`].
+    Matrix {
+        /// Where the matrix's row count is.
+        at: usize,
+        /// Why it is not a matrix.
+        error: sample::Error,
+    },
     /// A unit does not read.
     Unit {
         /// Where the unit's length is.
@@ -917,6 +942,9 @@ impl fmt::Display for Error {
             }
             Self::Scalar { at, found } => {
                 write!(f, "the scalar {found} at byte {at} is not a known scalar")
+            }
+            Self::Matrix { at, error } => {
+                write!(f, "the matrix at byte {at}: {error}")
             }
             Self::Unit { at, error } => {
                 write!(f, "the unit at byte {at} does not read: {error}")

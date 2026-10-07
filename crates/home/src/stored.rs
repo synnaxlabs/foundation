@@ -1,12 +1,13 @@
 //! The data entry of an index frame. Its body is a header that describes each series by
-//! its channel and type, then the frame's series bytes.
+//! its channel and type, then the frame's series bytes. The header is a count, a
+//! descriptor for each series, then the columns of each matrix in descriptor order.
 
 use block::Block;
 use buffer::Entry;
 use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
-use types::sample::{Scalar, Type};
+use types::sample::{Matrix, Scalar, Type};
 use types::time::Stamp;
 
 /// The buffer tag of a data entry.
@@ -16,6 +17,10 @@ const TAG: u8 = 0;
 const COUNT: usize = 4;
 /// Bytes of one series descriptor: channel, kind, element, `n`, and end.
 const DESCRIPTOR: usize = 26;
+/// Bytes of the columns of one matrix, in the table after the descriptors.
+const COLUMNS: usize = 4;
+/// The kind code of a matrix, whose `n` is its rows.
+const MATRIX: u8 = 5;
 
 /// Offsets in a descriptor.
 mod at {
@@ -88,10 +93,16 @@ fn body(
     let entries = set.entries();
     let group = frame.ends().next().map(|(entry, _)| entries[entry].group);
     let count = frame.ends().count();
-    let mut head = pool.alloc(COUNT + DESCRIPTOR * count)?;
-    let (start, descriptors) = head.split_at_mut(COUNT);
+    let matrices = frame
+        .ends()
+        .filter(|&(entry, _)| matches!(entries[entry].data_type, Type::Matrix(_)))
+        .count();
+    let mut head = pool.alloc(COUNT + DESCRIPTOR * count + COLUMNS * matrices)?;
+    let (start, rest) = head.split_at_mut(COUNT);
     start.copy_from_slice(&to_u32(count).to_le_bytes());
+    let (descriptors, table) = rest.split_at_mut(DESCRIPTOR * count);
     let (descriptors, _) = descriptors.as_chunks_mut::<DESCRIPTOR>();
+    let mut table = table.as_chunks_mut::<COLUMNS>().0.iter_mut();
     for (descriptor, (entry, end)) in descriptors.iter_mut().zip(frame.ends()) {
         let entry = &entries[entry];
         assert_eq!(
@@ -106,6 +117,12 @@ fn body(
         descriptor[at::ELEMENT] = element;
         descriptor[at::N..at::END].copy_from_slice(&n.to_le_bytes());
         descriptor[at::END..].copy_from_slice(&to_u32(end).to_le_bytes());
+        if let Type::Matrix(matrix) = entry.data_type {
+            let Some(columns) = table.next() else {
+                unreachable!("invariant: the table has room for each matrix");
+            };
+            *columns = matrix.columns().to_le_bytes();
+        }
     }
     Ok([head.freeze(), frame.body()])
 }
@@ -127,7 +144,8 @@ pub(crate) struct Series<'a> {
 /// # Panics
 ///
 /// If `body` is shorter than its header. The iterator panics on an unknown kind or
-/// scalar, and on ends that do not fit the series bytes. Bytes from another node must
+/// scalar, on a matrix that [`Matrix::new`] refuses, and on ends that do not fit the
+/// series bytes. Bytes from another node must
 /// be checked before they reach `read`.
 #[cfg_attr(
     not(test),
@@ -138,37 +156,53 @@ pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
         panic!("the stored body of {} bytes has no count", body.len());
     };
     let header = COUNT + DESCRIPTOR * to_usize(u32::from_le_bytes(*count));
-    let Some((head, series)) = body.split_at_checked(header) else {
+    let Some((head, rest)) = body.split_at_checked(header) else {
         panic!(
             "the stored body of {} bytes is shorter than its header of {header} bytes",
             body.len()
         );
     };
     let (descriptors, _) = head[COUNT..].as_chunks::<DESCRIPTOR>();
+    let matrices = descriptors.iter().filter(|d| d[at::KIND] == MATRIX).count();
+    let Some((table, series)) = rest.split_at_checked(COLUMNS * matrices) else {
+        panic!(
+            "the stored body of {} bytes is shorter than its header of {} bytes",
+            body.len(),
+            header + COLUMNS * matrices
+        );
+    };
+    let mut columns = table.as_chunks::<COLUMNS>().0.iter();
     let ends = descriptors.iter().map(|descriptor| {
         let end = u32::from_le_bytes(field(descriptor, at::END));
         (descriptor, to_usize(end))
     });
-    frame::split(series, ends).map(|(descriptor, bytes)| Series {
+    frame::split(series, ends).map(move |(descriptor, bytes)| Series {
         channel: channel::Key::from_u128(u128::from_le_bytes(field(descriptor, 0))),
-        data_type: data_type(descriptor),
+        data_type: data_type(descriptor, || {
+            let Some(columns) = columns.next() else {
+                unreachable!("invariant: the table has the columns of each matrix");
+            };
+            u32::from_le_bytes(*columns)
+        }),
         bytes,
     })
 }
 
-/// The kind code, element code, and `n` of `data_type`.
+/// The kind code, element code, and `n` of `data_type`. The columns of a matrix go in
+/// the table.
 const fn codes(data_type: Type) -> (u8, u8, u32) {
     match data_type {
         Type::Scalar(element) => (0, code(element), 0),
         Type::Array { element, len } => (1, code(element), len),
+        Type::Matrix(matrix) => (MATRIX, code(matrix.element()), matrix.rows()),
         Type::List { element, max } => (2, code(element), max),
         Type::String => (3, 0, 0),
         Type::Bytes => (4, 0, 0),
     }
 }
 
-/// The type that `descriptor` holds.
-fn data_type(descriptor: &[u8; DESCRIPTOR]) -> Type {
+/// The type that `descriptor` holds. `columns` gives the next entry of the table.
+fn data_type(descriptor: &[u8; DESCRIPTOR], columns: impl FnOnce() -> u32) -> Type {
     let (kind, element) = (descriptor[at::KIND], descriptor[at::ELEMENT]);
     let n = u32::from_le_bytes(field(descriptor, at::N));
     match kind {
@@ -183,6 +217,15 @@ fn data_type(descriptor: &[u8; DESCRIPTOR]) -> Type {
         },
         3 => Type::String,
         4 => Type::Bytes,
+        MATRIX => {
+            let columns = columns();
+            match Matrix::new(scalar(element), n, columns) {
+                Ok(matrix) => Type::Matrix(matrix),
+                Err(error) => {
+                    panic!("the stored body has a matrix of {n} by {columns}: {error}")
+                }
+            }
+        }
         _ => panic!("the stored body has an unknown kind {kind}"),
     }
 }
@@ -290,6 +333,20 @@ mod tests {
         }]);
         let pool = create_pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
+        joined(&body(&pool, &frame, &set).expect("room"))
+    }
+
+    /// The stored body of an index series of 8 bytes and a `u8[2][3]` series: 74
+    /// bytes, with the columns at 56.
+    fn stored_matrix() -> Vec<u8> {
+        let matrix = Type::Matrix(Matrix::new(Scalar::U8, 2, 3).expect("a matrix"));
+        let data = [(key(Slot::new(2)), matrix)];
+        let set = create_interner().intern(&[Group {
+            index: key(Slot::new(1)),
+            data: &data,
+        }]);
+        let pool = create_pool(4096);
+        let frame = frame(&pool, &set, &[(0, &[9; 8]), (1, &[1, 2, 3, 4, 5, 6])]);
         joined(&body(&pool, &frame, &set).expect("room"))
     }
 
@@ -462,6 +519,67 @@ mod tests {
         }
 
         #[test]
+        fn lays_out_the_columns_of_each_matrix_after_the_descriptors() {
+            let matrix = |element, rows, columns| {
+                Type::Matrix(Matrix::new(element, rows, columns).expect("a matrix"))
+            };
+            let types = [
+                Type::Scalar(Scalar::U8),
+                matrix(Scalar::F32, 2, 3),
+                Type::Array {
+                    element: Scalar::I16,
+                    len: 3,
+                },
+                matrix(Scalar::U8, 0, 0x0102_0304),
+                Type::String,
+            ];
+            let data: Vec<_> = (2..)
+                .zip(types)
+                .map(|(slot, data_type)| (key(Slot::new(slot)), data_type))
+                .collect();
+            let set = create_interner().intern(&[Group {
+                index: key(Slot::new(1)),
+                data: &data,
+            }]);
+            let pool = create_pool(4096);
+            let lens = [8, 1, 24, 6, 0, 2];
+            let bytes: Vec<Vec<u8>> =
+                (1..).zip(lens).map(|(b, len)| vec![b; len]).collect();
+            let series: Vec<(usize, &[u8])> =
+                bytes.iter().map(Vec::as_slice).enumerate().collect();
+            let frame = frame(&pool, &set, &series);
+
+            let parts = body(&pool, &frame, &set).expect("room");
+
+            let (descriptors, table) = parts[0][COUNT..].split_at(DESCRIPTOR * 6);
+            let (descriptors, _) = descriptors.as_chunks::<DESCRIPTOR>();
+            let codes: Vec<[u8; 6]> = descriptors
+                .iter()
+                .map(|descriptor| field(descriptor, at::KIND))
+                .collect();
+            let expected = [
+                [0, 11, 0, 0, 0, 0],
+                [0, 5, 0, 0, 0, 0],
+                [5, 9, 2, 0, 0, 0],
+                [1, 2, 3, 0, 0, 0],
+                [5, 5, 0, 0, 0, 0],
+                [3, 0, 0, 0, 0, 0],
+            ];
+            assert_eq!(codes, expected);
+            assert_eq!(table, [3, 0, 0, 0, 4, 3, 2, 1]);
+            assert_eq!(parts[1][..], frame.body()[..]);
+            let body = joined(&parts);
+            let read: Vec<_> = read(&body).map(|s| (s.data_type, s.bytes)).collect();
+            let expected: Vec<_> = set
+                .entries()
+                .iter()
+                .map(|e| e.data_type)
+                .zip(series.iter().map(|&(_, bytes)| bytes))
+                .collect();
+            assert_eq!(read, expected);
+        }
+
+        #[test]
         fn returns_the_pool_error_when_the_pool_is_full() {
             let set = create_interner().intern(&[Group {
                 index: key(Slot::new(1)),
@@ -568,10 +686,33 @@ mod tests {
             }
 
             #[test]
-            #[should_panic(expected = "the stored body has an unknown kind 5")]
+            #[should_panic(expected = "the stored body has an unknown kind 6")]
             fn panics_on_an_unknown_kind() {
                 let mut body = stored();
-                body[COUNT + at::KIND] = 5;
+                body[COUNT + at::KIND] = 6;
+                read(&body).for_each(drop);
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "the stored body of 58 bytes is shorter than its header of 60 \
+                            bytes"
+            )]
+            fn panics_on_a_body_shorter_than_its_columns() {
+                read(&stored_matrix()[..58]).for_each(drop);
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "the stored body has a matrix of 65536 by 65536: expected at \
+                            most 4294967295 elements in a matrix"
+            )]
+            fn panics_on_a_matrix_that_sample_refuses() {
+                let mut body = stored_matrix();
+                let rows = COUNT + DESCRIPTOR + at::N;
+                body[rows..rows + 4].copy_from_slice(&65_536_u32.to_le_bytes());
+                let columns = COUNT + 2 * DESCRIPTOR;
+                body[columns..columns + 4].copy_from_slice(&65_536_u32.to_le_bytes());
                 read(&body).for_each(drop);
             }
 
@@ -612,6 +753,12 @@ mod tests {
                 scalar().prop_map(Type::Scalar),
                 (scalar(), any::<u32>())
                     .prop_map(|(element, len)| Type::Array { element, len }),
+                (scalar(), any::<u16>(), any::<u16>()).prop_map(
+                    |(element, rows, columns)| Type::Matrix(
+                        Matrix::new(element, rows.into(), columns.into())
+                            .expect("a matrix")
+                    )
+                ),
                 (scalar(), any::<u32>())
                     .prop_map(|(element, max)| Type::List { element, max }),
                 Just(Type::String),
@@ -679,7 +826,14 @@ mod tests {
 
                 let parts = body(&pool, &frame, &set).expect("room");
 
-                prop_assert_eq!(parts[0].len(), COUNT + DESCRIPTOR * series.len());
+                let matrices = series
+                    .iter()
+                    .filter(|&&(e, _)| matches!(set.entries()[e].data_type, Type::Matrix(_)))
+                    .count();
+                prop_assert_eq!(
+                    parts[0].len(),
+                    COUNT + DESCRIPTOR * series.len() + COLUMNS * matrices
+                );
                 let body = joined(&parts);
                 let read: Vec<_> = read(&body).collect();
                 let expected: Vec<_> = series
