@@ -74,7 +74,9 @@ again once to prove that the failure replays (r16 59).
 - **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
   second test feature (r16 57).
 - **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
-  frames, bad offsets, stale fences) (r16 54).
+  frames, bad offsets, stale fences) (r16 54). A check against a bound has a test at
+  the bound and one on each side. `cargo mutants` turns `>=` only into `<`, so it
+  cannot show that the test past the bound is missing.
 - **Pair assertions.** Check data before it goes to disk or the wire, and again after
   it comes back (r16 55).
 - **No tautological tests.** Never repeat the implementation's formula or assert that
