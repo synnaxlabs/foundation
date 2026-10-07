@@ -33,7 +33,7 @@ pub struct Config {
 pub enum Error {
     /// A file call failed.
     Files(files::Error),
-    /// The pool has no block for a read.
+    /// The pool has no block of the chunk's length.
     Pool(block::Error),
     /// The bytes of a put do not hash to its digest.
     Mismatch {
@@ -85,8 +85,9 @@ enum State {
     /// A file of the name was listed at open, or a dropped put left one. Its bytes
     /// may be torn or not durable.
     Listed,
-    /// A put returned in this open.
-    Held,
+    /// A put returned in this open: the serial of that put. A read that saw an
+    /// earlier put must not forget a later one.
+    Held(u64),
     /// A put is in flight, and these calls wait for its end.
     Writing(Vec<Waker>),
     /// The close of the file of a dropped put. A write open of the path is `Busy`
@@ -98,8 +99,10 @@ impl fmt::Debug for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Listed => f.write_str("Listed"),
-            Self::Held => f.write_str("Held"),
-            Self::Writing(wakers) => f.debug_tuple("Writing").field(wakers).finish(),
+            Self::Held(serial) => f.debug_tuple("Held").field(serial).finish(),
+            Self::Writing(wakers) => {
+                f.debug_tuple("Writing").field(&wakers.len()).finish()
+            }
             Self::Closing(_) => f.write_str("Closing(..)"),
         }
     }
@@ -114,6 +117,7 @@ pub struct Store {
     pool: Rc<Pool>,
     chunks: RefCell<BTreeMap<Digest, State>>,
     corruptions: Cell<u64>,
+    puts: Cell<u64>,
 }
 
 impl Store {
@@ -146,6 +150,7 @@ impl Store {
             pool,
             chunks: RefCell::new(chunks),
             corruptions: Cell::new(0),
+            puts: Cell::new(0),
         })
     }
 
@@ -175,14 +180,16 @@ impl Store {
         loop {
             match self.peek(digest) {
                 Peek::Absent | Peek::Listed => break,
-                Peek::Held => return Ok(()),
+                Peek::Held(_) => return Ok(()),
                 Peek::Writing => self.wait(digest).await,
                 Peek::Closing => self.settle(digest).await,
             }
         }
+        let serial = self.puts.get();
+        self.puts.set(serial + 1);
         let mut flight = Flight::new(self, digest);
         let written = flight.write(chunk).await;
-        flight.after = written.is_ok().then_some(State::Held);
+        flight.after = written.is_ok().then_some(State::Held(serial));
         written
     }
 
@@ -199,7 +206,7 @@ impl Store {
         loop {
             match self.peek(digest) {
                 Peek::Absent => return Ok(None),
-                Peek::Held | Peek::Listed => return self.read(digest).await,
+                Peek::Held(_) | Peek::Listed => return self.read(digest).await,
                 Peek::Writing => self.wait(digest).await,
                 Peek::Closing => self.settle(digest).await,
             }
@@ -290,7 +297,7 @@ impl Store {
 enum Peek {
     Absent,
     Listed,
-    Held,
+    Held(u64),
     Writing,
     Closing,
 }
@@ -300,7 +307,7 @@ impl Peek {
         match state {
             None => Self::Absent,
             Some(State::Listed) => Self::Listed,
-            Some(State::Held) => Self::Held,
+            Some(State::Held(serial)) => Self::Held(*serial),
             Some(State::Writing(_)) => Self::Writing,
             Some(State::Closing(_)) => Self::Closing,
         }
@@ -332,7 +339,7 @@ impl<'a> Flight<'a> {
                 panic!("invariant: one put of a digest is in flight at a time")
             }
             Some(State::Closing(close)) => Some(close),
-            Some(State::Listed | State::Held) | None => None,
+            Some(State::Listed | State::Held(_)) | None => None,
         };
         Flight {
             store,
@@ -370,14 +377,11 @@ impl<'a> Flight<'a> {
         Ok(())
     }
 
-    /// Closes the file, when one is open or closing. A drop during the close keeps
-    /// the close future, so the file's calls still end before the next open.
+    /// Closes the file, which is open or closing. A drop during the close keeps the
+    /// close future, so the file's calls still end before the next open.
     async fn close(&mut self) {
         if let Some(file) = self.file.take() {
             self.closing = Some(Box::pin(file.close()));
-        }
-        if self.closing.is_none() {
-            return;
         }
         poll_fn(|cx| {
             let close = self.closing.as_mut().expect("invariant: a close is set");
@@ -674,11 +678,13 @@ mod tests {
         fn of_a_chunk_longer_than_the_largest_block_writes_nothing() {
             let (mut sim, node) = create_default_node(0);
             sim.run_on(&node, |node, _| async move {
-                let store = open_with(&node, create_pool(2048)).await.unwrap();
-                let (digest, block) = chunk(7, 3000);
+                let pool = create_pool(2048);
+                let over = pool.largest() + 1;
+                let store = open_with(&node, pool).await.unwrap();
+                let (digest, block) = chunk(7, over);
                 node.fail_file(&path(digest), Operation::Open);
                 let error = store.put(digest, &block).await.unwrap_err();
-                assert_eq!(error, Error::Pool(too_large(3000)));
+                assert_eq!(error, Error::Pool(too_large(over)));
                 assert_absent(&store, digest).await;
                 assert_no_open(&node, &path(digest)).await;
             })
@@ -699,6 +705,36 @@ mod tests {
                 store.put(digest, &block).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn whose_open_fails_gives_io() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                node.fail_file(&path(digest), Operation::Open);
+                let error = store.put(digest, &block).await.unwrap_err();
+                assert_eq!(error, io(&path(digest), Operation::Open));
+                assert_absent(&store, digest).await;
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn over_a_file_of_another_length_whose_remove_fails_gives_io() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(7, 512);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                node.fail_file(&path(digest), Operation::Remove);
+                let error = store.put(digest, &block).await.unwrap_err();
+                assert_eq!(error, io(&path(digest), Operation::Remove));
             })
             .unwrap();
         }
@@ -953,6 +989,36 @@ mod tests {
                 node.clock().sleep(Span::SECOND).await;
                 let got = got.borrow_mut().take().expect("the get ended");
                 assert_eq!(&got.unwrap().unwrap()[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        // Two gets read the changed bytes. The first forgets the digest, a put
+        // stores the chunk again, and then the second ends. Its stale result must
+        // not forget the new chunk.
+        #[test]
+        fn of_a_changed_chunk_that_ends_after_a_new_put_keeps_the_put() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                store.put(digest, &block).await.unwrap();
+                put_bytes(&node, digest, 2999, &[8]).await;
+                let mut stale = pin!(store.get(digest));
+                // Open, then start the read of the changed bytes.
+                for _ in 0..2 {
+                    assert!(poll_once(&mut stale).await.is_pending());
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                }
+                assert_absent(&store, digest).await;
+                assert_eq!(store.corruptions(), 1);
+                store.put(digest, &block).await.unwrap();
+                assert!(stale.await.unwrap().is_none());
+                assert_eq!(store.corruptions(), 2);
+                node.fail_file(&path(digest), Operation::WriteAt);
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
             })
             .unwrap();
         }
@@ -1221,16 +1287,37 @@ mod tests {
         }
     }
 
-    mod state {
+    mod debug {
         use super::*;
 
+        // A put is in its write with a get waiting on it, and a second digest's put
+        // was dropped in its write. The output names each state with no pointer.
         #[test]
-        fn debug_names_each_variant() {
-            assert_eq!(format!("{:?}", State::Listed), "Listed");
-            assert_eq!(format!("{:?}", State::Held), "Held");
-            assert_eq!(format!("{:?}", State::Writing(Vec::new())), "Writing([])");
-            let closing = State::Closing(Box::pin(async {}));
-            assert_eq!(format!("{closing:?}"), "Closing(..)");
+        fn names_each_state_and_prints_no_pointer() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                let (held, held_block) = chunk(8, 100);
+                store.put(held, &held_block).await.unwrap();
+                let (dropped, dropped_block) = chunk(9, 3000);
+                {
+                    let mut put = pin!(store.put(dropped, &dropped_block));
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                }
+                let mut put = pin!(store.put(digest, &block));
+                assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                let mut get = pin!(store.get(digest));
+                assert!(poll_once(&mut get).await.is_pending());
+                let text = format!("{store:?}");
+                assert!(text.contains("Held(0)"), "{text}");
+                assert!(text.contains("Writing(1)"), "{text}");
+                assert!(text.contains("Closing(..)"), "{text}");
+                assert!(!text.contains("0x"), "{text}");
+            })
+            .unwrap();
         }
     }
 
