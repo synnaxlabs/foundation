@@ -42,6 +42,8 @@ case "${*: -1}" in
     echo run >>"$T/runs"
     run=$(($(wc -l <"$T/runs")))
     [[ -z ${BIG:-} ]] || { head -c 70000 /dev/zero | tr '\0' x && echo; }
+    [[ -z ${EDGE:-} ]] || { echo ab && echo "table $run" && yes 1234567 | head -1873; }
+    [[ -z ${LONG:-} ]] || head -c 20000 /dev/zero | tr '\0' x
     echo "table $run"
     [[ $run != "${FAIL_RUN:-}" ]] || { echo "bench error" >&2; exit 101; } ;;
 esac
@@ -220,6 +222,15 @@ check "each run of a long output posts its end" eval '
     [[ $status == 0 && $(posted 1047 | grep -c "^table") == 4 ]] &&
     has "$(posted 1047)" "(only the last 15000 bytes" &&
     ! has "$(posted 1047)" xxxxxxxx'
+
+EDGE=1 run '[]' "${args[@]}"
+check "a cut at the start of a line keeps that line" eval '
+    [[ $status == 0 && $(posted 1047 | grep -c "^table") == 8 ]]'
+
+LONG=1 run '[]' "${args[@]}"
+check "a last line over 15000 bytes keeps its last 15000 bytes" eval '
+    lengths=$(posted 1047 | grep "table [1-4]$" | awk "{ print length }" | uniq -c)
+    [[ $status == 0 && $lengths == *"4 14999" ]]'
 
 FAIL_REPORT=1 run '[]' "${args[@]}"
 check "a report that does not post is printed, and the run exits 1" eval '
