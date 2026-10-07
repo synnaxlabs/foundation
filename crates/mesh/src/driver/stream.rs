@@ -139,8 +139,6 @@ fn code(error: &Error) -> Option<Code> {
         | Error::NotMember(_)
         | Error::Member(_)
         | Error::WrongKey
-        | Error::Unsynced
-        | Error::Status(_)
         | Error::Pool(_)
         | Error::Stopped(_) => Some(REFUSED),
     }
