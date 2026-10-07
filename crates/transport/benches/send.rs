@@ -2,12 +2,15 @@
 //! sim nodes. Run with `cargo bench -p transport --bench send`. A figure is per timed
 //! send over a round, and some sends in a round cost more than others.
 //!
-//! The lines up to `try complete 1 KiB` time a send that is ready on its first poll,
-//! or a `try_send` that takes its message. Each round fills its blocks, then times one
-//! poll of each send, or one `try_send` of each block: a burst of 64 sends into
-//! streams the peer has drained. A sim sleep between rounds lets the peer read and
+//! The `SCENARIOS` lines time a send that is ready on its first poll, and the `try`
+//! lines a `try_send` that takes its message. Each round fills its blocks, then times
+//! one poll of each send, or one `try_send` of each block: a burst of 64 sends into
+//! streams the peer has drained. A sim sleep before each round lets the peer read and
 //! acknowledge. A send that waits on its first poll, or a `try_send` that gives its
-//! message back, panics, so no number holds a wait.
+//! message back, panics, so no number holds a wait. A scenario times `send` and
+//! `try_send` in alternating rounds on the same streams. The cost of a line moves with
+//! its place in the run, so compare a `try` line only with the line of its own
+//! scenario. A `try_send` makes no poll.
 //!
 //! The `waiting` lines send a round on their streams at once, over a session whose
 //! peer window holds a quarter of a round, so the sends wait for the QUIC window and
@@ -26,7 +29,8 @@
 //! times a sim one, and an `os` wake about a quarter of a sim one. Compare a send with
 //! the control, or a build with another build, not with an `os` number. To compare two
 //! builds, run each several times in turn on one pinned core and compare p10 and p50:
-//! on a busy machine, p90 holds the preemptions.
+//! on a busy machine, p90 holds the preemptions. Drop a run whose control reads above
+//! its usual value: a busy sibling core makes every line cost up to twice as much.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -103,11 +107,18 @@ enum Load {
     Control,
     /// One stream per class, sent on in turn.
     Streams(&'static [Class]),
-    /// As `Streams`, with `try_send`.
-    TryStreams(&'static [Class]),
 }
 
-const SCENARIOS: [Scenario; 7] = [
+/// How a round of [`measure`] sends its blocks.
+#[derive(Clone, Copy)]
+enum Call {
+    /// The loop of [`Load::Control`].
+    Control,
+    Send,
+    TrySend,
+}
+
+const SCENARIOS: [Scenario; 5] = [
     Scenario {
         name: "control 1 KiB",
         load: Load::Control,
@@ -131,16 +142,6 @@ const SCENARIOS: [Scenario; 7] = [
     Scenario {
         name: "8 complete 1 KiB",
         load: Load::Streams(&[Class::Complete; 8]),
-        bytes: 1024,
-    },
-    Scenario {
-        name: "try complete 64 B",
-        load: Load::TryStreams(&[Class::Complete]),
-        bytes: 64,
-    },
-    Scenario {
-        name: "try complete 1 KiB",
-        load: Load::TryStreams(&[Class::Complete]),
         bytes: 1024,
     },
 ];
@@ -181,7 +182,7 @@ type Accepted = Arc<Mutex<Vec<Class>>>;
 
 /// The result of one scenario.
 struct Measured {
-    name: &'static str,
+    name: String,
     /// The nanoseconds per timed send of each round, sorted.
     nanos: Vec<f64>,
     allocations: u64,
@@ -213,7 +214,7 @@ fn main() {
             let mut lines = Vec::with_capacity(SCENARIOS.len());
             for scenario in &SCENARIOS {
                 let mut senders = open(&session, scenario.load).await;
-                lines.push(measure(&clock, &pool, &mut senders, scenario).await);
+                lines.extend(measure(&clock, &pool, &mut senders, scenario).await);
                 for sender in &mut senders {
                     sender.finish().expect("the stream finishes");
                 }
@@ -282,41 +283,57 @@ fn serve(node: &Node, key: PrivateKey, room: Room) -> Accepted {
     accepted
 }
 
-/// Runs the rounds of `scenario` on `senders`, empty for the control.
+/// Runs the rounds of `scenario` on `senders`, empty for the control. Gives the
+/// control's line, or the lines of `send` and `try_send`, timed in alternating rounds.
 async fn measure(
     clock: &env::clock::Clock,
     pool: &Pool,
     senders: &mut [Sender],
     scenario: &Scenario,
-) -> Measured {
+) -> Vec<Measured> {
+    let calls: &[Call] = match scenario.load {
+        Load::Control => &[Call::Control],
+        Load::Streams(_) => &[Call::Send, Call::TrySend],
+    };
     let waker = future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
-    let mut nanos = Vec::with_capacity(ROUNDS);
-    let mut allocations = 0;
+    let mut nanos = vec![Vec::with_capacity(ROUNDS); calls.len()];
+    let mut allocations = vec![0; calls.len()];
     let mut held = Vec::with_capacity(SENDS);
     for round in 0..WARMUP + ROUNDS {
-        clock.sleep(PAUSE).await;
-        let blocks: Vec<Block> =
-            (0..SENDS).map(|_| filled(pool, scenario.bytes)).collect();
-        let (span, counted) = ALLOCATOR.count(|| match scenario.load {
-            Load::Control => poll_control(clock, &waker, blocks, &mut held),
-            Load::Streams(_) => poll_sends(senders, blocks),
-            Load::TryStreams(_) => try_sends(senders, blocks),
-        });
-        held.clear();
-        if round >= WARMUP {
-            nanos.push(per(span) / per(SENDS));
-            allocations += counted;
+        for (at, &call) in calls.iter().enumerate() {
+            clock.sleep(PAUSE).await;
+            let blocks: Vec<Block> =
+                (0..SENDS).map(|_| filled(pool, scenario.bytes)).collect();
+            let (span, counted) = ALLOCATOR.count(|| match call {
+                Call::Control => poll_control(clock, &waker, blocks, &mut held),
+                Call::Send => poll_sends(senders, blocks),
+                Call::TrySend => try_sends(senders, blocks),
+            });
+            held.clear();
+            if round >= WARMUP {
+                nanos[at].push(per(span) / per(SENDS));
+                allocations[at] += counted;
+            }
         }
     }
-    nanos.sort_unstable_by(f64::total_cmp);
     let sends = u64::try_from(ROUNDS * SENDS).expect("fits");
-    Measured {
-        name: scenario.name,
-        nanos,
-        allocations,
-        polls: sends,
-        sends,
-    }
+    let lines = calls.iter().zip(nanos).zip(allocations);
+    lines
+        .map(|((&call, mut nanos), allocations)| {
+            nanos.sort_unstable_by(f64::total_cmp);
+            let (name, polls) = match call {
+                Call::Control | Call::Send => (scenario.name.to_owned(), sends),
+                Call::TrySend => (format!("try {}", scenario.name), 0),
+            };
+            Measured {
+                name,
+                nanos,
+                allocations,
+                polls,
+                sends,
+            }
+        })
+        .collect()
 }
 
 /// Polls one send of each block once, on `senders` in turn, and gives the nanoseconds
@@ -353,11 +370,11 @@ fn try_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
     let start = Instant::now();
     while blocks.len() > 0 {
         for (sender, block) in senders.iter_mut().zip(&mut blocks) {
-            match sender.try_send(block) {
-                Ok(None) => {}
-                Ok(Some(_)) => panic!("a try_send gave its block back: raise PAUSE"),
-                Err(error) => panic!("the try_send failed: {error}"),
-            }
+            let given = sender.try_send(block).expect("the try_send goes");
+            assert!(
+                given.is_none(),
+                "a try_send gave its block back: raise PAUSE"
+            );
         }
     }
     nanos(Instant::now().duration_since(start))
@@ -390,7 +407,7 @@ fn poll_control(
 async fn open(session: &Session, load: Load) -> Vec<Sender> {
     let classes = match load {
         Load::Control => &[][..],
-        Load::Streams(classes) | Load::TryStreams(classes) => classes,
+        Load::Streams(classes) => classes,
     };
     let mut senders = Vec::with_capacity(classes.len());
     for &class in classes {
@@ -453,7 +470,7 @@ async fn compete(
     assert_eq!(sent, asked, "the classes {} sends on", scenario.name);
     nanos.sort_unstable_by(f64::total_cmp);
     Measured {
-        name: scenario.name,
+        name: scenario.name.to_owned(),
         nanos,
         allocations,
         polls,
@@ -684,7 +701,7 @@ fn print(lines: &[Measured]) {
         let allocations = per(line.allocations) / per(line.sends);
         let polls = per(line.polls) / per(line.sends);
         let timed = per(line.sends) / per(ROUNDS * SENDS);
-        let name = line.name;
+        let name = &line.name;
         let (p10, p50, p90) = (at(10), at(50), at(90));
         println!(
             "{name:<34} {p10:>9.1} {p50:>9.1} {p90:>9.1} {allocations:>12.2} \
