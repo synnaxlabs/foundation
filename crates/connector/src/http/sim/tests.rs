@@ -231,7 +231,7 @@ fn answers_and_ends_the_stream_on_connection_close() {
     assert_eq!(
         network.exchange(REQUEST, false),
         End::Closed(
-            "HTTP/1.1 200 OK\r\ncontent-length: 20\r\nconnection: close\r\n\r\n\
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 20\r\n\r\n\
             POST /a HTTP/1.1 abc"
                 .into()
         )
@@ -259,7 +259,7 @@ fn answers_each_of_two_requests_in_one_write_in_order() {
         network.exchange(REQUEST, false),
         End::Closed(
             "HTTP/1.1 200 OK\r\ncontent-length: 18\r\n\r\nPOST /a HTTP/1.1 1\
-            HTTP/1.1 200 OK\r\ncontent-length: 18\r\nconnection: close\r\n\r\n\
+            HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 18\r\n\r\n\
             POST /b HTTP/1.1 2"
                 .into()
         )
@@ -273,9 +273,7 @@ fn answers_an_http_1_0_request_and_ends_the_stream() {
     assert_eq!(
         network.exchange(REQUEST, false),
         End::Closed(
-            "HTTP/1.1 200 OK\r\ncontent-length: 16\r\nconnection: close\r\n\r\n\
-            GET /a HTTP/1.0 "
-                .into()
+            "HTTP/1.0 200 OK\r\ncontent-length: 16\r\n\r\nGET /a HTTP/1.0 ".into()
         )
     );
 }
@@ -302,64 +300,50 @@ fn resets_a_stream_whose_head_ends_early_and_answers_nothing() {
     assert_eq!(network.seen(), [""; 0]);
 }
 
+const REFUSED: &str = "HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\
+    content-length: 0\r\n\r\n";
+
 #[test]
 fn answers_a_request_that_breaks_http_with_400_and_ends_the_stream() {
     const REQUEST: &[u8] = b"POST /a HTTP/1.1\r\nbad header\r\n\r\n\
         GET /b HTTP/1.1\r\n\r\n";
-    let text = "the request breaks HTTP/1.1: invalid header name";
     let mut network = Network::new();
     assert_eq!(
         network.exchange(REQUEST, false),
-        End::Closed(format!(
-            "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\
-             \r\n\r\n{text}",
-            text.len()
-        ))
+        End::Closed(REFUSED.into())
     );
     assert_eq!(network.seen(), [""; 0]);
 }
 
 #[test]
 fn answers_a_content_length_that_is_not_one_number_with_400() {
-    for (request, text) in [
-        (
-            &b"POST /a HTTP/1.1\r\ncontent-length: +3\r\n\r\nabc"[..],
-            "the request breaks HTTP/1.1: content-length \"+3\" is not a length",
-        ),
-        (
-            b"POST /a HTTP/1.1\r\ncontent-length: 3\r\ncontent-length: 4\r\n\r\nabcd",
-            "the request breaks HTTP/1.1: content-length 3 and 4 differ",
-        ),
+    for request in [
+        &b"POST /a HTTP/1.1\r\ncontent-length: +3\r\n\r\nabc"[..],
+        b"POST /a HTTP/1.1\r\ncontent-length: 3\r\ncontent-length: 4\r\n\r\nabcd",
     ] {
         let mut network = Network::new();
         let request: &'static [u8] = Box::leak(request.into());
         assert_eq!(
             network.exchange(request, false),
-            End::Closed(format!(
-                "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\
-                 \r\n\r\n{text}",
-                text.len()
-            ))
+            End::Closed(REFUSED.into())
         );
         assert_eq!(network.seen(), [""; 0]);
     }
 }
 
 #[test]
-fn answers_a_transfer_encoding_with_501_and_ends_the_stream() {
+fn answers_a_chunked_body_whole() {
     const REQUEST: &[u8] = b"POST /a HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n\
-        3\r\nabc\r\n0\r\n\r\n";
-    let text = "the server takes no transfer-encoding";
+        3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
     let mut network = Network::new();
     assert_eq!(
-        network.exchange(REQUEST, false),
-        End::Closed(format!(
-            "HTTP/1.1 501 Not Implemented\r\ncontent-length: {}\r\nconnection: close\
-             \r\n\r\n{text}",
-            text.len()
-        ))
+        network.exchange(REQUEST, true),
+        End::Closed(
+            "HTTP/1.1 200 OK\r\ncontent-length: 22\r\n\r\nPOST /a HTTP/1.1 abcde"
+                .into()
+        )
     );
-    assert_eq!(network.seen(), [""; 0]);
+    assert_eq!(network.seen(), ["POST /a HTTP/1.1 abcde"]);
 }
 
 #[test]

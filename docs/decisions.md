@@ -2550,18 +2550,20 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508).
 - **HTTP SIM SERVER (#1151)** `connector::http::sim::serve(listener, tasks, answer)`,
   behind the `connector` cargo feature `sim`, off by default, is the one HTTP/1.1
-  server of the protocol simulators of HTTP connectors. It runs each stream on its own
-  task, with keep-alive, and gives `answer` each request with its whole body. It reads
-  no clock and sets no timeout. A request that breaks HTTP/1.1 gets 400 and one with a
-  `transfer-encoding` gets 501, and each ends its stream; a `content-encoding` other
-  than `identity` gets 415, as the simulators decode no body. It returns the listener's
-  error, so a test server that cannot accept fails loud. It parses heads with
-  `httparse`, frames bodies by `content-length`, and writes answers itself, because
-  `hyper`'s server reads OS wall time (`SystemTime::now()`) on each poll, with no
-  option to turn it off (hyper 1.12.0, `common/date.rs`). Lost: `hyper`'s server, for
-  that clock read; and a copy of the server in each kind crate. Decided by architect-2
+  server of the protocol simulators of HTTP connectors. It runs `hyper`'s server on
+  each stream, on its own task, with keep-alive, and gives `answer` each request with
+  its whole body. A request that breaks HTTP gets 400 from `hyper` and ends its stream;
+  a `content-encoding` other than `identity` gets 415, as the simulators decode no
+  body. It returns the listener's error, so a test server that cannot accept fails
+  loud. `hyper`'s server reads OS wall time on each poll (hyper 1.12.0,
+  `common/date.rs`). With no `date` header and no timer it drops that value; a timer
+  arms the header read timeout, which uses it (`proto/h1/conn.rs`). So this server
+  gets no timer. Lost: our own server on `httparse`, which the person refused; and a
+  copy of the server in each kind crate. Decided by architect-2
   (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
-  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508).
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508) and the
+  person (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353),
+  which supersedes 6042446508 in its clause that the server parses with `httparse`.
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

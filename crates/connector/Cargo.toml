@@ -6,13 +6,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-sim = ["dep:httparse"]
+sim = ["hyper/server"]
 
 [dependencies]
 bytes.workspace = true
 http.workspace = true
 http-body.workspace = true
-httparse = { workspace = true, optional = true }
 hyper.workspace = true
 env = { path = "../env" }
 document = { path = "../document" }
