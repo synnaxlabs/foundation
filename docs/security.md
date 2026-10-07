@@ -156,7 +156,7 @@ state on `main`.
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
-  `raft` counts the keys of a proof, and `mesh::grant` checks each signature
+  `raft` counts the keys of a proof, and `mesh::claim` checks each signature
   against the voter's public key. Until the driver (#471) runs that check before
   `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
@@ -216,22 +216,25 @@ state on `main`.
 ### Disk to `buffer`
 
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
-  of the ring. A chained CRC32C finds these. It does not stop a local user who writes
-  the file: the CRC is not a secret, and a header block has no tie to its ring.
+  of the ring. A chained CRC32C finds these, with two exceptions that are open on
+  `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
+  of each header block reads as zero, an open takes the file for a ring with no
+  checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
+  local user who writes the file: it is not a secret, and a header block has no tie
+  to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
-  ring. #234 and #300 are robustness defects of this boundary, with fixes in
-  review (#356, #348). They do not have the `security` label: each needs a writer
-  of the file, or, for the small body of #300, a `Layout` from the node's own
-  config (a new ring with a body of 4 to 54 bytes stops the node at its first
-  `append`).
-- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Open on `main`:
-  #392 (three ways a ring loses data it reported durable or cannot open), #566 (a write
-  of a dead process can land on a ring that a new process opened), #572 (`append` takes
-  a record over the pool's largest block, and then each open fails), #657 (an open
-  reports durable the records a killed process never synced). Fixed: #553 (a power cut
+  ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
+  #348. They do not have the `security` label: each needed a writer of the file, or,
+  for the small body of #300, a `Layout` from the node's own config (a new ring with
+  a body of 4 to 54 bytes stopped the node at its first `append`).
+- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Fixed: #392
+  (three ways a ring lost data it reported durable or could not open), #566 (a write
+  of a dead process could land on a ring that a new process opened), #572 (`append`
+  took a record over the pool's largest block, and then each open failed), #657 (an
+  open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
   #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold both.
+  inputs hold the two fields of #393.
 
 ### Device to connector
 

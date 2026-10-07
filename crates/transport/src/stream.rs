@@ -278,8 +278,8 @@ impl Drop for Sender {
     }
 }
 
-/// A [`Sender::send`] in progress. Dropping it before it is done cancels the message
-/// once the stream took it.
+/// A [`Sender::send`] in progress. Dropping it before it is done ends its wait, and
+/// cancels the message once the stream took it.
 struct Sending<'a> {
     session: &'a quic::Session,
     stream: &'a quic::stream::Sender,
@@ -290,8 +290,8 @@ struct Sending<'a> {
 
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
-        if !self.done && self.message.is_none() {
-            self.session.cancel(self.stream);
+        if !self.done {
+            self.session.abandon(self.stream, self.message.is_none());
         }
     }
 }
@@ -937,6 +937,15 @@ mod tests {
         }
     }
 
+    /// A waker that counts its wakes.
+    struct Count(AtomicU32);
+
+    impl std::task::Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// What a sender does after [`try_fill`].
     #[derive(Clone, Copy, Debug)]
     enum Then {
@@ -966,10 +975,21 @@ mod tests {
                         }
                         Then::Finish => sender.finish().expect("finished"),
                         Then::DropSend => {
-                            let send = sender.send(side.block(b"c"));
-                            let waiting = poll_once(pin!(send)).await;
-                            assert_eq!(waiting, None, "the send waits");
+                            let count = Arc::new(Count(AtomicU32::new(0)));
+                            let waker = Waker::from(Arc::clone(&count));
+                            {
+                                let mut send = pin!(sender.send(side.block(b"c")));
+                                let mut cx = Context::from_waker(&waker);
+                                let waiting = send.as_mut().poll(&mut cx);
+                                assert!(waiting.is_pending(), "the send waits");
+                            }
                             sender.finish().expect("finished");
+                            // Until the peer read the rest, which frees the stream.
+                            side.node
+                                .clock()
+                                .sleep(spans(Span::MILLISECOND, 200))
+                                .await;
+                            assert_eq!(count.0.load(Ordering::Relaxed), 0, "no waker");
                         }
                         Then::Drop => {
                             // The first message reaches the peer first, as the peer

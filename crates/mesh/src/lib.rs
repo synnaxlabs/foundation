@@ -16,6 +16,11 @@
 )]
 mod bytes;
 pub mod card;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
+mod claim;
 #[cfg(test)]
 mod common;
 #[cfg_attr(
@@ -34,11 +39,6 @@ mod entry;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod error;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the streams of #471 are the first user")
-)]
-mod grant;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")

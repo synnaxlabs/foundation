@@ -11,5 +11,9 @@ publish.workspace = true
 name = "global"
 harness = false
 
+[[test]]
+name = "bytes"
+harness = false
+
 [lints]
 workspace = true
