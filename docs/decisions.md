@@ -1812,7 +1812,7 @@ How to read this record:
   1,000,000 entries and 6 silent peers at 41 to 44 ms per tick with the scan
   (reviewer,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042889435,
-  2026-10-07T17:11:00Z). With the index the same tick, its `ready` included, takes
+  2026-10-07T17:11:00Z). With the index, the same tick, its `ready` included, takes
   0.33 µs (box1, Intel Xeon Platinum 8488C; `crates/raft/benches/chain.rs`).
   The advisor required a proof on every message and on each refusal, signatures
   only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks

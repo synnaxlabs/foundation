@@ -626,7 +626,7 @@ proptest! {
             .filter(|(claim, _)| matches!(claim, Claim::Change { .. }))
             .count();
         // The receiver's log is empty, so `step` skips the links before the first
-        // one above index 0, and reads `read` links from there.
+        // one above index 0, and reads from there up to link `read`.
         let skipped = message
             .chain
             .iter()

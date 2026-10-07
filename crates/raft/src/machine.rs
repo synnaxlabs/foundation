@@ -3149,6 +3149,20 @@ mod tests {
             assert_eq!((raft.term(), raft.leader()), (Term(2), Some(key(2))));
         }
 
+        // `claims` lists no link of such a chain, so `mesh` checks none.
+        #[test]
+        fn a_chain_with_every_link_at_or_below_the_commit_index_gives_no_link() {
+            let mut raft = behind(&ALL);
+            let below = link(position(1, 0), 3, &ALL, plain(&[1, 2, 3]));
+            let message = heartbeat(2, vec![below]);
+            let changes = raft
+                .claims(&message)
+                .filter(|(claim, _)| matches!(claim, Claim::Change { .. }))
+                .count();
+            assert_eq!(changes, 0);
+            refuses(&mut raft, message, "every link below");
+        }
+
         #[test]
         fn a_candidate_carries_its_chain_on_a_vote_and_none_on_a_pre_vote() {
             let mut raft = left();
