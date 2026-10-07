@@ -451,4 +451,50 @@ mod tests {
         card.addresses = vec![Address::Udp(SocketAddr::V6(at))];
         let _checked = Signed::check(key(1), card, [0; 64]);
     }
+
+    #[test]
+    fn the_signed_bytes_are_the_tag_the_key_and_the_card() {
+        let card = Card {
+            name: "a.b".parse().unwrap(),
+            public_key: public(1),
+            seal_key: SealKey::new([9; 32]).unwrap(),
+            addresses: vec![
+                Address::Tcp("1.2.3.4:258".parse().unwrap()),
+                Address::Relay {
+                    node: public(2),
+                    at: "[::1]:258".parse().unwrap(),
+                },
+            ],
+            version: 3,
+        };
+        let mut expected = b"foundation/card/1".to_vec();
+        expected.extend(1u128.to_le_bytes());
+        expected.push(3);
+        expected.extend(b"a.b");
+        expected.extend(public(1).to_bytes());
+        expected.extend([9; 32]);
+        expected.extend(2u64.to_le_bytes());
+        expected.extend([TCP, 4, 1, 2, 3, 4, 2, 1]);
+        expected.push(RELAY);
+        expected.extend(public(2).to_bytes());
+        expected.push(6);
+        expected.extend(1u128.to_be_bytes());
+        expected.extend([2, 1]);
+        expected.extend(3u64.to_le_bytes());
+        assert_eq!(statement(key(1), &card), expected);
+    }
+
+    #[test]
+    fn each_one_byte_change_that_decodes_is_the_byte_form() {
+        let bytes = encoded(&fixed());
+        for at in 0..bytes.len() {
+            for byte in 0..=u8::MAX {
+                let mut changed = bytes.clone();
+                changed[at] = byte;
+                if let Some(found) = decoded(&changed) {
+                    assert_eq!(encoded(&found), changed, "byte {at} set to {byte}");
+                }
+            }
+        }
+    }
 }

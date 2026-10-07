@@ -1642,14 +1642,15 @@ How to read this record:
   set time offline. Tickets are secrets.
 - **MEMBER RECORD (#242)** The region's record of a node is a `mesh::Member`: a
   `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
-  node signs over `foundation/card/1`, its `node::Key`, and the card's one byte form),
-  the join ticket's signature over the first card, an ephemeral expiry, and the status
-  channel keys (X27). The card's byte form is the name behind a length byte, the public
-  key, the seal key, a count of addresses (8 bytes), each address, and the version (8
-  bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds its node key), a
-  family byte (4 or 6), the IP, and the port. An IPv6 address has no flow info and no
-  scope, because each means something only on the node that sets it. Numbers are little
-  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
+  node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
+  byte form), the join ticket's signature over the first card, an ephemeral expiry, and
+  the status channel keys (X27). The card's byte form is the name behind a length byte,
+  the public key (32 bytes), the seal key (32 bytes), a count of addresses (8 bytes),
+  each address, and the version (8 bytes). An address is a kind byte (UDP 0, TCP 1,
+  relay 2, which adds its node key), a family byte (4 or 6), the IP (4 or 16 bytes, in
+  network order), and the port (2 bytes). An IPv6 address has no flow info and no scope,
+  because each means something only on the node that sets it. Every number but the IP is
+  little endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
   configuration is the one source) and no lease. The seal key is inside the signed card
   (S8). A join is one `Join` change. Every node that applies it checks the card, and the
   admission against the ticket's public key, scope, uses, and expiry at the change's
