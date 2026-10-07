@@ -102,9 +102,8 @@ impl Dial<'_> {
         while let Some((index, session)) = self.flying.get(at) {
             match session.poll_connected(cx) {
                 Poll::Ready(Ok(connected)) => {
-                    if first.is_none_or(|(_, earliest)| connected < earliest) {
-                        first = Some((at, connected));
-                    }
+                    let this = (connected, at);
+                    first = Some(first.map_or(this, |earliest| this.min(earliest)));
                     at += 1;
                 }
                 // A later attempt can have connected before the break.
@@ -119,7 +118,7 @@ impl Dial<'_> {
                 Poll::Pending => at += 1,
             }
         }
-        if let Some((at, _)) = first {
+        if let Some((_, at)) = first {
             return Some(Ok(self.flying.swap_remove(at).1));
         }
         broken.map(Err)
