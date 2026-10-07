@@ -972,7 +972,7 @@ mod tests {
                             sender.finish().expect("finished");
                         }
                         Then::Drop => {
-                            // The peer drops a stream reset before any message.
+                            // The peer reads a cancel before any message.
                             side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
                             drop(sender);
                         }

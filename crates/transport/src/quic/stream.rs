@@ -3380,7 +3380,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_after_only_the_class_byte_fails_the_first_write_of_the_reply() {
+    fn a_stop_after_only_the_class_byte_resets_the_reply() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let bytes = [byte(Class::Complete)];
@@ -3400,6 +3400,16 @@ mod tests {
             let message = shard.block(b"b");
             let written = pair.server.endpoint.write(now, &reply, &mut Some(message));
             assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
+            // Only the reset at the stop frees the slot once both halves end.
+            let finished = pair.client.connection().send_stream(id).finish();
+            finished.expect("finished");
+            pair.run(RUN);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![], true));
+            pair.run(RUN);
+            let streams = pair.server.connection().streams();
+            assert_eq!(streams.remote_open_streams(Dir::Bi), 0);
         });
     }
 
