@@ -21,8 +21,9 @@ const CHUNK: usize = 4096;
 /// and 2 of index, with room for the chunks.
 const BUDGET: usize = 22;
 
-/// The most that SIM INFLUX allows, which also holds with 255 sparse fields: each
-/// chunk keeps a column for each field it holds.
+/// The most that SIM INFLUX allows, which also holds with 255 sparse fields, as each
+/// chunk keeps a column for each field it holds, and with 1000 short series, as each
+/// series has a fixed cost.
 const SPARSE: usize = 32;
 
 /// The fewest: 8 of time and 8 of value.
@@ -44,6 +45,9 @@ fn main() {
     });
     check("each pair of times swapped", POINTS, BUDGET, |k, line| {
         writeln!(line, "m value={k} {}", 1_000_000 + (k ^ 1))
+    });
+    check("1000 series of 200 points", POINTS, SPARSE, |k, line| {
+        writeln!(line, "m,s={} value={k} {}", k % 1000, 1_000_000 + k)
     });
     between();
     wide();
@@ -72,19 +76,26 @@ fn main() {
     );
 }
 
-/// One point with 255 fields, then points of one field before it, so each split
-/// moves the wide point's columns. Long keys make an empty column cost much.
+/// One point with 255 fields, written first, then points of one field all after it or
+/// all before it, so each split leaves the wide point's columns in one half. Long keys
+/// make an empty column cost much.
 fn wide() {
-    for live in [POINTS - 1, 0] {
-        let name = format!("255 fields at write {live}, the rest 1 field before it");
+    for (wide, after) in [(0, true), (10 * POINTS, false)] {
+        let side = if after {
+            "after it, newest"
+        } else {
+            "before it, oldest"
+        };
+        let name = format!("255 fields first, then 1 field {side} first");
         check(&name, POINTS, BUDGET, |k, line| {
-            if k == live {
+            if k == 0 {
                 let all: Vec<_> = (0..255)
                     .map(|key| format!("plant_a_line_3_hydraulic_psi_{key}=1"))
                     .collect();
-                return writeln!(line, "m {} {}", all.join(","), 10 * POINTS);
+                return writeln!(line, "m {} {wide}", all.join(","));
             }
-            writeln!(line, "m plant_a_line_3_hydraulic_psi_0={k} {}", k + 1)
+            let time = if after { POINTS - k } else { k };
+            writeln!(line, "m plant_a_line_3_hydraulic_psi_0={k} {time}")
         });
     }
 }
