@@ -412,6 +412,29 @@ mod tests {
         Diagnostic::new(Code::new(code), span, message.into(), fix.into())
     }
 
+    /// Asserts that each of two blocks inside a `keyword` block with `attributes` adds
+    /// one `config.unknown-block` diagnostic to what `check` gives without them.
+    fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
+        let mut policy = block(0, 0, keyword, &["edge"], attributes);
+        let mut expected = check(&[document(vec![policy.clone()])])
+            .err()
+            .unwrap_or_default();
+        for (offset, inner) in [(90, "inner"), (95, "other")] {
+            policy.body.blocks.push(block(0, offset, inner, &[], &[]));
+            expected.push(refused(
+                "config.unknown-block",
+                at(0, offset),
+                &format!("the `{keyword}` block cannot hold the `{inner}` block"),
+                "Remove it",
+            ));
+        }
+        assert_eq!(
+            check(&[document(vec![policy])]),
+            Err(expected),
+            "{attributes:?}"
+        );
+    }
+
     fn selector(patterns: &[&str]) -> Selector {
         Selector::new(patterns.iter().copied()).unwrap()
     }
@@ -700,6 +723,25 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn refuses_a_block_inside_node_settings_with_any_attributes() {
+        let select = || ("select", string("site_a.*"));
+        let cases = [
+            vec![select(), ("disk", string("1GiB"))],
+            vec![],
+            vec![("disk", string("1GiB"))],
+            vec![("select", Kind::Integer(7)), ("disk", string("1GiB"))],
+            vec![select()],
+            vec![select(), ("disk", Kind::Integer(7))],
+            vec![select(), ("disk", string("nope"))],
+            vec![select(), ("pool", Kind::Integer(7))],
+            vec![select(), ("disk", string("0B"))],
+        ];
+        for attributes in cases {
+            assert_inner_blocks_refused("node_settings", &attributes);
+        }
     }
 
     #[test]
@@ -1292,6 +1334,59 @@ mod tests {
                 )])
             );
         }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement_with_an_unknown_attribute() {
+            let [mut documents] = placement(&[
+                ("select", string("edge.*")),
+                ("home", string("edge")),
+                ("node", string("edge")),
+            ]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 14),
+                        "`node` is not an attribute of the `placement` block",
+                        "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `placement` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement_with_any_attributes() {
+            let select = || ("select", string("edge.*"));
+            let cases = [
+                vec![select(), ("home", string("edge"))],
+                vec![],
+                vec![("home", string("edge"))],
+                vec![("select", Kind::Integer(7)), ("home", string("edge"))],
+                vec![select(), ("home", Kind::Integer(7))],
+                vec![select(), ("standby", Kind::Bool(true))],
+                vec![select(), ("copies", list(50, &[Kind::Integer(7)]))],
+                vec![select()],
+                vec![
+                    select(),
+                    ("home", string("n_1")),
+                    ("standby", string("n_1")),
+                ],
+            ];
+            for attributes in cases {
+                assert_inner_blocks_refused("placement", &attributes);
+            }
+        }
     }
 
     mod retentions {
@@ -1471,6 +1566,54 @@ mod tests {
                     "Remove it",
                 )])
             );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_retention_with_an_unknown_attribute() {
+            let [mut documents] = retention(&[
+                ("select", string("edge.**")),
+                ("keep", string("3d")),
+                ("hold", string("1d")),
+            ]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 14),
+                        "`hold` is not an attribute of the `retention` block",
+                        "Use `select` or `keep`, or remove it",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `retention` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_retention_with_any_attributes() {
+            let select = || ("select", string("edge.**"));
+            let cases = [
+                vec![select(), ("keep", string("3d"))],
+                vec![],
+                vec![("keep", string("3d"))],
+                vec![("select", Kind::Integer(7)), ("keep", string("3d"))],
+                vec![select()],
+                vec![select(), ("keep", Kind::Integer(3))],
+                vec![select(), ("keep", string("nope"))],
+                vec![select(), ("keep", string("-3d"))],
+            ];
+            for attributes in cases {
+                assert_inner_blocks_refused("retention", &attributes);
+            }
         }
     }
 }

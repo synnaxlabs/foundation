@@ -156,7 +156,7 @@ state on `main`.
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
-  `raft` counts the keys of a proof, and `mesh::grant` checks each signature
+  `raft` counts the keys of a proof, and `mesh::claim` checks each signature
   against the voter's public key. Until the driver (#471) runs that check before
   `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
@@ -164,7 +164,11 @@ state on `main`.
   are a quorum of what it holds. When a second node fails before that, the group
   waits for an operator: wipe the voter's state and start it with no configuration.
   The chain of proofs over configuration entries closes it (#881, a release
-  blocker). `raft/tests/it/behind.rs` pins both.
+  blocker). Its first PR gives each configuration entry the votes and the signature
+  of the leader that wrote it (`raft::Change`); the chain and its check are the
+  second PR (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  `raft/tests/it/behind.rs` pins both.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -212,22 +216,25 @@ state on `main`.
 ### Disk to `buffer`
 
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
-  of the ring. A chained CRC32C finds these. It does not stop a local user who writes
-  the file: the CRC is not a secret, and a header block has no tie to its ring.
+  of the ring. A chained CRC32C finds these, with two exceptions that are open on
+  `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
+  of each header block reads as zero, an open takes the file for a ring with no
+  checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
+  local user who writes the file: it is not a secret, and a header block has no tie
+  to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
-  ring. #234 and #300 are robustness defects of this boundary, with fixes in
-  review (#356, #348). They do not have the `security` label: each needs a writer
-  of the file, or, for the small body of #300, a `Layout` from the node's own
-  config (a new ring with a body of 4 to 54 bytes stops the node at its first
-  `append`).
-- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Open on `main`:
-  #392 (three ways a ring loses data it reported durable or cannot open), #566 (a write
-  of a dead process can land on a ring that a new process opened), #572 (`append` takes
-  a record over the pool's largest block, and then each open fails), #657 (an open
-  reports durable the records a killed process never synced). Fixed: #553 (a power cut
+  ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
+  #348. They do not have the `security` label: each needed a writer of the file, or,
+  for the small body of #300, a `Layout` from the node's own config (a new ring with
+  a body of 4 to 54 bytes stopped the node at its first `append`).
+- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Fixed: #392
+  (three ways a ring lost data it reported durable or could not open), #566 (a write
+  of a dead process could land on a ring that a new process opened), #572 (`append`
+  took a record over the pool's largest block, and then each open failed), #657 (an
+  open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
   #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold both.
+  inputs hold the two fields of #393.
 
 ### Device to connector
 
@@ -293,8 +300,9 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
-| `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each valid message made from the input decodes to itself |
-| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
@@ -313,6 +321,8 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
+| `types_sample` | `sample::Type` | Prints as the text it was read from |
+| `types_frame_ends` | `frame::Layout::from_ends`, `frame::check`, `frame::split` | Refuses exactly the ends that break a rule, with an error that names a broken rule; the layout is the one that `Layout::new` gives for the lengths; a frame drafted from the ends has them, and `split` cuts its series at them; `check` refuses exactly the ends that do not fit a body whose length the input gives, and `split` cuts a body that `check` took at them. Not reached: the panics of `split`, a body over 64 KiB |
 | `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 

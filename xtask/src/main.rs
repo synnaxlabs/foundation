@@ -10,6 +10,7 @@ mod globals;
 mod map;
 mod miri;
 mod oracles;
+mod review;
 mod select;
 
 use std::collections::BTreeSet;
@@ -23,14 +24,20 @@ fn main() -> ExitCode {
         .parent()
         .expect("invariant: xtask is a directory of the workspace root");
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
-    let result = match std::env::args().nth(1).as_deref() {
-        Some("layers") => layers(root),
-        Some("globals") => globals::check(root),
-        Some("oracles") => oracles::check(root),
-        Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
-        Some("miri") => miri::run(root),
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = match args[..] {
+        ["layers"] => layers(root),
+        ["globals"] => globals::check(root),
+        ["oracles"] => oracles::check(root),
+        [name @ ("loom" | "shuttle")] => cfg::test(root, name),
+        ["miri"] => miri::run(root),
+        ["review", pr, head] => return review::run(root, pr, head),
         _ => {
-            eprintln!("usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>");
+            eprintln!(
+                "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
+                 cargo xtask review <pr> <head sha>"
+            );
             return ExitCode::FAILURE;
         }
     };

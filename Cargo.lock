@@ -789,6 +789,17 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 [[package]]
 name = "hub"
 version = "0.0.0"
+dependencies = [
+ "block",
+ "buffer",
+ "clock",
+ "codec",
+ "counting",
+ "env",
+ "home",
+ "sim",
+ "types",
+]
 
 [[package]]
 name = "hyper"
@@ -939,6 +950,7 @@ version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
  "block",
+ "clock",
  "env",
  "proptest",
  "raft",
@@ -1842,6 +1854,7 @@ dependencies = [
  "counting",
  "divan",
  "proptest",
+ "rustc-hash",
 ]
 
 [[package]]
