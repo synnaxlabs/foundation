@@ -212,11 +212,12 @@ state on `main`.
 ### Disk to `buffer`
 
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
-  of the ring. A chained CRC32C finds these, with one exception that is open on `main`
-  (#1441): when the first sector of each header block reads as zero, an open takes the
-  file for a ring with no checkpoint, removes it, and makes a new ring with no error.
-  The CRC does not stop a local user who writes the file: it is not a secret, and a
-  header block has no tie to its ring.
+  of the ring. A chained CRC32C finds these, with two exceptions that are open on
+  `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
+  of each header block reads as zero, an open takes the file for a ring with no
+  checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
+  local user who writes the file: it is not a secret, and a header block has no tie
+  to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
   ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
   #348. They do not have the `security` label: each needed a writer of the file, or,
@@ -229,7 +230,7 @@ state on `main`.
   open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
   #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold the last two.
+  inputs hold the two fields of #393.
 
 ### Device to connector
 
