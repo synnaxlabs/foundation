@@ -3509,7 +3509,9 @@ How to read this record:
   Decided by the architect, #1068
   (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156,
   corrected in
-  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083 and
+  https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6043266054, the
+  latter at 2026-10-07T17:32:11Z).
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
