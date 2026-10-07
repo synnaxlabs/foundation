@@ -3295,6 +3295,11 @@ How to read this record:
   queue stays readable. A pulled serial adapter takes its buffer with it, so
   `Node::fail_serial` loses its unread bytes. Decided by `laptop.architect-2`, #1255
   (https://github.com/synnaxlabs/foundation/issues/1255#issuecomment-6033324472).
+  Amended (2026-10-07, #1473): `Node::fail_listener` makes a TCP listener fail until
+  it drops: each accept gives the streams already in its backlog, then `EIO`. A
+  connect after the fault is refused, a stream in its handshake at the fault is
+  reset, and the streams it accepted still work. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042821949).
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
