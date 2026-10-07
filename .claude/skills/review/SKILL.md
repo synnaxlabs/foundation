@@ -118,7 +118,8 @@ Hot path: <none, or each function>
 Each of the `Reviewers:`, `Range:`, and `Findings:` lines holds its value alone:
 `Findings: 2`, never `Findings: 2, each fixed in <sha>`. The check fails on the second.
 `Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
-skips `breaker` adds this line:
+skips `breaker` adds this line under its `Reviewers:` line, with no blank line between,
+because the check reads only the first block of lines after the round heading:
 
 ```
 Breaker: skipped, the check counts no code change in the range
