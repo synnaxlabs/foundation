@@ -195,8 +195,9 @@ fn count(text: &str) -> Result<u32, Error> {
 /// with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The text has none of the forms of a type. `F64`, `float`, `f32[3`, and
-    /// `list<u8,16>` give this error.
+    /// The text has none of the forms of a type. `F64`, `float`, `f32[3`,
+    /// `list<u8,16>`, and a scalar element with space around it, as in `f32 [3]`, give
+    /// this error.
     Syntax,
     /// The element of an array or a list is not a scalar, as in `string[3]` or
     /// `list<f32[2], 4>`.
