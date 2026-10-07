@@ -130,8 +130,9 @@ fn between() {
         BUDGET,
         |k, line| writeln!(line, "m value={k} {}", halves(k)),
     );
-    // A split leaves each half a copy of each column.
-    for (fields, budget) in [(63, BUDGET), (255, SPARSE)] {
+    // A split leaves each half a copy of each column. One key past a power of two
+    // finds a `Vec` of columns that grew by doubling.
+    for (fields, budget) in [(63, BUDGET), (65, BUDGET), (255, SPARSE), (257, SPARSE)] {
         let name =
             format!("{fields} sparse fields, one odd time in each half of each chunk");
         check(&name, POINTS, budget, |k, line| {

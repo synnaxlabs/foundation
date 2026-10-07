@@ -330,6 +330,7 @@ impl Chunk {
             !column.points.is_empty()
         });
         self.columns.shrink_to_fit();
+        columns.shrink_to_fit();
         Self {
             times: split(&mut self.times, half),
             columns,
