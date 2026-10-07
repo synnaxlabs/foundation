@@ -4019,8 +4019,9 @@ fn a_record_with_a_table_over_one_block_is_read() {
 }
 
 /// Commits one entry, appends a second, and cuts the power `cut` nanoseconds after
-/// a point at most 100 µs before the deadline of the second commit. Returns the
-/// sim, the node, and whether the second commit had ended.
+/// a point before the deadline of the second commit. That deadline is one commit
+/// span after the start of the first commit, whose write and sync take up to 100 µs
+/// each. Returns the sim, the node, and whether the second commit had ended.
 fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
     let (mut sim, node) = one_node(seed);
     let committed = Arc::new(AtomicBool::new(false));
@@ -4051,7 +4052,7 @@ fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, boo
             .expect("the run goes on");
     }
     committed.store(false, Ordering::Relaxed);
-    let rest = Span::from_nanos(COMMIT.nanos() - 10 * step + cut);
+    let rest = Span::from_nanos(COMMIT.nanos() - 25 * step + cut);
     sim.run_for(rest).expect("the run goes on");
     sim.crash(&node, sim::Crash::Power);
     (sim, node, committed.load(Ordering::Relaxed))
