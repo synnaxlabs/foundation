@@ -1859,7 +1859,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032723969), and in
   the review of #1239
   (https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032923332,
-  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032970676).
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032970676,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033050251).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

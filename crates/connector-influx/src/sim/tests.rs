@@ -92,7 +92,12 @@ fn refuses_a_body_that_is_not_utf8_and_stores_none_of_it() {
     let body = [b"m v=1 10\nm v=1 2".as_slice(), &[0xff], b"\n"].concat();
     let mut store = Store::default();
     let error = store.write(&body).unwrap_err();
-    assert_eq!(error, Error::Utf8(std::str::from_utf8(&body).unwrap_err()));
+    assert_eq!(
+        error,
+        Error::Utf8 {
+            error: std::str::from_utf8(&body).unwrap_err(),
+        }
+    );
     assert_eq!(
         error.to_string(),
         "the body is not UTF-8: invalid utf-8 sequence of 1 bytes from index 16"

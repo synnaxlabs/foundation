@@ -54,7 +54,7 @@ impl Store {
     ///
     /// No field of a line that is not valid is stored.
     pub fn write(&mut self, body: &[u8]) -> Result<(), Error> {
-        let body = std::str::from_utf8(body).map_err(Error::Utf8)?;
+        let body = std::str::from_utf8(body).map_err(|error| Error::Utf8 { error })?;
         let mut first = None;
         for text in influxdb_line_protocol::split_lines(body) {
             let Some(parsed) = influxdb_line_protocol::parse_lines(text).next() else {
@@ -253,7 +253,10 @@ impl fmt::Display for Kind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The body is not UTF-8.
-    Utf8(Utf8Error),
+    Utf8 {
+        /// Where the body stops being UTF-8.
+        error: Utf8Error,
+    },
     /// The line does not parse.
     Parse {
         /// The line.
@@ -306,7 +309,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Utf8(error) => write!(f, "the body is not UTF-8: {error}"),
+            Self::Utf8 { error } => write!(f, "the body is not UTF-8: {error}"),
             Self::Parse { line, message } => {
                 write!(f, "the line {line:?} does not parse: {message}")
             }
