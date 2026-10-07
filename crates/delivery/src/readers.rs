@@ -2307,8 +2307,9 @@ pub(super) mod tests {
             readers.queue(&first, &sets.wide, 0..1);
             readers.queue(&second, &sets.narrow, 1..2);
             assert_eq!(readers.release(2), [key]);
-            assert_eq!(spent(&readers), CHARGE + built(&sets.pool, &[200]));
-            assert!(built(&sets.pool, &[200]) > CHARGE);
+            let built = built(&sets.pool, &[200]).charge();
+            assert_eq!(spent(&readers), CHARGE + built);
+            assert!(built > CHARGE);
         }
 
         #[test]
@@ -2318,9 +2319,9 @@ pub(super) mod tests {
             Readers::new(0).queue(&sets.full(), &sets.narrow, 0..1);
         }
 
-        /// The charge of the frame that a remote reader builds: one series for each of
-        /// `lens`, in order, in a key set of its own.
-        fn built(pool: &block::Pool, lens: &[usize]) -> u64 {
+        /// The frame that a remote reader builds: one series for each of `lens`, in
+        /// order, in a key set of its own.
+        fn built(pool: &block::Pool, lens: &[usize]) -> Frame {
             let keys: Vec<_> = (0..lens.len().max(1))
                 .map(|n| {
                     (
@@ -2337,7 +2338,6 @@ pub(super) mod tests {
             Draft::new(pool, &set, Form::Raw, &series)
                 .expect("the pool holds the frame")
                 .freeze(Path::Live)
-                .charge()
         }
 
         proptest! {
@@ -2372,11 +2372,14 @@ pub(super) mod tests {
                         }
                     }
                 }
-                let charge = Charge::Places(slots.into());
+                let built = built(&sets.pool, &read);
+                let mut places = complete::Places::new(slots.clone().into());
                 prop_assert_eq!(
-                    charged(charge, &frame, &sets.wide),
-                    built(&sets.pool, &read)
+                    places.size(&frame, &sets.wide),
+                    (read.len(), built.body().len())
                 );
+                let charge = Charge::Places(slots.into());
+                prop_assert_eq!(charged(charge, &frame, &sets.wide), built.charge());
             }
         }
     }

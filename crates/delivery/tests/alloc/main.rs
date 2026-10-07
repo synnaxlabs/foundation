@@ -1,7 +1,7 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
-//! make none once each session got a frame, nor a release in which sessions miss a
-//! frame, with frames waiting or not. An ack makes none, and no call on a closed key of
+//! make none once each session got a frame, also for sessions charged by their places,
+//! nor a release in which sessions miss a frame, with frames waiting or not. An ack makes none, and no call on a closed key of
 //! either mode makes one. This binary has no test harness: the count covers each
 //! thread, and a harness allocates on its own thread at any time.
 
@@ -41,6 +41,7 @@ fn main() {
     };
     latest(&frame);
     complete(&frame, &set);
+    places(&frame, &set);
     missed(&frame, &set);
 }
 
@@ -153,6 +154,35 @@ fn open(readers: &mut Readers, live: u64, limit_bytes: u64) -> complete::Key {
     readers
         .open(Reader::Unnamed, start, limit_bytes, complete::Charge::Whole)
         .key
+}
+
+/// Sessions charged by their places allocate only for the first frame of a key set.
+fn places(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
+    let mut readers = Readers::new(0);
+    let start = Start::At(Position {
+        live: 0,
+        backfill: None,
+    });
+    let slot = set.entries()[0].slot;
+    let keys: Vec<_> = (0..SESSIONS)
+        .map(|_| {
+            let charge = complete::Charge::Places([slot, slot].into());
+            readers.open(Reader::Unnamed, start, u64::MAX, charge).key
+        })
+        .collect();
+    let mut seq = 0;
+    flow(&mut readers, &keys, frame, set, &mut seq);
+    let (delivered, allocations) = ALLOCATOR.count(|| {
+        (0..4)
+            .map(|_| flow(&mut readers, &keys, frame, set, &mut seq))
+            .sum::<usize>()
+    });
+    assert_eq!(allocations, 0, "the live path allocated for places");
+    assert_eq!(
+        delivered,
+        12 * SESSIONS,
+        "each round takes two frames from and wakes every session"
+    );
 }
 
 fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {

@@ -71,7 +71,7 @@ impl Cost {
     pub(super) fn new(charge: Charge) -> Self {
         match charge {
             Charge::Whole => Self::Whole,
-            Charge::Places(slots) => Self::Places(Places { slots, held: None }),
+            Charge::Places(slots) => Self::Places(Places::new(slots)),
         }
     }
 
@@ -79,12 +79,26 @@ impl Cost {
     /// m places in `set` and n series in `frame`. Allocates only for the first frame
     /// of a key set.
     pub(super) fn charge(&mut self, frame: &Frame, set: &KeySet) -> u64 {
-        let Self::Places(Places { slots, held }) = self else {
-            return frame.charge();
-        };
-        let held = match held {
+        match self {
+            Self::Whole => frame.charge(),
+            Self::Places(places) => {
+                let (series, body_len) = places.size(frame, set);
+                frame::charge(series, body_len)
+            }
+        }
+    }
+}
+
+impl Places {
+    pub(super) fn new(slots: Box<[Slot]>) -> Self {
+        Self { slots, held: None }
+    }
+
+    /// The series and the body length of the frame of `frame`'s series at the places.
+    pub(super) fn size(&mut self, frame: &Frame, set: &KeySet) -> (usize, usize) {
+        let held = match &mut self.held {
             Some(held) if held.set == set.key() => held,
-            held => held.insert(Held::new(slots, set)),
+            held => held.insert(Held::new(&self.slots, set)),
         };
         // The body holds each series but the last in place order padded, then the last.
         let (mut series, mut others) = (0, 0);
@@ -108,7 +122,7 @@ impl Cost {
                 };
                 others += padded(other);
             });
-        frame::charge(series, others + last.map_or(0, |(_, len)| len))
+        (series, others + last.map_or(0, |(_, len)| len))
     }
 }
 
