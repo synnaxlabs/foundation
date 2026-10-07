@@ -30,7 +30,8 @@ impl Policy {
     /// # Errors
     ///
     /// Returns [`Error::Empty`] with no home, no standby, and no copy, and
-    /// [`Error::Overlap`] when one node has two roles.
+    /// [`Error::Overlap`] when one node has two roles. It names the home when the home
+    /// has two roles, else the standby.
     pub fn new(select: Selector, mut nodes: Nodes) -> Result<Self, Error> {
         nodes.copies.sort();
         nodes.copies.dedup();
