@@ -1166,7 +1166,9 @@ mod tests {
             // The task sends the close and arms the drain timer, which falls due in
             // the pause, before the keep-alive.
             node.clock().sleep(Span::MILLISECOND).await;
-            assert!(socket(&node).is_err());
+            let local = address(&node);
+            let held = Some(env::net::Error::AddressInUse { local });
+            assert_eq!(socket(&node).err(), held);
             node.pause(spans(Span::MILLISECOND, 150));
             node.clock().sleep(spans(Span::MILLISECOND, 151)).await;
             assert_eq!(socket(&node).err(), None);
