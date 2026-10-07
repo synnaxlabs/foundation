@@ -960,8 +960,10 @@ mod tests {
                     .expect("an Ed25519 signer");
                 let signature = signer.sign(b"message").expect("a signature");
                 let key = key(&certified.cert[0], &[]).expect("a node key");
-                let verifier =
-                    UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, key.to_bytes());
+                let verifier = UnparsedPublicKey::new(
+                    &aws_lc_rs::signature::ED25519,
+                    key.to_bytes(),
+                );
                 prop_assert_eq!(verifier.verify(b"message", &signature), Ok(()));
             }
         }
