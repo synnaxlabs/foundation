@@ -742,9 +742,10 @@ pub(super) mod tests {
     }
 
     /// Makes each call on the closed session `key`, and asserts that it changes
-    /// nothing.
+    /// nothing. It drops the records made before the calls.
     pub(super) fn dropped(readers: &mut Readers, key: Key) {
-        let before = format!("{readers:?}");
+        drained(readers);
+        let before = (readers.floor(), readers.deadline(), readers.pending());
         if let Key::Complete(key) = key {
             readers.grant(key, u64::MAX);
             assert_eq!(readers.ack(key, live(0)), Ok(()));
@@ -754,16 +755,11 @@ pub(super) mod tests {
         if let Key::Complete(key) = key {
             readers.close_named(key, at(i64::MAX));
         }
-        assert_eq!(format!("{readers:?}"), before);
-    }
-
-    /// Checks [`dropped`] on each complete key that `readers` gave and `open` rejects.
-    fn dropped_closed(readers: &mut Readers, open: impl Fn(&complete::Key) -> bool) {
-        for key in (0..readers.next_complete).map(complete::Key) {
-            if !open(&key) {
-                dropped(readers, key.into());
-            }
-        }
+        assert_eq!(drained(readers), []);
+        assert_eq!(
+            (readers.floor(), readers.deadline(), readers.pending()),
+            before
+        );
     }
 
     mod open {
@@ -2043,6 +2039,8 @@ pub(super) mod tests {
         struct Model {
             open: BTreeMap<complete::Key, (Option<usize>, Position, i64)>,
             closed: BTreeMap<usize, (Position, i64, i64)>,
+            /// Each key ever opened.
+            given: BTreeSet<complete::Key>,
         }
 
         impl Model {
@@ -2090,6 +2088,7 @@ pub(super) mod tests {
                     }
                 };
                 self.open.insert(key, (name, position, hold));
+                self.given.insert(key);
                 (position, session.map(|(key, _)| Key::Complete(key)))
             }
 
@@ -2205,6 +2204,16 @@ pub(super) mod tests {
             }
         }
 
+        /// Checks [`dropped`] on each key that `model` opened and then closed.
+        fn dropped_closed(readers: &mut Readers, model: &Model) {
+            for key in model
+                .given
+                .difference(&model.open.keys().copied().collect())
+            {
+                dropped(readers, (*key).into());
+            }
+        }
+
         /// Closes the open session `key` at `now` with the call for its kind.
         fn close(readers: &mut Readers, model: &Model, key: complete::Key, now: i64) {
             match model.open[&key].0 {
@@ -2279,7 +2288,7 @@ pub(super) mod tests {
                 model.forget(now);
                 apply(&mut readers, &mut model, input, now);
                 records.extend(readers.records());
-                dropped_closed(&mut readers, |key| model.open.contains_key(key));
+                dropped_closed(&mut readers, &model);
             }
             if flushed {
                 readers.flush();
@@ -2584,7 +2593,7 @@ pub(super) mod tests {
                 for (&key, got) in &model.open {
                     assert_eq!(readers.behind(key), got.behind, "session {key:?}");
                 }
-                dropped_closed(&mut readers, |key| model.open.contains_key(key));
+                dropped_closed(&mut readers, &model.readers);
             }
         }
 
