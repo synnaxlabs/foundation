@@ -435,11 +435,11 @@ impl Shard {
 
     /// Raises the credit of the complete reader `key` to `limit_bytes` since it
     /// opened. A limit that is not higher changes nothing, and so does a grant to a
-    /// reader that is not open: a grant can arrive after its reader closes.
+    /// closed reader: a grant can arrive after its reader closes.
     ///
     /// # Panics
     ///
-    /// If `key` is of another shard.
+    /// If the shard never gave `key`.
     pub(crate) fn grant(&mut self, key: reader::complete::Key, limit_bytes: u64) {
         let place = self.place(key.slot);
         self.readers.grant(place, key.session, limit_bytes);
@@ -450,7 +450,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If `key` is of another shard.
+    /// If the shard never gave `key`.
     pub(crate) fn take(&mut self, key: reader::Key) -> Option<Frame> {
         self.readers.take(self.place(key.slot), key.session)
     }
@@ -461,7 +461,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If `key` is of another shard.
+    /// If the shard never gave `key`.
     pub(crate) fn close_reader(&mut self, key: reader::Key) {
         let (_, mesh) = self.time();
         self.readers.close(self.place(key.slot), key.session, mesh);
@@ -2396,6 +2396,7 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [readers[1], readers[0]]);
                 for reader in readers {
                     close(&mut shard, reader);
                     assert_eq!(taken(&mut shard, reader, 0), []);
