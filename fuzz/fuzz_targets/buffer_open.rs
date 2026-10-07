@@ -7,14 +7,20 @@
 //! inside an entry or a gap, and after a reopen.
 //!
 //! Input: batches that the production path writes, then edits on the file bytes.
+//! A batch makes a record of one to three blocks, with a table of up to three.
 //! Two edits seal a CRC: a header block (at offset 42, over its first 512-byte
 //! sector less the CRC) and a record (over `len`, `kind`, and the body, continued
-//! from the chain the block before leaves: the header's chain field, a restart
-//! record's body, or a record's CRC).
-//! They restate the formats in `header.rs` and `record.rs` of `buffer`. When the
-//! header moves, the seal of the first block as written changes it and the target
-//! panics. When the record moves, the edits stop reaching the walk and coverage
-//! drops without a failed replay.
+//! from the chain the record before leaves: the header's chain field, a restart
+//! record's body, or a record's CRC). One edit writes a tail and its chain value
+//! in the first header block: a block of the area, on one of the first 128 laps or
+//! the last 128. The records an open then writes wrap, or find the offsets at their
+//! end.
+//!
+//! The edits restate the formats in `header.rs` and `record.rs` of `buffer`. Before
+//! it edits, the target seals each record from the tail up to the first block with
+//! no record, and writes the tail where it is. The build's ring is one chain from
+//! one open, so when a seal or the write changes the file, or no record is found, a
+//! format moved and the target panics.
 
 #![no_main]
 
@@ -24,7 +30,7 @@ use std::rc::Rc;
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, Entry, Error, Layout, Mark, Parts, Rejected, Stored, Tail,
+    Buffer, Config, Entry, Error, Layout, Limit, Mark, Parts, Rejected, Stored, Tail,
 };
 use env::files::{File, Mode};
 use env::tasks::Tasks;
@@ -35,12 +41,25 @@ use types::frame;
 use types::time::{Span, Stamp};
 
 const BLOCK: usize = 4096;
-/// Blocks in the area: one record each, with room for the build, the check, and
-/// the restart record each open writes.
+/// Blocks in the area. A batch that needs more than are left gets `Rejected::Full`.
 const BLOCKS: usize = 8;
 const AREA: u64 = (BLOCKS * BLOCK) as u64;
-/// A record is 9 bytes of header and a body, so this keeps a record in one block.
-const BODY_MAX: usize = BLOCK - 9;
+/// A record's CRC, kind, and body: `[len: u32][crc32c: u32][kind: u8][body]`.
+const RECORD_CRC_AT: usize = 4;
+const RECORD_KIND_AT: usize = 8;
+const RECORD_HEAD: usize = 9;
+const DATA: u8 = 1;
+const WRAP: u8 = 2;
+const RESTART: u8 = 3;
+/// The largest record is three blocks.
+const BODY_MAX: usize = 3 * BLOCK - RECORD_HEAD;
+/// The most bytes of one decoded entry. One such entry makes a record of three
+/// blocks, and two make a batch that the layout refuses.
+const PART_MAX: usize = 2 * BLOCK - 1;
+/// The place of a header block's tail offset.
+const HEADER_TAIL_AT: usize = 22;
+/// The place of a header block's tail chain value.
+const HEADER_CHAIN_AT: usize = 30;
 /// The place of a header block's CRC, right after its fields.
 const HEADER_CRC_AT: usize = 42;
 /// A header block's CRC covers its first sector.
@@ -51,21 +70,38 @@ const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const COMMIT: Span = Span::from_nanos(10_000_000);
 const INDEXES: usize = 3;
-/// Bytes of each entry the check commits.
+/// The least and the most bytes of each entry the check commits: a record of one
+/// block, and one of three.
 const CHECK_PART: usize = 512;
-/// The check's batch and its table, of 51 bytes an entry, fit one record.
-const _: () = assert!(4 + INDEXES * PATHS.len() * (51 + CHECK_PART) <= BODY_MAX);
+const CHECK_PART_MAX: usize = 1994;
+const _: () = assert!(check_record(CHECK_PART) <= BLOCK);
+const _: () = assert!(check_record(CHECK_PART_MAX) <= 3 * BLOCK);
 const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
+
+/// The bytes of the check's record with entries of `part` bytes.
+const fn check_record(part: usize) -> usize {
+    let entries = INDEXES * PATHS.len();
+    RECORD_HEAD + body(entries, entries * part)
+}
+
+/// The body of a record of `entries` entries and `bytes` bytes: 4 bytes and 51 an
+/// entry of table, then the bytes.
+const fn body(entries: usize, bytes: usize) -> usize {
+    4 + 51 * entries + bytes
+}
 /// A read budget that some entries of a path fill together.
 const BUDGET: usize = 1024;
 /// A key that no build writes. Its slot comes after each slot an open made.
 const SPARE: channel::Key = channel::Key::from_u128(u128::MAX);
 const CHECK_LAST: Stamp = Stamp::from_nanos(9);
-/// The tag of the first entry of the build and of the check. Each entry has its
-/// own tag, fills its bytes with it, and is stored at it, so a read cannot give one
-/// entry for another.
+/// The tag of the first entry of the build and of the check. Each entry takes the
+/// next tag, fills its bytes with it, and is stored at it. The tags of the build
+/// start again after 128 entries, below the tags of the check, so entries that
+/// share a tag differ in `first`.
 const BUILD_TAG: u8 = 0x01;
 const CHECK_TAG: u8 = 0x81;
+/// The last lap of the area that a `u64` offset holds.
+const LAP_LAST: u64 = u64::MAX / AREA;
 
 /// The time an entry with `tag` is stored.
 fn stored_at(tag: u8) -> Stamp {
@@ -105,13 +141,53 @@ impl From<&Stored> for Given {
     }
 }
 
+impl From<&Entry> for Given {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            first: entry.first,
+            len: entry.len,
+            stored_at: entry.stored_at,
+            last: entry.last,
+            tag: entry.tag,
+            bytes: entry
+                .parts
+                .clone()
+                .into_iter()
+                .flat_map(|b| b.to_vec())
+                .collect(),
+        }
+    }
+}
+
 /// One entry the build phase appends.
 #[derive(Debug)]
 struct Append {
     index: usize,
     path: frame::Path,
+    /// Seqs the entry leaves out before its first.
+    skip: u64,
+    /// Samples in the entry: 0 for a caller record.
     len: u32,
-    part: usize,
+    /// The bytes of each part: none, one, or two.
+    parts: Vec<usize>,
+}
+
+impl Append {
+    /// Small entry `number` of a batch, with at most 72 bytes. The entries differ:
+    /// samples or a caller record, no part or two, a skip ahead or none.
+    fn small(number: usize) -> Self {
+        Self {
+            index: number % INDEXES,
+            path: PATHS[number / INDEXES % PATHS.len()],
+            skip: if number % 5 == 2 { 2 } else { 0 },
+            len: u32::from(number % 4 != 3),
+            parts: if number % 7 == 1 {
+                vec![number % 61, number % 13]
+            } else {
+                Vec::new()
+            },
+        }
+    }
 }
 
 /// One change to the file bytes.
@@ -121,6 +197,7 @@ enum Edit {
     Zero { at: usize, len: usize },
     SealHeader { second: bool },
     SealRecord { block: usize },
+    MoveTail { block: usize, lap: u64 },
 }
 
 #[derive(Debug)]
@@ -130,6 +207,8 @@ struct Input {
     replay: u64,
     batches: Vec<Vec<Append>>,
     edits: Vec<Edit>,
+    /// Bytes of each entry the check commits.
+    check_part: usize,
 }
 
 /// FNV-1a of 64 bits. Its definition is fixed, so a stored input keeps its run.
@@ -144,20 +223,21 @@ impl<'a> Arbitrary<'a> for Input {
         let replay = fnv(u.peek_bytes(u.len()).expect("the input has its length"));
         let mut batches = Vec::new();
         for _ in 0..u.int_in_range(0..=4)? {
-            let mut batch = Vec::new();
+            let mut appends = Vec::new();
             for _ in 0..u.int_in_range(1..=4)? {
-                batch.push(Append {
+                appends.push(Append {
                     index: u.int_in_range(0..=INDEXES - 1)?,
                     path: PATHS[usize::from(u.int_in_range(0..=1u8)?)],
+                    skip: 0,
                     len: u.int_in_range(1..=16)?,
-                    part: u.int_in_range(0..=512)?,
+                    parts: vec![u.int_in_range(0..=PART_MAX)?],
                 });
             }
-            batches.push(batch);
+            batches.push(appends);
         }
         let mut edits = Vec::new();
         for _ in 0..u.int_in_range(0..=16)? {
-            edits.push(match u.int_in_range(0..=3u8)? {
+            edits.push(match u.int_in_range(0..=4u8)? {
                 0 => Edit::Put {
                     at: u.int_in_range(0..=FILE_LEN - 1)?,
                     bytes: u.arbitrary::<[u8; 8]>()?[..u.int_in_range(1..=8)?].to_vec(),
@@ -169,15 +249,29 @@ impl<'a> Arbitrary<'a> for Input {
                 2 => Edit::SealHeader {
                     second: u.arbitrary()?,
                 },
-                _ => Edit::SealRecord {
+                3 => Edit::SealRecord {
                     block: u.int_in_range(2..=BLOCKS + 1)?,
                 },
+                _ => Edit::MoveTail {
+                    block: u.int_in_range(2..=BLOCKS + 1)?,
+                    // The first 128 laps, or the last 128.
+                    lap: match u.arbitrary::<u8>()? {
+                        low @ ..128 => u64::from(low),
+                        high => LAP_LAST - u64::from(255 - high),
+                    },
+                },
             });
+        }
+        // Last, so an input that ends before these has no small entry and the least
+        // commit.
+        for batch in &mut batches {
+            batch.extend((0..u.int_in_range(0..=255)?).map(Append::small));
         }
         Ok(Self {
             replay,
             batches,
             edits,
+            check_part: u.int_in_range(CHECK_PART..=CHECK_PART_MAX)?,
         })
     }
 }
@@ -202,38 +296,86 @@ fn apply(image: &mut [u8], edit: &Edit) {
         Edit::SealRecord { block } => {
             let start = block * BLOCK;
             let chain = chain_before(image, *block);
-            let (len, rest) = image[start..]
-                .split_first_chunk::<4>()
-                .expect("invariant: a block holds a record header");
-            let claimed = u32::from_le_bytes(*len);
+            let record = &image[start..];
+            let len = &record[..RECORD_CRC_AT];
+            let claimed = u32::from_le_bytes(len.try_into().expect("four bytes"));
             let body = usize::try_from(claimed)
                 .expect("invariant: a u32 fits in usize")
-                .min(rest.len() - 5);
+                .min(record.len() - RECORD_HEAD);
             let mut crc = crc32c::crc32c_append(chain, len);
-            crc = crc32c::crc32c_append(crc, &rest[4..5]);
-            crc = crc32c::crc32c_append(crc, &rest[5..5 + body]);
-            image[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+            crc = crc32c::crc32c_append(crc, &record[RECORD_KIND_AT..RECORD_HEAD]);
+            crc = crc32c::crc32c_append(crc, &record[RECORD_HEAD..RECORD_HEAD + body]);
+            let at = start + RECORD_CRC_AT;
+            image[at..at + 4].copy_from_slice(&crc.to_le_bytes());
+        }
+        Edit::MoveTail { block, lap } => {
+            let chain = chain_before(image, *block);
+            let offset = lap * AREA + ((block - 2) * BLOCK) as u64;
+            image[HEADER_TAIL_AT..HEADER_TAIL_AT + 8]
+                .copy_from_slice(&offset.to_le_bytes());
+            image[HEADER_CHAIN_AT..HEADER_CHAIN_AT + 4]
+                .copy_from_slice(&chain.to_le_bytes());
+            apply(image, &Edit::SealHeader { second: false });
         }
     }
 }
 
-/// The chain value a record at `block` must continue from.
+/// The chain value a record at `block` must continue from: the one that the
+/// records from the tail in the first header block leave there. When no record
+/// starts at `block`, the value where the way ends.
 fn chain_before(image: &[u8], block: usize) -> u32 {
+    let way = walk(image);
+    let end = way.last().expect("invariant: the way starts at the tail");
+    way.iter()
+        .find(|&&(start, _)| start == block)
+        .unwrap_or(end)
+        .1
+}
+
+/// The block and the lap of the tail in the first header block.
+fn tail(image: &[u8]) -> (usize, u64) {
+    let tail: [u8; 8] = image[HEADER_TAIL_AT..HEADER_TAIL_AT + 8]
+        .try_into()
+        .expect("invariant: eight bytes");
+    let tail = u64::from_le_bytes(tail);
+    (2 + (tail % AREA) as usize / BLOCK, tail / AREA)
+}
+
+/// The way of the records from the tail in the first header block, for `BLOCKS`
+/// records: the block each starts at, with the chain value it continues from. The
+/// CRCs on the way are not checked.
+fn walk(image: &[u8]) -> Vec<(usize, u32)> {
     let at = |offset: usize| -> u32 {
         let bytes = image[offset..offset + 4]
             .try_into()
             .expect("invariant: four bytes");
         u32::from_le_bytes(bytes)
     };
-    if block == 2 {
-        return at(30);
+    let (mut start, _) = tail(image);
+    let mut chain = at(HEADER_CHAIN_AT);
+    let mut way = vec![(start, chain)];
+    for _ in 0..BLOCKS {
+        let record = start * BLOCK;
+        let kind = image[record + RECORD_KIND_AT];
+        chain = at(record
+            + if kind == RESTART {
+                RECORD_HEAD
+            } else {
+                RECORD_CRC_AT
+            });
+        start = match kind {
+            WRAP => 2,
+            _ => start + (RECORD_HEAD + at(record) as usize).div_ceil(BLOCK),
+        };
+        if start == 2 + BLOCKS {
+            start = 2;
+        }
+        way.push((start, chain));
+        if start > 2 + BLOCKS {
+            break;
+        }
     }
-    let before = (block - 1) * BLOCK;
-    if image[before + 8] == 3 {
-        at(before + 9)
-    } else {
-        at(before + 4)
-    }
+    way
 }
 
 fn key(index: usize) -> channel::Key {
@@ -271,68 +413,114 @@ async fn open(
 }
 
 /// Writes the batches to a new ring and returns the durable tail and the entries of
-/// each path, in slot then path order.
+/// each path, in slot then path order, and the blocks of the area its records take.
+/// An append refuses a batch exactly when `limit` does, or when the blocks left are
+/// fewer than the record takes, and the build goes on after it.
 async fn build(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,
     input: &Input,
-) -> (Vec<Tail>, Vec<Vec<Given>>) {
+) -> (Vec<Tail>, Vec<Vec<Given>>, usize) {
     let (buffer, slots) = open(node, tasks, pool).await.expect("a new ring opens");
+    // A new ring holds its restart record, and no trim frees a block.
+    let mut used = 1;
     let mut next = vec![[0u64; 2]; INDEXES];
-    let mut tags = BUILD_TAG..CHECK_TAG;
+    let mut tags = (BUILD_TAG..CHECK_TAG).cycle();
     let mut written: Vec<[Vec<Given>; 2]> =
         iter::repeat_with(Default::default).take(INDEXES).collect();
     for batch in &input.batches {
         let mut firsts = next.clone();
         let mut appended = Vec::new();
-        let entries: Vec<Entry> = batch
-            .iter()
-            .map(|append| {
-                let mut part = pool.alloc(append.part).expect("the pool has a block");
-                let tag = tags.next().expect("the build has few entries");
-                part.fill(tag);
-                let path = usize::from(append.path == frame::Path::Backfill);
-                let first = firsts[append.index][path];
-                firsts[append.index][path] += u64::from(append.len);
-                let last =
-                    Some(Stamp::from_nanos(i64::try_from(first).expect("small")));
-                appended.push((
-                    append.index,
-                    path,
-                    Given {
-                        first,
-                        len: append.len,
-                        stored_at: stored_at(tag),
-                        last,
-                        tag,
-                        bytes: part.to_vec(),
-                    },
-                ));
-                Entry {
-                    index: key(append.index),
-                    slot: slots[append.index],
-                    path: append.path,
-                    first,
-                    len: append.len,
-                    stored_at: stored_at(tag),
-                    last,
-                    tag,
-                    parts: Parts::from(part.freeze()),
-                }
-            })
-            .collect();
-        match buffer.append(entries) {
-            Ok(()) => next = firsts,
+        let mut entries = Vec::new();
+        let (mut parts, mut bytes) = (0, 0);
+        for (append, tag) in batch.iter().zip(&mut tags) {
+            let path = usize::from(append.path == frame::Path::Backfill);
+            let first = firsts[append.index][path] + append.skip;
+            firsts[append.index][path] = first + u64::from(append.len);
+            let last = (append.len > 0)
+                .then(|| Stamp::from_nanos(i64::try_from(first).expect("small")));
+            let mut blocks = append.parts.iter().map(|len| {
+                let mut block = pool.alloc(*len).expect("the pool has a block");
+                block.fill(tag);
+                block.freeze()
+            });
+            let blocks = match (blocks.next(), blocks.next()) {
+                (Some(one), Some(two)) => Parts::from([one, two]),
+                (one, _) => Parts::from(one),
+            };
+            parts += append.parts.len();
+            let entry = Entry {
+                index: key(append.index),
+                slot: slots[append.index],
+                path: append.path,
+                first,
+                len: append.len,
+                stored_at: stored_at(tag),
+                last,
+                tag,
+                parts: blocks,
+            };
+            let given = Given::from(&entry);
+            bytes += given.bytes.len();
+            appended.push((append.index, path, given));
+            entries.push(entry);
+        }
+        let fits = limit(BODY_MAX, entries.len(), parts, bytes);
+        let size = (RECORD_HEAD + body(entries.len(), bytes)).div_ceil(BLOCK);
+        let taken = buffer.append(entries);
+        if let Err(limit) = fits {
+            assert_eq!(
+                taken,
+                Err(Rejected::Large(limit)),
+                "an append refused a batch other than by the record limits"
+            );
+            continue;
+        }
+        match taken {
+            Ok(()) => assert!(
+                used + size <= BLOCKS,
+                "an append took more blocks than the area has"
+            ),
+            Err(Rejected::Full { .. }) => {
+                assert!(
+                    used + size > BLOCKS,
+                    "an append refused a batch that the area has room for"
+                );
+                continue;
+            }
             Err(other) => panic!("append failed: {other}"),
         }
+        used += size;
+        next = firsts;
         buffer.committed().await.expect("the batch commits");
         for (index, path, entry) in appended {
             written[index][path].push(entry);
         }
     }
     let written = written.into_iter().flatten().collect();
-    (tails(&buffer, &slots), written)
+    (tails(&buffer, &slots), written, used)
+}
+
+/// The first limit of one record that a batch of `entries` entries, `parts` parts,
+/// and `bytes` bytes is over: 1023 entries, 1023 parts, and a body of `body_max`.
+fn limit(
+    body_max: usize,
+    entries: usize,
+    parts: usize,
+    bytes: usize,
+) -> Result<(), Limit> {
+    const COUNT_MAX: usize = 1023;
+    let len = body(entries, bytes);
+    if entries > COUNT_MAX {
+        Err(Limit::Entries { count: entries })
+    } else if parts > COUNT_MAX {
+        Err(Limit::Parts { count: parts })
+    } else if len > body_max {
+        Err(Limit::Body { len, max: body_max })
+    } else {
+        Ok(())
+    }
 }
 
 /// Every entry of each path from the start, in slot then path order.
@@ -460,12 +648,26 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
             .expect("the ring reads");
         image.extend_from_slice(&read);
     }
-    let sealed = image[..BLOCK].to_vec();
-    apply(&mut image, &Edit::SealHeader { second: false });
-    assert_eq!(
-        image[..BLOCK],
-        sealed,
-        "the header seal restates the format"
+    let written = image.clone();
+    let mut restated = 0;
+    for (block, _) in walk(&image) {
+        let kind = image.get(block * BLOCK + RECORD_KIND_AT);
+        if !matches!(kind, Some(&(DATA | WRAP | RESTART))) {
+            break;
+        }
+        apply(&mut image, &Edit::SealRecord { block });
+        assert!(
+            image == written,
+            "the record seal restates the format at {block}"
+        );
+        restated += 1;
+    }
+    let (block, lap) = tail(&written);
+    let mut image = written.clone();
+    apply(&mut image, &Edit::MoveTail { block, lap });
+    assert!(
+        restated > 0 && image == written,
+        "the record kind and `MoveTail` restate the formats"
     );
     for edit in edits {
         apply(&mut image, edit);
@@ -483,12 +685,15 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
 }
 
 /// Opens the changed ring. With no edits, it must open, give the tails and the
-/// entries the build left, and have room for the commit and the reopen. When it
-/// opens, each path must read, and one commit on it must survive a reopen and read
-/// back the same before and after.
+/// entries the build left, and refuse the commit and the reopen for no room exactly
+/// when the blocks of the area run out. When it opens, each path must read. One
+/// commit on it must then give `Rejected::Large` when the record limits in the ring
+/// header refuse it, or else fit or give `Rejected::Full`. A commit that fits must
+/// survive a reopen and read back the same before and after.
 ///
-/// The commit is one entry of `CHECK_PART` bytes at each tail. A record edit can put a
-/// tail at `u64::MAX`, a precondition of `append`, so such a ring is not checked.
+/// The commit is one entry at each tail, of the input's `check_part` bytes. A record
+/// edit can put a tail at `u64::MAX`, a precondition of `append`, so such a ring is
+/// not checked.
 async fn check(
     node: &sim::node::Node,
     tasks: &Tasks,
@@ -496,17 +701,46 @@ async fn check(
     input: &Input,
     built: &[Tail],
     written: &[Vec<Given>],
+    used: usize,
 ) {
-    let (buffer, slots) = match open(node, tasks, pool).await {
+    // The blocks taken after the open when no edit changed the ring. An open writes
+    // its restart record over the build's when the build took no batch.
+    let used = input
+        .edits
+        .is_empty()
+        .then_some(used + usize::from(used > 1));
+    // The offsets left after a tail that the only edit moved to the last lap.
+    let left = match input.edits[..] {
+        [Edit::MoveTail { block, lap }] if lap == LAP_LAST => {
+            Some(u64::MAX - (lap * AREA + ((block - 2) * BLOCK) as u64))
+        }
+        _ => None,
+    };
+    let opened = open(node, tasks, pool).await;
+    if left.is_some_and(|left| left < BLOCK as u64) {
+        assert!(
+            matches!(opened, Err(Error::Full { .. } | Error::Invalid { .. })),
+            "an open wrote a restart record past the last offset"
+        );
+    }
+    let (buffer, slots) = match opened {
         Ok(opened) => opened,
         Err(Error::Pool(_) | Error::Files(_)) => panic!("open failed outside the ring"),
+        Err(Error::Full { .. }) if used.is_none_or(|used| used > BLOCKS) => return,
         Err(other) if input.edits.is_empty() => {
             panic!("an open refused the ring the build wrote: {other}")
         }
         Err(_) => return,
     };
+    assert!(
+        used.is_none_or(|used| used <= BLOCKS),
+        "an open wrote a restart record that the area has no room for"
+    );
     let read = read_paths(&buffer, &slots).await;
+    // An edit can change the sizes in the header, and the ring keeps them.
+    let body_max = buffer.layout().body_max();
     if input.edits.is_empty() {
+        assert_eq!(body_max, BODY_MAX, "an open lost the sizes the build wrote");
         assert_eq!(
             tails(&buffer, &slots),
             built,
@@ -527,18 +761,10 @@ async fn check(
             if tail.seq == u64::MAX {
                 return;
             }
-            let mut part = pool.alloc(CHECK_PART).expect("the pool has a block");
+            let mut part = pool.alloc(input.check_part).expect("the pool has a block");
             let tag = CHECK_TAG + u8::try_from(commits.len()).expect("few paths");
             part.fill(tag);
-            commits.push(Given {
-                first: tail.seq,
-                len: 1,
-                stored_at: stored_at(tag),
-                last: Some(CHECK_LAST),
-                tag,
-                bytes: part.to_vec(),
-            });
-            entries.push(Entry {
+            let entry = Entry {
                 index: key(index),
                 slot: *slot,
                 path,
@@ -548,13 +774,48 @@ async fn check(
                 last: Some(CHECK_LAST),
                 tag,
                 parts: Parts::from(part.freeze()),
-            });
+            };
+            commits.push(Given::from(&entry));
+            entries.push(entry);
         }
     }
     let before = tails(&buffer, &slots);
-    match buffer.append(entries) {
-        Ok(()) => {}
-        Err(Rejected::Full { .. }) if !input.edits.is_empty() => return,
+    // The restart record took a block of the offsets left.
+    let room = left.map(|left| left.saturating_sub(BLOCK as u64));
+    let fits = limit(
+        body_max,
+        entries.len(),
+        entries.len(),
+        input.check_part * entries.len(),
+    );
+    let taken = buffer.append(entries);
+    if let Err(limit) = fits {
+        assert_eq!(
+            taken,
+            Err(Rejected::Large(limit)),
+            "an append refused a commit other than by the record limits"
+        );
+        return;
+    }
+    let used = used.map(|used| used + check_record(input.check_part).div_ceil(BLOCK));
+    match taken {
+        Ok(()) => assert!(
+            room.is_none_or(|room| {
+                check_record(input.check_part).next_multiple_of(BLOCK) as u64 <= room
+            }),
+            "a commit took offsets past the last"
+        ),
+        Err(Rejected::Full { free, .. }) => {
+            assert!(
+                room.is_none_or(|room| free <= room),
+                "a full ring had more offsets free than are left"
+            );
+            assert!(
+                used.is_none_or(|used| used > BLOCKS),
+                "an append refused a commit that the area has room for"
+            );
+            return;
+        }
         Err(other) => panic!("append failed: {other}"),
     }
     assert_eq!(
@@ -570,12 +831,21 @@ async fn check(
         assert_eq!(given.last(), Some(commit), "a read lost the commit");
     }
     drop(buffer);
-    // An open costs one block for its restart record. Only an edit leaves no room.
+    assert!(
+        used.is_none_or(|used| used <= BLOCKS),
+        "an append took more blocks than the area has"
+    );
+    // An open costs one block for its restart record.
+    let used = used.map(|used| used + 1);
     let (reopened, slots) = match open(node, tasks, pool).await {
         Ok(opened) => opened,
-        Err(Error::Full { .. }) if !input.edits.is_empty() => return,
+        Err(Error::Full { .. }) if used.is_none_or(|used| used > BLOCKS) => return,
         Err(other) => panic!("a ring with a commit did not reopen: {other}"),
     };
+    assert!(
+        used.is_none_or(|used| used <= BLOCKS),
+        "a reopen wrote a restart record that the area has no room for"
+    );
     let recovered: Vec<Tail> = slots
         .iter()
         .flat_map(|slot| PATHS.map(|path| reopened.tail(*slot, path)))
@@ -604,7 +874,7 @@ fuzz_target!(|input: Input| {
             let config = block::Config { budget: 1 << 21 };
             let pool =
                 Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-            let (built, written) = build(&node, &tasks, &pool, &input).await;
+            let (built, written, used) = build(&node, &tasks, &pool, &input).await;
             let file = node
                 .files()
                 .open(Path::new(RING), Mode::Write)
@@ -612,7 +882,7 @@ fuzz_target!(|input: Input| {
                 .expect("the ring is there");
             edit(&file, &pool, &input.edits).await;
             drop(file);
-            check(&node, &tasks, &pool, &input, &built, &written).await;
+            check(&node, &tasks, &pool, &input, &built, &written, used).await;
         })
         .expect("the shard starts");
     sim.run().expect("the run ends");
