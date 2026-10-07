@@ -3620,6 +3620,34 @@ mod tests {
     }
 
     #[test]
+    fn ended_streams_give_their_own_end_after_the_connection_drains() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut reset = reset(&mut pair, VarInt::from_u32(7));
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
+            pair.run(RUN);
+            let mut finished = accept(&mut pair.server).receiver;
+            let now = pair.now();
+            let drained = drain(&mut pair.server, now, &mut finished);
+            assert_eq!(drained, (vec![b"a".to_vec()], true));
+            let read = next(&mut pair.server, now, &mut reset);
+            let stream_reset = Err(Error::Reset { code: Code(7) });
+            assert_eq!(read, stream_reset);
+            let server = key(&pair.server);
+            pair.server.endpoint.close(now, server, Code(9));
+            pair.run(Duration::from_secs(3));
+            assert!(pair.server.endpoint.drained());
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut finished);
+            assert_eq!(read, Ok(Poll::Ready(None)));
+            assert_eq!(next(&mut pair.server, now, &mut reset), stream_reset);
+        });
+    }
+
+    #[test]
     fn reset_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
@@ -3648,6 +3676,21 @@ mod tests {
         stopped.expect("stopped");
         pair.run(RUN);
         sender
+    }
+
+    #[test]
+    fn stopped_by_the_peer_give_the_end_of_the_connection_once_it_ended() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = stop(&mut pair, shard, VarInt::from_u32(7));
+            let (now, key) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, key, Code(9));
+            let mut message = Some(shard.block(b"b"));
+            let written = pair.client.endpoint.write(now, &sender, &mut message);
+            assert_eq!(written, Err(Error::Closed { code: Code(9) }));
+            let finished = pair.client.endpoint.finish(now, &mut sender);
+            assert_eq!(finished, Err(Error::Closed { code: Code(9) }));
+        });
     }
 
     #[test]
@@ -3847,7 +3890,7 @@ mod tests {
     }
 
     #[test]
-    fn after_a_peer_close_or_a_fault_give_its_error_until_it_drains() {
+    fn after_a_peer_close_or_a_fault_give_its_error_also_after_it_drains() {
         let broken = Error::Broken {
             reason: "a stream of class 4".into(),
         };
@@ -3870,20 +3913,27 @@ mod tests {
                 while !events(&pair.client).iter().any(ended) {
                     pair.run(STEP);
                 }
+                for drained in [false, true] {
+                    if drained {
+                        pair.run(Duration::from_secs(3));
+                    }
+                    assert_eq!(pair.client.endpoint.drained(), drained);
+                    let now = pair.now();
+                    let read = next(&mut pair.client, now, &mut receiver);
+                    assert_eq!(read, Err(error.clone()));
+                    let endpoint = &mut pair.client.endpoint;
+                    let flushed = endpoint.write(now, &sender, &mut None);
+                    assert_eq!(flushed, Err(error.clone()));
+                    let mut message = Some(shard.block(b"a"));
+                    let written = endpoint.write(now, &sender, &mut message);
+                    assert_eq!(written, Err(error.clone()));
+                    let finished = endpoint.finish(now, &mut finishing);
+                    assert_eq!(finished, Err(error.clone()));
+                    let block = shard.block(b"b");
+                    let given = try_write(&mut pair.client, now, &mut other, block);
+                    assert_eq!(given, Err(error.clone()));
+                }
                 let now = pair.now();
-                let read = next(&mut pair.client, now, &mut receiver);
-                assert_eq!(read, Err(error.clone()));
-                let endpoint = &mut pair.client.endpoint;
-                let flushed = endpoint.write(now, &sender, &mut None);
-                assert_eq!(flushed, Err(error.clone()));
-                let written =
-                    endpoint.write(now, &sender, &mut Some(shard.block(b"a")));
-                assert_eq!(written, Err(error.clone()));
-                let finished = endpoint.finish(now, &mut finishing);
-                assert_eq!(finished, Err(error.clone()));
-                let block = shard.block(b"b");
-                let given = try_write(&mut pair.client, now, &mut other, block);
-                assert_eq!(given, Err(error.clone()));
                 let endpoint = &mut pair.client.endpoint;
                 endpoint.reset(now, &mut sender, Code(9));
                 endpoint.stop(now, receiver, Code(9));

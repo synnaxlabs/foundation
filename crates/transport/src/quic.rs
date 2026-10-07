@@ -333,11 +333,10 @@ impl Endpoint {
     /// # Errors
     ///
     /// [`Error::TooLarge`] when `message` is over the peer's largest message.
-    /// Nothing of it is sent, and it stays in `message`. Then [`Error::Reset`] with
+    /// Nothing of it is sent, and it stays in `message`. Then the error of the
+    /// connection's [`Event::Closed`] once it ended. Then [`Error::Reset`] with
     /// `Code(0)` after an [`Endpoint::cancel`] reset the stream, and
     /// [`Error::Stopped`] when the peer stopped it; each later write gives it too.
-    /// The error of the connection's [`Event::Closed`] once it ended, and
-    /// [`Error::Broken`] when the call finds a fault of the peer's.
     ///
     /// # Panics
     ///
@@ -401,10 +400,10 @@ impl Endpoint {
     ///
     /// # Errors
     ///
+    /// The error of the connection's [`Event::Closed`] once it ended. Then
     /// [`Error::Reset`] with `Code(0)` after an [`Endpoint::cancel`] reset the
     /// stream, and [`Error::Stopped`] when the peer stopped it; each later finish
-    /// gives it too. The error of the connection's [`Event::Closed`] once it ended,
-    /// and [`Error::Broken`] when the call finds a fault of the peer's.
+    /// gives it too.
     ///
     /// # Panics
     ///
@@ -433,8 +432,8 @@ impl Endpoint {
     /// # Errors
     ///
     /// - [`Error::Reset`] when the peer reset the stream. Each later read gives it
-    ///   too.
-    /// - The error of the connection's [`Event::Closed`] once it ended, and
+    ///   too, also once the connection ended.
+    /// - Else the error of the connection's [`Event::Closed`] once it ended, and
     ///   [`Error::Broken`] when the read finds a fault of the peer's.
     pub(crate) fn read(
         &mut self,
