@@ -34,8 +34,8 @@ impl Gap {
 
     /// Adds the trimmed samples with the seqs in `seqs`. The gap then holds each seq
     /// from the least start it got, also the seqs between two ranges that do not touch.
-    /// A seq that the gap already holds is held once, so a gap that the reader
-    /// reports again counts once. A range with `start == end` adds nothing.
+    /// A seq that the gap already holds is held once, so a gap that the reader reports
+    /// again counts once. A range with `start == end` adds nothing.
     ///
     /// # Panics
     ///
