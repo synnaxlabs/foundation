@@ -413,7 +413,9 @@ impl Group {
         let waiting = queues.filter_map(|queue| queue.waker.take());
         waiting.for_each(Waker::wake);
         self.wake_watches();
-        self.proposals.iter().for_each(|proposal| proposal.wake());
+        for proposal in &self.proposals {
+            proposal.wake();
+        }
     }
 
     fn wake_watches(&mut self) {
@@ -560,7 +562,9 @@ async fn run(
             group.send(messages);
             group.apply(committed)
         });
-        proposals.iter().for_each(|proposal| proposal.wake());
+        for proposal in &proposals {
+            proposal.wake();
+        }
         if let Err(stopped) = applied {
             group.stop(stopped);
             return;
