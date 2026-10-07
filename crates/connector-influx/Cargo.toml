@@ -25,8 +25,14 @@ types = { path = "../types" }
 
 [dev-dependencies]
 connector = { path = "../connector" }
+counting = { path = "../counting" }
 proptest.workspace = true
 sim = { path = "../sim" }
+
+[[test]]
+name = "memory"
+harness = false
+required-features = ["sim"]
 
 [lints]
 workspace = true

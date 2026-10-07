@@ -7,8 +7,10 @@ name = "acceptance"
 version = "0.0.0"
 dependencies = [
  "block",
+ "connector-influx",
  "env",
  "node",
+ "proptest",
  "sim",
  "types",
 ]
@@ -354,6 +356,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "connector",
+ "counting",
  "env",
  "http",
  "influxdb-line-protocol",
@@ -967,6 +970,7 @@ dependencies = [
  "sim",
  "transport",
  "types",
+ "wire",
 ]
 
 [[package]]

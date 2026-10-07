@@ -1,6 +1,7 @@
 //! The `env::files` driver on the real disk. One I/O thread runs every call of a
 //! disk and its files, in the order they reach its queue.
 
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::IoSlice;
@@ -14,7 +15,7 @@ use block::{Block, Unique};
 use env::files::{Descriptor, Error, Mode, Operation, Request};
 use env::thread::Handle;
 use env::threads::Threads;
-use rustix::fs::{self, AtFlags, FileType, FlockOperation, OFlags};
+use rustix::fs::{self, AtFlags, FileType, FlockOperation, OFlags, RenameFlags};
 use rustix::io::{self, Errno};
 use tokio::sync::{mpsc, oneshot};
 
@@ -92,13 +93,14 @@ impl env::files::Driver for Disk {
     ) -> Request<'a, Box<dyn Descriptor>> {
         let (data, owned) = (Arc::clone(&self.data), path.to_path_buf());
         let opened = self.queue.run(move || open(&data, &owned, mode));
-        let (queue, path) = (self.queue.clone(), Arc::from(path));
+        let (data, queue) = (Arc::clone(&self.data), self.queue.clone());
         Box::pin(async move {
             let (fd, len) = opened.await?;
             let file: Box<dyn Descriptor> = Box::new(File {
                 fd: Arc::new(fd),
+                data,
                 len,
-                path,
+                path: RefCell::new(Arc::from(path)),
                 queue,
             });
             Ok(file)
@@ -136,8 +138,11 @@ impl env::files::Driver for Disk {
 /// One open file. Each call keeps the file open until it ends.
 struct File {
     fd: Arc<OwnedFd>,
+    /// The data directory, which a rename acts in.
+    data: Arc<OwnedFd>,
     len: u64,
-    path: Arc<Path>,
+    /// The path of the file now: a rename changes it.
+    path: RefCell<Arc<Path>>,
     queue: Queue,
 }
 
@@ -148,7 +153,7 @@ impl File {
         operation: Operation,
         call: impl FnOnce(&OwnedFd) -> io::Result<T> + Send + 'static,
     ) -> Request<'_, T> {
-        let (fd, path) = (Arc::clone(&self.fd), Arc::clone(&self.path));
+        let (fd, path) = (Arc::clone(&self.fd), Arc::clone(&self.path.borrow()));
         Box::pin(
             self.queue
                 .run(move || call(&fd).map_err(fail(&path, operation))),
@@ -176,6 +181,17 @@ impl Descriptor for File {
 
     fn sync(&self) -> Request<'_, ()> {
         self.call(Operation::Sync, sync_data)
+    }
+
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
+        let (fd, data) = (Arc::clone(&self.fd), Arc::clone(&self.data));
+        let (old, new) = (from.to_path_buf(), to.to_path_buf());
+        let renamed = self.queue.run(move || rename(&fd, &data, &old, &new));
+        Box::pin(async move {
+            renamed.await?;
+            *self.path.borrow_mut() = Arc::from(to);
+            Ok(())
+        })
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
@@ -250,7 +266,8 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
             }
         }
         let stat = fs::fstat(&fd).map_err(&failed)?;
-        if mode == Mode::Read || named(data, path, &stat).map_err(&failed)? {
+        let flags = AtFlags::empty();
+        if mode == Mode::Read || named(data, path, flags, &stat).map_err(&failed)? {
             break (fd, stat);
         }
     };
@@ -357,10 +374,34 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
     return fs::fcntl_fullfsync(fd);
 }
 
-/// Whether `path` names the file of `stat`. A failed create of another handle unlinks
-/// its file, also after a write open found it and before that open locked it.
-fn named(data: &OwnedFd, path: &Path, stat: &fs::Stat) -> io::Result<bool> {
-    match fs::statat(data, path, AtFlags::empty()) {
+/// Renames `from` to `to` when `from` names the file `fd`, with no replace. The I/O
+/// thread of a shard runs its calls in order, and each shard writes only its own
+/// directory, so nothing changes `from` between the check and the rename.
+fn rename(fd: &OwnedFd, data: &OwnedFd, from: &Path, to: &Path) -> Result<(), Error> {
+    let failed = fail(from, Operation::Rename);
+    let stat = fs::fstat(fd).map_err(&failed)?;
+    let flags = AtFlags::SYMLINK_NOFOLLOW;
+    if !named(data, from, flags, &stat).map_err(&failed)? {
+        return Err(failed(Errno::NOENT));
+    }
+    match fs::renameat_with(data, from, data, to, RenameFlags::NOREPLACE) {
+        Err(Errno::EXIST) => Err(Error::Exists {
+            path: to.to_path_buf(),
+        }),
+        renamed => renamed.map_err(&failed),
+    }
+}
+
+/// Whether `path`, looked up by `flags`, names the file of `stat`. A failed create of
+/// another handle unlinks its file, also after a write open found it and before that
+/// open locked it.
+fn named(
+    data: &OwnedFd,
+    path: &Path,
+    flags: AtFlags,
+    stat: &fs::Stat,
+) -> io::Result<bool> {
+    match fs::statat(data, path, flags) {
         Ok(found) => Ok((found.st_dev, found.st_ino) == (stat.st_dev, stat.st_ino)),
         Err(Errno::NOENT) => Ok(false),
         Err(errno) => Err(errno),
