@@ -2190,7 +2190,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
   From the review of #1018: a name matches in any ASCII case and with or without one
   final dot, as in DNS. An IP literal as a name panics, because no lookup reads it.
-  A lookup that would end past the end of the clock never answers.
+  A lookup that would end past the end of the clock never answers. The match in any
+  case and with a final dot was confirmed by the architect on #1018, in place of its
+  earlier exact match
+  (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649).
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
