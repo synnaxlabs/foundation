@@ -1,0 +1,8 @@
+retention "a" {
+  select = "x"
+  keep = "0s"
+}
+retention "A" {
+  select = "y"
+  keep = "1h"
+}

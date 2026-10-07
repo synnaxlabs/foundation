@@ -224,6 +224,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "config"
+version = "0.0.0"
+dependencies = [
+ "document",
+ "spec",
+ "types",
+]
+
+[[package]]
 name = "config-hcl"
 version = "0.0.0"
 dependencies = [
@@ -405,6 +414,7 @@ dependencies = [
  "block",
  "buffer",
  "codec",
+ "config",
  "config-hcl",
  "connector-modbus",
  "crc32c",
