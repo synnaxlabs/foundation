@@ -194,7 +194,7 @@ impl<const N: usize> Iterator for Join<'_, N> {
 
     #[expect(
         clippy::inline_always,
-        reason = "as a call, it made a narrow walk 1.7 to 2 times slower"
+        reason = "as a call, it made a narrow walk 1.5 to 2.2 times slower"
     )]
     #[inline(always)]
     fn next(&mut self) -> Option<usize> {
