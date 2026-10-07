@@ -370,6 +370,28 @@ mod tests {
         assert_eq!(size(&value).unwrap_err().span, None);
     }
 
+    /// A span that starts at `offset`, so each item in a list has its own.
+    fn at(offset: u32) -> Option<Span> {
+        let at = |offset| Position {
+            offset,
+            line: 0,
+            column: offset,
+        };
+        Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
+    }
+
+    /// A list of the items, each at its index.
+    fn list(items: Vec<Kind>) -> Value {
+        let items = (0..)
+            .zip(items)
+            .map(|(i, kind)| Value { kind, span: at(i) });
+        value(Kind::List(items.collect()))
+    }
+
+    fn text(text: &str) -> Kind {
+        Kind::String(text.into())
+    }
+
     /// A `document.bad-name` diagnostic.
     fn bad_name(span: Option<Span>, message: &str, fix: &str) -> Diagnostic {
         Diagnostic::new(
@@ -473,28 +495,6 @@ mod tests {
 
         const FIX: &str = "Write a name such as \"site_a.node_1\"";
 
-        /// A span that starts at `offset`, so each item in a list has its own.
-        fn at(offset: u32) -> Option<Span> {
-            let at = |offset| Position {
-                offset,
-                line: 0,
-                column: offset,
-            };
-            Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
-        }
-
-        /// A list of the items, each at its index.
-        fn list(items: Vec<Kind>) -> Value {
-            let items = (0..)
-                .zip(items)
-                .map(|(i, kind)| Value { kind, span: at(i) });
-            value(Kind::List(items.collect()))
-        }
-
-        fn text(text: &str) -> Kind {
-            Kind::String(text.into())
-        }
-
         fn parsed(text: &str) -> Name {
             text.parse().unwrap()
         }
@@ -575,28 +575,6 @@ mod tests {
 
     mod selectors {
         use super::*;
-
-        /// A span that starts at `offset`, so each pattern in a list has its own.
-        fn at(offset: u32) -> Option<Span> {
-            let at = |offset| Position {
-                offset,
-                line: 0,
-                column: offset,
-            };
-            Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
-        }
-
-        /// A list of the patterns, each at its index.
-        fn list(patterns: Vec<Kind>) -> Value {
-            let items = (0..)
-                .zip(patterns)
-                .map(|(i, kind)| Value { kind, span: at(i) });
-            value(Kind::List(items.collect()))
-        }
-
-        fn text(text: &str) -> Kind {
-            Kind::String(text.into())
-        }
 
         fn reference(name: &str) -> Kind {
             Kind::Reference(name.parse().unwrap())
