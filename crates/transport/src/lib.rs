@@ -87,9 +87,9 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// [`Port`] and splits it into one part for each shard.
 ///
 /// Dropping it closes each session that no caller accepted with `Code(0)`, and the
-/// sessions it gave stay open. It refuses each dial from a peer until each session
-/// ended and its connection drained, a few round trips later. Then it frees its
-/// [`port::Part`], so a later dial gets no answer.
+/// sessions it gave stay open. It refuses each dial from a peer until each of its
+/// connections drained: each session ended, and each handshake in flight finished
+/// or timed out. Then it frees its [`port::Part`], so a later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
 }

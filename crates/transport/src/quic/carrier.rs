@@ -364,6 +364,7 @@ impl Task {
         if state.accepted.is_none()
             && state.endpoint.drained()
             && self.socket.held.is_none()
+            && !more
         {
             state.task = None;
             return Poll::Ready(());
@@ -969,6 +970,42 @@ mod tests {
     }
 
     #[test]
+    fn a_dial_that_arrives_before_the_drain_behind_junk_is_refused() {
+        let (mut sim, client, server) = nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, node| async move {
+            let session = carrier.accept().await.expect("a session");
+            drop(carrier);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            let now = node.clock().now();
+            let drain = session.state.borrow().endpoint.deadline().expect("a drain");
+            // The dial of `late` arrives at about 41 ms, before the drain ends.
+            assert!(drain - now > spans(Span::MILLISECOND, 30));
+            node.pause(spans(Span::MILLISECOND, 300));
+            node.clock().sleep(spans(IDLE, 3)).await;
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 40)).await;
+            junk(&node, at, BATCHES).await;
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let reason =
+                "aborted by peer: the server refused to accept a new connection";
+            let reason = String::from(reason);
+            assert_eq!(dialed.err(), Some(Error::Broken { reason }));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_broken_socket_ends_each_session_and_refuses_new_ones() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
@@ -984,6 +1021,7 @@ mod tests {
                 error: env::net::Error::Io { code: 5 },
             };
             assert_eq!(session.closed().await, network);
+            assert!(carrier.0.borrow().task.is_none());
             let dialed = carrier.connect(public(&SERVER), at).await;
             assert_eq!(dialed.err(), Some(network.clone()));
             assert_eq!(carrier.accept().await.err(), Some(network));
