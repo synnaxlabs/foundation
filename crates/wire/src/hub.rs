@@ -910,6 +910,12 @@ mod tests {
         fn panics_when_out_holds_another_count_of_keys() {
             super::super::keys::encode(&[key(1)], &mut [0; 32]);
         }
+
+        #[test]
+        #[should_panic(expected = "out holds 1 keys, and the message has 2")]
+        fn panics_when_out_holds_fewer_keys_than_the_message() {
+            super::super::keys::encode(&[key(1), key(2)], &mut [0; 16]);
+        }
     }
 
     mod ends {
