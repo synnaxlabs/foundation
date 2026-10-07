@@ -36,7 +36,7 @@ impl Rng {
     }
 
     fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
+        self.next() % n
     }
 
     fn chance(&mut self, permille: u64) -> bool {
