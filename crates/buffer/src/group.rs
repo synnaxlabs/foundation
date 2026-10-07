@@ -11,7 +11,7 @@ use types::channel::Slot;
 
 use crate::entry::{self, Entry, Header};
 use crate::record;
-use crate::wal::{Full, Limit, Plan, Writer};
+use crate::wal::{Full, Limit, Plan, Position, Writer};
 
 /// Bytes of the block that holds a record header and the largest entry table: one
 /// block of the pool's 64 KiB class.
@@ -245,7 +245,14 @@ impl Closed {
             header.copy_from_slice(&write.header);
             (write.place, wrap.freeze().skip(start))
         });
-        let sealed = Sealed { group, plan, wrap };
+        let end = Position::new(plan.next, next)
+            .expect("invariant: a planned record ends on a block boundary");
+        let sealed = Sealed {
+            group,
+            plan,
+            wrap,
+            end,
+        };
         (sealed, next)
     }
 }
@@ -257,6 +264,7 @@ pub(crate) struct Sealed {
     group: Group,
     plan: Plan,
     wrap: Option<(u64, Block)>,
+    end: Position,
 }
 
 impl Sealed {
@@ -276,10 +284,10 @@ impl Sealed {
         self.plan.offset
     }
 
-    /// The offset after the record.
+    /// The boundary after the record: where the tail goes to free it.
     #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
-    pub(crate) fn next(&self) -> u64 {
-        self.plan.next
+    pub(crate) fn end(&self) -> Position {
+        self.end
     }
 
     /// The headers, for the durable tails once the record is synced.
@@ -316,7 +324,7 @@ mod tests {
 
     use crate::entry::{ENTRIES_MAX, Parts, table_len};
     use crate::record::HEADER_LEN;
-    use crate::wal::{self, Cursor, Layout, Position, Step, Window};
+    use crate::wal::{self, Cursor, Layout, Step, Window};
 
     const BLOCKS: u64 = 32;
     const AREA: u64 = BLOCKS * 4096;
@@ -688,7 +696,7 @@ mod tests {
             let closed = group.close(&mut area.writer);
             let sealed = area.commit(closed);
             if first == 0 {
-                tail = Position::new(sealed.next(), area.chain).expect("aligned");
+                tail = sealed.end();
             }
             group = sealed.clear();
         }
@@ -709,7 +717,7 @@ mod tests {
             "the wrap, then the record"
         );
         assert_eq!(sealed.offset(), 32 * 4096, "the offset is past the wrap");
-        assert_eq!(sealed.next(), 34 * 4096);
+        assert_eq!(sealed.end().offset(), 34 * 4096);
         let bodies = area.walk_from(tail);
         assert_eq!(bodies.len(), 10);
         assert_eq!(bodies[9].len(), table_len(1) + 4096);
