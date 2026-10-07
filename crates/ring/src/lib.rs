@@ -543,6 +543,11 @@ mod tests {
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
             assert_eq!(producer.lock().unwrap().push(2), Ok(()));
             assert_eq!(tally.count(), 0);
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(2)));
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
+            assert_eq!(tally.count(), 0);
+            assert_eq!(producer.lock().unwrap().push(3), Ok(()));
+            assert_eq!(tally.count(), 1);
         }
 
         /// A `pop` that finds a value looks before it parks, so it leaves no clone
