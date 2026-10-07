@@ -1779,8 +1779,8 @@ mod tests {
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
                 let not_voter = Error::NotVoter { from: key(3) };
                 assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
-                let grant = Error::Claim(claim::Error::Forged { signer: key(1) });
-                assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
+                let forged = Error::Claim(claim::Error::Forged { signer: key(1) });
+                assert_eq!(mesh.receive(public(2), forged(2)), Err(forged));
             });
         }
 
