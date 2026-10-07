@@ -2938,6 +2938,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447, and, for
   a ring with no checkpoint (2026-10-07T08:52:34Z),
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034449677.
+- **NODE SPAWN (2026-10-07)** `Node::spawn(task)` runs `task` with the node's one hub,
+  on shard 0, once each shard has opened its buffer. It has the shape and the rules of
+  `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a panic ends shard 0 and
+  fails the node (`Error::Panicked`). Tasks start in the order of their calls. A task
+  that is given before the hub exists, or after a stop, waits or is dropped unrun. A
+  stop drops each running task. The task runs on shard 0's thread, so it may hold
+  values that are not `Send`, such as sessions. `node` depends on `hub`, and
+  `Node::interner` goes away: shard 0 builds the hub with the interner when it comes
+  back from the last shard. `hub::Config` stays as it is, one interner by value for one
+  shard (after
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043797070). A hub
+  on each shard waits for #1566. Decided by `laptop.architect-2`:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
