@@ -972,7 +972,8 @@ mod tests {
                             sender.finish().expect("finished");
                         }
                         Then::Drop => {
-                            // The peer reads a cancel before any message.
+                            // The first message reaches the peer first, as the peer
+                            // drops a stream reset before it.
                             side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
                             drop(sender);
                         }

@@ -3380,15 +3380,61 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_before_the_class_byte_resets_the_reply() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            // A frame of the later stream opens the earlier one with no byte.
+            let id = raw(pair.client.connection(), Dir::Bi, &[], false);
+            let bytes = [byte(Class::Complete), 1, b'z'];
+            let later = raw(pair.client.connection(), Dir::Bi, &bytes, true);
+            pair.run(RUN);
+            let stopped = pair.client.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            pair.run(RUN);
+            let bytes = [byte(Class::Complete), 1, b'a'];
+            let mut send = pair.client.connection().send_stream(id);
+            assert_eq!(send.write(&bytes), Ok(3));
+            send.finish().expect("finished");
+            pair.run(RUN);
+            let now = pair.now();
+            for (stream, message) in [(later, b"z"), (id, b"a")] {
+                let mut incoming = accept(&mut pair.server);
+                assert_eq!(incoming.receiver.key.id, stream);
+                let read = drain(&mut pair.server, now, &mut incoming.receiver);
+                assert_eq!(read, (vec![message.to_vec()], true));
+                let mut reply = incoming.sender.expect("a two-way stream");
+                if stream == id {
+                    let block = shard.block(b"b");
+                    let written =
+                        pair.server.endpoint.write(now, &reply, &mut Some(block));
+                    assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
+                } else {
+                    let finished = pair.server.endpoint.finish(now, &mut reply);
+                    finished.expect("finished");
+                }
+            }
+            pair.run(RUN);
+            let streams = pair.server.connection().streams();
+            assert_eq!(streams.remote_open_streams(Dir::Bi), 0);
+        });
+    }
+
+    #[test]
     fn a_stop_after_only_the_class_byte_resets_the_reply() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let bytes = [byte(Class::Complete)];
             let id = raw(pair.client.connection(), Dir::Bi, &bytes, false);
             pair.run(RUN);
+            let resets = |pair: &mut Pair| {
+                let stats = pair.client.connection().stats();
+                stats.frame_rx.reset_stream
+            };
+            let before = resets(&mut pair);
             let stopped = pair.client.connection().recv_stream(id).stop(7u32.into());
             stopped.expect("stopped");
             pair.run(RUN);
+            assert_eq!(resets(&mut pair) - before, 1, "a reset at the stop");
             let mut send = pair.client.connection().send_stream(id);
             assert_eq!(send.write(&[1, b'a']), Ok(2));
             pair.run(RUN);
@@ -3400,7 +3446,7 @@ mod tests {
             let message = shard.block(b"b");
             let written = pair.server.endpoint.write(now, &reply, &mut Some(message));
             assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
-            // Only the reset at the stop frees the slot once both halves end.
+            // The reset frees the slot once both halves end.
             let finished = pair.client.connection().send_stream(id).finish();
             finished.expect("finished");
             pair.run(RUN);
@@ -5832,6 +5878,31 @@ mod tests {
                 let written =
                     pair.server.endpoint.write(now, &reply, &mut Some(message));
                 assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+            });
+        }
+
+        #[test]
+        fn reset_at_the_hello_a_reply_stopped_before_it() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let connection = foreign(&mut pair);
+                let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
+                let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                pair.run(RUN);
+                let mut send = foreign(&mut pair).send_stream(hello);
+                let own = OWN.encode();
+                assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                let mut incoming = accept(&mut pair.server);
+                let now = pair.now();
+                let read = drain(&mut pair.server, now, &mut incoming.receiver);
+                assert_eq!(read, (vec![b"b".to_vec()], true));
+                pair.run(RUN);
+                let streams = pair.server.connection().streams();
+                assert_eq!(streams.remote_open_streams(Dir::Bi), 0);
             });
         }
 
