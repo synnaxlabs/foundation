@@ -92,26 +92,15 @@ impl std::error::Error for Error {}
 /// A reader session. Dropping it closes the session; frames that wait do not go out.
 #[derive(Debug)]
 pub struct Reader {
-    state: Rc<RefCell<State>>,
-    key: ::home::reader::Key,
-    /// The credit of a complete reader.
-    credit: Option<Credit>,
+    session: Session,
+    /// The charge of each frame that a complete reader took and gave back.
+    taken_bytes: Option<u64>,
     /// The slots of the reader's channels.
     slots: Box<[channel::Slot]>,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
     mask: Option<(Arc<KeySet>, Mask)>,
-    /// Frames given in a row since `next` last returned `Pending`.
-    streak: u32,
-}
-
-/// What a complete reader took, to grant its credit.
-#[derive(Debug)]
-struct Credit {
-    key: ::home::reader::complete::Key,
-    /// The charge of each frame that the caller took and gave back.
-    taken_bytes: u64,
 }
 
 impl Reader {
@@ -121,43 +110,36 @@ impl Reader {
         channels: &[Name],
         mode: Mode,
     ) -> Result<Self, Error> {
-        let mut borrowed = state.borrow_mut();
-        let borrowed = &mut *borrowed;
-        let mut index = None;
         let mut slots = Vec::with_capacity(channels.len());
-        for name in channels {
-            let channel = borrowed
-                .channels
-                .get(name)
-                .ok_or_else(|| Error::Unknown(name.clone()))?;
-            if *index.get_or_insert(channel.index) != channel.index {
-                return Err(Error::ManyIndexes);
+        let index = {
+            let mut borrowed = state.borrow_mut();
+            let borrowed = &mut *borrowed;
+            let mut index = None;
+            for name in channels {
+                let channel = borrowed
+                    .channels
+                    .get(name)
+                    .ok_or_else(|| Error::Unknown(name.clone()))?;
+                if *index.get_or_insert(channel.index) != channel.index {
+                    return Err(Error::ManyIndexes);
+                }
+                slots.push(borrowed.interner.slots().assign(channel.key));
             }
-            slots.push(borrowed.interner.slots().assign(channel.key));
-        }
-        let index = index.ok_or(Error::Empty)?;
-        let slot = borrowed.interner.slots().assign(index);
+            let index = index.ok_or(Error::Empty)?;
+            borrowed.interner.slots().assign(index)
+        };
         // A frame without the reader's channels still shows that time moved.
-        slots.push(slot);
-        let (key, credit) = match mode {
-            Mode::Complete => {
-                let key = borrowed.home.open_complete(slot, WINDOW);
-                let credit = Credit {
-                    key,
-                    taken_bytes: 0,
-                };
-                (key.into(), Some(credit))
-            }
-            Mode::Latest => (borrowed.home.open_latest(slot), None),
+        slots.push(index);
+        let (session, taken_bytes) = match mode {
+            Mode::Complete => (Session::complete(state, index, WINDOW), Some(0)),
+            Mode::Latest => (Session::latest(state, index), None),
         };
         Ok(Self {
-            state: Rc::clone(state),
-            key,
-            credit,
+            session,
+            taken_bytes,
             slots: slots.into(),
             frame: None,
             mask: None,
-            streak: 0,
         })
     }
 
@@ -180,43 +162,18 @@ impl Reader {
     )]
     pub fn next(&mut self) -> impl Future<Output = Result<Received<'_>, Ended>> {
         if let Some(frame) = self.frame.take()
-            && let Some(credit) = &mut self.credit
+            && let Some(taken_bytes) = &mut self.taken_bytes
         {
-            credit.taken_bytes += frame.charge();
-            let limit = credit.taken_bytes + WINDOW;
-            self.state.borrow_mut().home.grant(credit.key, limit);
+            *taken_bytes += frame.charge();
+            self.session.grant(*taken_bytes + WINDOW);
         }
         async move {
-            let frame = poll_fn(|cx| {
-                let mut state = self.state.borrow_mut();
-                let state = &mut *state;
-                if self.streak == STREAK {
-                    self.streak = 0;
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-                if let Some(frame) = state.home.take(self.key) {
-                    self.streak += 1;
-                    return Poll::Ready(Ok(frame));
-                }
-                if let Some(credit) = &self.credit
-                    && state.home.behind(credit.key)
-                {
-                    return Poll::Ready(Err(Ended::Behind));
-                }
-                if let Some(error) = &state.failed {
-                    return Poll::Ready(Err(Ended::Buffer(error.clone())));
-                }
-                self.streak = 0;
-                state.wakers.insert(self.key, cx.waker().clone());
-                Poll::Pending
-            })
-            .await?;
+            let frame = self.session.take().await?;
             let key = frame.key_set();
             let (set, mask) = match self.mask.take() {
                 Some(mask) if mask.0.key() == key => self.mask.insert(mask),
                 _ => {
-                    let snapshot = self.state.borrow().interner.snapshot();
+                    let snapshot = self.session.state.borrow().interner.snapshot();
                     let set = snapshot
                         .get(key)
                         .expect("invariant: a frame's key set is known");
@@ -233,7 +190,94 @@ impl Reader {
     }
 }
 
-impl Drop for Reader {
+/// A reader session at the shard's home: the frames it takes, and why it ends. Each
+/// [`Reader`] drives one, and so does each stream of a remote reader.
+#[derive(Debug)]
+pub(crate) struct Session {
+    state: Rc<RefCell<State>>,
+    key: ::home::reader::Key,
+    /// The key of a complete session.
+    complete: Option<::home::reader::complete::Key>,
+    /// Frames given in a row since `take` last returned `Pending`.
+    streak: u32,
+}
+
+impl Session {
+    /// Opens a complete session on the index of `slot`, with a grant of
+    /// `limit_bytes`.
+    pub(crate) fn complete(
+        state: &Rc<RefCell<State>>,
+        slot: channel::Slot,
+        limit_bytes: u64,
+    ) -> Self {
+        let complete = state.borrow_mut().home.open_complete(slot, limit_bytes);
+        Self::new(state, complete.into(), Some(complete))
+    }
+
+    /// Opens a latest session on the index of `slot`.
+    pub(crate) fn latest(state: &Rc<RefCell<State>>, slot: channel::Slot) -> Self {
+        let key = state.borrow_mut().home.open_latest(slot);
+        Self::new(state, key, None)
+    }
+
+    fn new(
+        state: &Rc<RefCell<State>>,
+        key: ::home::reader::Key,
+        complete: Option<::home::reader::complete::Key>,
+    ) -> Self {
+        Self {
+            state: Rc::clone(state),
+            key,
+            complete,
+            streak: 0,
+        }
+    }
+
+    /// Raises the grant of a complete session to `limit_bytes` since the open.
+    ///
+    /// # Panics
+    ///
+    /// When the session is latest.
+    pub(crate) fn grant(&self, limit_bytes: u64) {
+        let complete = self.complete.expect("only a complete session has credit");
+        self.state.borrow_mut().home.grant(complete, limit_bytes);
+    }
+
+    /// The next frame. After [`STREAK`] frames in a row, it yields once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::next`].
+    pub(crate) async fn take(&mut self) -> Result<Frame, Ended> {
+        poll_fn(|cx| {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            if self.streak == STREAK {
+                self.streak = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if let Some(frame) = state.home.take(self.key) {
+                self.streak += 1;
+                return Poll::Ready(Ok(frame));
+            }
+            if let Some(complete) = self.complete
+                && state.home.behind(complete)
+            {
+                return Poll::Ready(Err(Ended::Behind));
+            }
+            if let Some(error) = &state.failed {
+                return Poll::Ready(Err(Ended::Buffer(error.clone())));
+            }
+            self.streak = 0;
+            state.wakers.insert(self.key, cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+impl Drop for Session {
     fn drop(&mut self) {
         let mut state = self.state.borrow_mut();
         state.wakers.remove(&self.key);
