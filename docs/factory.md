@@ -36,8 +36,8 @@ Code with `--name <role>`, the factory mod, and the role's skill. The architect 
 `xhigh` effort, the others at `high`. The monitor watches factory efficiency and
 performance.
 
-A builder works one issue per context. When its PR merges, the engineer runs `/clear`
-and then `/build`.
+A builder works one issue per context. When its PR merges, it calls the factory mod's
+`next` tool, which runs `/clear` and then `/build` by itself.
 
 ## Workstreams
 

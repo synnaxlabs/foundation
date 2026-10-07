@@ -2,6 +2,7 @@
 import type { EngineInterface as Api, Register, Timer } from 'claude-code'
 
 const SEND = 'mcp__factory__send'
+const NEXT = 'mcp__factory__next'
 const ACK_MS = 60_000
 const RETRY_MS = 5_000
 const MINUTE_MS = 60_000
@@ -101,6 +102,14 @@ async function start($: Api): Promise<Session | undefined> {
       },
       required: ['to', 'text'],
     },
+  })
+  await $.tool.register({
+    name: 'next',
+    description:
+      "Clears this session's context once the turn ends, then runs /build, so the " +
+      'session takes its next issue. Call it after the final state comment on a ' +
+      'merged issue, then end your turn.',
+    inputSchema: { type: 'object', properties: {} },
   })
   void listen($, s)
   void drain($, s)
@@ -213,6 +222,16 @@ async function drain($: Api, s: Session) {
   await refresh($, s)
 }
 
+// The commands queue until the session is idle, so `/build` starts in a clear context.
+async function restart($: Api) {
+  try {
+    await $.command.run({ command: 'clear' })
+    await $.command.run({ command: 'build' })
+  } catch (error) {
+    $.ui.log(`next failed: ${error}`)
+  }
+}
+
 async function send($: Api, s: Session, to: unknown, text: unknown) {
   if (typeof to !== 'string' || !s.roster.names.includes(to))
     return {
@@ -305,12 +324,19 @@ export const register: Register = on => {
     return send($, s, e.to, e.text)
   })
 
-  // A session that wakes for a message with nobody at the prompt never searches for
-  // a deferred tool.
-  on('tool.describe', { tool: SEND }, async ($, e, next) => ({
-    ...(await next(e)),
-    isDeferred: false,
-  }))
+  // `$.command.run` rejects inside a hook the turn waits on, so it runs from a timer.
+  on('tool.call', { tool: NEXT }, async $ => {
+    if (!s) return { deny: 'factory messaging is off; see the status line' }
+    $.clock.after(0, () => void restart($))
+    return { result: 'after this turn: /clear, then /build' }
+  })
+
+  // A session that wakes with nobody at the prompt never searches for a deferred tool.
+  for (const tool of [SEND, NEXT])
+    on('tool.describe', { tool }, async ($, e, next) => ({
+      ...(await next(e)),
+      isDeferred: false,
+    }))
 
   // The tool description alone does not stop plain-text answers to a message.
   on('prompt.compose', async ($, e, next) => {
