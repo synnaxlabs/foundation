@@ -552,7 +552,7 @@ mod tests {
 
     use super::*;
     use crate::card;
-    use crate::common::{self, key, message, pool, private, proven, public};
+    use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::region::Malformed;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -604,7 +604,7 @@ mod tests {
             clock: node.clock(),
             entropy: node.entropy(),
             tasks: tasks.clone(),
-            pool: pool(),
+            pool: create_pool(),
         }
     }
 
@@ -1417,7 +1417,7 @@ mod tests {
                 .run_on(&node, |node, _| async move {
                     let files = node.files();
                     let (_, stored) =
-                        Log::open(files, LOG.into(), pool()).await.unwrap();
+                        Log::open(files, LOG.into(), create_pool()).await.unwrap();
                     let changes = stored.entries.into_iter().map(|entry| {
                         let Data::Bytes(bytes) = entry.data else {
                             return None;
@@ -1657,8 +1657,9 @@ mod tests {
         solo(|node, tasks| async move {
             drop(open(&node, &tasks, 1, &[1], &[1]).await.unwrap());
             node.clock().sleep(seconds(5)).await;
-            let (_, stored) =
-                Log::open(node.files(), LOG.into(), pool()).await.unwrap();
+            let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
             assert_eq!((stored.hard, stored.entries), (Hard::default(), Vec::new()));
         });
     }

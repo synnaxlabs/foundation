@@ -653,7 +653,7 @@ mod tests {
 
     use super::*;
     use crate::bytes::{PRESENT, VOTE};
-    use crate::common::pool;
+    use crate::common::create_pool;
 
     const DIR: &str = "mesh";
 
@@ -674,7 +674,7 @@ mod tests {
     }
 
     async fn open(node: &sim::node::Node) -> Result<(Log, Stored), Error> {
-        Log::open(node.files(), DIR.into(), pool()).await
+        Log::open(node.files(), DIR.into(), create_pool()).await
     }
 
     /// What the log of `node` holds when it opens.
@@ -693,7 +693,7 @@ mod tests {
     async fn put(node: &sim::node::Node, file: &str, offset: u64, bytes: &[u8]) {
         let path = Path::new(DIR).join(file);
         let file = node.files().open(&path, Mode::Write).await.unwrap();
-        let mut block = pool().alloc(bytes.len()).unwrap();
+        let mut block = create_pool().alloc(bytes.len()).unwrap();
         block.copy_from_slice(bytes);
         file.write_at(offset, &[block.freeze()]).await.unwrap();
         file.sync().await.unwrap();
@@ -1028,7 +1028,7 @@ mod tests {
         sim.run_on(node, move |node, _| async move {
             let log = file("log-0");
             let file = node.files().open(&log, Mode::Read).await.unwrap();
-            let bytes = read(&file, &pool()).await.unwrap();
+            let bytes = read(&file, &create_pool()).await.unwrap();
             bytes[narrow(end)..].iter().all(|&byte| byte == 0)
         })
         .unwrap()
@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn a_block_is_the_most_whole_sectors_that_the_pool_gives() {
         assert_eq!(chunk(&odd_pool()), 3 * SECTOR);
-        assert_eq!(chunk(&pool()), CHUNK);
+        assert_eq!(chunk(&create_pool()), CHUNK);
     }
 
     // The header of the second record is at bytes 1,770 to 1,804, in one sector and
