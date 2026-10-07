@@ -681,13 +681,29 @@ mod directory {
         }
     }
 
+    /// With more than one record of another count, the error gives the smallest, in
+    /// any order of the list.
+    #[test]
+    fn the_smallest_other_count_is_the_stored_one() {
+        for (records, stored) in [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4)] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            for &k in records {
+                record(&mut sim, &host, k);
+            }
+            let e = run_on(&mut sim, &host).unwrap_err();
+            assert_eq!(e, Error::Shards { stored, cores: 2 }, "{records:?}");
+        }
+    }
+
     #[test]
     fn a_name_that_is_not_a_count_is_not_a_record() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         sim.run_on(&host, |host, _| async move {
             let files = host.files();
-            for name in ["shards-x", "shards", "other-3"] {
+            let names = ["shards-x", "shards", "other-3", "shards-03", "shards-+3"];
+            for name in names {
                 files.create_dir(Path::new(name)).await.expect("makes");
             }
         })
@@ -695,7 +711,14 @@ mod directory {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
         let made = [
-            "other-3", "shard-0", "shard-1", "shards", "shards-2", "shards-x",
+            "other-3",
+            "shard-0",
+            "shard-1",
+            "shards",
+            "shards-+3",
+            "shards-03",
+            "shards-2",
+            "shards-x",
         ];
         assert_eq!(listed, made.map(PathBuf::from));
     }

@@ -40,17 +40,24 @@ impl Claim {
 async fn claim(files: &env::files::Files, cores: usize) -> Result<(), Error> {
     let root = Path::new("");
     let names = files.list(root).await.map_err(Error::Directory)?;
-    let mut stored = names.iter().filter_map(|name| {
-        let count = name.to_str()?.strip_prefix(RECORD)?;
-        count.parse::<usize>().ok()
-    });
-    match stored.next() {
-        Some(stored) if stored != cores => Err(Error::Shards { stored, cores }),
-        Some(_) => Ok(()),
-        None => {
-            let record = PathBuf::from(format!("{RECORD}{cores}"));
-            files.create_dir(&record).await.map_err(Error::Directory)?;
-            files.sync_dir(root).await.map_err(Error::Directory)
-        }
+    let counts: Vec<usize> = names.iter().filter_map(|name| count(name)).collect();
+    // The smallest, so the error does not hang on the order of the list.
+    let other = counts.iter().copied().filter(|&k| k != cores).min();
+    if let Some(stored) = other {
+        return Err(Error::Shards { stored, cores });
     }
+    if counts.is_empty() {
+        let record = PathBuf::from(format!("{RECORD}{cores}"));
+        files.create_dir(&record).await.map_err(Error::Directory)?;
+        files.sync_dir(root).await.map_err(Error::Directory)?;
+    }
+    Ok(())
+}
+
+/// The count of a record named `name`: a plain count, so `shards-03` and `shards-+3`
+/// are not records.
+fn count(name: &Path) -> Option<usize> {
+    let rest = name.to_str()?.strip_prefix(RECORD)?;
+    let count = rest.parse::<usize>().ok()?;
+    (count.to_string() == rest).then_some(count)
 }
