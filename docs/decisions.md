@@ -96,8 +96,14 @@ How to read this record:
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
-  tie (`a.*` and `*.a`); a tie between setting policies on one name is the S12 plan
-  error. Access has no ties (X25).
+  tie (`a.*` and `*.a`); a tie between the most specific setting policies on one name is
+  the S12 plan error. For node settings, the plan error is a tie between the most
+  specific policies that set one budget for one node (X25). A tie below them decides
+  nothing, because only the most specific value is used. Access has no ties (X25). The
+  tie rule is the reading of S12 by `laptop.architect-2` (2026-10-07T15:16:46Z:
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6040858277), and
+  `laptop.director` agrees that it changes no rule (2026-10-07T15:27:12Z:
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6041077733).
 - **A4 + M1/M2 answer** `channel::Key` is a UUIDv7 made with the channel. It is never
   reused and never changes. Files carry names only. The stored spec maps name to key,
   and `apply` assigns a key the first time a name appears. Renames are explicit
@@ -261,17 +267,18 @@ How to read this record:
   that no policy selects has no time cap. `keep` is zero or more. At `0s` the cutoff is
   the mesh time of `home`, from its first estimate (READER RULES). A trim gives a reader
   that is behind a gap at any `keep` (STORE TRIM). Most specific wins as a whole policy
-  (X25), equal specificity is a plan error (S12), and a data channel takes its index's
-  policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", a size cap
-  per index, and a read that reports each sample past `keep` as a gap while its bytes
-  are on disk. That read does not depend on disk pressure, but at `0s` a reader a few
-  milliseconds behind loses each sample it reads from disk, and each read needs `keep`
-  and a clock. Stale commands are the job of `max_age` (A20), not of retention. In
-  `config`, `select` and `keep` are both required. `keep` reads with
-  `document::read::span` (`document.bad-span`), where a negative span reads, and
-  `config` refuses it with `config.negative-span` at the `keep` value. The code names
-  the defect, so a later span bound (a reader `hold`, S10) uses it too. Ruling and
-  answers: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
+  (X25), a tie between the most specific policies is a plan error (S12, SPECIFICITY),
+  and a data channel takes its index's policy (X26). Lost: a finite default `keep`
+  (5.3), a value for "no cap", a size cap per index, and a read that reports each sample
+  past `keep` as a gap while its bytes are on disk. That read does not depend on disk
+  pressure, but at `0s` a reader a few milliseconds behind loses each sample it reads
+  from disk, and each read needs `keep` and a clock. Stale commands are the job of
+  `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
+  `keep` reads with `document::read::span` (`document.bad-span`), where a negative span
+  reads, and `config` refuses it with `config.negative-span` at the `keep` value. The
+  code names the defect, so a later span bound (a reader `hold`, S10) uses it too.
+  Ruling and answers:
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. The lost
   read: decided by `laptop.architect`, 2026-10-07T12:30:53Z,
@@ -685,7 +692,7 @@ How to read this record:
   no checkpoint and has not yet synced the directory. The open does not look again,
   because no caller opens one directory two times at once. A dropped open can leave its
   remove in flight, and a later open of the same directory in the process can lose its
-  ring (#1310). It syncs the directory before each create of a ring, because a disk
+  ring (#1441). It syncs the directory before each create of a ring, because a disk
   gives the room of a removed file back only then, and a kill after the remove leaves
   such a file: the remake needs room for the larger of the two files, not for both.
   `Length` stays for a ring with a checkpoint whose length does not fit its header, and
@@ -2020,12 +2027,50 @@ How to read this record:
   writes one answer on its reply half, and then both halves end. So a proposal and its
   answers name no sender and carry no request number (#779): a request number makes the
   node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
-  and HUB WIRE already answers on the stream that asks. A two-way stream whose first
-  message is not a proposal, or a proposal on a one-way stream, breaks the protocol, and
-  the receiver ends the stream with code 2 (`wire::header::MALFORMED`) (decided by the
-  architect, 2026-10-07T08:15:18Z:
-  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
-  has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
+  and HUB WIRE already answers on the stream that asks. A stream breaks the protocol
+  when a message is the byte form of no message, when a one-way stream carries a
+  proposal or an answer, when a two-way stream does not start with a proposal, or when
+  it carries a second message. The receiver stops the stream with code 2
+  (`wire::header::MALFORMED`), the code that HUB WIRE gives for a broken protocol rule
+  (decided by the architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025, and
+  2026-10-07T09:42:17Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035294122, point 3).
+  A second message comes after the answer, and a reset takes back an answer that the
+  peer does not have yet. So there the receiver stops only the half that it reads. At
+  each other break of a two-way stream, it stops the half that it reads and resets its
+  reply half, each with code 2: a two-way stream that ends with no message is such a
+  break (approved by the architect, 2026-10-07T12:52:00Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038303084). A message
+  that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
+  stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
+  a reply half with the same code. A group that stopped gives code 16 on a one-way
+  stream. On a stream that goes both ways it gives no mesh code: it can stop in the
+  write of the entry, which then applies after a new open. A `raft` message that finds
+  no block in the pool is not a refusal: the receiver drops it, the stream goes on, and
+  `raft` sends it again. The receiver holds no block while the group writes the entry:
+  it drops the block of the proposal before it gives the change to the group, and takes
+  the block of the answer after the answer. With no block for the answer, the peer gets
+  no answer: the group can hold the entry of the proposal. The reply half ends with no
+  answer and no mesh code. A reply half that ends with no answer and with no code 2 or
+  16 says nothing about the change, and the peer forwards it again. Lost: the block of
+  the answer first, because a block held while the group writes can take the room that
+  the write needs, and only the end of the write frees it (decided by the architect,
+  2026-10-07T13:07:00Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823). The
+  sentences on a group that stopped and on an answer with no block are from a later
+  ruling. Lost there: code 16 that says nothing about the change after a stop, because
+  code 16 carries no cause, so the peer cannot tell a stop from a refusal (decided by
+  the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458).
+  Supersedes, for a stream that goes both ways, point 2 of
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501, and the
+  sentence "the group took the proposal" of
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823. The
+  receiver does not check the class of a stream: the class sets only the priority of the
+  sender (approved by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
+  message has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
   messages share the byte form of an entry. Decided by `consensus`, approved by the
   coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
   gives the fuzz target `mesh_change` the decode and encode of a change record; no
@@ -2090,10 +2135,14 @@ How to read this record:
   not reach the group. A leader that waits sends no heartbeat, so the other voters elect
   a new leader. A follower that waits answers no message and falls behind until its
   write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
-  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
-  of the variant decided by the architect, 2026-10-07T11:52:00Z:
-  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
-  of the two cases by the architect, 2026-10-07T12:08:39Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the doc
+  text of the variant decided by the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458, which
+  supersedes the doc texts of
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 and
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823, and the
+  Display text of the first (2026-10-07T11:52:00Z) stands; the text of the two cases by
+  the architect, 2026-10-07T12:08:39Z:
   https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
   checks the wait before each other check of a message or of a forwarded proposal, so
   each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
@@ -2498,30 +2547,32 @@ How to read this record:
   `laptop.architect-2` on #1159
   (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
 - **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
-  names one sample of an index (X31), and InfluxDB keys a point by measurement, tag
-  set, and time, so a resend stores each sample once. Each run of explicit gaps
-  before a sample is one line,
-  `foundation_gaps,connector=<connector>,index=<index> count=<n>i <stamp>`: `<stamp>`
-  is the stamp of the first sample after the gaps, and `count` is the number of seqs
-  from the first trimmed seq up to that sample. The gap line goes in the request of
-  that sample, and the position is acked only after InfluxDB confirms it (B3). The
-  count is signed, because InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two
-  connectors that write one index to one database from replacing each other's gap
-  lines. Until a later sample comes, the connector keeps one gap per index. After a
-  restart the buffer reports the gap again (READER RULES), so a lost gap line is sent
-  again. The measurement name is fixed, and the kind check (#1153) refuses it as a
+  names one sample of an index on each path (X31), and InfluxDB keys a point by
+  measurement, tag set, and time, so a resend stores each sample once. Each run of
+  explicit gaps before a sample is one line,
+  `foundation_gaps,connector=<connector>,index=<index>,path=<path> count=<n>i <stamp>`:
+  `<path>` is `live` or `backfill` (amendment below), `<stamp>` is the stamp of the
+  first sample after the gaps, and `count` is the number of seqs from the first trimmed
+  seq up to that sample. The gap line goes in the request of that sample, and the
+  position is acked only after InfluxDB confirms it (B3). The count is signed, because
+  InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two connectors that write one
+  index to one database from replacing each other's gap lines. Until a later sample
+  comes, the connector keeps one gap per index, and from #1270 one per index and path.
+  After a restart the buffer reports the gap again (READER RULES), so a lost gap line is
+  sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
   data measurement.
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
   reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
   `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
   minus the stored seqs, as maximal runs. Each run is one gap: `after` is the count
   of stored samples before the run, and the count is the run's length. A gap line
-  whose stamp is not in the write record, or whose range starts below the first
-  written seq, is a lab failure (panic), not data. The property test also asserts no
-  silent loss: each seq from the first written seq to the last stored seq is stored
-  or in a gap range. After a lost confirmation, a resend, and a later trim, gap lines
-  can overlap, so the sum of `count` in `foundation_gaps` is an upper bound on the
-  loss. The exact loss is the union of the ranges minus the stored samples.
+  whose stamp is not in the write record on the path of its tag, or whose range starts
+  below the first written seq, is a lab failure (panic), not data. The property test
+  also asserts no silent loss: each seq from the first written seq to the last stored
+  seq is stored or in a gap range. After a lost confirmation, a resend, and a later
+  trim, gap lines can overlap, so the sum of `count` in `foundation_gaps` is an upper
+  bound on the loss from trims. Before #1270 (amendment below) that is the whole loss,
+  and the exact loss is the union of the ranges minus the stored samples.
   Lost: a seq field (about 20 bytes a line), a seq tag (one series per sample), a gap
   point in the data measurement (a field type conflict), a configurable gap
   measurement, and a `first=<seq>i` field on each gap line. That field puts a seq,
@@ -2536,6 +2587,33 @@ How to read this record:
   in the review of #1225
   (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
   https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
+  Amended on #1151: with #1270 (M2), the connector is a recording reader and writes the
+  samples of both paths (A6, A8). Until then it reads the live path only, and the
+  store-and-forward tests use the live path only. The `path` tag of each gap line is
+  `live` until then, so the format does not change at M2. The `path` tag keeps a live
+  gap line and a backfill gap line at one stamp as two points, so the sum of `count`
+  stays an upper bound on the loss from trims. Data lines get no `path` tag, so a live
+  sample and a backfill sample of one index at one stamp are one point, and the later
+  write sets its fields. The earlier sample is a loss that no gap line counts. The fold
+  takes the path of a gap line from its tag, and `seq(stamp)` on that path from the
+  write record. From #1270, the fold, `after`, the first written seq, and the
+  no-silent-loss assertion each run on each path apart. A data point whose stamp the
+  write record holds on both paths of one index is a lab failure (panic), because the
+  lab cannot tell which seq the point holds, so the property test writes no such stamp.
+  From #1270, a separate test reads the points of the simulated InfluxDB and pins the
+  overwrite. Lost: a `path` tag on data lines, which makes two series for each channel
+  and puts the path, which is internal to the node, in each user's data schema.
+  `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
+  data nothing. Decided by `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748; amended
+  2026-10-07T08:18:10Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167;
+  corrected 2026-10-07T16:52:35Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042660446).
+  Supersedes the gap line with no `path` tag of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515 and of
+  point 3 of 6033743748, and the loss bound of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -2803,11 +2881,12 @@ How to read this record:
 - **S12 + C8 amendment** Settings are policies that select names. One `Selector`
   (patterns with `*`, `**`, and `!` exclusions) serves subscriptions, readers,
   connectors, policies, and access. Most specific pattern wins; equal specificity is a
-  plan error; `explain` shows each effective value and its source. A rename can move a
-  channel under other policies, and `plan` shows it. Current policy kinds: retention,
-  placement, transmission, compression, reduction, time, access, secret store, and node
-  settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
-  SPECIFICITY (#3).
+  plan error; `explain` shows each effective value and its source. Equal specificity
+  means a tie between the most specific policies, per budget for node settings
+  (SPECIFICITY). A rename can move a channel under other policies, and `plan` shows it.
+  Current policy kinds: retention, placement, transmission, compression, reduction,
+  time, access, secret store, and node settings (NODE SETTINGS). Targets and combination
+  rules: X25, X26. Specificity: SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
   that selects node names: `node_settings "<name>" { select, disk, pool }`, such as
   `select = "site_a.*"` and `disk = "200GiB"`. Each budget is optional and above zero.
@@ -3065,9 +3144,19 @@ How to read this record:
   round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
   trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
   any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
-  added. An earlier round's skip is taken as written, since a rebase can drop its range
-  from the clone. An earlier round in the fixed format that does not parse fails. A
-  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  added. A merge of the base in the range counts only by its resolution: a conflict that
+  `git merge-tree` finds between its parents in a `.rs`, `Cargo.toml`, or `Cargo.lock`
+  file is a code change. The rest of the range is read from the tree that
+  `git merge-tree` makes of its start and the newest base commit that its end holds,
+  not from its start: the base's code does not count, and text that the range changes
+  and the base moves into a code file does. Text from an earlier round that the base
+  moves into a code file does not yet count (#1496). A conflict in this tree in a code
+  file is a code change, also one that leaves no markers, and so is an end that holds
+  more than one newest base commit. Found by the director at 2026-10-07T14:50:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed
+  by #1451. An earlier round's skip is taken as written, since a rebase can drop its
+  range from the clone. An earlier round in the fixed format that does not parse fails.
+  A red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
   status is `success` on `merge_group`. Decided by the director on #1169
   (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
   in messages on #1193.
@@ -3202,6 +3291,20 @@ How to read this record:
   `Full` promises no file; a flock, stat, or name check error after `openat` can leave
   the empty file that the create made. Lost: a promise that any failed create leaves no
   file it made.
+  Amended (2026-10-07, #1310): a call of `Files` whose future drops can still run. A
+  remove left so removes what the path names when it ends. Count the room of a
+  removed file as used until `sync_dir` on its directory ends, and while a handle holds
+  the file (#1301). Lost: `File::remove`, a remove through the write handle, which the
+  handle rule would cover with `Busy`; after #1441 it had no caller. Decided by
+  `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
+  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245).
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
+  sentence on a dropped call: `laptop.architect-2`, 2026-10-07T16:23:52Z
+  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6042117395).
+  Supersedes the drop sentence of
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Lost:
+  "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -3434,8 +3537,16 @@ How to read this record:
   `shard-` or `shards-` is plain decimal that fits a `usize`: above zero for a
   record, and below `usize::MAX` for a ring. Any other name (`shards-03`,
   `shards-+3`, `shards-0`, `shard-<usize::MAX>`) is one the claim does not know, and
-  it ignores it, because no node can write it. The claim reads names only, so a file
-  with such a name counts as a directory would. Decided by the architect, #1214:
+  it ignores it, because no core count makes the node write it. A count that no host
+  has, such as `shards-<usize::MAX>`, is still a record, and the claim refuses the
+  start (decided by `laptop.architect-2`, 2026-10-07T08:16:03Z, #1214:
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6033877711, with
+  "node" for "claim" at 2026-10-07T16:47:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6042568803).
+  Supersedes the reason in
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887. The
+  claim reads names only, so a file with such a name counts as a directory would.
+  Decided by the architect, #1214:
   https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887, as on
   #1110 for `shards-0` and `shard-<usize::MAX>`:
   https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. With
@@ -3511,7 +3622,20 @@ How to read this record:
   can hold bytes the program never wrote, such as padding or the spare capacity of a
   `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
   and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
-  3605); when Rust has one, `freed_holding` uses it and the exception goes.
+  3605); when Rust has one, `freed_holding` uses it and the exception goes. A binary
+  that bounds the memory of a structure holds `counting::Bytes`, one atomic count of
+  the bytes it holds; a binary holds one counting allocator, `Allocator` or `Bytes`.
+  `Allocator` does not keep that count: a benchmark must not pay for a count that only
+  a test reads, or its baseline moves with no product change, as
+  `transport/benches/send.rs` did (+4.2% to +11.2% at p50). Lost: `Allocator` keeps
+  `held` (that cost in each counting binary); a `bool` at construction (a branch on
+  each allocation and free, and a `held` that must panic when it is false);
+  `Allocator<const HELD: bool>` (no branch, but `Allocator<true>` says nothing at the
+  call site, and no caller needs both counts in one binary). Decided by
+  `laptop.architect` on 2026-10-07T16:28:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242).
+  Supersedes the `held` part of
+  https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190.
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
@@ -4064,14 +4188,15 @@ conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
 placement, transmission, compression, reduction, time, secret store, node settings).
 For node settings, each budget resolves on its own: a policy that leaves a budget unset
-gives that budget to a less specific policy. Two policies of equal specificity that
-both set the same budget for one node are a plan error; two that set different budgets
-do not conflict. Per-budget resolution holds only because `disk` and `pool` are
-independent. It does not extend to kinds whose fields go together (such as placement),
-where values from different policies could make a combination nobody wrote. Access is
-evaluated only in `access`, as the union of matching allows; the authority cap is the
-highest authority among matching allows that grant `write`. Both use the one selector
-matcher in `types`. Basis: C8, SRP PASS (`access` split).
+gives that budget to a less specific policy. A tie between the most specific policies
+that set one budget for one node is a plan error, and a tie below them decides nothing
+(SPECIFICITY); two policies that set different budgets do not conflict. Per-budget
+resolution holds only because `disk` and `pool` are independent. It does not extend to
+kinds whose fields go together (such as placement), where values from different policies
+could make a combination nobody wrote. Access is evaluated only in `access`, as the
+union of matching allows; the authority cap is the highest authority among matching
+allows that grant `write`. Both use the one selector matcher in `types`. Basis: C8, SRP
+PASS (`access` split).
 
 **X26. Policy targets and reach.**
 Conflict: S12 says "policies apply to whole indexes; data channels follow". Reduction
@@ -4343,7 +4468,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
-| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |

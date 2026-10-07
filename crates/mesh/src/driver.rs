@@ -27,6 +27,8 @@ use crate::message::Message;
 use crate::region::{self, Change, Join, Malformed, Refused, Request};
 use crate::status::Status;
 
+mod stream;
+
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
@@ -63,9 +65,10 @@ pub(crate) struct Config {
     pub(crate) entropy: Entropy,
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
-    /// Gives the blocks of the log's reads and writes. A write that finds the pool
-    /// full, or that the system refuses memory for, waits: the group takes, sends, and
-    /// applies nothing until that write ends.
+    /// Gives the blocks of the log's reads and writes, and of each answer to a
+    /// forwarded proposal. A write that finds the pool full, or that the system refuses
+    /// memory for, waits: the group takes, sends, and applies nothing until that write
+    /// ends.
     pub(crate) pool: Rc<Pool>,
 }
 
@@ -78,6 +81,7 @@ pub(crate) struct Config {
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
+    pool: Rc<Pool>,
     time: clock::Reader,
     entropy: Entropy,
 }
@@ -111,6 +115,7 @@ impl Mesh {
         if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
+        let pool = Rc::clone(&config.pool);
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
         let start = Start {
             hard: stored.hard,
@@ -147,6 +152,7 @@ impl Mesh {
         ));
         Ok(Self {
             group,
+            pool,
             time: config.time,
             entropy: config.entropy,
         })
@@ -1186,6 +1192,22 @@ mod tests {
         mesh.group.borrow().raft.term()
     }
 
+    /// What `future` gives, or `None` when it waits for longer than `limit`.
+    async fn within<F: Future>(
+        clock: &Clock,
+        limit: Span,
+        mut future: Pin<&mut F>,
+    ) -> Option<F::Output> {
+        let mut end = clock.sleep(limit);
+        poll_fn(|cx| {
+            if let Poll::Ready(output) = future.as_mut().poll(cx) {
+                return Poll::Ready(Some(output));
+            }
+            Pin::new(&mut end).poll(cx).map(|()| None)
+        })
+        .await
+    }
+
     /// Gives the output of `future` when it does not wait.
     async fn now<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
@@ -1360,6 +1382,8 @@ mod tests {
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
         });
     }
+
+    mod serve;
 
     mod answer {
         use super::*;
