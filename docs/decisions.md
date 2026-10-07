@@ -2404,6 +2404,9 @@ How to read this record:
   `document.bad-size` quotes the size for `Syntax` and `Range` (`Use at most
   "16777215TiB"`), while `byte::Error::fix` stays bare for a flag (architect,
   https://github.com/synnaxlabs/foundation/issues/1070#issuecomment-6032077046).
+  `size_fix` stays in `document` (#650): it works on the text the reader read, and its
+  only caller is the reader. It moves to `types` when a second reader of sizes needs it
+  (same ruling).
   `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
   breaks no producer. No severity field: the warnings in K2 and R13-10 belong to plan
   output.
