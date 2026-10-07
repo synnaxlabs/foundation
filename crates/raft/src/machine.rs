@@ -2821,6 +2821,327 @@ mod tests {
         }
     }
 
+    // A message with a proof carries the sender's configuration entries below its
+    // term. A node whose configuration the proof is no quorum of reads them.
+    mod chain {
+        use super::*;
+
+        const ALL: [u8; 4] = [1, 2, 3, 4];
+
+        fn plain(ids: &[u8]) -> Voters {
+            Voters {
+                incoming: ids.iter().copied().map(key).collect(),
+                ..Voters::default()
+            }
+        }
+
+        // The change to `voters` that `leader` wrote at `at`, elected by `elected`.
+        fn link(at: Position, leader: u8, elected: &[u8], voters: Voters) -> Link {
+            Link {
+                at,
+                change: Change {
+                    voters,
+                    votes: proof(Grant::Vote, leader, elected),
+                    signature: Some(signature(Grant::Vote, leader)),
+                },
+            }
+        }
+
+        // The chain of the shrink from `all` to 1, 2 and 3 that leader 3 wrote in
+        // term 1, elected by `all`: the joint entry at index 1, the leave at 2.
+        fn shrink(all: &[u8]) -> Vec<Link> {
+            let joint = Voters {
+                incoming: plain(&[1, 2, 3]).incoming,
+                outgoing: plain(all).incoming,
+            };
+            vec![
+                link(position(1, 1), 3, all, joint),
+                link(position(1, 2), 3, all, plain(&[1, 2, 3])),
+            ]
+        }
+
+        // The heartbeat of leader 2 in `term`, elected by 2 and 3, with `chain`.
+        fn heartbeat(term: u64, chain: Vec<Link>) -> Message {
+            Message {
+                proof: Some(proof(Grant::Vote, 2, &[2, 3])),
+                chain,
+                ..message(2, term, Body::Heartbeat { commit: 0 })
+            }
+        }
+
+        // Node 1, a voter of `all`, in term 1 with an empty log: it missed the shrink.
+        fn behind(all: &[u8]) -> Raft {
+            let mut raft = raft(all, at_term(1));
+            sent(&mut raft);
+            raft
+        }
+
+        // The leave to 1, 2 and 3 that node 1 wrote at index 1 of term 1, elected by
+        // every node of `ALL`.
+        fn leave() -> Entry {
+            written(1, 1, plain(&[1, 2, 3]), &ALL)
+        }
+
+        fn leave_link() -> Link {
+            let Entry {
+                at,
+                data: Data::Voters(change),
+            } = leave()
+            else {
+                unreachable!("a leave is a change");
+            };
+            Link { at, change }
+        }
+
+        // Node 1 after the leave, committed.
+        fn left() -> Raft {
+            let start = Start {
+                entries: vec![leave()],
+                applied: 1,
+                ..start(&ALL, at_term(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            sent(&mut raft);
+            raft
+        }
+
+        // `message` is unproven for `case`, and leaves the node as it was.
+        fn refuses(raft: &mut Raft, message: Message, case: &str) {
+            let state = |raft: &Raft| {
+                (
+                    raft.hard(),
+                    raft.role(),
+                    raft.leader(),
+                    raft.voters().clone(),
+                )
+            };
+            let before = state(raft);
+            let expected = Error::Unproven {
+                term: message.term,
+                from: message.from,
+            };
+            assert_eq!(raft.step(message), Err(expected), "{case}");
+            assert_eq!(state(raft), before, "{case}");
+            assert_eq!(raft.ready(), Ready::default(), "{case}");
+        }
+
+        #[test]
+        fn a_voter_down_through_a_shrink_takes_the_heartbeat_with_the_chain() {
+            for all in [&[1, 2, 3, 4][..], &[1, 2, 3, 4, 5]] {
+                let mut raft = behind(all);
+                refuses(&mut raft, heartbeat(2, Vec::new()), "no chain");
+                raft.step(heartbeat(2, shrink(all))).unwrap();
+                let state = (raft.term(), raft.leader(), raft.voters());
+                assert_eq!(state, (Term(2), Some(key(2)), &plain(all)), "{all:?}");
+            }
+        }
+
+        #[test]
+        fn a_voter_down_through_a_pending_leave_takes_the_append_with_the_chain() {
+            let mut raft = behind(&ALL);
+            let chain = shrink(&ALL);
+            let appended = chain
+                .iter()
+                .map(|link| Entry {
+                    at: link.at,
+                    data: Data::Voters(link.change.clone()),
+                })
+                .chain(entries(&[(2, 3)]))
+                .collect();
+            let append = Message {
+                body: append(Position::default(), appended, 1),
+                ..heartbeat(2, chain)
+            };
+            raft.step(append).unwrap();
+            let state = (raft.term(), raft.leader(), raft.voters());
+            assert_eq!(state, (Term(2), Some(key(2)), &plain(&[1, 2, 3])));
+        }
+
+        #[test]
+        fn a_voter_that_missed_the_leave_grants_a_vote_whose_chain_holds_it() {
+            let mut raft = behind(&ALL);
+            let last = Position::default();
+            let vote = || Message {
+                proof: Some(proof(Grant::PreVote, 2, &[2, 3])),
+                ..message(2, 2, Body::Vote { last })
+            };
+            refuses(&mut raft, vote(), "no chain");
+            let vote = Message {
+                chain: shrink(&ALL),
+                ..vote()
+            };
+            raft.step(vote).unwrap();
+            let [reply] = &sent(&mut raft)[..] else {
+                panic!("one reply");
+            };
+            let granted = Body::VoteReply { answer: GRANTED };
+            assert_eq!(
+                (reply.to, reply.term, &reply.body),
+                (key(2), Term(2), &granted)
+            );
+            assert_eq!(raft.hard().vote, Some(key(2)));
+        }
+
+        #[test]
+        fn a_link_that_fails_leaves_the_node_as_it_was() {
+            let mut few = shrink(&ALL);
+            few[0].change.votes = proof(Grant::Vote, 3, &[3, 4]);
+            let mut pre_votes = shrink(&ALL);
+            pre_votes[0].change.votes.grant = Grant::PreVote;
+            let mut late = shrink(&ALL);
+            late[1].at.term = Term(2);
+            let mut flat = shrink(&ALL);
+            flat[1].at.index = 1;
+            let mut falling = shrink(&ALL);
+            falling[1].at.term = Term(0);
+            let cases = [
+                (
+                    "votes that are no quorum of the founding configuration",
+                    few,
+                ),
+                ("pre-votes", pre_votes),
+                ("a link in the message's term", late),
+                ("an index that does not rise", flat),
+                ("a term that falls", falling),
+                (
+                    "a chain that ends before the leave",
+                    shrink(&ALL)[..1].to_vec(),
+                ),
+            ];
+            for (case, chain) in cases {
+                refuses(&mut behind(&ALL), heartbeat(2, chain), case);
+            }
+        }
+
+        // The leader of a term is elected under the last configuration below it,
+        // so a link trusts the last link of a lower term, else what the receiver
+        // committed below its term.
+        #[test]
+        fn a_link_trusts_the_last_link_of_a_lower_term() {
+            let all = [1, 2, 3, 4, 5];
+            let leave = plain(&[1, 2, 3]);
+            // 3, 4 and 5 are a quorum of the founding configuration, not of the joint
+            // one: its incoming set holds 3 alone.
+            let mut same_term = shrink(&all);
+            same_term[1] = link(position(1, 2), 3, &[3, 4, 5], leave.clone());
+            let mut raft = behind(&all);
+            raft.step(heartbeat(2, same_term)).unwrap();
+            assert_eq!(raft.leader(), Some(key(2)));
+            let mut later_term = shrink(&all);
+            later_term[1] = link(position(2, 2), 3, &[3, 4, 5], leave.clone());
+            refuses(&mut behind(&all), heartbeat(3, later_term), "later term");
+            let mut by_joint = shrink(&all);
+            by_joint[1] = link(position(2, 2), 3, &[1, 2, 3, 4], leave);
+            let mut raft = behind(&all);
+            raft.step(heartbeat(3, by_joint)).unwrap();
+            assert_eq!((raft.term(), raft.leader()), (Term(3), Some(key(2))));
+        }
+
+        #[test]
+        fn a_link_at_or_below_the_commit_index_is_skipped() {
+            let chain = shrink(&ALL);
+            let joint = Entry {
+                at: chain[0].at,
+                data: Data::Voters(chain[0].change.clone()),
+            };
+            let start = Start {
+                entries: vec![joint],
+                applied: 1,
+                ..start(&ALL, at_term(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            sent(&mut raft);
+            let mut bad = chain;
+            bad[0].change.votes = proof(Grant::PreVote, 9, &[]);
+            raft.step(heartbeat(2, bad)).unwrap();
+            assert_eq!((raft.term(), raft.leader()), (Term(2), Some(key(2))));
+        }
+
+        #[test]
+        fn a_candidate_carries_its_chain_on_a_vote_and_none_on_a_pre_vote() {
+            let mut raft = left();
+            raft.campaign();
+            let pre_votes = sent(&mut raft);
+            assert_eq!(pre_votes.len(), 2);
+            for pre_vote in &pre_votes {
+                assert_eq!((&pre_vote.proof, &pre_vote.chain), (&None, &Vec::new()));
+            }
+            raft.step(message(2, 2, Body::PreVoteReply { answer: GRANTED }))
+                .unwrap();
+            let votes = sent(&mut raft);
+            assert_eq!(votes.len(), 2);
+            for vote in &votes {
+                assert!(matches!(vote.body, Body::Vote { .. }), "{vote:?}");
+                assert_eq!(vote.chain, [leave_link()]);
+            }
+        }
+
+        // The chain holds only entries below the term: not the leader's own change.
+        #[test]
+        fn a_leader_carries_its_chain_until_the_peer_answers() {
+            let mut raft = left();
+            elect(&mut raft, &[2]);
+            raft.step(message(2, 2, Body::AppendReply { last: 2 }))
+                .unwrap();
+            raft.propose_voters([key(1), key(2)].into()).unwrap();
+            sent(&mut raft);
+            raft.tick(0);
+            raft.step(message(3, 2, Body::HeartbeatReply)).unwrap();
+            let messages = sent(&mut raft);
+            let appends = messages
+                .iter()
+                .filter(|m| m.to == key(3) && matches!(m.body, Body::Append { .. }))
+                .count();
+            assert_eq!(appends, 1, "{messages:#?}");
+            for message in &messages {
+                let answered = message.to == key(2);
+                assert_eq!(message.proof.is_some(), !answered, "{message:?}");
+                let chain = if answered { vec![] } else { vec![leave_link()] };
+                assert_eq!(message.chain, chain, "{message:?}");
+            }
+        }
+
+        #[test]
+        fn an_answer_to_a_stale_message_carries_the_chain_of_its_term() {
+            let start = Start {
+                entries: vec![leave()],
+                applied: 1,
+                ..start(&ALL, with_proof(2))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            sent(&mut raft);
+            raft.step(message(3, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            let [refusal] = &sent(&mut raft)[..] else {
+                panic!("one refusal");
+            };
+            let expected = (Term(2), true, vec![leave_link()]);
+            let got = (refusal.term, refusal.proof.is_some(), refusal.chain.clone());
+            assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn a_grant_carries_no_chain() {
+            let mut raft = left();
+            let last = position(1, 1);
+            raft.step(message(2, 2, Body::PreVote { last })).unwrap();
+            raft.step(message(2, 2, Body::Vote { last })).unwrap();
+            let replies = sent(&mut raft);
+            assert_eq!(replies.len(), 2, "{replies:#?}");
+            for reply in replies {
+                assert!(
+                    matches!(
+                        reply.body,
+                        Body::PreVoteReply { answer: GRANTED }
+                            | Body::VoteReply { answer: GRANTED }
+                    ),
+                    "{reply:?}"
+                );
+                assert_eq!((reply.proof, reply.chain), (None, Vec::new()));
+            }
+        }
+    }
+
     // `step` checks a message against the log before it changes any state.
     mod check {
         use super::*;

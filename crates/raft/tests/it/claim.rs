@@ -589,4 +589,41 @@ proptest! {
             .collect();
         prop_assert_eq!(after, want);
     }
+
+    // `claims` gives the links `step` reads, so a link it omits can change freely.
+    #[test]
+    fn a_link_that_claims_omits_changes_nothing(
+        term in any::<u64>(),
+        body in body(),
+        proof in prop::option::of(proof(5)),
+        chain in prop::collection::vec(a_link(), 0..4),
+        other in a_link(),
+    ) {
+        let mut message = message(term, body, proof);
+        message.chain = chain;
+        let appended = match &message.body {
+            Body::Append { entries, .. } => entries
+                .iter()
+                .filter(|entry| matches!(entry.data, Data::Voters(_)))
+                .count(),
+            _ => 0,
+        };
+        let changes = receiver(0)
+            .claims(&message)
+            .filter(|(claim, _)| matches!(claim, Claim::Change { .. }))
+            .count();
+        let read = changes - appended;
+        prop_assert!(read <= message.chain.len());
+        let outcome = |message: Message| {
+            let mut raft = receiver(0);
+            let result = raft.step(message);
+            (result, raft.hard(), raft.role(), raft.leader(), raft.ready())
+        };
+        let want = outcome(message.clone());
+        for omitted in read..message.chain.len() {
+            let mut changed = message.clone();
+            changed.chain[omitted] = other.clone();
+            prop_assert_eq!(outcome(changed), want.clone(), "link {}", omitted);
+        }
+    }
 }
