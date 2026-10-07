@@ -8,11 +8,11 @@
 //! others.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
-//! and `os` costs for both differ: an `os` clock read costs about 7 times a sim one,
-//! and an `os` wake about a quarter of a sim one. Compare a send with the control, or a
-//! build with another build, not with an `os` number. To compare two builds, run each
-//! several times in turn on one pinned core and compare p10 and p50: on a busy machine,
-//! p90 holds the preemptions.
+//! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
+//! times a sim one, and an `os` wake about a quarter of a sim one. Compare a send with
+//! the control, or a build with another build, not with an `os` number. To compare two
+//! builds, run each several times in turn on one pinned core and compare p10 and p50:
+//! on a busy machine, p90 holds the preemptions.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
