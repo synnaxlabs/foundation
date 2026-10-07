@@ -1909,7 +1909,12 @@ How to read this record:
   A `card::Signed` holds the `node::Key` that its signature covers (`Signed::key`): the
   key cannot come from the public key, which can rotate, so the signed card is its one
   place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
-  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). The
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). A
+  `Signed` comes only from `sign` or from `Unchecked::check`. `Signed::decode`
+  (crate-private) checks the signature and gives `None` when it does not hold; a change
+  record holds an `Unchecked` card, which each node checks at apply. Approved by
+  `laptop.architect` (2026-10-07T11:17:10Z):
+  https://github.com/synnaxlabs/foundation/pull/1323#issuecomment-6036785467. The
   field is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
   (`Stamp`) with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302). Decided
