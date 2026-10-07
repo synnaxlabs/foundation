@@ -72,6 +72,10 @@ findings. A later push needs a new approval.
 
 ## The bar
 
+- The objective is high-quality software, shipped fast. A new rule closes a gap that no
+  rule or check already covers, and names the defect it would have stopped. Never add a
+  second gate on the same thing, and send the architect only boundaries, public
+  surfaces, contracts, and risk-crate deferrals.
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
   in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. Collect
   the rule changes from your audits in one rule PR, and keep only one open at a time.
