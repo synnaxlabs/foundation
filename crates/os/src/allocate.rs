@@ -32,3 +32,27 @@ pub(crate) fn all(fd: &OwnedFd, len: u64) -> io::Result<()> {
     }
     fs::ftruncate(fd, len)
 }
+
+#[cfg(test)]
+mod tests {
+    use rustix::fs::OFlags;
+
+    use super::*;
+
+    /// A read-only file of this test binary.
+    fn read_only() -> OwnedFd {
+        let path = std::env::current_exe().unwrap();
+        fs::open(path, OFlags::RDONLY, fs::Mode::empty()).unwrap()
+    }
+
+    #[test]
+    fn a_file_open_to_read_gives_the_error_of_the_allocation() {
+        // `ftruncate` gives `INVAL` here, so this fails when the error is not checked.
+        assert_eq!(all(&read_only(), 4096), Err(Errno::BADF));
+    }
+
+    #[test]
+    fn a_length_past_the_largest_offset_gives_fbig() {
+        assert_eq!(all(&read_only(), u64::MAX), Err(Errno::FBIG));
+    }
+}
