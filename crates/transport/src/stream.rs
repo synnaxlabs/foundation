@@ -883,41 +883,59 @@ mod tests {
     }
 
     #[test]
-    fn a_close_after_the_session_ended_keeps_its_error() {
-        for broken in [true, false] {
-            let (mut sim, ..) = testing::sessions(
-                0,
-                same,
-                move |side| async move {
-                    let opened = side.session.open_sender(Class::Complete).await;
-                    let mut sender = opened.expect("a stream");
-                    sender.send(side.block(b"a")).await.expect("sent");
-                    let end = if broken {
-                        side.node.fail_udp(testing::address(&side.node));
-                        Error::Network {
-                            error: env::net::Error::Io { code: 5 },
-                        }
-                    } else {
-                        Error::PeerClosed { code: Code(7) }
-                    };
-                    assert_eq!(side.session.closed().await, end);
-                    side.session.close(Code(5));
-                    assert_eq!(side.session.closed().await, end);
-                    let sent = sender.send(side.block(b"b")).await;
-                    assert_eq!(sent, Err(end.clone()));
-                    assert_eq!(sender.finish(), Err(end));
-                },
-                move |side| async move {
-                    if broken {
-                        assert_eq!(side.session.closed().await, Error::TimedOut);
-                    } else {
-                        side.session.accept().await.expect("a stream");
-                        side.session.close(Code(7));
+    fn a_close_after_the_socket_breaks_keeps_the_break() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                side.node.fail_udp(testing::address(&side.node));
+                let broken = Error::Network {
+                    error: env::net::Error::Io { code: 5 },
+                };
+                assert_eq!(side.session.closed().await, broken);
+                side.session.close(Code(5));
+                assert_eq!(side.session.closed().await, broken);
+                let sent = sender.send(side.block(b"b")).await;
+                assert_eq!(sent, Err(broken.clone()));
+                assert_eq!(sender.finish(), Err(broken));
+            },
+            |side| async move {
+                assert_eq!(side.session.closed().await, Error::TimedOut);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_send_cut_by_a_peer_close_then_a_close_then_send_gives_the_peer_close() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let body = vec![7; 60_000];
+                let ended = loop {
+                    if let Err(error) = sender.send(side.block(&body)).await {
+                        break error;
                     }
-                },
-            );
-            assert_eq!(sim.run(), Ok(()), "broken: {broken}");
-        }
+                };
+                let closed = Error::PeerClosed { code: Code(5) };
+                assert_eq!(ended, closed);
+                side.session.close(Code(6));
+                let sent = sender.send(side.block(b"a")).await;
+                assert_eq!(sent, Err(closed));
+            },
+            |side| async move {
+                let _incoming = side.session.accept().await.expect("a stream");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                side.session.close(Code(5));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
