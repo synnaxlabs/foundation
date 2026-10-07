@@ -388,6 +388,20 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_whole_head_inside_a_run_as_the_run() {
+        let mut reader = opened(1);
+        reader.decode(&head(1)).expect("the head decodes");
+        assert_eq!(
+            reader.decode(&head(1)).err(),
+            Some(Error::Length { len: 18 })
+        );
+        reader
+            .decode(&encode_ends(&[(0, 18)]))
+            .expect("the end decodes");
+        assert_eq!(event(&mut reader, &head(1)), Ok(Event::Body(head(1), true)));
+    }
+
+    #[test]
     fn refuses_a_body_longer_than_the_last_end() {
         let mut reader = opened(1);
         reader.decode(&head(1)).expect("the head decodes");
