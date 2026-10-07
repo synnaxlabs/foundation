@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use env::net::{self, Listener};
 use env::tasks::Tasks;
+use http::header::CONTENT_ENCODING;
 use http::{Method, Request, Response, StatusCode};
 
 use super::Store;
@@ -20,12 +21,11 @@ use super::Store;
 /// percent-decoding. A request with a missing or empty `db` or `bucket`, a write to
 /// `/api/v2/write` with a missing or empty `org` and `orgID`, or a `precision` other
 /// than `ns` gives 400 and stores nothing; a missing or empty `precision` is `ns`.
-/// Any other path gives 404, and another method on a write path gives 405. It checks
-/// no token.
+/// Any other path gives 404, and another method on a write path gives 405. A request
+/// with a `content-encoding` other than `identity` gets 415 and stores nothing. It
+/// checks no token.
 ///
-/// # Errors
-///
-/// The error of the first accept that fails. It runs until then.
+/// It runs until the listener fails, and returns that error.
 pub async fn serve(
     listener: Listener,
     tasks: Tasks,
@@ -51,6 +51,15 @@ fn route(
         return reply(
             StatusCode::METHOD_NOT_ALLOWED,
             format!("{} takes POST, not {method}", uri.path()),
+        );
+    }
+    let encoding = (request.headers().get_all(CONTENT_ENCODING).iter())
+        .map(|value| String::from_utf8_lossy(value.as_bytes()))
+        .find(|value| !value.eq_ignore_ascii_case("identity"));
+    if let Some(encoding) = encoding {
+        return reply(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("the store decodes no content-encoding, not {encoding:?}"),
         );
     }
     let query = |key: &str| {

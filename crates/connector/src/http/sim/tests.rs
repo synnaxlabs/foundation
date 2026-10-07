@@ -368,29 +368,6 @@ fn answers_a_chunked_body_whole() {
 }
 
 #[test]
-fn answers_a_content_encoding_with_415_and_keeps_the_stream() {
-    const REQUEST: &[u8] = b"POST /a HTTP/1.1\r\ncontent-encoding: gzip\r\n\
-        content-length: 1\r\n\r\n1\
-        POST /c HTTP/1.1\r\ncontent-encoding: identity\r\ncontent-encoding: gzip\r\n\
-        content-length: 1\r\n\r\n3\
-        POST /b HTTP/1.1\r\ncontent-encoding: Identity\r\ncontent-length: 1\r\n\r\n2";
-    let text = "the server decodes no content-encoding, not \"gzip\"";
-    let refused = format!(
-        "HTTP/1.1 415 Unsupported Media Type\r\ncontent-length: {}\r\n\r\n{text}",
-        text.len()
-    );
-    let mut network = Network::new();
-    assert_eq!(
-        network.exchange(REQUEST, true),
-        End::Closed(format!(
-            "{refused}{refused}HTTP/1.1 200 OK\r\ncontent-length: 18\r\n\r\n\
-             POST /b HTTP/1.1 2"
-        ))
-    );
-    assert_eq!(network.seen(), ["POST /b HTTP/1.1 2"]);
-}
-
-#[test]
 fn answers_a_head_with_too_many_headers_with_431_and_ends_the_stream() {
     let mut request = b"GET /a HTTP/1.1\r\n".to_vec();
     for _ in 0..101 {

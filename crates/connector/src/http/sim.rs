@@ -8,8 +8,7 @@ use std::rc::Rc;
 use bytes::Bytes;
 use env::net::{self, Listener};
 use env::tasks::Tasks;
-use http::header::{CONNECTION, CONTENT_ENCODING};
-use http::request::Parts;
+use http::header::CONNECTION;
 use http::{HeaderValue, Request, Response, StatusCode};
 use http_body::Body as _;
 use hyper::body::Incoming;
@@ -23,10 +22,9 @@ use super::stream::Stream;
 /// its own task of `tasks`, with keep-alive. `answer` gets each request with its
 /// whole body. It sends no `date` header and sets no timer, so no clock value
 /// changes what it does. A client that closes its write side after a whole request
-/// still gets the answer. A request that breaks HTTP gets 400, or 414 for a URI or
-/// 431 for a head that is too long, and its stream ends. An HTTP/2 preface ends the
-/// stream with no answer. A request with a `content-encoding` other than `identity`
-/// gets 415 and does not reach `answer`.
+/// still gets the answer. A request that breaks HTTP gets 400, or 414 when its URI is
+/// too long and 431 when its head is too long, and its stream ends. An HTTP/2 preface
+/// ends the stream with no answer.
 ///
 /// It runs until the listener fails, and returns that error. Dropping the future stops
 /// only the accepts: each stream it accepted runs on.
@@ -75,13 +73,7 @@ async fn respond(
             bytes.extend_from_slice(&data);
         }
     }
-    let response = match encoding(&parts) {
-        Some(encoding) => reply(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            format!("the server decodes no content-encoding, not {encoding:?}"),
-        ),
-        None => answer(Request::from_parts(parts, Bytes::from(bytes))),
-    };
+    let response = answer(Request::from_parts(parts, Bytes::from(bytes)));
     Ok(response.map(|body| Whole(Some(body))))
 }
 
@@ -89,16 +81,6 @@ fn reply(status: StatusCode, text: String) -> Response<Bytes> {
     let mut response = Response::new(Bytes::from(text));
     *response.status_mut() = status;
     response
-}
-
-/// The first `content-encoding` other than `identity`.
-fn encoding(parts: &Parts) -> Option<String> {
-    parts
-        .headers
-        .get_all(CONTENT_ENCODING)
-        .iter()
-        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
-        .find(|value| !value.eq_ignore_ascii_case("identity"))
 }
 
 #[cfg(test)]

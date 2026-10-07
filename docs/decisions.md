@@ -2621,18 +2621,22 @@ How to read this record:
   one that does not exist. `precision` is `ns` only, and a missing or empty one is `ns`; another
   gives 400, where InfluxDB scales it, because our writer writes nanoseconds only and a
   wrong precision must fail loud. Another path gives 404, and another method on a write
-  path 405. It checks no token. `database` stays out of `Store`: the 404 is an answer of
-  the HTTP front. Decided by architect-2
+  path 405. A `content-encoding` other than `identity` gets 415 and stores nothing, as
+  the store decodes no body. It checks no token. `database` stays out of `Store`: the
+  404 is an answer of the HTTP front. It compares names as the query writes them, with
+  no percent-decoding, until the first PR of `connector-influx` that writes a name into
+  a query (#1530). Decided by architect-2
   (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
-  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508).
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777).
 - **HTTP SIM SERVER (#1151)** `connector::http::sim::serve(listener, tasks, answer)`,
   behind the `connector` cargo feature `sim`, off by default, is the one HTTP/1.1
   server of the protocol simulators of HTTP connectors. It runs `hyper`'s server on
   each stream, on its own task, with keep-alive, and gives `answer` each request with
-  its whole body. A request that breaks HTTP gets 400, or 414 for a URI or 431 for a
-  head that is too long, and ends its stream; an HTTP/2 preface ends it with no
-  answer. A `content-encoding` other than `identity` gets 415, as the simulators
-  decode no body. It returns the listener's error, so a test server that cannot accept
+  its whole body. A request that breaks HTTP gets 400, or 414 when its URI is too long
+  and 431 when its head is too long, and ends its stream; an HTTP/2 preface ends it
+  with no answer. Each simulator answers a `content-encoding` in its own route. It
+  returns the listener's error, so a test server that cannot accept
   fails loud. `hyper`'s server reads OS wall time on each poll (hyper 1.12.0,
   `common/date.rs`) only for the `date` header, which is off. A timer reads its own
   `Instant` to arm the header read timeout, which is off too
@@ -2641,7 +2645,8 @@ How to read this record:
   copy of the server in each kind crate. Decided by architect-2
   (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
-  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816) and the
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816,
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777) and the
   person (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353),
   which supersedes 6042446508 in its clause that the server parses with `httparse`.
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its

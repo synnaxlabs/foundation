@@ -5,7 +5,8 @@ use bytes::Bytes;
 use connector::http::{Client, Config};
 use env::net::tcp;
 use env::thread::Handle;
-use http::{Method, Request, StatusCode};
+use http::header::CONTENT_ENCODING;
+use http::{HeaderValue, Method, Request, StatusCode};
 use sim::{Sim, node};
 use types::time::Span;
 
@@ -290,4 +291,31 @@ fn answers_another_database_with_404_and_stores_nothing() {
         ]
     );
     assert_eq!(network.times("m"), [0_i64; 0]);
+}
+
+#[test]
+fn answers_a_content_encoding_with_415_and_stores_nothing() {
+    let mut network = Network::new();
+    let encoded = |encodings: &[&'static str], body| {
+        let mut request = network.post("/write?db=edge", body);
+        for &encoding in encodings {
+            let value = HeaderValue::from_static(encoding);
+            request.headers_mut().append(CONTENT_ENCODING, value);
+        }
+        request
+    };
+    let requests = vec![
+        encoded(&["gzip"], "m v=1 1"),
+        encoded(&["identity", "gzip"], "m v=3 3"),
+        encoded(&["Identity"], "m v=2 2"),
+    ];
+    let refused = answer(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "the store decodes no content-encoding, not \"gzip\"",
+    );
+    assert_eq!(
+        network.send(vec![requests]),
+        [refused.clone(), refused, answer(StatusCode::NO_CONTENT, "")]
+    );
+    assert_eq!(network.times("m"), [2]);
 }
