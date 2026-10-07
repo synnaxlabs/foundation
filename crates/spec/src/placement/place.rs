@@ -28,9 +28,9 @@ pub struct Placed<'a> {
 /// index.
 ///
 /// `placements` gives each placement with its tree key. It holds each placement that
-/// reaches the index, once: those of its region and of each region above it. Node names compare as written, so `Edge` and `edge` are
-/// two nodes. The caller checks that a node exists, is not reserved, and is in the
-/// home's region.
+/// reaches the index, once: those of its region and of each region above it. Node
+/// names compare as written, so `Edge` and `edge` are two nodes. The caller checks
+/// that a node exists, is not reserved, and is in the home's region.
 ///
 /// # Errors
 ///
@@ -377,7 +377,10 @@ mod tests {
                     prop_assert_eq!(placed.copies, winner.copies());
                     prop_assert_eq!(placed.home, winner.home().unwrap_or(&writer));
                 }
-                ([(_, first, _), (_, second, _), ..], Err(Unplaced::Tie { first: a, second: b })) => {
+                (
+                    [(_, first, _), (_, second, _), ..],
+                    Err(Unplaced::Tie { first: a, second: b }),
+                ) => {
                     prop_assert_eq!(&a, *first);
                     prop_assert_eq!(&b, *second);
                 }
