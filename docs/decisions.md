@@ -2064,11 +2064,11 @@ How to read this record:
   that the join repeats (A4), an unknown ticket, and each refusal of `Record::admit`.
   So no refusal counts a use. A member's names are its card name and each
   `<name>.<status>`, and two names are equal when they differ only in ASCII case (A3,
-  X27), so each full name maps to at most one member. Region state
-  cannot see the keys of the spec, so the status key check covers members only. The name
-  and key checks are one function, which `State::new` also runs on the founding members;
-  both give a `region::Unfit`, which `Refused::Unfit` wraps. A member and a `Join` hold
-  at most 64 status entries, as the 32 of `Addresses`. Decided by `laptop.architect`
+  X27), so each full name maps to at most one member. Region state cannot see the keys
+  of the spec, so the status key check covers members only. The name and key checks are
+  one function, which `State::new` also runs on the founding members; both give a
+  `region::Unfit`, which `Refused::Unfit` wraps. A member and a `Join` hold at most 64
+  status entries, as the 32 of `Addresses`. Decided by `laptop.architect`
   (2026-10-07T10:44:26Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
   `mesh::status::Status` holds the cap of 64: `Status::new` refuses more (`Many`), and
