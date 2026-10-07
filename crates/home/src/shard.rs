@@ -2242,17 +2242,18 @@ mod tests {
             let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
             let writers = create_pool(4 * POOL);
             let small = |stamp: i64| frame(&writers, &set, &[(0, &[stamp]), (1, &[1])]);
-            // The append of the handoff fails, then the pool has no block for it.
-            let mut blocks = Vec::new();
-            for state in ["append", "no block"] {
-                let live = shard.write(b, LIVE, small(600_000));
-                assert_eq!(live, Err(disk.clone()), "{state}");
-                let backfill = shard.write(b, BACKFILL, small(100));
-                assert_eq!(backfill, Err(disk.clone()), "{state}");
-                blocks.extend(test.fill());
-            }
-            let large = create_large(&set, 100, &[]);
-            assert_eq!(shard.write(b, BACKFILL, large), Err(disk));
+            let mut write = |state: &str| {
+                for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
+                    let written = shard.write(b, label, small(first));
+                    assert_eq!(written, Err(disk.clone()), "{state} {label:?}");
+                    let large = create_large(&set, first, &[]);
+                    let written = shard.write(b, label, large);
+                    assert_eq!(written, Err(disk.clone()), "{state} {label:?} large");
+                }
+            };
+            write("the append of the handoff fails");
+            let _blocks = test.fill();
+            write("no block holds the handoff");
         });
     }
 
