@@ -516,4 +516,17 @@ mod tests {
         assert_eq!(bytes.len(), 1 + 255 + 32 + 32 + 8 + 8);
         assert_eq!(decoded(&bytes), Some(card));
     }
+
+    #[test]
+    fn a_card_at_the_edges_round_trips() {
+        let many = Card {
+            addresses: vec![Address::Udp("10.0.0.1:4100".parse().unwrap()); 300],
+            ..fixed()
+        };
+        for version in [0, u64::MAX] {
+            let card = Card { version, ..fixed() };
+            assert_eq!(decoded(&encoded(&card)), Some(card), "version {version}");
+        }
+        assert_eq!(decoded(&encoded(&many)), Some(many), "300 addresses");
+    }
 }
