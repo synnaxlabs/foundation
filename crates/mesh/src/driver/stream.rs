@@ -4,7 +4,8 @@ use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
 use types::node::PublicKey;
 
-use super::{Mesh, block};
+use super::Mesh;
+use crate::bytes::block;
 use crate::error::Error;
 use crate::message::Message;
 

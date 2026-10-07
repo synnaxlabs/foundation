@@ -2300,9 +2300,14 @@ How to read this record:
   or in a send. The task of a voter that a change removed, to which `raft` sends no more
   messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881). The group
-  holds the handle of each session, in the queue of its member, and not the task: a call
-  of the mesh that forwards a change opens its stream on it (`set_home`). A stop of the
-  group drops each handle (box1.builder-3, #1593: no public item changes, so no ruling).
+  holds the handle of the session to each member, and not the task, so that `set_home`
+  opens its stream on it: the task is the only one that dials (the plan of PR 4d,
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037266854, approved
+  by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A stop
+  of the group drops each handle. When `Transport::dial` gives the one open session to a
+  peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
+  handle goes back to the task.
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
