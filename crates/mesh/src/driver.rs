@@ -517,8 +517,11 @@ mod tests {
         homes: Homes,
         /// The node of each proposal that the group took, in order.
         led: Vec<u8>,
-        /// The change that each node proposes until the group takes it.
-        script: BTreeMap<u8, Change>,
+        /// The changes that each node proposes in order, each until the group takes
+        /// it.
+        script: BTreeMap<u8, VecDeque<Change>>,
+        /// The members from 1 to 9 on each node, when its watch last gave a home.
+        members: BTreeMap<u8, BTreeSet<u8>>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -634,18 +637,20 @@ mod tests {
         }
     }
 
-    /// Proposes the change of node `id` in the script, once per tick, until the
+    /// Proposes the next change of node `id` in the script, once per tick, until the
     /// group takes it.
     async fn propose(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
             let mut board = board.lock().unwrap();
-            let Some(change) = board.script.get(&id).cloned() else {
+            let Some(change) =
+                board.script.get_mut(&id).and_then(|script| script.front())
+            else {
                 continue;
             };
-            match mesh.propose(&change) {
+            match mesh.propose(change) {
                 Ok(_) => {
-                    board.script.remove(&id);
+                    board.script.get_mut(&id).map(VecDeque::pop_front);
                     board.led.push(id);
                 }
                 Err(Error::Raft(raft::Error::NotLeader { .. })) => {}
@@ -661,10 +666,20 @@ mod tests {
         board: Arc<Mutex<Board>>,
     }
 
+    /// `config` with an MTU that holds each raft message in one datagram, as the
+    /// stream of a mesh does.
+    fn wide(config: link::Config) -> link::Config {
+        link::Config {
+            mtu: 1 << 16,
+            ..config
+        }
+    }
+
     impl Cluster {
         fn new(seed: u64) -> Self {
             let mut sim = Sim::new(sim::Config {
                 seed,
+                link: wide(link::Config::default()),
                 ..sim::Config::default()
             });
             let node = |_| sim.node(sim::node::Config::default());
@@ -692,7 +707,13 @@ mod tests {
 
         /// Sets what each node proposes.
         fn script(&self, change: impl Fn(u8) -> Change) {
-            let script = IDS.map(|id| (id, change(id))).into();
+            let script = IDS.map(|id| (id, [change(id)].into())).into();
+            self.board.lock().unwrap().script = script;
+        }
+
+        /// Each node proposes `changes`, in order.
+        fn script_each(&self, changes: &[Change]) {
+            let script = IDS.map(|id| (id, changes.iter().cloned().collect())).into();
             self.board.lock().unwrap().script = script;
         }
 
@@ -703,10 +724,10 @@ mod tests {
         /// Sets the chance that a datagram between `a` and `b` is lost, each way.
         fn link(&mut self, a: u8, b: u8, loss: f64) {
             let node = |id| &self.nodes[IDS.iter().position(|&own| own == id).unwrap()];
-            let config = link::Config {
+            let config = wide(link::Config {
                 loss,
                 ..link::Config::default()
-            };
+            });
             self.sim.link(node(a), node(b), config);
             self.sim.link(node(b), node(a), config);
         }
@@ -748,13 +769,10 @@ mod tests {
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();
-            board
-                .lock()
-                .unwrap()
-                .homes
-                .entry(id)
-                .or_default()
-                .push(home);
+            let members = (1..10).filter(|&of| mesh.member(key(of)).is_some());
+            let mut board = board.lock().unwrap();
+            board.homes.entry(id).or_default().push(home);
+            board.members.insert(id, members.collect());
         }
     }
 
@@ -1492,34 +1510,26 @@ mod tests {
     // stop, so one voter that proposes bad bytes cannot halt the region.
     #[test]
     fn a_committed_join_that_does_not_decode_changes_nothing() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-            let mut watch = mesh.watch(INDEX);
-            assert_eq!(watch.next().await, Ok(None));
-            lead(&mesh, &node.clock(), ticket()).await;
-            let Change::Join(mut over) = join(3) else {
-                unreachable!()
-            };
-            over.status = (0..65)
-                .map(|i| {
-                    (
-                        format!("s{i:02}").parse().unwrap(),
-                        channel::Key::from_u128(i),
-                    )
-                })
-                .collect();
-            mesh.propose(&Change::Join(over)).unwrap();
-            mesh.propose(&join(4)).unwrap();
-            mesh.propose(&home(1)).unwrap();
-            assert_eq!(watch.next().await, Ok(Some(key(1))));
-            assert_eq!(mesh.member(key(3)), None);
-            let admitted = mesh.member(key(4)).map(|member| member.card);
-            assert_eq!(admitted, Some(common::member(4).card));
-        });
+        let Change::Join(mut over) = join(5) else {
+            unreachable!()
+        };
+        over.status = (0..65)
+            .map(|i| {
+                let status = format!("s{i:02}").parse().unwrap();
+                (status, channel::Key::from_u128(100 + i))
+            })
+            .collect();
+        let mut cluster = Cluster::new(1);
+        cluster.script_each(&[ticket(), Change::Join(over), join(4), home(1)]);
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = std::mem::take(&mut *cluster.board.lock().unwrap());
+        assert_eq!(board.led, vec![board.led[0]; 4]);
+        assert_eq!(board.homes, each(&[None, Some(key(1))]));
+        let members = IDS.map(|id| (id, [1, 2, 3, 4].into())).into();
+        assert_eq!(board.members, members);
     }
 
-    // Every node refuses the same changes, so a refused change in the log changes no
-    // state and the group applies the next entry.
     #[test]
     fn a_committed_join_with_a_forged_card_changes_nothing() {
         solo(|node, tasks| async move {
