@@ -92,8 +92,9 @@ that pass in CI.
   with zero other approvals.
 - After its local gate and review, the author runs `gh pr merge <n> --auto`. The queue
   tests each PR on top of `main` and merges it.
-- Code owners (`.github/CODEOWNERS`): the person owns `oracles/`, `.github/`,
-  `CLAUDE.md`, and `.claude/`. Everything else merges when its checks pass.
+- Code owners (`.github/CODEOWNERS`): the person owns `oracles/` (except the fuzz
+  inputs in `oracles/fuzz/`), `.github/`, `CLAUDE.md`, and `.claude/`. Everything else
+  merges when its checks pass.
 - The architect reviews every public-interface or crate-dependency change before the
   person.
 - Branches start with the machine: `<machine>/<issue>-<slug>`, for example

@@ -2019,7 +2019,8 @@ How to read this record:
   own PR through the queue when the gate, the review rounds, and CI pass; agents may run
   `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
   `.claude/`. The person: "Great, make the fucking changes and do your fucking job
-  shipping software". Supersedes: the approvals in ENGINEERS and MERGE QUEUE.
+  shipping software". Fuzz inputs in `oracles/fuzz/` need no approval either: they only
+  add tests. The person: "Yes". Supersedes: the approvals in ENGINEERS and MERGE QUEUE.
 
 ### 1.14 Testing
 
