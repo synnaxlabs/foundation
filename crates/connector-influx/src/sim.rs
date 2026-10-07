@@ -60,10 +60,11 @@ enum Column {
     String(Typed<String>),
 }
 
-/// `set[i]` says whether point `i` sets the field, and then `values[i]` holds it.
+/// `values[i]` is the value of the point at index `points[i]` of the chunk. Only the
+/// points that set the field take room, so a sparse field costs little.
 #[derive(Debug)]
 struct Typed<T> {
-    set: Vec<bool>,
+    points: Vec<u16>,
     values: Vec<T>,
 }
 
@@ -242,9 +243,19 @@ impl Series {
         match found {
             Ok(at) => self.chunk(first).set(at, fields),
             Err(at) if len < CHUNK => self.insert(first, at, time, fields),
-            // A time before or after a full chunk starts a chunk, so appends in time
-            // order leave each chunk full.
-            Err(0 | CHUNK) => self.insert(time, 0, time, fields),
+            // A time before or after a full chunk goes to the start of the next chunk
+            // when it has room, or else starts a chunk, so appends in either time order
+            // leave each chunk full.
+            Err(0) => self.insert(time, 0, time, fields),
+            Err(CHUNK) => {
+                let next = self
+                    .chunks
+                    .range(time..)
+                    .next()
+                    .filter(|(_, chunk)| chunk.times.len() < CHUNK)
+                    .map_or(time, |(&first, _)| first);
+                self.insert(next, 0, time, fields);
+            }
             Err(_) => {
                 let right = self.chunk(first).split();
                 self.chunks.insert(right.first(), right);
@@ -284,11 +295,10 @@ impl Chunk {
     }
 
     fn set(&mut self, at: usize, fields: BTreeMap<String, Field>) {
-        let len = self.times.len();
         for (key, field) in fields {
             self.columns
                 .entry(key)
-                .or_insert_with(|| Column::new(&field, len))
+                .or_insert_with(|| Column::new(&field))
                 .set(at, field);
         }
     }
@@ -316,14 +326,14 @@ impl Chunk {
 }
 
 impl Column {
-    /// A column of `len` points, none of which sets it, for the type of `field`.
-    fn new(field: &Field, len: usize) -> Self {
+    /// An empty column for the type of `field`.
+    fn new(field: &Field) -> Self {
         match field {
-            Field::Float(_) => Self::Float(Typed::new(len)),
-            Field::Integer(_) => Self::Integer(Typed::new(len)),
-            Field::Unsigned(_) => Self::Unsigned(Typed::new(len)),
-            Field::Boolean(_) => Self::Boolean(Typed::new(len)),
-            Field::String(_) => Self::String(Typed::new(len)),
+            Field::Float(_) => Self::Float(Typed::new()),
+            Field::Integer(_) => Self::Integer(Typed::new()),
+            Field::Unsigned(_) => Self::Unsigned(Typed::new()),
+            Field::Boolean(_) => Self::Boolean(Typed::new()),
+            Field::String(_) => Self::String(Typed::new()),
         }
     }
 
@@ -371,43 +381,60 @@ impl Column {
     }
 }
 
-impl<T: Clone + Default> Typed<T> {
-    fn new(len: usize) -> Self {
+impl<T> Typed<T> {
+    fn new() -> Self {
         Self {
-            set: vec![false; len],
-            values: vec![T::default(); len],
+            points: Vec::new(),
+            values: Vec::new(),
         }
     }
 
+    /// Moves each point at index `at` or later one index up, for a new point at `at`.
     fn insert(&mut self, at: usize) {
-        self.set.insert(at, false);
-        self.values.insert(at, T::default());
+        let from = self
+            .points
+            .partition_point(|&point| usize::from(point) < at);
+        for point in self.points.iter_mut().skip(from) {
+            *point = point.strict_add(1);
+        }
     }
 
     fn set(&mut self, at: usize, value: T) {
-        *self.set.get_mut(at).expect("a point of the chunk") = true;
-        *self.values.get_mut(at).expect("a point of the chunk") = value;
+        let at = u16::try_from(at).expect("a chunk holds at most CHUNK points");
+        match self.points.binary_search(&at) {
+            Ok(i) => *self.values.get_mut(i).expect("a value for each point") = value,
+            Err(i) => {
+                self.points.insert(i, at);
+                self.values.insert(i, value);
+            }
+        }
     }
 
     fn get(&self, at: usize) -> Option<&T> {
-        self.set
-            .get(at)
-            .is_some_and(|set| *set)
-            .then(|| self.values.get(at))
-            .flatten()
+        let at = u16::try_from(at).ok()?;
+        self.values.get(self.points.binary_search(&at).ok()?)
     }
 
+    /// Moves the points at index `half` or later into a new column, `half` indexes
+    /// down.
     fn split(&mut self, half: usize) -> Self {
+        let from = self
+            .points
+            .partition_point(|&point| usize::from(point) < half);
+        let half = u16::try_from(half).expect("a chunk holds at most CHUNK points");
         Self {
-            set: split(&mut self.set, half),
-            values: split(&mut self.values, half),
+            points: split(&mut self.points, from)
+                .into_iter()
+                .map(|point| point.strict_sub(half))
+                .collect(),
+            values: split(&mut self.values, from),
         }
     }
 }
 
-/// Moves `values[half..]` into a new `Vec`, and frees the spare capacity of `values`.
-fn split<T>(values: &mut Vec<T>, half: usize) -> Vec<T> {
-    let right = values.split_off(half);
+/// Moves `values[from..]` into a new `Vec`, and frees the spare capacity of `values`.
+fn split<T>(values: &mut Vec<T>, from: usize) -> Vec<T> {
+    let right = values.split_off(from);
     values.shrink_to_fit();
     right
 }
