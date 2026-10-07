@@ -115,4 +115,15 @@ mod tests {
         assert_eq!(lease(span).map(control::Lease::span), Ok(span));
         assert_eq!(lease(Span::ZERO), Err(Error::Lease { span: Span::ZERO }));
     }
+
+    #[test]
+    #[should_panic(expected = "writer 7 is of shard 5, not shard 9")]
+    fn panics_on_a_key_of_another_shard() {
+        let key = Key {
+            shard: 5,
+            number: 7,
+        };
+
+        key.on(9);
+    }
 }
