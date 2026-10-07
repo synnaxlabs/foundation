@@ -36,4 +36,9 @@ exclude_re = [
   # When the measured time asleep equals the largest, `fetch_max` stores the same
   # value, so `>=` gives the same result as `>`.
   'crates/os/src/clock\.rs:.*replace > with >= in combine',
+  # A `Tcp` has no write buffer, so a flush is ready at once. `Poll::Ready(Ok(()))` is
+  # what the body returns.
+  'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
+  # macOS only. CI runs Linux and does not build it; its tests run on macOS.
+  'crates/os/src/allocate\.rs:',
 ]

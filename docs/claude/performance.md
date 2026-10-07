@@ -5,7 +5,7 @@ latest-mode p99 under 250 µs over one encrypted LAN hop; under 4 bytes per samp
 a Raspberry Pi 4 idles under 50 MB and starts in under 1 s. A regression over 5% needs
 a written judgment before merge: how often the path runs (per sample, frame, session, or
 start), its absolute cost against the P1 budget, the noise of the machine, and what the
-change buys. The code owner accepts or rejects it on those facts.
+change buys. The architect accepts or rejects it on those facts.
 
 Evidence: `docs/research/r1-thread-model.md`, `docs/research/r11-memory-sync.md`, and
 `docs/research/r11-mem-bench/`. The numbers below are from an M3 Max. Rerun on Linux

@@ -474,6 +474,10 @@ mod tests {
         fn listen(&self, _: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error> {
             Err(Error::Io { code: 95 })
         }
+
+        fn resolve<'a>(&'a self, _: &'a str, _: u16) -> net::Resolve<'a> {
+            Box::pin(async { Err(Error::Io { code: 95 }) })
+        }
     }
 
     fn bind() -> (Sender, Receiver, Arc<Mutex<Vec<String>>>) {

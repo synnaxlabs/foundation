@@ -1,20 +1,6 @@
 /oracles/ @emilbon99
-/docs/decisions* @emilbon99
+# A fuzz input only adds a test, so it needs no approval.
+/oracles/fuzz/
 /.github/ @emilbon99
 /CLAUDE.md @emilbon99
 /.claude/ @emilbon99
-**/public-api.txt @emilbon99
-
-# box1 (Ronaldo):
-/crates/raft/ @emilbon99
-/crates/buffer/ @emilbon99
-/crates/delivery/ @emilbon99
-/crates/block/ @emilbon99
-/crates/ring/ @emilbon99
-/crates/codec/ @emilbon99
-/crates/wire/ @emilbon99
-/crates/home/ @emilbon99
-/crates/replica/ @emilbon99
-
-# box2 (Sergio):
-/crates/transport/ @emilbon99

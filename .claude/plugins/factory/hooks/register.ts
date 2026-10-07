@@ -2,6 +2,7 @@
 import type { EngineInterface as Api, Register, Timer } from 'claude-code'
 
 const SEND = 'mcp__factory__send'
+const NEXT = 'mcp__factory__next'
 const ACK_MS = 60_000
 const RETRY_MS = 5_000
 const MINUTE_MS = 60_000
@@ -21,12 +22,20 @@ const HINT =
   'answer, such as thanks. A line "fmsg <id> to <name>: no ack after 60 s" says ' +
   'that <name> did not receive your message yet; it is not a message.'
 
-type Roster = { host: string; port: number; names: string[] }
+// `turnCaps` raises the cap for a session that every other session messages.
+type Roster = {
+  host: string
+  port: number
+  names: string[]
+  turnCaps?: Record<string, number>
+}
 type Saved = { queue: string[]; seen: string[] }
 
 type Session = Saved & {
   name: string
   roster: Roster
+  rosterText: string
+  cap: number
   tls: string[]
   link: string
   // The id of the last probe, until it comes back.
@@ -59,7 +68,8 @@ function parse(text: string): Record<string, unknown> {
 
 async function start($: Api): Promise<Session | undefined> {
   const name = await $.env.get('FACTORY_NAME')
-  const roster: Roster = JSON.parse(await $.fs.read(`${$.plugin.root}/roster.json`))
+  const rosterText = await $.fs.read(`${$.plugin.root}/roster.json`)
+  const roster: Roster = JSON.parse(rosterText)
   if (!name || !roster.names.includes(name)) {
     const why = name ? `${name} is not in the roster` : 'FACTORY_NAME is not set'
     $.ui.status(`${why}; messaging is off`)
@@ -71,6 +81,8 @@ async function start($: Api): Promise<Session | undefined> {
     ...saved,
     name,
     roster,
+    rosterText,
+    cap: roster.turnCaps?.[name] ?? TURN_CAP,
     tls: [
       ...['-h', roster.host, '-p', String(roster.port)],
       ...['--cafile', `${dir}/root-ca.pem`, '--cert', `${dir}/cert.pem`],
@@ -87,6 +99,25 @@ async function start($: Api): Promise<Session | undefined> {
     reported: '',
     reportedAt: 0,
   }
+  await registerSend($, s)
+  await $.tool.register({
+    name: 'next',
+    description:
+      "Clears this session's context once the turn ends, then runs /build, so the " +
+      'session takes its next issue. Call it after the final state comment on a ' +
+      'merged issue, then end your turn.',
+    inputSchema: { type: 'object', properties: {} },
+  })
+  void listen($, s)
+  void drain($, s)
+  $.clock.every(MINUTE_MS, () => {
+    void probe($, s)
+    void reread($, s)
+  })
+  return s
+}
+
+async function registerSend($: Api, s: Session) {
   await $.tool.register({
     name: 'send',
     description:
@@ -96,16 +127,29 @@ async function start($: Api): Promise<Session | undefined> {
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', enum: roster.names.filter(n => n !== name) },
+        to: { type: 'string', enum: s.roster.names.filter(n => n !== s.name) },
         text: { type: 'string' },
       },
       required: ['to', 'text'],
     },
   })
-  void listen($, s)
-  void drain($, s)
-  $.clock.every(MINUTE_MS, () => void probe($, s))
-  return s
+}
+
+// A reload happens only when code changes, so a roster edit applies here: the names
+// and the turn caps. A file caught mid-write keeps the old roster until the next read.
+async function reread($: Api, s: Session) {
+  const text = await $.fs.read(`${$.plugin.root}/roster.json`)
+  if (text === s.rosterText) return
+  let roster: Roster
+  try {
+    roster = JSON.parse(text)
+  } catch (error) {
+    return $.ui.log(`roster.json does not parse: ${error}`)
+  }
+  s.rosterText = text
+  s.roster = roster
+  s.cap = roster.turnCaps?.[s.name] ?? TURN_CAP
+  await registerSend($, s)
 }
 
 // One subscriber for the session's life.
@@ -193,7 +237,7 @@ async function drain($: Api, s: Session) {
     while (s.queue[0] !== undefined) {
       const now = await $.clock.now()
       s.starts = s.starts.filter(t => t > now - HOUR_MS)
-      if (s.starts.length >= TURN_CAP) {
+      if (s.starts.length >= s.cap) {
         s.capped = $.clock.after(s.starts[0]! + HOUR_MS - now, () => {
           s.capped = undefined
           void drain($, s)
@@ -211,6 +255,16 @@ async function drain($: Api, s: Session) {
     s.draining = false
   }
   await refresh($, s)
+}
+
+// The commands queue until the session is idle, so `/build` starts in a clear context.
+async function restart($: Api) {
+  try {
+    await $.command.run({ command: 'clear' })
+    await $.command.run({ command: 'build' })
+  } catch (error) {
+    $.ui.log(`next failed: ${error}`)
+  }
 }
 
 async function send($: Api, s: Session, to: unknown, text: unknown) {
@@ -266,7 +320,7 @@ async function refresh($: Api, s: Session) {
       `queued ${queued}`,
       ...(usage.cost ? [`$${usage.cost.usd.toFixed(2)}`] : []),
       ...usage.rateLimits.map(l => `${LIMITS[l.kind] ?? l.kind} ${l.percentUsed}%`),
-      ...(s.capped ? [`capped at ${TURN_CAP} turns an hour`] : []),
+      ...(s.capped ? [`capped at ${s.cap} turns an hour`] : []),
     ].join(' · '),
   )
   const { recv, sent, noAcks } = s
@@ -305,12 +359,19 @@ export const register: Register = on => {
     return send($, s, e.to, e.text)
   })
 
-  // A session that wakes for a message with nobody at the prompt never searches for
-  // a deferred tool.
-  on('tool.describe', { tool: SEND }, async ($, e, next) => ({
-    ...(await next(e)),
-    isDeferred: false,
-  }))
+  // `$.command.run` rejects inside a hook the turn waits on, so it runs from a timer.
+  on('tool.call', { tool: NEXT }, async $ => {
+    if (!s) return { deny: 'factory messaging is off; see the status line' }
+    $.clock.after(0, () => void restart($))
+    return { result: 'after this turn: /clear, then /build' }
+  })
+
+  // A session that wakes with nobody at the prompt never searches for a deferred tool.
+  for (const tool of [SEND, NEXT])
+    on('tool.describe', { tool }, async ($, e, next) => ({
+      ...(await next(e)),
+      isDeferred: false,
+    }))
 
   // The tool description alone does not stop plain-text answers to a message.
   on('prompt.compose', async ($, e, next) => {

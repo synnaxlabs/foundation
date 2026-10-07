@@ -76,7 +76,7 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 
 - Every public type implements `Debug`, and the output is never empty (r16 1).
 - Each public item has one path. Do not `pub use` an item that is public at its home
-  (r16 2).
+  (r16 2). The one exception is `hub`, the layer-3 window (R16-10).
 - Fields are all private, or all public on plain data with no invariant (r16 4).
 - A type with an invariant has a fallible constructor and no `From` that can panic
   (r16 5).
@@ -116,7 +116,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, `counting`, the `memory`, `clock`, and `wall` modules of `os`, and
+  `block`, `ring`, `counting`, the `memory`, `clock`, and `wall` modules of `os`, the
+  `allocate` module of `os` on macOS (architect, #931,
+  https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099), and
   later FFI connectors. Such a module uses `#[expect(unsafe_code, reason = "...")]`
   and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
   cannot run, so tests on the real OS check them, and `cargo xtask miri` skips `os`
