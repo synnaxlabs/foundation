@@ -216,6 +216,27 @@ fn gives_a_silent_address_half_the_timeout_before_the_next() {
 }
 
 #[test]
+fn gives_two_silent_addresses_a_third_of_the_timeout_each() {
+    let mut network = Network::new(86);
+    let (first, second) = (network.silent(), network.silent());
+    network.name(
+        "influx",
+        vec![first, second, network.remote().ip()],
+        Span::ZERO,
+    );
+    let log = network.serve_each(PORT, ok);
+    all_ok(&network.run(vec![Step::Send(get(&format!("http://influx:{PORT}/")))]));
+    assert_eq!(log.lock().expect("no panic").requests, [0]);
+    let two_thirds = Span::from_nanos(TIMEOUT.nanos() * 2 / 3);
+    let elapsed = network.elapsed.expect("a send ran");
+    assert!(
+        two_thirds < elapsed
+            && elapsed < Span::from_nanos(two_thirds.nanos() + 100_000_000),
+        "{elapsed}"
+    );
+}
+
+#[test]
 fn gives_each_silent_address_at_least_2_s() {
     let mut network = Network::new(81);
     let mut addresses: Vec<IpAddr> = (0..5).map(|_| network.silent()).collect();
