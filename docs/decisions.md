@@ -1333,23 +1333,22 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. An empty `Start.voters` is a voter that an operator wiped, because a
-  node that joins opens with the founding voters from its join answer (decided by the
-  architect, #242:
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). It takes
-  any proof until it holds a `Voters` entry (#1004). Then its
-  first `Voters` entry shows the configuration before the entries: a joint entry's
-  outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
-  starts at index 1, so that entry is the joint entry of the group's first change, and
-  the node checks proofs as a founder with the same log does, gaps included (#881,
-  #1005). Lost: an empty committed set proves nothing (the new node then refuses a
-  leader that the outgoing set elects when the old leader fails before the joint entry
-  commits); a joining node starts with the group's configuration (the caller must know
-  it, and it removes the operator's recovery of a wiped voter); the founding
-  configuration as entry 1, as in etcd (a wider change that alone leaves the node open
-  until it holds that entry). A `Voters` entry with an empty `incoming` set, in
-  `Start.entries` or in an `Append`, is `Error::NoVoters`: a group with no voter can
-  never commit or elect.
+  `Start.entries`. A node that joins starts with the founding voters from the answer to
+  its join (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). An empty
+  `Start.voters` is a voter that an operator wiped. It takes any proof until it holds a
+  `Voters` entry (#1004). Then its first `Voters` entry shows the configuration before
+  the entries: a joint entry's outgoing set, or for a leave its own set (#928,
+  coordinator, 2026-10-06). A log starts at index 1, so that entry is the joint entry of
+  the group's first change, and the node checks proofs as a founder with the same log
+  does, gaps included (#881, #1005). Lost: an empty committed set proves nothing (the
+  new node then refuses a leader that the outgoing set elects when the old leader fails
+  before the joint entry commits); a joining node starts with the group's current
+  configuration (the caller must know it, and it removes the operator's recovery of a
+  wiped voter); the founding configuration as entry 1, as in etcd (a wider change that
+  alone leaves the node open until it holds that entry). A `Voters` entry with an empty
+  `incoming` set, in `Start.entries` or in an `Append`, is `Error::NoVoters`: a group
+  with no voter can never commit or elect.
   A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
