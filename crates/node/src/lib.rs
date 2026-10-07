@@ -96,9 +96,7 @@ struct Shard {
 const BODY_MAX: usize = 1 << 20;
 /// The longest an entry waits for its group commit to start.
 const COMMIT: Span = Span::from_nanos(2_000_000);
-/// The stamps each home accepts. A patch until the limits are settings (#1285):
-/// 2000-01-01 refuses a clock that was never set, and 10 s is ten times the time
-/// error target.
+/// The stamps each home accepts, a patch until they are settings (#1285).
 const LIMITS: home::order::Limits = home::order::Limits {
     earliest: Stamp::from_nanos(946_684_800_000_000_000),
     ahead: Span::from_nanos(10_000_000_000),
@@ -165,7 +163,7 @@ impl Node {
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
         let cores = shards.cores().get();
-        let (mesh, reader) = clock::Clock::new(monotonic.clone());
+        let (mesh, clock) = clock::Clock::new(monotonic.clone());
         // Shard 0 runs the mesh clock, and gives the first interner once it has
         // claimed the data directory.
         let mut first = Some((mesh, wall, give));
@@ -194,8 +192,8 @@ impl Node {
                 core,
                 take,
                 give,
-                clock: monotonic.clone(),
-                reader: reader.clone(),
+                monotonic: monotonic.clone(),
+                clock: clock.clone(),
                 entropy: entropy.clone(),
                 layout,
                 failed: Arc::clone(&failed),
@@ -278,16 +276,16 @@ fn error(
 }
 
 /// The disk steps of a shard, made before the shard starts: shard 0's claim of the
-/// data directory, and the open of the shard's buffer. The shards open one after
-/// another, in order of core, because each open assigns slots in the node's one
-/// interner.
+/// data directory, and the open of the shard's buffer, with the shard's home over
+/// it. The shards open one after another, in order of core, because each open
+/// assigns slots in the node's one interner.
 struct Open {
     core: usize,
     take: Take<Interner>,
     give: Give<Interner>,
-    clock: env::clock::Clock,
-    /// The node's mesh clock, for the shard's home.
-    reader: clock::Reader,
+    monotonic: env::clock::Clock,
+    /// The node's clocks, for the shard's home.
+    clock: clock::Reader,
     entropy: env::entropy::Entropy,
     layout: buffer::Layout,
     failed: Arc<OnceLock<Error>>,
@@ -377,7 +375,7 @@ impl Open {
             files,
             dir: directory::shard(self.core),
             pool,
-            clock: self.clock,
+            clock: self.monotonic,
             tasks,
             entropy: self.entropy,
             layout: self.layout,
@@ -390,7 +388,7 @@ impl Open {
                     shard: u32::try_from(self.core)
                         .expect("invariant: a core fits a u32"),
                     buffer,
-                    clock: self.reader,
+                    clock: self.clock,
                     limits: LIMITS,
                 }))
             }
