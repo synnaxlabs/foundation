@@ -1,45 +1,63 @@
-//! The placement policy: where copies of the connectors and indexes it selects live.
+//! The placement policy: where the connectors and indexes it selects live: a home, a
+//! standby, and copies.
 
 use std::fmt;
 
 use types::name::{Name, Selector};
 
-/// Places the connectors and indexes that `select` matches: a standby node that takes
-/// over when the home fails, and copy nodes that are never promoted.
+mod place;
+
+pub use place::{Placed, Unplaced, place};
+
+/// Places the connectors and indexes that `select` matches: a home node, a standby node
+/// that takes over when the home fails, and copy nodes that are never promoted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
     select: Selector,
-    standby: Option<Name>,
-    copies: Vec<Name>,
+    nodes: Nodes,
+}
+
+/// The nodes a placement names. Plain data; [`Policy::new`] checks it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Nodes {
+    /// The node that orders, buffers, and gates the selected indexes.
+    pub home: Option<Name>,
+    /// The node that takes over when the home fails.
+    pub standby: Option<Name>,
+    /// The nodes that keep a copy that is never promoted.
+    pub copies: Vec<Name>,
 }
 
 impl Policy {
-    /// Makes a policy. The order and repeats of `copies` do not count.
+    /// Makes a policy. The order and repeats of `nodes.copies` do not count.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Empty`] with no standby and no copy, and [`Error::Overlap`]
-    /// when the standby is also a copy.
-    pub fn new(
-        select: Selector,
-        standby: Option<Name>,
-        copies: impl IntoIterator<Item = Name>,
-    ) -> Result<Self, Error> {
-        let mut copies = copies.into_iter().collect::<Vec<_>>();
-        copies.sort();
-        copies.dedup();
-        match &standby {
-            None if copies.is_empty() => return Err(Error::Empty),
-            Some(node) if copies.contains(node) => {
-                return Err(Error::Overlap(node.clone()));
-            }
-            _ => {}
-        }
-        Ok(Self {
-            select,
+    /// Returns [`Error::Empty`] with no home, no standby, and no copy, and
+    /// [`Error::Overlap`] when one node has two roles. It names the home when the home
+    /// has two roles, else the standby.
+    pub fn new(select: Selector, mut nodes: Nodes) -> Result<Self, Error> {
+        nodes.copies.sort();
+        nodes.copies.dedup();
+        let Nodes {
+            home,
             standby,
             copies,
-        })
+        } = &nodes;
+        if home.is_none() && standby.is_none() && copies.is_empty() {
+            return Err(Error::Empty);
+        }
+        let overlap = match (home, standby) {
+            (Some(home), Some(standby)) if home == standby => Some(home),
+            _ => [home, standby]
+                .into_iter()
+                .flatten()
+                .find(|node| copies.contains(node)),
+        };
+        if let Some(node) = overlap {
+            return Err(Error::Overlap(node.clone()));
+        }
+        Ok(Self { select, nodes })
     }
 
     /// The connectors and indexes the policy applies to.
@@ -48,34 +66,42 @@ impl Policy {
         &self.select
     }
 
+    /// The node that orders, buffers, and gates the selected indexes.
+    #[must_use]
+    pub const fn home(&self) -> Option<&Name> {
+        self.nodes.home.as_ref()
+    }
+
     /// The node that takes over when the home fails.
     #[must_use]
     pub const fn standby(&self) -> Option<&Name> {
-        self.standby.as_ref()
+        self.nodes.standby.as_ref()
     }
 
     /// The nodes that keep a copy, in name order with no repeat.
     #[must_use]
     pub fn copies(&self) -> &[Name] {
-        &self.copies
+        &self.nodes.copies
     }
 }
 
 /// A placement that places nothing, or names one node twice.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The policy has no standby and no copy.
+    /// The policy names no home, no standby, and no copy.
     Empty,
-    /// The node is both the standby and a copy.
+    /// The node has more than one role in the policy.
     Overlap(Name),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => write!(f, "a placement has no standby and no copy"),
+            Self::Empty => {
+                write!(f, "a placement names no home, no standby, and no copy")
+            }
             Self::Overlap(node) => {
-                write!(f, "node {node} is both the standby and a copy")
+                write!(f, "node {node} has more than one role in the placement")
             }
         }
     }
@@ -95,40 +121,69 @@ mod tests {
         text.parse().unwrap()
     }
 
+    fn nodes(home: Option<&str>, standby: Option<&str>, copies: &[&str]) -> Nodes {
+        Nodes {
+            home: home.map(name),
+            standby: standby.map(name),
+            copies: copies.iter().map(|copy| name(copy)).collect(),
+        }
+    }
+
     #[test]
-    fn refuses_a_placement_with_no_standby_and_no_copy() {
-        assert_eq!(Policy::new(select(), None, []), Err(Error::Empty));
+    fn refuses_a_placement_that_names_no_node() {
+        assert_eq!(Policy::new(select(), Nodes::default()), Err(Error::Empty));
         assert_eq!(
             Error::Empty.to_string(),
-            "a placement has no standby and no copy"
+            "a placement names no home, no standby, and no copy"
         );
     }
 
     #[test]
-    fn refuses_a_standby_that_is_also_a_copy() {
-        let copies = [name("n_2"), name("n_1")];
-        let error = Error::Overlap(name("n_1"));
+    fn refuses_a_node_with_two_roles() {
+        for nodes in [
+            nodes(Some("n_1"), Some("n_1"), &[]),
+            nodes(Some("n_1"), None, &["n_2", "n_1"]),
+            nodes(None, Some("n_1"), &["n_2", "n_1"]),
+            nodes(Some("n_3"), Some("n_1"), &["n_2", "n_1"]),
+        ] {
+            assert_eq!(
+                Policy::new(select(), nodes),
+                Err(Error::Overlap(name("n_1")))
+            );
+        }
+        let both = nodes(Some("n_2"), Some("n_1"), &["n_1", "n_2"]);
         assert_eq!(
-            Policy::new(select(), Some(name("n_1")), copies),
-            Err(error.clone())
+            Policy::new(select(), both),
+            Err(Error::Overlap(name("n_2"))),
+            "the home comes before the standby"
         );
-        assert_eq!(error.to_string(), "node n_1 is both the standby and a copy");
+        assert_eq!(
+            Error::Overlap(name("n_1")).to_string(),
+            "node n_1 has more than one role in the placement"
+        );
     }
 
     #[test]
     fn keeps_the_copies_in_name_order_with_no_repeat() {
-        let copies = [name("n_3"), name("n_1"), name("n_3")];
-        let policy = Policy::new(select(), Some(name("n_2")), copies).unwrap();
+        let nodes = nodes(Some("n_4"), Some("n_2"), &["n_3", "n_1", "n_3"]);
+        let policy = Policy::new(select(), nodes).unwrap();
         assert_eq!(policy.copies(), [name("n_1"), name("n_3")]);
+        assert_eq!(policy.home(), Some(&name("n_4")));
         assert_eq!(policy.standby(), Some(&name("n_2")));
         assert_eq!(policy.select(), &select());
     }
 
     #[test]
-    fn makes_a_placement_with_only_a_standby_or_only_copies() {
-        let standby = Policy::new(select(), Some(name("n_1")), []).unwrap();
-        assert!(standby.copies().is_empty());
-        let copies = Policy::new(select(), None, [name("n_1")]).unwrap();
+    fn makes_a_placement_with_any_one_role() {
+        let home = Policy::new(select(), nodes(Some("n_1"), None, &[])).unwrap();
+        assert_eq!(home.home(), Some(&name("n_1")));
+        assert_eq!(home.standby(), None);
+        assert!(home.copies().is_empty());
+        let standby = Policy::new(select(), nodes(None, Some("n_1"), &[])).unwrap();
+        assert_eq!(standby.home(), None);
+        assert_eq!(standby.standby(), Some(&name("n_1")));
+        let copies = Policy::new(select(), nodes(None, None, &["n_1"])).unwrap();
+        assert_eq!(copies.home(), None);
         assert_eq!(copies.standby(), None);
     }
 }

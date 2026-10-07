@@ -1,5 +1,6 @@
 //! `os::files` on the real disk, through `env::files`.
 
+use std::cell::Cell;
 use std::future::poll_fn;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -169,6 +170,24 @@ fn create_allocates_an_empty_file_that_is_there() {
     });
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
+    use rustix::fs::{self, FallocateFlags, OFlags};
+    const LEN: u64 = 4 << 20;
+    run(|files, data| async move {
+        // What a crash after an allocation that kept the length leaves.
+        let flags = OFlags::WRONLY.union(OFlags::CREATE);
+        let fd =
+            fs::open(data.join("a"), flags, fs::Mode::RUSR | fs::Mode::WUSR).unwrap();
+        fs::fallocate(&fd, FallocateFlags::KEEP_SIZE, 0, 4 * LEN).unwrap();
+        drop(fd);
+        create(&files, "a", LEN).await.close().await;
+        let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
+        assert_eq!(allocated, LEN);
+    });
+}
+
 #[test]
 fn create_of_no_bytes_makes_an_empty_file() {
     run(|files, data| async move {
@@ -190,6 +209,36 @@ fn create_of_another_length_gives_length() {
             found: 4 * KIB,
         };
         assert_eq!(found, expected);
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_create_past_the_file_size_limit_leaves_no_file() {
+    use rustix::process::{Resource, getrlimit};
+    const LIMIT: u64 = 1 << 20;
+    if getrlimit(Resource::Fsize).current != Some(LIMIT) {
+        let thread = std::thread::current();
+        let test = thread.name().expect("invariant: libtest names the thread");
+        // The limit is on the whole process, so this test runs alone in a child. An
+        // ignored `SIGXFSZ` stays ignored across `exec`, so it does not end the child.
+        let script = r#"trap '' XFSZ && ulimit -f "$0" && exec "$1" --exact "$2""#;
+        let status = std::process::Command::new("sh")
+            .args(["-c", script])
+            .arg((LIMIT / 512).to_string())
+            .arg(std::env::current_exe().unwrap())
+            .arg(test)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
+        return;
+    }
+    run(|files, _| async move {
+        let mode = Mode::Create { len: 8 * LIMIT };
+        let found = files.open(Path::new("a"), mode).await.unwrap_err();
+        assert_eq!(found, io("a", Operation::Open, libc::EFBIG));
+        let found = files.open(Path::new("a"), Mode::Write).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
     });
 }
 
@@ -390,4 +439,65 @@ fn files_in_a_directory_under_a_file_gives_dir() {
         "cannot open the data directory: Not a directory (os error 20)"
     );
     assert!(matches!(found, os::Error::Dir(_)));
+}
+
+#[test]
+fn a_write_open_while_another_create_fails_holds_the_file_at_its_path() {
+    hold_while_another_create_fails(Mode::Write);
+}
+
+#[test]
+fn a_create_while_another_create_fails_holds_the_file_at_its_path() {
+    hold_while_another_create_fails(Mode::Create { len: 4 * KIB });
+}
+
+/// Opens `a` with `mode` while another handle's creates fail and unlink it, and
+/// checks that the open holds the file at its path.
+fn hold_while_another_create_fails(mode: Mode) {
+    let scratch = Scratch::new();
+    let (creator, creator_thread) = files(&scratch.0, "creator");
+    let (writer, writer_thread) = files(&scratch.0, "writer");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for _ in 0..500 {
+            let stopped = Cell::new(false);
+            // Fails with no allocation, so each create unlinks the file it made.
+            let mut create = pin!(async {
+                while !stopped.get() {
+                    let mode = Mode::Create { len: u64::MAX };
+                    creator.open(Path::new("a"), mode).await.unwrap_err();
+                }
+            });
+            let mut write = pin!(async {
+                loop {
+                    if let Ok(file) = writer.open(Path::new("a"), mode).await {
+                        stopped.set(true);
+                        return file;
+                    }
+                }
+            });
+            let mut file = None;
+            poll_fn(|context| {
+                if file.is_none()
+                    && let Poll::Ready(found) = write.as_mut().poll(context)
+                {
+                    file = Some(found);
+                }
+                match (file.is_some(), create.as_mut().poll(context)) {
+                    (true, Poll::Ready(())) => Poll::Ready(()),
+                    _ => Poll::Pending,
+                }
+            })
+            .await;
+            let found = writer.open(Path::new("a"), Mode::Write).await.unwrap_err();
+            assert_eq!(found, Error::Busy { path: "a".into() });
+            file.unwrap().close().await;
+            writer.remove(Path::new("a")).await.unwrap();
+        }
+    });
+    drop((creator, writer));
+    creator_thread.join().unwrap();
+    writer_thread.join().unwrap();
 }

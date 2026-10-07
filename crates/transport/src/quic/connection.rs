@@ -19,7 +19,7 @@ use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
 /// that endpoint gets the same key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     /// noq-proto's handle, which it gives to a new connection after this one drains.
     pub(super) handle: ConnectionHandle,
@@ -29,7 +29,11 @@ pub(crate) struct Key {
 
 /// A fault of the peer's that closes the connection, with the reason.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Fault(pub(super) String);
+#[cfg_attr(
+    not(feature = "fuzzing"),
+    expect(unreachable_pub, reason = "only the fuzzing feature exports it")
+)]
+pub struct Fault(pub(super) String);
 
 /// One noq-proto connection, and what the caller knows of it.
 pub(super) struct Connection {
@@ -113,6 +117,10 @@ impl Connection {
             } else {
                 break;
             }
+        }
+        // After every event, so that each stop has reset its stream.
+        if self.live() {
+            self.streams.pump(&mut self.inner, events);
         }
         assert!(
             !drained || !self.live(),

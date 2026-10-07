@@ -4,29 +4,32 @@
 use std::fmt;
 use std::sync::Arc;
 
+use control::lease::Lease;
 use types::authority::Authority;
+use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::name::Name;
+use types::sample::Type;
 use types::time::Span;
 
 /// What a writer opens with.
 #[derive(Clone, Debug)]
-pub(crate) struct Writer {
+pub struct Writer {
     /// The subject that opened the writer.
-    pub(crate) subject: Name,
+    pub subject: Name,
     /// The writer's authority. The home does not cap it by access yet.
-    pub(crate) authority: Authority,
+    pub authority: Authority,
     /// The control lease, or `None` for no limit. It runs on each index apart: from
     /// when the writer takes control there, and again from each group applied or
     /// lost there. When it runs out, the writer loses control of that index.
-    pub(crate) lease: Option<Span>,
+    pub lease: Option<Span>,
     /// The key set of every frame the writer writes.
-    pub(crate) set: Arc<KeySet>,
+    pub set: Arc<KeySet>,
 }
 
 /// An open writer on its shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Key {
+pub struct Key {
     /// The number of the shard that opened the writer.
     pub(crate) shard: u32,
     /// The writer's number on its shard.
@@ -52,52 +55,104 @@ impl Key {
 
 /// Why a writer did not open. Nothing changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
-    /// The node has no mesh time yet. Open the writer again later.
+pub enum Error {
+    /// The node has no mesh time yet.
     Unsynced,
     /// A control lease must be longer than zero.
     Lease {
         /// The span that was asked for.
         span: Span,
     },
+    /// The key set has a series of a type the home does not write yet.
+    Type {
+        /// The slot of the series' channel.
+        slot: Slot,
+        /// The type of the series.
+        data_type: Type,
+    },
+}
+
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(self) -> &'static str {
+        match self {
+            Self::Unsynced => "Open the writer again later",
+            Self::Lease { .. } => "Give a lease longer than zero, or none",
+            Self::Type { .. } => "Give the channel a type the home writes (a scalar)",
+        }
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Unsynced => f.write_str(
-                "the node has no mesh time yet: open the writer again later",
-            ),
+            Self::Unsynced => f.write_str("the node has no mesh time yet"),
             Self::Lease { span } => control::lease::Error { span }.fmt(f),
+            Self::Type { data_type, .. } => {
+                write!(f, "the home does not write a series of {data_type} yet")
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
 
-impl From<control::lease::Error> for Error {
-    fn from(error: control::lease::Error) -> Self {
-        Self::Lease { span: error.span }
-    }
+/// The control lease of `span`.
+///
+/// # Errors
+///
+/// [`Error::Lease`] when `span` is not longer than zero.
+pub(crate) fn lease(span: Span) -> Result<Lease, Error> {
+    Lease::new(span).map_err(|error| Error::Lease { span: error.span })
 }
 
 #[cfg(test)]
 mod tests {
+    use types::sample::Scalar;
+
     use super::*;
 
     #[test]
-    fn says_what_to_do_for_each_error() {
+    fn says_what_is_wrong_and_what_to_do_for_each_error() {
         let lease = Error::Lease {
             span: Span::from_nanos(-3),
         };
+        let series = Error::Type {
+            slot: Slot::new(3),
+            data_type: Type::String,
+        };
 
-        assert_eq!(
-            Error::Unsynced.to_string(),
-            "the node has no mesh time yet: open the writer again later"
-        );
+        assert_eq!(Error::Unsynced.to_string(), "the node has no mesh time yet");
+        assert_eq!(Error::Unsynced.fix(), "Open the writer again later");
         assert_eq!(
             lease.to_string(),
             "control lease must be longer than zero, got -3ns"
+        );
+        assert_eq!(lease.fix(), "Give a lease longer than zero, or none");
+        assert_eq!(
+            series.to_string(),
+            "the home does not write a series of string yet"
+        );
+        assert_eq!(
+            series.fix(),
+            "Give the channel a type the home writes (a scalar)"
+        );
+    }
+
+    #[test]
+    fn says_each_field_of_a_type_the_home_does_not_write() {
+        let series = Error::Type {
+            slot: Slot::new(3),
+            data_type: Type::Array {
+                element: Scalar::F32,
+                len: 3,
+            },
+        };
+
+        assert_eq!(
+            series.to_string(),
+            "the home does not write a series of f32[3] yet"
         );
     }
 
@@ -105,10 +160,7 @@ mod tests {
     fn keeps_the_span_of_a_lease_error() {
         let span = Span::from_nanos(-3);
 
-        assert_eq!(
-            Error::from(control::lease::Error { span }),
-            Error::Lease { span }
-        );
+        assert_eq!(lease(span).err(), Some(Error::Lease { span }));
     }
 
     #[test]

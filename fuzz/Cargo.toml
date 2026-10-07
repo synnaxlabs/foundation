@@ -20,10 +20,12 @@ crc32c = "0.6.8"
 document = { path = "../crates/document" }
 env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
+mesh = { path = "../crates/mesh", features = ["sim"] }
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
 spec = { path = "../crates/spec" }
+transport = { path = "../crates/transport", features = ["fuzzing"] }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
@@ -91,6 +93,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mesh_change"
+path = "fuzz_targets/mesh_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ops_mcp"
 path = "fuzz_targets/ops_mcp.rs"
 test = false
@@ -100,6 +109,13 @@ bench = false
 [[bin]]
 name = "spec_definition"
 path = "fuzz_targets/spec_definition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_hello"
+path = "fuzz_targets/transport_hello.rs"
 test = false
 doc = false
 bench = false
@@ -128,6 +144,13 @@ bench = false
 [[bin]]
 name = "types_channel"
 path = "fuzz_targets/types_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_frame_ends"
+path = "fuzz_targets/types_frame_ends.rs"
 test = false
 doc = false
 bench = false
@@ -168,6 +191,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "types_sample"
+path = "fuzz_targets/types_sample.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "wire_clock"
 path = "fuzz_targets/wire_clock.rs"
 test = false
@@ -175,8 +205,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "wire_hub"
-path = "fuzz_targets/wire_hub.rs"
+name = "wire_hub_reader"
+path = "fuzz_targets/wire_hub_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_hub_home"
+path = "fuzz_targets/wire_hub_home.rs"
 test = false
 doc = false
 bench = false

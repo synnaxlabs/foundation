@@ -51,8 +51,8 @@ pub(crate) enum Protocol {
     Ni,
 }
 
-/// What a reader received on one channel, folded as it arrives, so an hour at full
-/// rate needs no memory per sample.
+/// What a reader received on one channel, folded as it arrives, so a long run at
+/// full rate needs no memory per sample.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Received {
     pub samples: u64,
@@ -108,7 +108,7 @@ impl Lab {
             shards: host.shards(),
             clock: host.clock(),
             wall: host.wall(),
-            budget: 1 << 20,
+            budget: types::byte::Size::MEBIBYTE,
             memory: Box::new(|len| Ok(block::Heap::new(len))),
             files: {
                 let host = host.clone();
@@ -118,6 +118,7 @@ impl Lab {
                 })
             },
             entropy: host.entropy(),
+            disk: types::byte::Size::GIBIBYTE,
         });
         self.members.push(Member {
             name: name.into(),
@@ -129,13 +130,13 @@ impl Lab {
 
     /// Sets the disk budget of `node` to `bytes`.
     pub(crate) fn limit(&mut self, _node: Node, _bytes: u64) {
-        todo!("waits on #342")
+        todo!("waits on #337")
     }
 
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
     /// second, as `buffer` stores it.
     pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
-        todo!("waits on #342")
+        todo!("waits on #1256")
     }
 
     /// Makes `nodes` the members of one mesh, without a ticket.
