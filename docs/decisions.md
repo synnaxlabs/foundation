@@ -1989,12 +1989,14 @@ How to read this record:
   not reach the group. A leader that waits sends no heartbeat, so the other voters elect
   a new leader. A follower that waits answers no message and falls behind until its
   write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
-  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
-  of the variant decided by the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the doc
+  text of the variant decided by the architect, 2026-10-07T14:17:49Z:
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458, which
-  supersedes the text of
-  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
-  of the two cases by the architect, 2026-10-07T12:08:39Z:
+  supersedes the doc texts of
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 and
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823, and the
+  Display text of the first stands; the text of the two cases by the architect,
+  2026-10-07T12:08:39Z:
   https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
   checks the wait before each other check of a message or of a forwarded proposal, so
   each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The

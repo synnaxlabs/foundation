@@ -26,12 +26,13 @@ impl Mesh {
     /// - [`Error::Spoofed`], [`Error::NotVoter`], [`Error::PeerNotVoter`],
     ///   [`Error::Grant`], and [`Error::Raft`] when the group refuses a message.
     /// - [`Error::Pool`] when the pool has no block: while the group waits to write its
-    ///   log, which refuses the message, or for the answer to a proposal, which the peer
-    ///   then does not get, and the group can hold the entry of the proposal. A `raft`
-    ///   message that gets it on a one-way stream is dropped, and the stream goes on.
+    ///   log, which refuses the message, or for the answer to a proposal, which the
+    ///   peer then does not get, and the group can hold the entry of the proposal. A
+    ///   `raft` message that gets it on a one-way stream is dropped, and the stream
+    ///   goes on.
     /// - [`Error::Stream`] when the stream or its session fails.
-    /// - [`Error::Stopped`] when the group stopped. On a stream that goes both ways, the
-    ///   reply half then ends with no mesh code: the group can hold the entry.
+    /// - [`Error::Stopped`] when the group stopped. On a stream that goes both ways,
+    ///   the reply half then ends with no mesh code: the group can hold the entry.
     pub(crate) async fn serve(
         &self,
         peer: PublicKey,
