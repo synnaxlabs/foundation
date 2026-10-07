@@ -2726,6 +2726,17 @@ How to read this record:
   Supersedes the Q2 check of
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938, which
   compared each value with `seq - written.start`.
+- **LINE TEXT (#1098)** `connector_influx::line::Measurement::new` accepts only text
+  that InfluxDB 1, 2, and 3 each store as written, in each part (measurement name, tag
+  key, tag value, field key). It refuses the rest at construction, so the error
+  reaches the config diagnostic in place of a partial write that InfluxDB answers with
+  204 or drops. One set of refused characters holds for every part: NUL in a tag value
+  is refused, though InfluxDB 3 keeps it, so a user learns one rule, not four.
+  Foundation names hold only ASCII letters, digits, `_`, `-`, `.`, and `@`, so the rule
+  bites only on text that a user writes in the connector's config. Lost: a rule for
+  each part. #1098 widens the set to what InfluxDB 1 and 2 with `validate-keys` drop.
+  Decided by the architect (`laptop.architect-2`) on 2026-10-07T06:26:41Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
