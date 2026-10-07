@@ -1229,7 +1229,7 @@ impl Streams {
     }
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
-    /// that `take(len)` gives, as [`Reader::read`]. `Ready(None)` at the end.
+    /// that `take(len)` gives. `Ready(None)` at the end.
     /// `Pending` when no whole message is here yet, the next has no room in the
     /// receive budget or waits behind a stream of its class or a higher class, or
     /// `take` gives no block for it. The receivers that get the freed room get
@@ -1270,12 +1270,12 @@ impl Streams {
             };
             loop {
                 match reader.read(&mut source) {
-                    Ok(Step::Room(len))
-                        if receiving.charge(*key, len, claim, Order::RANK) =>
-                    {
+                    Ok(Step::Room(len)) => {
+                        if !receiving.charge(*key, len, claim, Order::RANK) {
+                            break (Ok(Poll::Pending), true);
+                        }
                         reader.admit();
                     }
-                    Ok(Step::Room(_)) => break (Ok(Poll::Pending), true),
                     Ok(Step::Block(len)) => match reader.fill(take(len)) {
                         Poll::Ready(block) => {
                             break (Ok(Poll::Ready(Some(block))), false);

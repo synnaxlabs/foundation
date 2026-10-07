@@ -405,8 +405,13 @@ mod tests {
         loop {
             match reader.read(&mut source)? {
                 Step::Ended => return Ok(Poll::Ready(None)),
-                Step::Room(len) if admit(len) => reader.admit(),
-                Step::Pending | Step::Room(_) => return Ok(Poll::Pending),
+                Step::Pending => return Ok(Poll::Pending),
+                Step::Room(len) => {
+                    if !admit(len) {
+                        return Ok(Poll::Pending);
+                    }
+                    reader.admit();
+                }
                 Step::Block(len) => return Ok(reader.fill(take(len)).map(Some)),
             }
         }
