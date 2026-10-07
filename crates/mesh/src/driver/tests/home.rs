@@ -566,8 +566,19 @@ async fn set(mesh: Mesh) -> (Result<(), Error>, Option<node::Key>) {
 // heartbeat, and node 1 has no leader after its election timeout.
 #[test]
 fn a_proposal_with_no_answer_goes_again_only_after_node_1_has_no_leader() {
-    let call = |_, mesh| set(mesh);
-    let (set, (changes, early, gap, late, ends)) = run(call, |mut leader| async move {
+    let call = |node: sim::node::Node, mesh| async move {
+        let clock = node.clock();
+        let mut set = pin!(set(mesh));
+        let (mut last, mut quiet) = (clock.now(), 0);
+        let set = poll_fn(|cx| {
+            let now = clock.now();
+            quiet = quiet.max((now - last).nanos());
+            last = now;
+            set.as_mut().poll(cx)
+        });
+        (set.await, quiet)
+    };
+    let leader = |mut leader: Leader| async move {
         let clock = leader.clock();
         let (first, mut old) = leader.proposal().await;
         let early = leader.proposal_within(seconds(3)).await;
@@ -583,7 +594,8 @@ fn a_proposal_with_no_answer_goes_again_only_after_node_1_has_no_leader() {
         leader.rest(seconds(2)).await;
         let early = early.map(|(change, _)| change);
         ([first, second], early, gap, late, [end, asked.end().await])
-    });
+    };
+    let ((set, quiet), (changes, early, gap, late, ends)) = run(call, leader);
     assert_eq!(set, (Ok(()), Some(key(1))));
     assert_eq!(changes, [home(1), home(1)]);
     assert_eq!(early, None);
@@ -593,6 +605,12 @@ fn a_proposal_with_no_answer_goes_again_only_after_node_1_has_no_leader() {
     assert!(
         (700..2100).contains(&ms),
         "the try ended {ms} ms after the last heartbeat"
+    );
+    // No heartbeat and no tick wakes the call while node 2 leads.
+    let ms = quiet / Span::MILLISECOND.nanos();
+    assert!(
+        ms >= 3700,
+        "the longest time with no poll of the call was {ms} ms"
     );
     assert_eq!(late, Err(transport::Error::Stopped { code: Code(0) }));
     // The try that gave up took its proposal back, and the other ended its stream.
