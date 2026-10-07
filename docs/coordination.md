@@ -1,46 +1,8 @@
 # Coordination
 
-Several Claude sessions build Foundation at the same time. This file is how they work
-together. When this file and a message disagree, this file wins.
-
-## Roles
-
-**The person** owns contracts and oracles, merges every PR that is not routine
-(below), and answers escalations.
-
-**The coordinator** (session `coordinator`) owns:
-
-- the interface skeleton: the public surface of every crate;
-- `docs/decisions.md`;
-- the issue board: it assigns crates to builders and checks that no two open issues
-  own one crate;
-- the merge queue: it checks each PR's gates, asks the person to merge, and merges
-  routine PRs that wait (below).
-
-The coordinator does not build crates.
-
-**Builders** (sessions named for their area, such as `data-path`) each own a set of
-crates. A builder files and takes issues for its crates from `docs/decisions.md`,
-writes code and tests, opens PRs, and runs adversarial review on them.
-
-**The advisor** (session `advisor`) is the design session that ran the interview. It
-answers "why did we decide this" questions. It does not write code in this repo.
-
-**The crew** are subagents defined in `.claude/agents/`. Any session runs them for
-review. The coordinator runs the daily quality pass with `/crew`.
-
-## Models
-
-- **Fable 5.1** where a subtle mistake is expensive and hard to find later: the
-  `memory`, `consensus`, and `storage` builders, and reviewers for `raft`, `mesh`,
-  `block`, `ring`, `buffer`, crash recovery, lock-free code, and wake protocols. Start
-  those sessions with `--model fable`.
-- **Opus 5.5** for the coordinator, the other builders, and other reviewers.
-- **Sonnet 5.5** for mechanical work: format runs, renames, regenerated code,
-  CI-only fixes, and the `code-quality` and `drift` crew agents. A builder hands a
-  mechanical task to a subagent with `model: "sonnet"`.
-
-Fable uses plan limits faster. Widen or narrow its use from what the limits show.
+Several Claude sessions build Foundation at the same time. `docs/factory.md` lists the
+sessions, the lanes, and the merge path. This file is how the sessions work together.
+When this file and a message disagree, this file wins.
 
 ## Tokens
 
@@ -52,7 +14,7 @@ Most of the cost is context size per turn, so keep each context small:
   lines you need (`grep -n`, then `sed -n` or Read with a range), never a whole file
   or log; look at `--stat` or `--name-only` before a diff; and cut long output with
   `tail`.
-- Wait for CI with one background `gh pr checks <n> --watch`, not repeated checks. A
+- Wait for a PR with one background command (`/build`), never repeated checks. A
   Monitor must filter to events you act on.
 - Never fork from a large context. Brief a fresh subagent instead.
 - The person: a `/login` that switches organizations flushes every session's cache.
@@ -63,97 +25,12 @@ Most of the cost is context size per turn, so keep each context small:
 - On usage credits, the prompt cache lives five minutes. A session that sleeps longer
   reads its whole context again at full price, so `/clear` before a long wait.
 
-## Current sessions
-
-| Session | Model | Owns |
-| --- | --- | --- |
-| **Laptop** | | |
-| `coordinator` | Opus | Interfaces, `docs/decisions.md`, issues, merge queue |
-| `memory` | Fable | `block`, `ring` |
-| `data-path` | Opus | `types`, `codec`, `wire` |
-| `consensus` | Fable | `raft`, `spec`, then `mesh`, `blob` |
-| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark, then two nodes in `sim` (`node`, #462) |
-| `write-path` | Opus | `control`, `delivery`, `home`, then `hub` (#462) |
-| `storage` | Fable | `buffer`, then `replica` |
-| `time` | Opus | `estimate`, then `clock` |
-| `config` | Opus | `document`, `config-hcl`, then `config` |
-| `network` | Opus | `transport` |
-| `advisor` | Opus | Answers design questions; writes no code here |
-| **Factory host** | | |
-| `connector` | Opus | `connector` (the kind contract, supervisor, `ctx`, components) |
-| `access` | Opus | `secret`, then `access` after `spec` (#43) |
-| `ops` | Opus | `node` first as a walking skeleton for `verify`, then `ops` |
-| `opcua` | Opus | `connector-opcua` |
-| `modbus` | Opus | `connector-modbus` |
-| `ni` | Opus | `connector-ni` |
-| `influx` | Opus | `connector-influx` |
-| `verify` | Opus | `acceptance` (MVP tests, test-only), the chaos lab |
-| `red-team` | Fable | `fuzz/`, additions under `oracles/`, simulation swarms |
-| **Cloud routines** | | |
-| `audit` | Opus | Architecture, practices, and performance, per merged PR |
-| `ux` | Opus | The end user's experience, per merged PR that a user touches |
-| `red-team` attack | Fable | Attacks each merged PR in layer 1 and layer 2 crates |
-
-A connector kind starts with its protocol codec and its device simulator, which need
-only layer 1. It moves onto the `connector` contract when that surface merges.
-
-The factory host runs on a second Claude account, so `SendMessage` and Remote Control
-cannot reach its sessions. Each host session has an open issue titled
-`inbox:<name>`, and the coordinator has `inbox:coordinator`. A message is one comment
-on the receiver's inbox. A host session reads its inbox once per loop run and
-writes to `inbox:coordinator`. While idle, a host session runs one background Monitor
-that reads its inbox's comment count (`gh api repos/<repo>/issues/<n> --jq .comments`)
-every 60 seconds and reports only when the count grows, so a message wakes it in about
-a minute. A Monitor ends after 30 minutes; the session starts it again at once. The
-coordinator watches `inbox:coordinator` the same way. The person decided on 2026-10-05
-("Yeah that's fine"). The coordinator relays between laptop and host sessions. Records
-still go into issues, PRs, and docs first.
-
-Two first surfaces have a named reviewer besides the coordinator: `consensus` reviews
-`document`, because `spec` uses it; `simulation` reviews `transport`, because `sim`
-simulates it.
-
-The coordinator updates this table when sessions or ownership change.
-
-## Starting a session
-
-1. Start Claude with the role as its name: `claude -n data-path`.
-2. Builders work in their own worktree (below). The coordinator works in the main
-   checkout.
-3. Run the role's skill: `/coordinate` or `/build`.
-
-## Running continuously
-
-A session works without a person between tasks in one of two ways:
-
-- **A loop** runs a skill again and again, and the session picks its own wait between
-  runs. Builders run `/loop /build`. The coordinator runs `/loop /coordinate`.
-- **A goal** keeps a session working until a condition holds, for one known
-  deliverable. A small model judges
-  the condition from the transcript only, so the builder prints the evidence at the
-  end of each turn. Set it after `/build`:
-  ```
-  /goal Issues #12 and #13 are closed or have an open PR labeled ready. The last
-  output in the transcript is `gh issue view 12` and `gh issue view 13`.
-  ```
-  A small model judges the condition from the transcript only, so name the evidence.
-  `/goal` shows its status. `/goal clear` removes it.
-
-Messages from other sessions wake an idle session in both cases. Start long runs with
-`--permission-mode auto` so routine commands do not wait for a person.
-
 ## Worktrees
 
-The main checkout is `~/Desktop/synnaxlabs/foundation`. Each builder has one long-lived
-worktree:
-
-```sh
-git -C ~/Desktop/synnaxlabs/foundation worktree add \
-  ~/Desktop/synnaxlabs/foundation-wt/<name> origin/main --detach
-```
-
-A builder makes a branch per issue inside its worktree. Never work in another session's
-worktree.
+The main checkout is `~/Desktop/synnaxlabs/foundation`. The launcher gives each session
+one long-lived worktree, `~/Desktop/synnaxlabs/foundation-wt/<role>`
+(`docs/factory.md`). A builder makes a branch per issue inside its worktree. Never work
+in another session's worktree.
 
 Never share `CARGO_TARGET_DIR` between worktrees. Cargo gives a path crate the same hash
 in each, so a stale build of another worktree's code can pass or fail a gate.
@@ -184,95 +61,73 @@ use memory" (RAM).
 
 ## Issues
 
-Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
+Every task is a GitHub issue. An issue states its goal, the crates it changes, the tests
 that must pass, and the section of `docs/decisions.md` it builds.
 
 Labels:
 
-- `owner:<session>` -> which session has the task.
+- `owner:<name>` -> the session that took the task.
 - `crate:<name>` -> which crates it changes.
-- `interface` -> a request to change a public surface.
+- `ready` -> on the milestone path, complete, and not blocked, so a builder may take it.
+  Only the coordinator adds it.
+- `night` -> ready for the night lane. Only the architect adds it.
+- `model:fable` -> runs on Fable. Only the person or the architect adds it.
+- `interface` -> a request to change a public surface or a crate dependency.
 - `oracle` -> it changes `oracles/`.
 - `blocked` -> waiting on another issue, linked in the body.
-- `ready` -> a PR that passed its gates and review, waiting for the person.
+- `security` -> a security finding.
 
-Each builder files the issues for its own crates from `docs/decisions.md` and the RFC
-phases, with the `owner:` and `crate:` labels. The coordinator files only issues that
-cross crates or owners. One task is in progress per crate. A builder may file the
-next issue for a crate early, labeled `blocked` with a link to the open one.
+Builders file the next issues for their machine's crates from `docs/decisions.md` and
+the milestone, and the coordinator admits them. One task is in progress per crate.
 
 ## Pull requests
 
-- **Branch:** `<session>/<issue>-<short-name>`, for example
-  `data-path/12-key-set`.
+- **Branch:** `<machine>/<issue>-<slug>`, for example `box1/462-hub-route`.
 - **Title:** `<crate>: Sentence case description`, for example
   `types: Add interned key sets`.
 - **Body:** the template in `.github/pull_request_template.md`. It links the issue,
   lists oracle changes, and answers the six performance questions when the PR touches
   a hot path.
-- **Gates:** CI passes (format, Clippy, layer check, tests).
-- **Review:** the author runs `/review <pr>`. Two fresh adversarial reviewers check
-  the diff, and their findings go on the PR as comments. The author fixes each finding
-  or answers it on the PR. When the PR changes how a crate is used, the author also
-  asks the owners of the crates that use it.
-- **Ready:** the author adds `ready` when every check on the PR's current head passed,
-  the PR has no conflict with `main`, every review finding is fixed or answered, and
-  the body is complete: oracle changes, Complexity, Shape decisions, and the six
-  performance answers on a hot path. The exception is a PR that changes a public
-  surface, a locked decision, or an oracle: the author messages the coordinator
-  instead, and only the coordinator adds `ready`.
-- **Merge:** the coordinator tells the person about each new `ready` PR, one line
-  each. The person merges with a squash.
-- **Routine merge:** when the person has not merged a routine PR 30 minutes after it
-  got `ready`, the coordinator reads every check on its current head again and merges
-  it the way the person does, then tells the person. A PR is routine when it adds,
-  removes, or changes no `pub` item, has no `interface` label, and touches nothing in
-  `oracles/`, `docs/decisions.md`, `docs/coordination.md`, `CLAUDE.md`, `.github/`,
-  `.claude/`, `.cargo/`, `xtask/`, `clippy.toml`, or any `Cargo.toml`.
-- **Stale base:** before each merge, if `main` moved since the PR's last CI run, the
-  coordinator merges the PR into `main` locally, runs clippy with `-D warnings` on the
-  crates the PR changes and every crate that uses them, and runs the tests of each
-  crate that depends (dev-dependencies too) on both a crate the PR changes and a crate
-  `main` changed since that CI run. Only those tests can newly fail. If either fails,
-  the owner merges `main`, and CI runs again. A crate's own `Cargo.toml` and the files
-  under the folder of one of its targets (such as `oracles/conformance/raft`) count as
-  that crate. A package added to `Cargo.lock` is fine. A `fuzz/` change also builds the
-  fuzz targets with `--locked` when `main` changed a crate they reach. These go back to
-  CI instead: a removed or changed package in `Cargo.lock`, an `oracles/` file under no
-  target, the root `Cargo.toml`, `.cargo/`, `rust-toolchain*`, or `clippy.toml` (unless
-  `main` changed no crate), and over 8 crates to test. Two PRs can each pass
-  CI and fail together: #721 used a function that #671 had renamed, and `main` did not
-  build; a test from #761 failed after #672 added a sync, and `main` tests failed.
+- **Gate:** before `ready`, the author runs CI's PR job set on the affected crates
+  (`/build`). CI then confirms instead of catching.
+- **Review:** the author runs `/review <pr>`. Fresh reviewers check the diff by tier,
+  and a second round checks the fix commits. Their findings go on the PR as comments.
+  The author fixes each finding or answers it on the PR.
+- **Ready:** the author runs `gh pr ready` when the gate passed, every review finding is
+  fixed or answered, and the body is complete: oracle changes, Complexity, Shape
+  decisions, and the six performance answers on a hot path.
+- **Merge:** `gh pr merge <n> --auto` puts it in the merge queue (`docs/factory.md`).
 
 ## Interface changes
 
-Builders never edit another crate's public surface. To change one:
+Builders never edit another crate's public surface. To change one, or to add a crate
+dependency:
 
-1. Open an issue labeled `interface` with the proposed signature and the reason.
-   Message the coordinator with the link.
-2. The coordinator decides. A change inside the locked decisions becomes a small PR:
-   from the owner when no other crate uses the surface yet, else from the
-   coordinator. A change to a locked decision, a contract, or an oracle goes
-   to the person first.
-3. After the merge, the coordinator messages the owner of every crate that uses the
-   changed surface. Each one rebases.
+1. Open an issue labeled `interface` with the proposed signature and the reason. Send
+   the link to `laptop.architect`.
+2. The architect decides. A change inside the locked decisions becomes a small PR from
+   the crate's builder. A change to a locked decision, a contract, or an oracle goes to
+   the person first, with the architect's recommendation.
+3. After the merge, the architect files an issue for each crate that must follow the
+   change.
 
 A builder may change anything private inside its own crates without asking.
 
 Two cases skip the interface issue:
 
-- A crate with no public surface yet gets one in its owner's first PR. The
-  coordinator reviews that surface as an interface before it adds `ready`.
+- A crate with no public surface yet gets one in its builder's first PR. The architect
+  reviews that surface before the PR merges.
 - An additive change to a builder's own crate that a locked decision already requires.
-  The coordinator approves it in a comment on the issue, and the builder makes it in
-  its PR.
+  The architect approves it in a comment on the issue, and the builder makes it in its
+  PR.
 
 ## Cloud machines
 
-The coordinator, `verify`, and `red-team` rent machines within the test budget
-(`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day.
+Only the red-team sessions rent machines, within the test budget (`docs/decisions.md`
+5.5): 1000 USD in total and at most 100 USD a day.
 
-1. The builder asks on its issue: instance types, count, and hours.
+1. A builder that needs one asks a red-team on its issue: instance types, count, and
+   hours.
 2. Before launch, the renting session posts the cap on the spend ledger issue (#15):
    on-demand price per hour times count times lifetime. The sum of caps stays inside
    the limit.
@@ -280,21 +135,17 @@ The coordinator, `verify`, and `red-team` rent machines within the test budget
    `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
    termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
    is at most 240 minutes.
-4. The renting session terminates the instances when the run ends and posts the
-   actual hours on the ledger. The coordinator checks for running tagged
-   instances on each loop.
+4. The renting session terminates the instances when the run ends, checks that none of
+   its tagged instances still run, and posts the actual hours on the ledger.
 
 ## Messages
 
-Sessions message each other with `SendMessage`, by name. Find names with
-`ListAgents`.
+`docs/factory.md` says how sessions reach each other.
 
 - Use messages for questions, review requests, and notices. Keep them short.
-- **A message is not a record.** Messages are lost when a session restarts, and a held
-  message expires after five minutes. Write the decision into the issue, the PR, or the
-  docs first, then send the link.
-- An idle session wakes when a message arrives. Do not send a message to check if a
-  session is alive.
+- **A message is not a record.** Write the decision into the issue, the PR, or the docs
+  first, then send the link.
+- Do not send a message to check if a session is alive.
 - **A question for the person** states the problem, the fix, its cost, and a
   recommendation. For each option, it says whether it is a patch or the long-term
   path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
@@ -318,7 +169,7 @@ Ask in a few short, plain sentences: what breaks, why, the fix, and your default
 use a multi-select dropdown.
 
 - a change touches a locked decision, a contract, or an oracle;
-- two sessions still disagree after one exchange;
+- a contract disagreement that the architect cannot settle inside the locked decisions;
 - a PR adds a third-party dependency (record it in `docs/dependencies.md`);
 - work would spend money: cloud resources or paid services, except rented machines
   within the test budget.

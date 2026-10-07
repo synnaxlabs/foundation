@@ -1,0 +1,21 @@
+{
+  "host": "a1y1qn09k2dlft-ats.iot.us-east-1.amazonaws.com",
+  "port": 8883,
+  "names": [
+    "laptop.coordinator",
+    "laptop.architect",
+    "laptop.integrator-1",
+    "laptop.integrator-2",
+    "laptop.monitor",
+    "box1.builder-1",
+    "box1.builder-2",
+    "box1.builder-3",
+    "box1.builder-4",
+    "box1.red-team",
+    "box2.builder-5",
+    "box2.builder-6",
+    "box2.builder-7",
+    "box2.connector",
+    "box2.red-team"
+  ]
+}

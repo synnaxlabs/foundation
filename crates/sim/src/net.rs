@@ -172,6 +172,7 @@ impl Network {
             Crash::Process => Vec::new(),
             Crash::Power => {
                 self.wire.cut(now, node);
+                self.udp().cut_power(node);
                 self.tcp().cut_power(node)
             }
         }
@@ -182,15 +183,17 @@ impl Network {
         self.tcp.yet()
     }
 
-    /// The true time of the first arrival.
+    /// The true time of the first arrival, or of the first departure that frees a
+    /// send buffer.
     pub(crate) fn first(&self) -> Option<Monotonic> {
-        self.wire.first()
+        self.wire.first().into_iter().chain(self.udp.first()).min()
     }
 
-    /// Delivers the packets that arrive by true time `at`, and returns the wakers of
-    /// the ends that receive them.
+    /// Delivers the packets that arrive by true time `at`, and frees the send buffers
+    /// of the datagrams that leave by then. Returns the wakers of the ends that receive
+    /// and of the sends that find room.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
-        let mut wakers = Vec::new();
+        let mut wakers = self.udp().free(at);
         while let Some(packet) = self.wire.pop(at) {
             match packet {
                 Packet::Datagram(datagram) => {

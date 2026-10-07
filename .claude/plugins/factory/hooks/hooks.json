@@ -1,0 +1,1 @@
+{ "description": "The factory messaging hooks module", "modules": ["./register.ts"] }

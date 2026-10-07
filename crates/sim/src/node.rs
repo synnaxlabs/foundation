@@ -95,7 +95,12 @@ impl Node {
     ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
     ///   destination, when its socket failed ([`Node::fail_udp`]), or when its
     ///   receive queue takes more than `recv_buffer_bytes`, in which each datagram
-    ///   takes its length plus 768 bytes. The send buffer never fills.
+    ///   takes its length plus 768 bytes.
+    /// - A datagram takes its length plus 768 bytes of its socket's send buffer until
+    ///   it leaves its link: at once when the link has no
+    ///   [`rate`](crate::link::Config::rate) and no packet waits on it. A send is
+    ///   pending while the send buffer is not empty and takes `send_buffer_bytes` or
+    ///   more, so the datagrams of one send may go past it.
     /// - A TCP segment is never lost or duplicated, and each direction of a stream
     ///   keeps its order. A connect is ready after one round trip, and its accept
     ///   after one and a half. A connect takes the next free port after the node's

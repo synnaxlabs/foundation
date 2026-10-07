@@ -1,7 +1,7 @@
 # Security
 
-The threat model of Foundation. The `red-team` session owns this file and updates it
-when a surface lands. `docs/decisions.md` wins where they differ. A defect that an
+The threat model of Foundation. The red-team sessions own this file and update it when
+a surface lands. `docs/decisions.md` wins where they differ. A defect that an
 attacker can use is a GitHub issue with the `security` label and a failing test.
 
 ## What we protect
@@ -149,9 +149,9 @@ state on `main`.
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
-  `raft` counts the keys of a proof; until `mesh` checks the signatures (the third
-  PR of #750), a voter can forge the keys. `raft/tests/it/hostile.rs` pins the
-  refusal.
+  `raft` counts the keys of a proof, and `mesh::grant` checks each signature
+  against the voter's public key. Until the driver (#471) runs that check before
+  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
   and refuses a leader it cannot prove. It rejoins at the next election whose grants
   are a quorum of what it holds. When a second node fails before that, the group

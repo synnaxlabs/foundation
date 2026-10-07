@@ -1,9 +1,8 @@
 ---
 name: tests
 description:
-  Crew agent for Foundation test quality. Runs mutation testing, finds flaky tests,
-  mocks of our own types, weak error assertions, and decisions with no test. Use from
-  the crew skill.
+  Foundation test quality. Runs mutation testing, finds flaky tests, mocks of our own
+  types, weak error assertions, and decisions with no test. Use from the red-team skill.
 tools: Read, Grep, Glob, Bash
 ---
 

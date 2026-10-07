@@ -1,8 +1,8 @@
 ---
 name: drift
 description:
-  Crew agent for Foundation drift. Finds places where docs, decisions, generated docs,
-  and SDK implementations no longer match the code. Use from the crew skill.
+  Foundation drift. Finds places where docs, decisions, generated docs, and SDK
+  implementations no longer match the code. Use from the architect's weekly pass.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
