@@ -611,17 +611,16 @@ How to read this record:
   frame struct. Approved by the coordinator (#390).
 - **M2 (revised 2026-10-06)** Readers get a view: the frame plus a mask cached per
   key set and reader. The home routes by key set. A mask holds the index of each
-  channel it holds, so the series of a view make a frame, and `View::charge` is its
-  charge (CREDIT RULES). A mask is a sorted list of the entries it holds, or no list
-  when it holds every entry. A mask that holds more than half of its key set also
-  keeps a sorted list of the entries it leaves out. A view's walk grows with the
-  smaller of its frame's series and its mask's entries, and its charge with the
-  smaller of its frame's series and the shorter list (rule 11). A view borrows its
-  frame and mask, so making one takes no reference count. Lost: only the list of the
-  entries left out, walked as the runs of series between them, because near half
-  that walk is 20% to 74% slower than a walk of the held entries (#873). Approved by
-  the coordinator (#157). The list of entries left out (#755): approved at the gate
-  of PR #873.
+  channel it holds, so the series of a view make a frame. A mask is a sorted list of
+  the entries it holds, or no list when it holds every entry. A view's walk grows with
+  the smaller of its frame's series and its mask's entries (rule 11). A view borrows
+  its frame and mask, so making one takes no reference count. Approved by the
+  coordinator (#157). A view has no charge: a remote reader charges the frame it builds
+  (FRAME LAYOUT), so `View::charge` and the list of the entries a mask leaves out,
+  which only the charge used, are gone (architect, #1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827 and
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
+  Supersedes: the list of the entries left out (#755, the gate of PR #873).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -657,7 +656,15 @@ How to read this record:
   1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
   body at its `(tag, end)` pairs and panics on ends that do not fit. Copy mode runs
   `frame::check` once where remote records enter (X43). Decided by the coordinator
-  (#306).
+  (#306). A frame from another node is built from its ends (HUB WIRE):
+  `Layout::from_ends` checks them before a block is taken, and `Draft::body_mut` takes
+  the body as it arrives. `frame::ends` gives the ends of series of given lengths, so
+  the rule of 8 has one home. Both nodes charge such a frame with
+  `frame::charge(series, body_len)`, one function on each side, so the charges are
+  equal by construction; a `Layout::charge` would be a second way. Decided by the
+  architect (#1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359 and
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -2624,13 +2631,19 @@ How to read this record:
   head of the interner handoff. Another count gives `Error::Shards`, and a failed
   file call `Error::Directory`. Any record of another count fails the start, also
   next to `shards-<cores>`, and `stored` is the smallest such count, so the error
-  does not hang on the order of the list. A name whose rest is not a count in plain
-  decimal (`shards-03`, `shards-+3`), or is zero, is not a record. With no record,
-  rings up to `shard-<k>` are a record of `k + 1`, so a data directory whose record
-  a copy dropped is checked too; a crash cannot leave a ring with no record. A name
-  `shard-<usize::MAX>` is not a ring, because no node has a shard of that index.
-  Each start syncs the data directory before `shard-0`, also when the record is
-  there, because a process crash can leave it unsynced. A one-sector file lost: it
+  does not hang on the order of the list. A name counts only when the rest after
+  `shard-` or `shards-` is plain decimal that fits a `usize`: above zero for a
+  record, and below `usize::MAX` for a ring. Any other name (`shards-03`,
+  `shards-+3`, `shards-0`, `shard-<usize::MAX>`) is one the claim does not know, and
+  it ignores it, because no node can write it. The claim reads names only, so a file
+  with such a name counts as a directory would. Decided by the architect, #1214:
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887, as on
+  #1110 for `shards-0` and `shard-<usize::MAX>`:
+  https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. With
+  no record, rings up to `shard-<k>` are a record of `k + 1`, so a data directory
+  whose record a copy dropped is checked too; a crash cannot leave a ring with no
+  record. Each start syncs the data directory before `shard-0`, also when the record
+  is there, because a process crash can leave it unsynced. A one-sector file lost: it
   needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
   https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
   The rule of rings with no record stays, decided by the architect on #1178:
@@ -2653,6 +2666,18 @@ How to read this record:
   length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
   lost: it clones the count for every view, and nothing needs a range yet. Decided
   by `memory`.
+  Amended (2026-10-07, #1068): `block::footprint(len)` gives `usize::MAX` when `len`
+  passes the largest payload, in place of a panic. No pool holds such a block, so
+  every budget refuses it. `frame::charge` of ends from a hostile peer gives
+  `u64::MAX`, and `Layout::draft` refuses it with
+  `Error::Pool(block::Error::TooLarge { .. })` and takes no block. A reader drafts
+  before it spends, so a spend adds only a charge that a pool holds, and a plain add
+  never overflows. Lost: an exported largest payload with a new `Error` variant, a
+  second check of a limit that `block` owns; a saturating spend, a second guard.
+  Decided by the architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156,
+  corrected in
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
