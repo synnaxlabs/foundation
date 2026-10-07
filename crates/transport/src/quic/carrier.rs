@@ -988,4 +988,52 @@ mod tests {
         });
         assert_eq!(sim.run(), Ok(()));
     }
+
+    #[test]
+    fn a_close_the_socket_held_goes_after_the_connections_drain() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let sessions = [(); 2].map(|()| carrier.accept());
+            for accepted in sessions {
+                let session = accepted.await.expect("a session");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(session.closed().await, closed);
+            }
+        });
+        shard(&client, CLIENT, move |config, node| async move {
+            // One datagram fills the send buffer.
+            let (sender, receiver) = node
+                .net()
+                .udp(&udp::Config {
+                    local: address(&node),
+                    send_buffer_bytes: 1,
+                    recv_buffer_bytes: 1 << 20,
+                })
+                .expect("a socket");
+            let part = crate::port::Part {
+                index: 0,
+                sender,
+                receiver,
+            };
+            let carrier = Carrier::new(config, part);
+            let first = carrier.connect(public(&SERVER), at).await;
+            let second = carrier.connect(public(&SERVER), at).await;
+            node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+            // About 150 ms of the link: longer than the drain, shorter than IDLE.
+            junk(&node, SocketAddr::new(at.ip(), PORT + 1), 150).await;
+            // The first close waits behind the junk, and the socket holds the second.
+            drop(first.expect("a session"));
+            drop(second.expect("a session"));
+            drop(carrier);
+            node.clock().sleep(spans(IDLE, 3)).await;
+        });
+        assert_eq!(sim.run_for(spans(Span::MILLISECOND, 50)), Ok(()));
+        let rate = sim::link::Config {
+            rate: std::num::NonZeroU64::new(100_000),
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &server, rate);
+        assert_eq!(sim.run(), Ok(()));
+    }
 }
