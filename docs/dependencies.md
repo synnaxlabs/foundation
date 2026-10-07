@@ -14,7 +14,7 @@ approval; pin the version you build against there.
 | --- | --- | --- | --- | --- | --- |
 | `blake3` | `types` (`types::digest`, for `spec` and `blob`) | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
 | `rustix` | `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
-| `tokio` | `os`, `transport`, `hub`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
+| `tokio` | `os`, `transport`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, signing, `mesh` (grants), `secret` (sealing) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
@@ -32,6 +32,7 @@ approval; pin the version you build against there.
 | `hyper` | `connector` (`http`) | The one HTTP client of every connector, with features `client` and `http1` only (R7, #341). Its tree: `httparse`, `want`, `try-lock`, `atomic-waker`, `smallvec`, `pin-project-lite`, `futures-core`, `itoa`, and `tokio` with `sync` only. The person: "Yes, R7 stands" (#213, https://github.com/synnaxlabs/foundation/issues/213#issuecomment-6022143908). Approved on #341 (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.12.0 | 2026-10-06 |
 | `http` | `connector` (`http`) | The request and response types of `hyper`, which the client's surface uses (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT or Apache-2.0 | 1.5.0 | 2026-10-06 |
 | `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.1.0 | 2026-10-06 |
+| `rustc-hash` | `types` (`types::hash::Map` and `Set`) | The fixed, fast hasher of every hash map (R16-7, #1321): SipHash cost 8.5 ns of 131 ns per 64 B `transport` write (#1308, #1399). Already in the build through `noq-proto`. The person: "Yeah I approve" (https://github.com/synnaxlabs/foundation/issues/1321#issuecomment-6039851114) | MIT or Apache-2.0 | 2.1.3 | 2026-10-07 |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
