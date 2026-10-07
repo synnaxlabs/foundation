@@ -2255,8 +2255,9 @@ fn seal_refuses_the_first_record_under_two_tail_chains() {
 fn seal_refuses_the_first_record_under_the_tail_chains_of_two_whole_blocks() {
     run(121, Memory::default(), |shard| async move {
         shard.create_two_records().await;
-        let chain = shard.memory.bytes(RING)[CHAIN_AT] ^ 1;
-        shard.tamper_block(to_usize(BLOCK), CHAIN_AT, &[chain]);
+        let last = SEQ_AT - 1;
+        let chain = shard.memory.bytes(RING)[last] ^ 1;
+        shard.tamper_block(to_usize(BLOCK), last, &[chain]);
         shard.seal(0);
     });
 }
@@ -2366,8 +2367,9 @@ fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
 }
 
 /// The open takes the newer header block, or the first one on a tie. It does not
-/// check the tail of the other. Each case: the block made newer, the block with the
-/// tail off a block boundary, and whether the open takes that block.
+/// check the tail of the other, and an open that gives `Unaligned` leaves the two
+/// blocks as read. Each case: the block made newer, the block with the tail off a
+/// block boundary, and whether the open takes that block.
 #[test]
 fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
     let (first, second) = (0, to_usize(BLOCK));
@@ -2388,11 +2390,17 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
                 shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes());
             }
             shard.tamper_block(unaligned, TAIL_AT, &(BLOCK + 1).to_le_bytes());
+            let (before, syncs) = (shard.memory.bytes(RING), shard.memory.syncs());
             let opened = shard.open(ring, &mut Slots::new()).await;
             let refused = Err(Error::Unaligned { tail: BLOCK + 1 });
             let expected = if taken { refused } else { Ok(()) };
             let case = format!("newer: {newer:?}, the block at {unaligned}");
             assert_eq!(opened.map(drop), expected, "{case}");
+            if taken {
+                assert_eq!(shard.memory.syncs(), syncs, "{case}: the open synced");
+                let after = shard.memory.bytes(RING);
+                assert!(after == before, "{case}: the open changed the ring");
+            }
         });
     }
 }
