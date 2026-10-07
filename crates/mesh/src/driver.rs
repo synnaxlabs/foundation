@@ -44,39 +44,40 @@ const QUEUE_MAX: usize = 64;
 const LOG: &str = "log";
 
 /// What a [`Mesh`] is built from.
-pub(crate) struct Config {
+#[derive(Debug)]
+pub struct Config {
     /// This node.
-    pub(crate) key: node::Key,
+    pub key: node::Key,
     /// This node's private key. It signs the node's claims.
-    pub(crate) private_key: PrivateKey,
+    pub private_key: PrivateKey,
     /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
-    pub(crate) region: Prefix,
+    pub region: Prefix,
     /// Each member of the region, this node included, one record for each node. A
     /// member's peer proves the public key of its card, and that key signs the member's
     /// claims.
-    pub(crate) members: Vec<Member>,
+    pub members: Vec<Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
-    pub(crate) voters: BTreeSet<node::Key>,
+    pub voters: BTreeSet<node::Key>,
     /// The mesh's directory.
-    pub(crate) files: Files,
+    pub files: Files,
     /// Times the ticks of the group.
-    pub(crate) clock: Clock,
+    pub clock: Clock,
     /// Gives the mesh time of each join that this node stamps.
-    pub(crate) time: clock::Reader,
+    pub time: clock::Reader,
     /// Gives each election timeout its random part, and the random part of each status
     /// key that this node makes.
-    pub(crate) entropy: Entropy,
+    pub entropy: Entropy,
     /// Runs the group's task and the tasks that send.
-    pub(crate) tasks: Tasks,
+    pub tasks: Tasks,
     /// Gives the blocks of the log's reads and writes, of each message that the group
     /// sends, and of each answer to a forwarded proposal. A write that finds the pool
     /// full, or that the system refuses memory for, waits: the group takes, sends, and
     /// applies nothing until that write ends. A message that finds no block drops.
-    pub(crate) pool: Rc<Pool>,
+    pub pool: Rc<Pool>,
     /// The transport of this shard. The mesh dials each other member on it.
-    pub(crate) transport: Rc<Transport>,
+    pub transport: Rc<Transport>,
 }
 
 /// One node's part in the group of a region. Clones share it. The group runs until
@@ -84,12 +85,20 @@ pub(crate) struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory fails with the error of the log.
+/// open of the same directory gives [`Error::Log`].
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
     pool: Rc<Pool>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
     time: clock::Reader,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
     entropy: Entropy,
 }
 
@@ -117,7 +126,7 @@ impl Mesh {
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
-    pub(crate) async fn open(config: Config) -> Result<Self, Error> {
+    pub async fn open(config: Config) -> Result<Self, Error> {
         let (transport, tasks) = (Rc::clone(&config.transport), config.tasks.clone());
         let mesh = Self::start(config).await?;
         let senders = Senders {
@@ -351,6 +360,10 @@ impl Mesh {
     ///   unknown, or when the later edge is before the Unix epoch, where a UUIDv7
     ///   key has no time.
     /// - [`Error::Status`] when `request` names more than 64 status channels.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
     pub(crate) fn stamp(&self, request: Request) -> Result<Change, Error> {
         let measurement = match self.time.status() {
             clock::Status::Synced(measurement)

@@ -135,10 +135,6 @@ pub(crate) struct Record {
     pub(crate) uses: u64,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the streams of #471 are the first user")
-)]
 impl Record {
     /// The record of a new ticket with `public_key` and `options`.
     pub(crate) const fn new(public_key: PublicKey, options: Options) -> Self {
@@ -192,10 +188,6 @@ impl Record {
 }
 
 /// Why a ticket does not admit a node.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the streams of #471 are the first user")
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
     /// The admission is not the ticket's signature over the node's card.

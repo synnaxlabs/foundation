@@ -2240,12 +2240,13 @@ How to read this record:
   gets the crate in its line through an `interface` issue first. `mesh` does not
   re-export such a type: a re-export makes each change to `raft` a change to the surface
   of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
-  index only. `Config`, `Mesh::open`, and `Mesh::serve` become public after the senders
-  (#1410), so until then no crate outside `mesh` opens a `Mesh`. `Error`,
-  `claim::Error`, and `region::Unfit` become public with them, because `open` and
-  `serve` give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the
-  module its new name. `Error` then adds `raft::Error`, `transport::Error`, and
-  `types::node::PublicKey` to the types of other crates. The calls that change the
+  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
+  gives it each stream of a peer with `Mesh::serve`. The three are public since the
+  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
+  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
+  rulings: #1460 gave the module its new name. `Error` adds `raft::Error`,
+  `transport::Error`, and `types::node::PublicKey` to the types of other crates. The
+  `Debug` text of a `Config` does not show the private key. The calls that change the
   region and the change records stay private. The surface is approved by the architect,
   2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. `member`

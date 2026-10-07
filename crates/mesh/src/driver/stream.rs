@@ -33,7 +33,7 @@ impl Mesh {
     /// - [`Error::Stream`] when the stream or its session fails.
     /// - [`Error::Stopped`] when the group stopped. On a stream that goes both ways,
     ///   the reply half then ends with no mesh code: the group can hold the entry.
-    pub(crate) async fn serve(
+    pub async fn serve(
         &self,
         peer: PublicKey,
         incoming: Incoming,

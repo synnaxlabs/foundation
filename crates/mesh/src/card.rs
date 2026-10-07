@@ -45,10 +45,6 @@ impl Card {
     /// with what [`Card::encode`] gives, such as an address list that
     /// [`Addresses::new`](addresses::Addresses::new) refuses; `bytes` is then at no known
     /// place.
-    #[cfg_attr(
-        not(any(test, feature = "sim")),
-        expect(dead_code, reason = "the streams of #471 are the first user")
-    )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let name = take_name(bytes)?;
         let public_key = take_public_key(bytes)?;
