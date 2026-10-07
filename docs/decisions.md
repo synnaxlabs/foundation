@@ -752,6 +752,21 @@ How to read this record:
   disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
   once where remote records enter (X43), and the read after it panics on a bad body.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **STORED BENCH (#1547, 2026-10-07)** The cargo feature `bench` of `home`, off by
+  default, adds `#[doc(hidden)] pub mod bench`: `entry` calls `stored::entry`, and
+  `read` calls `stored::read` and gives each series' channel, type, and bytes. Only the
+  bench `benches/stored.rs` (`test = true`) uses it, as `transport::fuzzing` serves the
+  fuzz crate. `read` gives all three fields, so the compiler cannot skip a decode that
+  production does, and the bench passes each item to `divan::black_box`. Run it with
+  `cargo bench -p home --bench stored`. Lost: a copy of `stored` in the bench through
+  `#[path]`, which breaks at its first `crate::` item, and a time of `Shard` writes and
+  reads, which hides the cost of the body in the cost of the write. Decided by
+  `laptop.architect` (2026-10-07T18:46:13Z):
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576.
+  `cargo bench -p home` turns on `bench` through a dev-dependency of `home` on itself,
+  since the bench host runs no features. Decided by `laptop.architect`
+  (2026-10-07T19:05:26Z):
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
