@@ -2,231 +2,167 @@
 //! `cargo bench -p hub --bench reader`.
 //!
 //! Each round writes `FRAMES` frames of one sample on an index and one data channel,
-//! and times five lines, each per frame of the round:
+//! and times six lines:
 //!
 //! - `timer`: an empty closure, the floor of each line's figure.
 //! - `write`, the control: one `Writer::write` of a frame whose draft is ready.
 //! - `latest next`: one poll of a latest reader's `next` right after each write, which
 //!   gives that frame before its commit.
 //! - `complete next`: one poll of a complete reader's `next` after the round's commit,
-//!   which gives a frame and grants the credit of the frame before it.
-//! - `complete wait`: one poll of `next` on the drained complete reader, which grants
-//!   its credit, finds no frame, and gives `Pending`.
+//!   which gives a frame. Each but the first of a round also grants the credit of the
+//!   frame before it.
+//! - `complete grant`: the first poll of `next` on the drained complete reader, once a
+//!   round: it grants the credit of the round's last frame, finds no frame, and gives
+//!   `Pending`.
+//! - `complete wait`: each later poll of `next` on the drained complete reader, which
+//!   grants nothing and gives `Pending`.
 //!
 //! A `next` that gives `Pending` while a frame waits is the yield after a run of
 //! frames: it is polled again, and only the poll that gives the frame is timed. Any
-//! other result panics, so no number holds a wait on the sim. To compare two builds,
+//! other result panics, so no figure holds a wait on the sim. To compare two builds,
 //! run each several times in turn on one pinned core and compare p10 and p50 with the
 //! control.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::path::PathBuf;
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use std::pin::pin;
-use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use block::{Heap, Pool};
+use common::{SETTLE, name};
 use hub::reader::{Mode, Reader};
-use hub::writer::{self, Writer};
-use hub::{Channel, Hub};
+use hub::writer;
 use types::authority::Authority;
-use types::channel;
-use types::frame::key_set::Interner;
-use types::frame::{Form, Label, Path};
-use types::name::Name;
-use types::sample::{Scalar, Type};
-use types::time::{Span, Stamp};
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 /// Frames per round. A round fits the window of a complete reader.
 const FRAMES: usize = 64;
-/// Rounds before the timed rounds.
 const WARMUP: usize = 20;
-/// Timed rounds.
 const ROUNDS: usize = 200;
-const COMMIT: Span = Span::from_nanos(10_000_000);
-/// Past the commit of a write.
-const SETTLE: Span = Span::from_nanos(20_000_000);
-const LIMITS: home::order::Limits = home::order::Limits {
-    earliest: Stamp::from_nanos(1),
-    ahead: Span::from_nanos(1_000_000_000),
-};
-const LINES: [&str; 5] = [
-    "timer",
-    "write",
-    "latest next",
-    "complete next",
-    "complete wait",
-];
 
 fn main() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    let measured = sim.run_on(&node, bench).expect("the run ends");
-    print(&measured);
+    let lines = sim.run_on(&node, bench).expect("the run ends");
+    print(&lines);
 }
 
-/// For each line, the ns per frame of each timed round, and the allocations of all
-/// timed rounds.
-struct Measured {
-    nanos: [Vec<u64>; LINES.len()],
-    allocations: [u64; LINES.len()],
+/// One line of the table.
+struct Line {
+    name: &'static str,
+    /// The timed calls of each round.
+    calls: u64,
+    /// The ns and allocations of the round so far.
+    round: (u64, u64),
+    /// The ns per call of each timed round.
+    nanos: Vec<u64>,
+    /// The allocations of all timed rounds.
+    allocations: u64,
 }
 
-async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> Measured {
-    let (hub, mesh) = hub(&node, tasks).await;
-    let mut writer = hub.writer(writer_config()).await.expect("opens");
-    let channels = [name("value")];
-    let mut latest = hub.reader(&channels, Mode::Latest).await.expect("opens");
-    let mut complete = hub.reader(&channels, Mode::Complete).await.expect("opens");
-    let mut measured = Measured {
-        nanos: Default::default(),
-        allocations: [0; LINES.len()],
-    };
-    for round in 0..WARMUP + ROUNDS {
-        let (mut nanos, mut allocations) = ([0; LINES.len()], [0; LINES.len()]);
-        let mut add = |line: usize, (span, counted): (u64, u64)| {
-            nanos[line] += span;
-            allocations[line] += counted;
-        };
-        let now = now(&mesh);
-        for n in 0..FRAMES {
-            let draft = draft(&writer, now + i64::try_from(n).expect("few"));
-            add(0, timed(|| ()));
-            add(1, timed(|| write(&mut writer, draft)));
-            add(2, take(&mut latest));
-        }
-        node.clock().sleep(SETTLE).await;
-        for _ in 0..FRAMES {
-            add(3, take(&mut complete));
-        }
-        for _ in 0..FRAMES {
-            add(
-                4,
-                timed(|| assert!(!poll(&mut complete), "the reader has no frame left")),
-            );
-        }
-        if round >= WARMUP {
-            for line in 0..LINES.len() {
-                let frames = u64::try_from(FRAMES).expect("few");
-                measured.nanos[line].push(nanos[line] / frames);
-                measured.allocations[line] += allocations[line];
-            }
+impl Line {
+    fn new(name: &'static str, calls: usize) -> Self {
+        Self {
+            name,
+            calls: u64::try_from(calls).expect("few"),
+            round: (0, 0),
+            nanos: Vec::with_capacity(ROUNDS),
+            allocations: 0,
         }
     }
-    measured
+
+    fn add(&mut self, (nanos, allocations): (u64, u64)) {
+        self.round.0 += nanos;
+        self.round.1 += allocations;
+    }
+
+    /// Ends a round, and keeps its figures when it is `timed`.
+    fn close(&mut self, timed: bool) {
+        let (nanos, allocations) = std::mem::take(&mut self.round);
+        if timed {
+            self.nanos.push(nanos / self.calls);
+            self.allocations += allocations;
+        }
+    }
 }
 
-/// A hub on a new ring of `node`, with `time` and `value` on it, and its mesh clock,
-/// once the node has mesh time.
-async fn hub(node: &sim::node::Node, tasks: env::tasks::Tasks) -> (Hub, clock::Reader) {
-    let config = block::Config { budget: 1 << 24 };
-    let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-    let (unsynced, mesh) = clock::Clock::new(node.clock());
-    let mut interner = Interner::new();
-    let config = buffer::Config {
-        files: node.files(),
-        dir: PathBuf::from("shard-0"),
-        pool,
-        clock: node.clock(),
-        tasks: tasks.clone(),
-        entropy: node.entropy(),
-        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
-        commit: COMMIT,
-    };
-    let buffer = buffer::Buffer::open(config, interner.slots())
-        .await
-        .expect("opens");
-    let home = home::Shard::new(home::Config {
-        shard: 0,
-        buffer,
-        clock: mesh.clone(),
-        limits: LIMITS,
-    });
-    let hub = Hub::new(hub::Config {
-        home,
-        interner,
-        tasks: tasks.clone(),
-    });
-    for (key, channel, scalar) in
-        [(1, "time", Scalar::Stamp), (2, "value", Scalar::I64)]
-    {
-        hub.define(Channel {
-            key: channel::Key::from_u128(key),
-            name: name(channel),
-            data_type: Type::Scalar(scalar),
-            index: channel::Key::from_u128(1),
-        });
-    }
-    let wall = node.wall();
-    tasks.spawn(async move { unsynced.run(wall).await });
-    while mesh.now().mesh.is_none() {
-        node.clock().sleep(Span::from_nanos(1)).await;
-    }
-    (hub, mesh)
-}
-
-fn writer_config() -> writer::Config {
-    writer::Config {
+async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
+    let (hub, mut stamp) = common::hub(&node, tasks).await;
+    let config = writer::Config {
         subject: name("bench"),
         authority: Authority(1),
         lease: None,
         channels: vec![name("value")],
-    }
-}
-
-fn name(name: &str) -> Name {
-    name.parse().expect("a valid name")
-}
-
-/// Mesh time now: the midpoint of the clock's interval.
-fn now(mesh: &clock::Reader) -> i64 {
-    let now = mesh.now().mesh.expect("the node has mesh time");
-    now.earliest.nanos().midpoint(now.latest.nanos())
-}
-
-/// A frame of one sample at `stamp` on `time` and `value`.
-fn draft(writer: &Writer, stamp: i64) -> types::frame::Draft {
-    let set = writer.set();
-    let entry = |key| {
-        let key = channel::Key::from_u128(key);
-        set.entries()
-            .iter()
-            .position(|entry| entry.key == key)
-            .expect("the key set holds the channel")
     };
-    let (time, value) = (entry(1), entry(2));
-    let mut series = [(time, 8), (value, 8)];
-    series.sort_unstable();
-    let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-    for (entry, sample) in [(time, stamp), (value, stamp)] {
-        let bytes = draft.series_mut(entry).expect("the series is present");
-        bytes.copy_from_slice(&sample.to_le_bytes());
+    let mut writer = hub.writer(config).await.expect("opens");
+    let channels = [name("value")];
+    let mut latest = hub.reader(&channels, Mode::Latest).await.expect("opens");
+    let mut complete = hub.reader(&channels, Mode::Complete).await.expect("opens");
+    let mut timer = Line::new("timer", FRAMES);
+    let mut write = Line::new("write", FRAMES);
+    let mut latest_next = Line::new("latest next", FRAMES);
+    let mut complete_next = Line::new("complete next", FRAMES);
+    let mut grant = Line::new("complete grant", 1);
+    let mut wait = Line::new("complete wait", FRAMES - 1);
+    for round in 0..WARMUP + ROUNDS {
+        for _ in 0..FRAMES {
+            let draft = common::draft(&writer, stamp);
+            stamp += 1;
+            timer.add(timed(|| ()));
+            write.add(timed(|| common::write(&mut writer, draft)));
+            latest_next.add(take(&mut latest));
+        }
+        node.clock().sleep(SETTLE).await;
+        for _ in 0..FRAMES {
+            complete_next.add(take(&mut complete));
+        }
+        grant.add(timed(|| pending(&mut complete)));
+        for _ in 1..FRAMES {
+            wait.add(timed(|| pending(&mut complete)));
+        }
+        let lines = [
+            &mut timer,
+            &mut write,
+            &mut latest_next,
+            &mut complete_next,
+            &mut grant,
+            &mut wait,
+        ];
+        for line in lines {
+            line.close(round >= WARMUP);
+        }
     }
-    draft.set_count(set.entries()[time].group, 1);
-    draft
-}
-
-fn write(writer: &mut Writer, draft: types::frame::Draft) {
-    writer
-        .write(Label::Path(Path::Live), draft)
-        .expect("the home takes it");
+    [timer, write, latest_next, complete_next, grant, wait]
 }
 
 /// The ns and allocations of the poll of `reader.next()` that gives the frame that
-/// waits. A poll that gives the `Pending` of a yield after a run of frames is not
-/// counted.
+/// waits. A first `Pending`, the yield after a run of frames, is not counted.
+///
+/// # Panics
+///
+/// When no frame waits.
 fn take(reader: &mut Reader) -> (u64, u64) {
-    loop {
+    for _ in 0..2 {
         let ((ready, span), counted) = ALLOCATOR.count(|| clocked(|| poll(reader)));
         if ready {
             return (span, counted);
         }
     }
+    panic!("a frame waits for the reader");
+}
+
+/// Polls `reader`, which has no frame waiting.
+///
+/// # Panics
+///
+/// When the poll gives a frame.
+fn pending(reader: &mut Reader) {
+    assert!(!poll(reader), "the reader has no frame left");
 }
 
 /// One poll of `reader.next()`: `true` for a frame, `false` for `Pending`.
@@ -262,20 +198,21 @@ fn nanos(span: Duration) -> u64 {
 }
 
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
-fn print(measured: &Measured) {
-    println!("ns per frame over {ROUNDS} rounds of {FRAMES} frames");
+fn print(lines: &[Line]) {
+    println!("ns per call over {ROUNDS} rounds of {FRAMES} frames");
     println!("pN: the round at percentile N");
     println!(
         "{:<14} {:>9} {:>9} {:>9} {:>13}",
-        "line", "p10", "p50", "p90", "allocs/frame"
+        "line", "p10", "p50", "p90", "allocs/call"
     );
-    for (line, name) in LINES.iter().enumerate() {
-        let mut nanos = measured.nanos[line].clone();
+    for line in lines {
+        let mut nanos = line.nanos.clone();
         nanos.sort_unstable();
         let at = |percent: usize| nanos[ROUNDS * percent / 100];
-        let allocations = per(measured.allocations[line]) / per(ROUNDS * FRAMES);
+        let allocations = per(line.allocations) / per(ROUNDS) / per(line.calls);
         println!(
-            "{name:<14} {:>9} {:>9} {:>9} {allocations:>13.2}",
+            "{:<14} {:>9} {:>9} {:>9} {allocations:>13.2}",
+            line.name,
             at(10),
             at(50),
             at(90)
