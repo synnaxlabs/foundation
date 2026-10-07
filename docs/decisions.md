@@ -4097,7 +4097,7 @@ How to read this record:
   shard, and `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard
   0, which builds the transport with `Config::private_key` once the last shard has
   opened its buffer (X42), so the node takes no session before that. Its limits are
-  patches until they are settings, as LIMITS of SHARD HOMES is: window 1 MiB, 64
+  patches until #1662 makes them settings, as LIMITS of SHARD HOMES is: window 1 MiB, 64
   streams of each kind, idle 30 s, and messages of the smaller of 64 KiB and the pool's
   largest block. Each session runs in its own future, and each stream of it reads its
   header in its own future, so a late header delays no other stream. One exhaustive

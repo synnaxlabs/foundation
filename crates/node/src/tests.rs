@@ -2217,7 +2217,8 @@ mod port {
     /// Starts a peer on a new host of `sim` that dials the node at `listen` of
     /// `host`, opens a two-way stream, sends `header` as its first message, then
     /// sends until a send fails, and reads the reply half. Gives what the peer saw
-    /// once the run reaches it, or the error of the dial.
+    /// once the run reaches it, or the error of the dial. The peer holds its session
+    /// until the session closes.
     fn dial(
         sim: &mut sim::Sim,
         host: &sim::node::Node,
@@ -2260,17 +2261,18 @@ mod port {
             let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
             let sent = sent.unwrap_err();
             *seen.lock().unwrap() = Some(Ok((session.peer(), sent, read)));
+            session.closed().await;
         });
         drop(started.expect("the peer starts"));
         out
     }
 
-    /// What a peer sees when it sends `header` to a running node, which then stops
-    /// cleanly.
-    fn rejected(header: &[u8]) -> Seen {
+    /// What a peer sees when it sends `header` to a running node with `memory`, which
+    /// then stops cleanly.
+    fn rejected(header: &[u8], memory: Size) -> Seen {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let node = Node::start(config(&host, memory, Box::new(heap)));
         let seen = dial(&mut sim, &host, header);
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
         node.stop();
@@ -2297,7 +2299,7 @@ mod port {
         let key = node_key(&mut sim::Sim::new(sim::Config::default()));
         let header = wire::header::encode(wire::Protocol::Mesh);
         let code = Code(wire::header::REJECTED);
-        let (peer, sent, read) = rejected(&header);
+        let (peer, sent, read) = rejected(&header, Size::MEBIBYTE);
         assert_eq!(peer, Peer::Node(key));
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
@@ -2313,9 +2315,74 @@ mod port {
             Err(wire::header::Error::Protocol { number: 9 })
         );
         let code = Code(wire::header::REJECTED);
-        let (_, sent, read) = rejected(&header);
+        let (_, sent, read) = rejected(&header, Size::MEBIBYTE);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
+    }
+
+    /// A node whose pool's largest block is below 64 KiB takes messages of that block.
+    #[test]
+    fn a_node_whose_largest_block_is_below_64_kib_serves_its_port() {
+        let pool = block::Config { budget: 64 << 10 };
+        let memory = block::Heap::new(pool.reservation());
+        assert_eq!(block::Pool::new(pool, memory).largest(), 57_344);
+        let header = wire::header::encode(wire::Protocol::Mesh);
+        let (_, sent, _) = rejected(&header, Size::from_bytes(128 << 10));
+        let code = Code(wire::header::REJECTED);
+        assert_eq!(sent, transport::Error::Stopped { code });
+    }
+
+    /// A session that stays open delays no stream of another session.
+    #[test]
+    fn a_held_session_delays_no_other_session() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let header = wire::header::encode(wire::Protocol::Mesh);
+        let first = dial(&mut sim, &host, &header);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        let second = dial(&mut sim, &host, &header);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        let sent = |seen: &Arc<Mutex<Option<Result<Seen, _>>>>| {
+            let seen = seen.lock().unwrap().take();
+            seen.map(|seen| seen.map(|(_, sent, _)| sent))
+        };
+        let code = Code(wire::header::REJECTED);
+        let stopped = Some(Ok(transport::Error::Stopped { code }));
+        assert_eq!(sent(&first), stopped);
+        assert_eq!(sent(&second), stopped);
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    /// `join` gives a disk budget that holds no ring before a port in use.
+    #[test]
+    fn join_gives_a_small_disk_over_a_port_in_use() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let udp = env::net::udp::Config {
+            local: listen(&host),
+            send_buffer_bytes: 1 << 16,
+            recv_buffer_bytes: 1 << 16,
+        };
+        let held = host.net().udp(&udp).expect("the port binds");
+        let disk = Size::from_bytes(1);
+        let node = Node::start(Config {
+            disk,
+            ..config(&host, Size::MEBIBYTE, Box::new(heap))
+        });
+        assert_eq!(sim.run(), Ok(()));
+        let min = Size::from_bytes(8_437_760);
+        assert_eq!(
+            node.join(),
+            Err(Error::Disk {
+                disk,
+                cores: 2,
+                min
+            })
+        );
+        drop(held);
     }
 
     /// A port that does not bind starts no shard, and `join` gives why.
