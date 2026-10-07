@@ -98,8 +98,17 @@ fn create_transport(
 
 /// The config of the region `plant`, whose one member and one voter is the node `KEY`.
 fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
+    create_config_on(node, tasks, private_key())
+}
+
+/// That config, on a transport that proves the public key of `transport_key`.
+fn create_config_on(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    transport_key: PrivateKey,
+) -> Config {
     let pool = create_pool();
-    let transport = create_transport(node, tasks, &pool, private_key());
+    let transport = create_transport(node, tasks, &pool, transport_key);
     Config {
         key: KEY,
         private_key: private_key(),
@@ -135,6 +144,15 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
         assert_eq!(watch.next().await, Ok(None));
         drop(mesh);
         assert_eq!(watch.next().await, Err(Stopped::Dropped));
+    });
+}
+
+// A known gap until #1587: `open` must refuse this transport.
+#[test]
+fn open_takes_a_transport_that_proves_another_key() {
+    solo(|node, tasks| async move {
+        let config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
+        drop(Mesh::open(config).await.unwrap());
     });
 }
 
