@@ -87,8 +87,8 @@ again once to prove that the failure replays (r16 59).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
   against is one: a resource (a pool, a store, files) or a collection that it fills (an
   interner, the members of a region), also when it writes nothing. A helper that turns
-  its arguments into one value (`key(slot)`, `message(from, to, body)`) is named for
-  that value.
+  its arguments into one value (`key(slot)`, `message(from, to, body)`), or builds the
+  type under test (`index()`, `carried(2)`), is named for that value.
 - **Snapshot tests for text output** (`plan`, diagnostics, formatted HCL, error
   `Display`) and **coverage marks** that prove a test reached a branch. Both need a
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
