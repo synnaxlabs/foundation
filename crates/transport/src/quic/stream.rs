@@ -4361,6 +4361,37 @@ mod tests {
     }
 
     #[test]
+    fn a_finish_after_a_pumped_message_leaves_no_turn_behind() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut bulk = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut bulk);
+            let mut first = open_sender(&mut pair, Class::Command);
+            let now = pair.now();
+            let written =
+                try_write(&mut pair.client, now, &mut first, shard.block(b"a"));
+            assert_eq!(written, Ok(None));
+            assert!(half(&mut pair.client, &first).holds());
+            let second = open_sender(&mut pair, Class::Command);
+            let message = Some(shard.block(b"b"));
+            let written = pair.client.endpoint.write(now, &second, &mut { message });
+            assert_eq!(written, Ok(Poll::Pending));
+            free(&mut pair);
+            assert!(!half(&mut pair.client, &first).holds());
+            let now = pair.now();
+            assert_eq!(pair.client.endpoint.finish(now, &mut first), Ok(()));
+            let flushed = pair.client.endpoint.write(now, &second, &mut None);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            let mut later = open_sender(&mut pair, Class::Command);
+            pair.run(10 * RUN);
+            let now = pair.now();
+            let written =
+                try_write(&mut pair.client, now, &mut later, shard.block(b"c"));
+            assert_eq!(written, Ok(None));
+        });
+    }
+
+    #[test]
     fn a_message_after_a_pumped_message_that_two_wakes_named_holds_its_bytes() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
