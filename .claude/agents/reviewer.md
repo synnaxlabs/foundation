@@ -31,11 +31,11 @@ Check:
   test would catch. For each sentence that the PR adds to a public doc or to
   `docs/decisions.md` that states a behavior, which test fails when the code breaks it?
   Does a test assert through a field or call that is not public, or compare the `Debug`
-  string of the type under test, with no written reason? Name the public call that shows
-  the same behavior. When the PR exists to remove work, which test fails if it is
-  reverted? Does each new `.cargo/mutants.toml` entry meet the rule in `testing.md`?
-  Does an entry still skip code that the PR changes, with a reason that the PR ends (a
-  stub that it fills)? The PR narrows or removes that entry.
+  string of the type under test, with no written reason that holds? Name the public call
+  that shows the same behavior. When the PR exists to remove work, which test fails if
+  it is reverted? Does each new `.cargo/mutants.toml` entry meet the rule in
+  `testing.md`? Does an entry still skip code that the PR changes, with a reason that
+  the PR ends (a stub that it fills)? The PR narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?
