@@ -164,7 +164,11 @@ state on `main`.
   are a quorum of what it holds. When a second node fails before that, the group
   waits for an operator: wipe the voter's state and start it with no configuration.
   The chain of proofs over configuration entries closes it (#881, a release
-  blocker). `raft/tests/it/behind.rs` pins both.
+  blocker). Its first PR gives each configuration entry the votes and the signature
+  of the leader that wrote it (`raft::Change`); the chain and its check are the
+  second PR (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  `raft/tests/it/behind.rs` pins both.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

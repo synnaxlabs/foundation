@@ -186,13 +186,13 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
     ///   voter of this node's configuration.
-    /// - [`Error::Grant`] when a grant in the message does not hold.
+    /// - [`Error::Grant`] when a claim in the message does not hold.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
     ///
-    /// When a grant in `message` has no signature. A decoded message gives each
-    /// grant one.
+    /// When a claim in `message` has no signature. A decoded message gives each
+    /// claim one.
     pub(crate) fn receive(
         &self,
         peer: PublicKey,
@@ -1434,10 +1434,7 @@ mod tests {
                 };
                 let append = Body::Append {
                     prev: Position::default(),
-                    entries: vec![Entry {
-                        at,
-                        data: Data::Voters(joint),
-                    }],
+                    entries: vec![common::change(2, at, joint)],
                     commit: 0,
                 };
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
@@ -1745,11 +1742,11 @@ mod tests {
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 let proof = heartbeat.proof.as_mut().unwrap();
                 proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
-                let forged = Error::Grant(grant::Error::Forged { voter: key(3) });
+                let forged = Error::Grant(grant::Error::Forged { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(forged.clone()));
                 assert_eq!(
                     forged.to_string(),
-                    format!("the grant of voter {} is forged", key(3))
+                    format!("the claim of node {} is forged", key(3))
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
@@ -1762,7 +1759,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                let refused = Error::Grant(grant::Error::NotMember { voter: key(3) });
+                let refused = Error::Grant(grant::Error::NotMember { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
             });
         }
@@ -1782,7 +1779,7 @@ mod tests {
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
                 let not_voter = Error::NotVoter { from: key(3) };
                 assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
-                let grant = Error::Grant(grant::Error::Forged { voter: key(1) });
+                let grant = Error::Grant(grant::Error::Forged { signer: key(1) });
                 assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
             });
         }
@@ -1801,10 +1798,7 @@ mod tests {
                 };
                 let append = Body::Append {
                     prev: Position::default(),
-                    entries: vec![Entry {
-                        at,
-                        data: Data::Voters(joint),
-                    }],
+                    entries: vec![common::change(2, at, joint)],
                     commit: 0,
                 };
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
@@ -1813,6 +1807,44 @@ mod tests {
                 let mut pre_vote = message(3, 1, Body::PreVote { last: at });
                 pre_vote.term = Term(common::TERM.0 + 1);
                 assert_eq!(mesh.receive(public(3), pre_vote), Ok(()));
+            });
+        }
+
+        #[test]
+        fn refuses_an_append_whose_change_is_forged_before_it_steps() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let at = Position {
+                    term: common::TERM,
+                    index: 1,
+                };
+                let joint = Voters {
+                    incoming: [key(1), key(2)].into(),
+                    outgoing: [key(1), key(2), key(3)].into(),
+                };
+                let mut entry = common::change(2, at, joint);
+                let Data::Voters(change) = &mut entry.data else {
+                    unreachable!("a change is a voters entry");
+                };
+                change.signature.as_mut().unwrap().0[63] ^= 1;
+                let append = Body::Append {
+                    prev: Position::default(),
+                    entries: vec![entry],
+                    commit: 0,
+                };
+                let forged = Error::Grant(grant::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Err(forged));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 2).await);
+                assert_eq!(term(&mesh), Term(0));
+                let probe = Body::Append {
+                    prev: at,
+                    entries: Vec::new(),
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, probe)), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::AppendReject { hint: 0 }));
             });
         }
 
@@ -2155,7 +2187,7 @@ mod tests {
                 (
                     public(2),
                     forged,
-                    Error::Grant(grant::Error::Forged { voter: key(3) }),
+                    Error::Grant(grant::Error::Forged { signer: key(3) }),
                 ),
             ];
             assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
@@ -3032,8 +3064,7 @@ mod tests {
                 term: Term(1),
                 index: 1,
             };
-            let data = Data::Voters(Voters::default());
-            let entries = [Entry { at, data }];
+            let entries = [common::change(1, at, Voters::default())];
             let proof = Proof {
                 grant: Grant::Vote,
                 candidate: key(1),

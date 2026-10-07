@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use types::node;
 
-use crate::{Entry, Position, Term};
+use crate::{Entry, Position, Term, Voters};
 
 /// One message between two nodes of a voter group.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,18 +37,41 @@ pub enum Grant {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signature(pub [u8; 64]);
 
-/// What a voter's signature attests: `voter` grants `grant` to `candidate` in
-/// `term`.
+/// What a signature attests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Claim {
-    /// The voter that signs.
-    pub voter: node::Key,
-    /// What it grants.
-    pub grant: Grant,
-    /// The term of the grant.
-    pub term: Term,
-    /// The node it grants it to.
-    pub candidate: node::Key,
+pub enum Claim<'a> {
+    /// `voter` grants `grant` to `candidate` in `term`.
+    Grant {
+        /// The voter that signs.
+        voter: node::Key,
+        /// What it grants.
+        grant: Grant,
+        /// The term of the grant.
+        term: Term,
+        /// The node it grants it to.
+        candidate: node::Key,
+    },
+    /// `leader` wrote the configuration entry `voters` at `at`.
+    Change {
+        /// The leader that signs.
+        leader: node::Key,
+        /// Where the entry is in the log.
+        at: Position,
+        /// The configuration.
+        voters: &'a Voters,
+    },
+}
+
+impl Claim<'_> {
+    /// The node whose signature attests the claim: the voter of a grant, or the
+    /// leader of a change.
+    #[must_use]
+    pub fn signer(&self) -> node::Key {
+        match *self {
+            Self::Grant { voter, .. } => voter,
+            Self::Change { leader, .. } => leader,
+        }
+    }
 }
 
 /// A voter's answer to a [`Body::PreVote`] or a [`Body::Vote`].
@@ -76,15 +99,31 @@ pub struct Proof {
 }
 
 impl Proof {
+    // Each entry's grant in `term`, in rising key order, with its signature.
+    pub(crate) fn claims(
+        &self,
+        term: Term,
+    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        self.voters.iter().map(move |(&voter, &signature)| {
+            let claim = Claim::Grant {
+                voter,
+                grant: self.grant,
+                term,
+                candidate: self.candidate,
+            };
+            (claim, signature)
+        })
+    }
+
     // Gives each entry with no signature the signature `sign` makes for its claim.
     pub(crate) fn sign(
         &mut self,
         term: Term,
-        sign: &mut impl FnMut(&Claim) -> Signature,
+        sign: &mut impl FnMut(&Claim<'_>) -> Signature,
     ) {
         for (&voter, signature) in &mut self.voters {
             if signature.is_none() {
-                *signature = Some(sign(&Claim {
+                *signature = Some(sign(&Claim::Grant {
                     voter,
                     grant: self.grant,
                     term,
@@ -96,33 +135,31 @@ impl Proof {
 }
 
 impl Message {
-    /// Each grant the message carries, with its signature: the entries of its proof
-    /// in rising key order, then the sender's grant when the body grants. The caller
-    /// checks each signature against its voter's key before `step`, and refuses a
-    /// `None`: `step` keeps each signature as it came.
-    pub fn claims(&self) -> impl Iterator<Item = (Claim, Option<Signature>)> + '_ {
-        let proof = self.proof.iter().flat_map(|proof| {
-            proof.voters.iter().map(|(&voter, &signature)| {
-                let claim = Claim {
-                    voter,
-                    grant: proof.grant,
-                    term: self.term,
-                    candidate: proof.candidate,
-                };
-                (claim, signature)
-            })
-        });
+    /// Each claim the message carries, with its signature: the entries of its proof
+    /// in rising key order, then, for each change an append carries, its votes in
+    /// the entry's term and the leader's change, then the sender's grant when the
+    /// body grants. The caller checks each signature against its signer's key before
+    /// `step`, and refuses a `None`: `step` keeps each signature as it came.
+    pub fn claims(&self) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> + '_ {
+        let proof = self.proof.iter().flat_map(|proof| proof.claims(self.term));
+        let changes = self.body.entries().iter().flat_map(Entry::claims);
         let granted = self
             .body
             .granted()
             .map(|(grant, signature)| (self.claim(grant), signature));
-        proof.chain(granted)
+        proof.chain(changes).chain(granted)
     }
 
-    // Gives each grant with no signature the signature `sign` makes for its claim.
-    pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim) -> Signature) {
+    // Gives each grant with no signature, and each `None` of a change it carries,
+    // the signature `sign` makes for its claim.
+    pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim<'_>) -> Signature) {
         if let Some(proof) = &mut self.proof {
             proof.sign(self.term, sign);
+        }
+        if let Body::Append { entries, .. } = &mut self.body {
+            for entry in entries {
+                entry.sign(sign);
+            }
         }
         if let Some((grant, None)) = self.body.granted() {
             let answer = Answer::Granted(Some(sign(&self.claim(grant))));
@@ -134,8 +171,8 @@ impl Message {
     }
 
     // The sender's claim of a grant to the receiver.
-    fn claim(&self, grant: Grant) -> Claim {
-        Claim {
+    fn claim(&self, grant: Grant) -> Claim<'static> {
+        Claim::Grant {
             voter: self.from,
             grant,
             term: self.term,
@@ -202,6 +239,21 @@ impl Body {
     /// Whether only a leader sends this body.
     pub(crate) fn leads(&self) -> bool {
         matches!(self, Self::Heartbeat { .. } | Self::Append { .. })
+    }
+
+    // The entries an append carries; none for another body.
+    pub(crate) fn entries(&self) -> &[Entry] {
+        match self {
+            Self::Append { entries, .. } => entries,
+            Self::PreVote { .. }
+            | Self::PreVoteReply { .. }
+            | Self::Vote { .. }
+            | Self::VoteReply { .. }
+            | Self::Heartbeat { .. }
+            | Self::HeartbeatReply
+            | Self::AppendReply { .. }
+            | Self::AppendReject { .. } => &[],
+        }
     }
 
     /// What this body grants, with its signature: `None` unless it grants.
