@@ -448,12 +448,13 @@ impl Shard {
         if !ready {
             entries.clear();
         }
+        // An empty append still reports a failed commit.
+        let appended = room(self.buffer.append(entries.drain(..)));
         let appended = match made {
             Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
-                Err(Error::Large)
+                appended.and(Err(Error::Large))
             }
-            // An empty append still reports a failed commit.
-            _ => room(self.buffer.append(entries.drain(..))),
+            _ => appended,
         };
         let room =
             recorded
@@ -2187,6 +2188,34 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, live), Err(disk.clone()));
             assert_eq!(shard.write(a, BACKFILL, backfill), Err(disk));
             drop(blocks);
+        });
+    }
+
+    #[test]
+    fn fails_a_frame_that_no_block_holds_after_a_failed_sync() {
+        run(112, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 2, &set)).expect("synced");
+            test.node.fail_file(FilePath::new(RING), Operation::Sync);
+            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 1)][..]));
+            let failed = env::files::Error::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::Sync,
+                code: 5,
+            };
+            assert_eq!(shard.committed().await, Err(failed.clone()));
+            let writers = create_pool(4 * POOL);
+            let len = 240_000;
+            let stamps: Vec<i64> = (100..).take(len).collect();
+            let values = scattered(len);
+            let series: [(usize, &[i64]); 2] = [(0, &stamps), (1, &values)];
+            for label in [LIVE, BACKFILL] {
+                let large = frame(&writers, &set, &series);
+                let disk = Error::Disk(failed.clone());
+                assert_eq!(shard.write(a, label, large), Err(disk), "{label:?}");
+            }
         });
     }
 
