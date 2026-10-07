@@ -9,7 +9,7 @@ use std::fmt;
 use codec::{Decoder, Encoder, VECTOR_LEN, max_len};
 use divan::Bencher;
 use divan::counter::ItemsCount;
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 
 fn main() {
     for shape in &SHAPES {
@@ -43,12 +43,13 @@ struct Shape {
 /// Creates `LEN` samples.
 #[derive(Clone, Copy)]
 enum Create {
-    /// Each cut to the scalar's width.
+    /// Each element, cut to its width. A sample of a fixed shape takes the next
+    /// elements of its width.
     Scalar(fn() -> Vec<i64>),
     Strings(fn() -> Vec<&'static str>),
 }
 
-const SHAPES: [Shape; 24] = [
+const SHAPES: [Shape; 26] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -73,7 +74,24 @@ const SHAPES: [Shape; 24] = [
     Shape::new("u64.ffor32", Scalar::U64, create_uniform::<32>, 1.982, FULL),
     Shape::new("u64.ffor55", Scalar::U64, create_uniform::<55>, 1.155, FULL),
     Shape::strings("str.state", create_state_names, 2.842, EVERY),
+    Shape::fixed("f32x6.imu", ARRAY, 0.999, EVERY),
+    Shape::fixed("f32x2x3.imu", MATRIX, 0.999, EVERY),
 ];
+
+/// Six `f32` elements as an array. It encodes as [`MATRIX`] does.
+const ARRAY: Type = Type::Array {
+    element: Scalar::F32,
+    len: 6,
+};
+
+/// Six `f32` elements as two rows of three.
+const MATRIX: Type = Type::Matrix {
+    element: Scalar::F32,
+    sides: Sides {
+        rows: 2,
+        columns: 3,
+    },
+};
 
 impl Shape {
     const fn new(
@@ -87,6 +105,22 @@ impl Shape {
             name,
             data_type: Type::Scalar(scalar),
             create: Create::Scalar(create),
+            ratio,
+            lens,
+        }
+    }
+
+    /// A shape of [`create_imu`] samples of the fixed type `data_type`.
+    const fn fixed(
+        name: &'static str,
+        data_type: Type,
+        ratio: f64,
+        lens: &'static [usize],
+    ) -> Self {
+        Self {
+            name,
+            data_type,
+            create: Create::Scalar(create_imu),
             ratio,
             lens,
         }
@@ -126,11 +160,19 @@ impl Shape {
     fn values(&self, len: usize) -> Vec<u8> {
         match self.create {
             Create::Scalar(create) => {
-                let width = self.data_type.width().expect("a scalar has a width");
+                let width = self.data_type.width().expect("a fixed shape");
+                let element = match self.data_type {
+                    Type::Scalar(element)
+                    | Type::Array { element, .. }
+                    | Type::Matrix { element, .. } => element.width(),
+                    Type::List { .. } | Type::String | Type::Bytes => {
+                        panic!("invariant: a `Scalar` shape has a fixed type")
+                    }
+                };
                 create()
                     .into_iter()
-                    .take(len)
-                    .flat_map(|sample| sample.to_le_bytes().into_iter().take(width))
+                    .take(len * width / element)
+                    .flat_map(|value| value.to_le_bytes().into_iter().take(element))
                     .collect()
             }
             Create::Strings(create) => {
@@ -317,6 +359,31 @@ fn create_walk<const BITS: u32>() -> Vec<i64> {
         .scan(0_i64, |value, _| {
             *value = value.wrapping_add((random.next() >> (64 - BITS)).cast_signed());
             Some(*value)
+        })
+        .collect()
+}
+
+/// The three axes of an accelerometer, in g, then of a gyroscope, in degrees per
+/// second, for each sample, as `f32` bits: slow sines plus normal noise.
+fn create_imu() -> Vec<i64> {
+    const SCALES: [(f64, f64); 6] = [
+        (0.2, 0.01),
+        (0.2, 0.01),
+        (1.0, 0.01),
+        (30.0, 0.5),
+        (30.0, 0.5),
+        (5.0, 0.5),
+    ];
+    let mut random = Random(8);
+    (0..LEN)
+        .flat_map(|i| {
+            let i = f64::from(u32::try_from(i).expect("invariant: `LEN` fits a `u32`"));
+            SCALES.map(|(amplitude, noise)| {
+                #[expect(clippy::cast_possible_truncation, reason = "an `f32` sample")]
+                let x = (amplitude * (TAU * i / 4_096.0).sin()
+                    + noise * random.normal()) as f32;
+                i64::from(x.to_bits())
+            })
         })
         .collect()
 }

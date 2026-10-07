@@ -10,7 +10,7 @@ use divan::counter::ItemsCount;
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{Draft, Form, Frame, Path};
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 use types::time::Stamp;
 
 fn main() {
@@ -18,7 +18,7 @@ fn main() {
 }
 
 /// The data types that a mixed frame cycles through.
-const MIXED: [Type; 9] = [
+const MIXED: [Type; 10] = [
     Type::Scalar(Scalar::F32),
     Type::Scalar(Scalar::F64),
     Type::Scalar(Scalar::I16),
@@ -27,6 +27,13 @@ const MIXED: [Type; 9] = [
     Type::Array {
         element: Scalar::F32,
         len: 6,
+    },
+    Type::Matrix {
+        element: Scalar::F32,
+        sides: Sides {
+            rows: 2,
+            columns: 3,
+        },
     },
     Type::List {
         element: Scalar::U16,
