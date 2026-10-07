@@ -885,6 +885,7 @@ mod tests {
     #[test]
     fn a_power_cut_keeps_what_an_open_after_a_failed_sync_gave() {
         let mut lost = Vec::new();
+        let mut gave = 0_usize;
         for seed in 0..64 {
             let (mut sim, node) = sim(seed);
             let expected = sim
@@ -908,6 +909,10 @@ mod tests {
                     opened
                 })
                 .unwrap();
+            // The entries are the first, the failed one or not, and the last.
+            if expected.entries.len() == 3 {
+                gave = gave.saturating_add(1);
+            }
             sim.crash(&node, Crash::Power);
             let kept = stored(&mut sim, &node).unwrap();
             if kept != expected {
@@ -915,6 +920,7 @@ mod tests {
             }
         }
         assert_eq!(lost, [], "(seed, entries before the cut, entries after it)");
+        assert!(gave > 16, "{GAVE}: {gave}");
     }
 
     // A failed open leaves the directory or `log-0` with no durable entry.
@@ -1000,38 +1006,66 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
+    /// Damages the last record, which starts at `end`, fails the sync of one open,
+    /// opens again, and cuts the power. Returns whether `log-0` then holds only
+    /// zeros from `end`.
+    fn zeros_after_a_failed_open(
+        sim: &mut Sim,
+        node: &sim::node::Node,
+        end: u64,
+    ) -> bool {
+        let at = end.saturating_add(wide(HEADER)).saturating_add(50);
+        sim.run_on(node, move |node, _| async move {
+            put(&node, "log-0", at, &[0xFF]).await;
+            node.fail_file(&file("log-0"), Operation::Sync);
+            let error = open(&node).await.unwrap_err();
+            assert_eq!(error, io("log-0", Operation::Sync));
+            open(&node).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(node, Crash::Power);
+        sim.run_on(node, move |node, _| async move {
+            let log = file("log-0");
+            let file = node.files().open(&log, Mode::Read).await.unwrap();
+            let bytes = read(&file, &pool()).await.unwrap();
+            bytes[narrow(end)..].iter().all(|&byte| byte == 0)
+        })
+        .unwrap()
+    }
+
+    const TORN: &str = "the runs with bytes after the end of the log";
+
     // The failed sync of an open leaves its zeros in the cache, clean, and the torn
     // record on the disk.
     #[test]
     fn a_power_cut_keeps_the_zeros_of_an_open_after_a_failed_open() {
         let mut torn = Vec::new();
-        for seed in 0..64 {
-            let (mut sim, node) = sim(seed);
+        for run in 0..64 {
+            let (mut sim, node) = sim(run);
             let starts = three(&mut sim, &node);
-            let at = starts[2] + wide(HEADER) + 50;
-            sim.run_on(&node, move |node, _| async move {
-                put(&node, "log-0", at, &[0xFF]).await;
-                node.fail_file(&file("log-0"), Operation::Sync);
-                let error = open(&node).await.unwrap_err();
-                assert_eq!(error, io("log-0", Operation::Sync));
-                open(&node).await.unwrap();
-            })
-            .unwrap();
-            sim.crash(&node, Crash::Power);
-            let end = narrow(starts[2]);
-            let zeros = sim
-                .run_on(&node, move |node, _| async move {
-                    let log = file("log-0");
-                    let file = node.files().open(&log, Mode::Read).await.unwrap();
-                    let bytes = read(&file, &pool()).await.unwrap();
-                    bytes[end..].iter().all(|&byte| byte == 0)
-                })
-                .unwrap();
-            if !zeros {
-                torn.push(seed);
+            if !zeros_after_a_failed_open(&mut sim, &node, starts[2]) {
+                torn.push(run);
             }
         }
-        assert_eq!(torn, [], "the seeds with bytes after the end of the log");
+        assert_eq!(torn, [], "{TORN}");
+    }
+
+    // The torn record is the first, so each block that the open writes is zeros.
+    #[test]
+    fn a_power_cut_keeps_the_zeros_of_an_open_that_gave_no_record() {
+        let mut torn = Vec::new();
+        for run in 0..64 {
+            let (mut sim, node) = sim(run);
+            sim.run_on(&node, |node, _| async move {
+                let (mut log, _) = open(&node).await.unwrap();
+                log.write(None, &[bytes(1, 700)]).await.unwrap();
+            })
+            .unwrap();
+            if !zeros_after_a_failed_open(&mut sim, &node, 0) {
+                torn.push(run);
+            }
+        }
+        assert_eq!(torn, [], "{TORN}");
     }
 
     #[test]
@@ -1085,6 +1119,7 @@ mod tests {
     #[test]
     fn a_power_cut_after_a_failed_open_keeps_each_header_whole() {
         let mut refused = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let (mut sim, node) = sim(run);
             sim.run_on(&node, |node, _| async move {
@@ -1110,6 +1145,9 @@ mod tests {
                     opened.map(|(_, stored)| stored.entries.len())
                 })
                 .unwrap();
+            if opened == Ok(2) {
+                gave = gave.saturating_add(1);
+            }
             if !matches!(opened, Ok(1 | 2)) {
                 refused.push((run, opened));
             }
@@ -1119,12 +1157,17 @@ mod tests {
             [],
             "(run, what the open after the power cuts gave)"
         );
+        assert!(
+            gave > 8,
+            "runs in which the power cuts kept the record: {gave}"
+        );
     }
 
     // The cache can drop the record of a failed sync between two reads of one sector.
     #[test]
     fn an_open_after_a_failed_sync_reads_each_header_whole() {
         let mut refused = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let (mut sim, node) = sim(run);
             let opened = sim
@@ -1139,6 +1182,9 @@ mod tests {
                     opened.map(|(_, stored)| stored.entries.len())
                 })
                 .unwrap();
+            if opened == Ok(2) {
+                gave = gave.saturating_add(1);
+            }
             if !matches!(opened, Ok(1 | 2)) {
                 refused.push((run, opened));
             }
@@ -1148,6 +1194,7 @@ mod tests {
             [],
             "(run, what the open after the failed sync gave)"
         );
+        assert!(gave > 16, "{GAVE}: {gave}");
     }
 
     // A pool of 512 bytes has a largest block of 448. A log that opens with it can
@@ -1156,20 +1203,27 @@ mod tests {
     fn refuses_a_pool_with_no_block_of_one_sector() {
         for (budget, largest) in [(0, 0), (256, 192), (512, 448)] {
             let (mut sim, node) = sim(0);
-            let (error, listed) = sim
+            let (new, listed, held) = sim
                 .run_on(&node, move |node, _| async move {
                     let config = block::Config { budget };
                     let memory = block::Heap::new(config.reservation());
                     let pool = Rc::new(Pool::new(config, memory));
                     let files = node.files();
-                    let error = Log::open(files.clone(), DIR.into(), pool).await.err();
-                    (error, files.list(Path::new(DIR)).await.is_ok())
+                    let dir = PathBuf::from(DIR);
+                    let new = Log::open(files.clone(), dir.clone(), Rc::clone(&pool));
+                    let new = new.await.err();
+                    let listed = files.list(&dir).await.is_ok();
+                    drop(open(&node).await.unwrap());
+                    let held = Log::open(files, dir, pool).await.err();
+                    (new, listed, held)
                 })
                 .unwrap();
             let requested = SECTOR;
             let cause = block::Error::TooLarge { requested, largest };
-            assert_eq!(error, Some(Error::Pool(cause)), "budget {budget}");
+            let expected = Some(Error::Pool(cause));
+            assert_eq!(new, expected, "budget {budget}, no log");
             assert!(!listed, "budget {budget}: the open made the directory");
+            assert_eq!(held, expected, "budget {budget}, a log");
         }
     }
 

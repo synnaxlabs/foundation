@@ -1300,6 +1300,7 @@ mod tests {
     #[test]
     fn a_power_cut_keeps_a_home_after_a_failed_sync_and_a_new_open() {
         let mut lost = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let mut sim = Sim::new(sim::Config {
                 seed: run,
@@ -1323,23 +1324,33 @@ mod tests {
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
-            let end = sim
+            let changes = sim
                 .run_on(&node, |node, _| async move {
                     let files = node.files();
                     let (_, stored) =
                         Log::open(files, LOG.into(), pool()).await.unwrap();
-                    let entry = stored.entries.last()?;
-                    let Data::Bytes(bytes) = &entry.data else {
-                        return None;
-                    };
-                    Change::decode(bytes).ok()
+                    let changes = stored.entries.into_iter().map(|entry| {
+                        let Data::Bytes(bytes) = entry.data else {
+                            return None;
+                        };
+                        Change::decode(&bytes).ok()
+                    });
+                    changes.collect::<Vec<_>>()
                 })
                 .unwrap();
+            if changes.contains(&Some(home(2))) {
+                gave = gave.saturating_add(1);
+            }
+            let end = changes.last().copied().flatten();
             if end != Some(home(3)) {
                 lost.push((run, end));
             }
         }
         assert_eq!(lost, [], "(run, the last change after the power cut)");
+        assert!(
+            gave > 16,
+            "runs in which the open gave the failed change: {gave}"
+        );
     }
 
     #[test]
