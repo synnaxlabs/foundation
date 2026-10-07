@@ -131,24 +131,30 @@ impl Shard {
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
-    /// the record in the block before it: a restart record, or a data record of one
-    /// block.
+    /// the record before it, a restart record or a data record. The records of the
+    /// ring must start at 0 of the area.
     fn seal(&self, offset: u64) {
-        assert!(offset >= BLOCK, "no record of one block before {offset}");
         let file = self.memory.bytes(RING);
-        let start = to_usize(AREA_START + offset);
         let u32_at = |at: usize| {
             u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
         };
-        let len = to_usize(u64::from(u32_at(start)));
-        let before = start - to_usize(BLOCK);
+        let len_at = |at: usize| to_usize(u64::from(u32_at(at)));
+        let start = to_usize(AREA_START + offset);
+        let (mut before, mut at) = (None, to_usize(AREA_START));
+        while at < start {
+            before = Some(at);
+            at += (9 + len_at(at)).next_multiple_of(to_usize(BLOCK));
+        }
+        assert_eq!(at, start, "no record starts at {offset}");
+        let before = before.expect("the first record of the area follows no record");
         let chain = match file[before + 8] {
             RESTART => u32_at(before + 9),
             DATA => u32_at(before + 4),
-            kind => panic!("no record of one block before {offset}: kind {kind}"),
+            kind => panic!("no chain value of kind {kind} before {offset}"),
         };
         let crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
-        let crc = crc32c::crc32c_append(crc, &file[start + 8..start + 9 + len]);
+        let end = start + 9 + len_at(start);
+        let crc = crc32c::crc32c_append(crc, &file[start + 8..end]);
         self.memory.put(RING, start + 4, &crc.to_le_bytes());
     }
 
@@ -2181,7 +2187,9 @@ fn an_open_that_finds_an_invalid_record_leaves_a_zero_header_block_as_read() {
 fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
     run(111, Memory::default(), |shard| async move {
         shard.create_two_records().await;
-        shard.memory.put(RING, COVER, b"past the sector");
+        for block in [0, to_usize(BLOCK)] {
+            shard.memory.put(RING, block + COVER, b"past the sector");
+        }
         shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
     });
@@ -2189,11 +2197,36 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
 
 /// A header block is before the first record, and its version byte reads as a kind.
 #[test]
-#[should_panic(expected = "no record of one block before 0")]
+#[should_panic(expected = "the first record of the area follows no record")]
 fn seal_refuses_the_first_record_of_the_area() {
     run(112, Memory::default(), |shard| async move {
         shard.create_two_records().await;
         shard.seal(0);
+    });
+}
+
+/// The record before the invalid one has two blocks, and a byte of its body in the
+/// second block reads as the kind of a data record.
+#[test]
+fn a_record_of_an_unknown_kind_after_a_long_record_is_invalid() {
+    run(114, Memory::default(), |shard| async move {
+        let ring = layout(AREA, 3 * to_usize(BLOCK) - 9);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let long = Parts::from(shard.block(4244));
+        for (first, stamp, parts) in [(0, 30, long), (3, 60, Parts::default())] {
+            buffer
+                .append([entry(1, a, Path::Live, first, 3, Some(stamp), parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        drop(buffer);
+        let kind = to_usize(AREA_START + 3 * BLOCK) + 8;
+        assert_eq!(shard.memory.bytes(RING)[kind - to_usize(BLOCK)], DATA);
+        shard.memory.put(RING, kind, &[4]);
+        shard.seal(3 * BLOCK);
+        shard.open_invalid(ring, 3 * BLOCK).await;
     });
 }
 
