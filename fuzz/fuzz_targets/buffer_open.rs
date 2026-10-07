@@ -11,14 +11,13 @@
 //! Two edits seal a CRC: a header block (at offset 42, over its first 512-byte
 //! sector less the CRC) and a record (over `len`, `kind`, and the body, continued
 //! from the chain the record before leaves: the header's chain field, a restart
-//! record's body, or a record's CRC). One edit moves the tail in the first header
-//! block to a block of the area, on any lap, as a trim does: the records an open
-//! then writes wrap, or find the offsets at their end. A wide input commits a
-//! record of two blocks in the check, so a wrap record can come before it.
-//! They restate the formats in `header.rs` and `record.rs` of `buffer`. When the
-//! header moves, the seal of the first block as written changes it and the target
-//! panics. When the record moves, the edits stop reaching the walk and coverage
-//! drops without a failed replay.
+//! record's body, or a record's CRC). One edit writes a tail and its chain value
+//! in the first header block: a block of the area, on one of the first 128 laps or
+//! the last 128. The records an open then writes wrap, or find the offsets at their
+//! end. The three edits restate the formats in `header.rs` and `record.rs` of
+//! `buffer`. When the header moves, the seal of the first block as written changes
+//! it and the target panics. When the record moves, the edits stop reaching the
+//! walk and coverage drops without a failed replay.
 
 #![no_main]
 
@@ -39,13 +38,13 @@ use types::frame;
 use types::time::{Span, Stamp};
 
 const BLOCK: usize = 4096;
-/// Blocks in the area: room for the build, the check, and the restart record each
-/// open writes.
+/// Blocks in the area. A build that needs more ends at `Rejected::Full`.
 const BLOCKS: usize = 8;
 const AREA: u64 = (BLOCKS * BLOCK) as u64;
 /// A record is 9 bytes of header and a body, so the largest record is three blocks.
 const BODY_MAX: usize = 3 * BLOCK - 9;
-/// The most bytes of one appended entry: two blocks less one byte.
+/// The most bytes of one decoded entry. One such entry makes a record of three
+/// blocks, and two make a batch that the layout refuses.
 const PART_MAX: usize = 2 * BLOCK - 1;
 /// The place of a header block's tail offset.
 const HEADER_TAIL_AT: usize = 22;
@@ -61,11 +60,12 @@ const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const COMMIT: Span = Span::from_nanos(10_000_000);
 const INDEXES: usize = 3;
-/// Bytes of each entry the check commits: a record of one block, or of two.
+/// The least and the most bytes of each entry the check commits: a record of one
+/// block, and one of three.
 const CHECK_PART: usize = 512;
-const CHECK_PART_WIDE: usize = 1024;
+const CHECK_PART_MAX: usize = 1994;
 /// The check's batch and its table, of 51 bytes an entry, fit one record.
-const _: () = assert!(4 + INDEXES * PATHS.len() * (51 + CHECK_PART_WIDE) <= BODY_MAX);
+const _: () = assert!(4 + INDEXES * PATHS.len() * (51 + CHECK_PART_MAX) <= BODY_MAX);
 const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
 /// A read budget that some entries of a path fill together.
 const BUDGET: usize = 1024;
@@ -78,8 +78,8 @@ const CHECK_LAST: Stamp = Stamp::from_nanos(9);
 /// The tags of the build start again before the first tag of the check.
 const BUILD_TAG: u8 = 0x01;
 const CHECK_TAG: u8 = 0x81;
-/// The laps of the area that an offset holds.
-const LAPS: u64 = u64::MAX / AREA;
+/// The last lap of the area that a `u64` offset holds.
+const LAP_LAST: u64 = u64::MAX / AREA;
 
 /// The time an entry with `tag` is stored.
 fn stored_at(tag: u8) -> Stamp {
@@ -124,84 +124,40 @@ impl From<&Stored> for Given {
 struct Append {
     index: usize,
     path: frame::Path,
-    len: u32,
-    part: usize,
-}
-
-/// One batch of the build phase: its appends, then `pad` entries of at most 72
-/// bytes, for a table of more than one block.
-#[derive(Debug)]
-struct Batch {
-    appends: Vec<Append>,
-    pad: usize,
-}
-
-/// One entry of a batch before the build gives it a seq.
-struct Planned {
-    index: usize,
-    path: frame::Path,
     /// Seqs the entry leaves out before its first.
     skip: u64,
+    /// Samples in the entry: 0 for a caller record.
     len: u32,
-    tag: u8,
-    parts: Parts,
+    /// The bytes of each part: none, one, or two.
+    parts: Vec<usize>,
 }
 
-impl Batch {
-    /// The entries of the batch, in order, each with the next of `tags`. The pad
-    /// entries differ by their number: samples or a caller record, no part or two,
-    /// and a skip ahead.
-    fn planned(
-        &self,
-        pool: &Pool,
-        tags: &mut impl Iterator<Item = u8>,
-    ) -> Vec<Planned> {
-        let block = |len: usize, fill: u8| {
-            let mut block = pool.alloc(len).expect("the pool has a block");
-            block.fill(fill);
-            block.freeze()
-        };
-        let mut tag = || tags.next().expect("the tags do not end");
-        let mut planned = Vec::new();
-        for append in &self.appends {
-            let tag = tag();
-            planned.push(Planned {
-                index: append.index,
-                path: append.path,
-                skip: 0,
-                len: append.len,
-                tag,
-                parts: Parts::from(block(append.part, tag)),
-            });
+impl Append {
+    /// Small entry `number` of a batch, with at most 72 bytes. The entries differ:
+    /// samples or a caller record, no part or two, a skip ahead or none.
+    fn small(number: usize) -> Self {
+        Self {
+            index: number % INDEXES,
+            path: PATHS[number / INDEXES % PATHS.len()],
+            skip: if number % 5 == 2 { 2 } else { 0 },
+            len: u32::from(number % 4 != 3),
+            parts: if number % 7 == 1 {
+                vec![number % 61, number % 13]
+            } else {
+                Vec::new()
+            },
         }
-        for number in 0..self.pad {
-            let tag = tag();
-            planned.push(Planned {
-                index: number % INDEXES,
-                path: PATHS[number / INDEXES % PATHS.len()],
-                skip: if number % 16 == 5 { 2 } else { 0 },
-                len: u32::from(number % 4 != 3),
-                tag,
-                parts: if number % 4 == 1 {
-                    Parts::from([block(number % 61, tag), block(number % 13, tag)])
-                } else {
-                    Parts::default()
-                },
-            });
-        }
-        planned
     }
 }
 
-/// One change to the file bytes. `MoveTail` counts `laps` under 128 from the first
-/// lap, and the rest from the last.
+/// One change to the file bytes.
 #[derive(Debug)]
 enum Edit {
     Put { at: usize, bytes: Vec<u8> },
     Zero { at: usize, len: usize },
     SealHeader { second: bool },
     SealRecord { block: usize },
-    MoveTail { block: usize, laps: u8 },
+    MoveTail { block: usize, lap: u64 },
 }
 
 #[derive(Debug)]
@@ -209,10 +165,10 @@ struct Input {
     /// The replay value of the run, from the input bytes. Bytes on a disk cannot
     /// hold a chain that a later open draws, so an edit must not either.
     replay: u64,
-    batches: Vec<Batch>,
+    batches: Vec<Vec<Append>>,
     edits: Vec<Edit>,
-    /// The check commits a record of two blocks, which a wrap record can come before.
-    wide: bool,
+    /// Bytes of each entry the check commits.
+    check_part: usize,
 }
 
 /// FNV-1a of 64 bits. Its definition is fixed, so a stored input keeps its run.
@@ -232,11 +188,12 @@ impl<'a> Arbitrary<'a> for Input {
                 appends.push(Append {
                     index: u.int_in_range(0..=INDEXES - 1)?,
                     path: PATHS[usize::from(u.int_in_range(0..=1u8)?)],
+                    skip: 0,
                     len: u.int_in_range(1..=16)?,
-                    part: u.int_in_range(0..=PART_MAX)?,
+                    parts: vec![u.int_in_range(0..=PART_MAX)?],
                 });
             }
-            batches.push(Batch { appends, pad: 0 });
+            batches.push(appends);
         }
         let mut edits = Vec::new();
         for _ in 0..u.int_in_range(0..=16)? {
@@ -257,19 +214,24 @@ impl<'a> Arbitrary<'a> for Input {
                 },
                 _ => Edit::MoveTail {
                     block: u.int_in_range(2..=BLOCKS + 1)?,
-                    laps: u.arbitrary()?,
+                    // The first 128 laps, or the last 128.
+                    lap: match u.arbitrary::<u8>()? {
+                        low @ ..128 => u64::from(low),
+                        high => LAP_LAST - u64::from(255 - high),
+                    },
                 },
             });
         }
-        // Last, so an input that ends before these has no pad and is not wide.
+        // Last, so an input that ends before these has no small entry and the least
+        // commit.
         for batch in &mut batches {
-            batch.pad = u.int_in_range(0..=255)?;
+            batch.extend((0..u.int_in_range(0..=255)?).map(Append::small));
         }
         Ok(Self {
             replay,
             batches,
             edits,
-            wide: u.arbitrary()?,
+            check_part: u.int_in_range(CHECK_PART..=CHECK_PART_MAX)?,
         })
     }
 }
@@ -306,12 +268,8 @@ fn apply(image: &mut [u8], edit: &Edit) {
             crc = crc32c::crc32c_append(crc, &rest[5..5 + body]);
             image[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
         }
-        Edit::MoveTail { block, laps } => {
+        Edit::MoveTail { block, lap } => {
             let chain = chain_before(image, *block);
-            let lap = match u64::from(*laps) {
-                low @ ..128 => low,
-                high => LAPS - (255 - high),
-            };
             let offset = lap * AREA + ((block - 2) * BLOCK) as u64;
             image[HEADER_TAIL_AT..HEADER_TAIL_AT + 8]
                 .copy_from_slice(&offset.to_le_bytes());
@@ -410,40 +368,46 @@ async fn build(
         let mut appended = Vec::new();
         let mut entries = Vec::new();
         let (mut parts, mut bytes) = (0, 0);
-        for planned in batch.planned(pool, &mut tags) {
-            let path = usize::from(planned.path == frame::Path::Backfill);
-            let first = firsts[planned.index][path] + planned.skip;
-            firsts[planned.index][path] = first + u64::from(planned.len);
-            let last = (planned.len > 0)
+        for (append, tag) in batch.iter().zip(&mut tags) {
+            let path = usize::from(append.path == frame::Path::Backfill);
+            let first = firsts[append.index][path] + append.skip;
+            firsts[append.index][path] = first + u64::from(append.len);
+            let last = (append.len > 0)
                 .then(|| Stamp::from_nanos(i64::try_from(first).expect("small")));
-            let mut joined = Vec::new();
-            for part in planned.parts.clone() {
-                parts += 1;
-                joined.extend_from_slice(&part);
-            }
-            bytes += joined.len();
+            let mut blocks = append.parts.iter().map(|len| {
+                let mut block = pool.alloc(*len).expect("the pool has a block");
+                block.fill(tag);
+                block.freeze()
+            });
+            let blocks = match (blocks.next(), blocks.next()) {
+                (Some(one), Some(two)) => Parts::from([one, two]),
+                (one, _) => Parts::from(one),
+            };
+            let len = append.parts.iter().sum();
+            parts += append.parts.len();
+            bytes += len;
             appended.push((
-                planned.index,
+                append.index,
                 path,
                 Given {
                     first,
-                    len: planned.len,
+                    len: append.len,
                     stored_at: stored_at(tag),
                     last,
-                    tag: planned.tag,
-                    bytes: joined,
+                    tag,
+                    bytes: vec![tag; len],
                 },
             ));
             entries.push(Entry {
-                index: key(planned.index),
-                slot: slots[planned.index],
-                path: planned.path,
+                index: key(append.index),
+                slot: slots[append.index],
+                path: append.path,
                 first,
-                len: planned.len,
+                len: append.len,
                 stored_at: stored_at(tag),
                 last,
-                tag: planned.tag,
-                parts: planned.parts,
+                tag,
+                parts: blocks,
             });
         }
         let fits = buffer.layout().check(entries.len(), parts, bytes);
@@ -621,9 +585,9 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
 /// the tails and the entries the build left. When it opens, each path must read, and
 /// one commit on it must survive a reopen and read back the same before and after.
 ///
-/// The commit is one entry at each tail, of `CHECK_PART` bytes or, for a wide input,
-/// `CHECK_PART_WIDE`. A record edit can put a tail at `u64::MAX`, a precondition of
-/// `append`, so such a ring is not checked.
+/// The commit is one entry at each tail, of the input's `check_part` bytes. A record
+/// edit can put a tail at `u64::MAX`, a precondition of `append`, so such a ring is
+/// not checked.
 async fn check(
     node: &sim::node::Node,
     tasks: &Tasks,
@@ -663,12 +627,7 @@ async fn check(
             if tail.seq == u64::MAX {
                 return;
             }
-            let len = if input.wide {
-                CHECK_PART_WIDE
-            } else {
-                CHECK_PART
-            };
-            let mut part = pool.alloc(len).expect("the pool has a block");
+            let mut part = pool.alloc(input.check_part).expect("the pool has a block");
             let tag = CHECK_TAG + u8::try_from(commits.len()).expect("few paths");
             part.fill(tag);
             commits.push(Given {
