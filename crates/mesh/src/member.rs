@@ -215,6 +215,10 @@ mod tests {
         assert_eq!(bytes[at], 0);
         bytes[at] = 2;
         assert_eq!(decoded(&bytes), None);
+        let mut bytes = encoded(&with_status(&[]));
+        assert_eq!(bytes[at], 1);
+        bytes[at] = 2;
+        assert_eq!(decoded(&bytes), None);
     }
 
     #[test]
@@ -234,6 +238,21 @@ mod tests {
         #[test]
         fn a_member_round_trips(member in records()) {
             prop_assert_eq!(decoded(&encoded(&member)), Some(member));
+        }
+
+        // A decode that takes two forms of one value fails here.
+        #[test]
+        fn a_changed_byte_that_decodes_encodes_back(
+            member in records(),
+            at in any::<prop::sample::Index>(),
+            flip in 1..=u8::MAX,
+        ) {
+            let mut bytes = encoded(&member);
+            let at = at.index(bytes.len());
+            bytes[at] ^= flip;
+            if let Some(changed) = decoded(&bytes) {
+                prop_assert_eq!(encoded(&changed), bytes);
+            }
         }
 
         #[test]
