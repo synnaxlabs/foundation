@@ -1262,7 +1262,7 @@ impl Streams {
             });
         }
         // The reader takes no bytes while it waits for room or a block, or for an
-        // empty message, so only this finds a reset.
+        // empty first message, whose one byte accept took, so only this finds a reset.
         let empty = matches!(&result, Ok(Poll::Ready(Some(block))) if block.is_empty());
         if (missed || empty || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
