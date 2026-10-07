@@ -49,7 +49,7 @@ pub(crate) fn member(id: u8) -> Member {
     }
 }
 
-pub(crate) fn members(ids: &[u8]) -> Vec<Member> {
+pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
     ids.iter().map(|&id| member(id)).collect()
 }
 
