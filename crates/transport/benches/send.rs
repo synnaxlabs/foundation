@@ -20,12 +20,12 @@
 //! gives the share of sends it timed. In each round, a send of each class must end
 //! while the other class waits, and the round must time at least half its sends so
 //! that its figure stands on enough sends. Over the timed rounds, the `Complete`
-//! sends it timed must be at least twice its `Latest` sends: the share gives
+//! sends it timed must be from 2 to 4 times its `Latest` sends: the share gives
 //! `Complete` 3 bytes for each byte of `Latest`, and both classes send messages of
-//! one size. After the rounds, the server must have
-//! one stream of each class. If not, the bench panics. Its control is `complete 1 KiB
-//! waiting`, whose send must wait in each round. Each poll has a timing cost, so
-//! compare the two lines with their polls per send.
+//! one size. After the rounds, the server must have one stream of each class. If
+//! not, the bench panics. Its control is `complete 1 KiB waiting`, whose send must
+//! wait in each round. Each poll has a timing cost, so compare the two lines with
+//! their polls per send.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
@@ -176,8 +176,8 @@ enum Premise {
     /// A send waits.
     Waits,
     /// A `Latest` send and a `Complete` send each end while a send of the other
-    /// class waits. Over the timed rounds, the timed `Complete` sends must also be at
-    /// least twice the timed `Latest` sends.
+    /// class waits. Over the timed rounds, the timed `Complete` sends must also be
+    /// from 2 to 4 times the timed `Latest` sends.
     Competes,
 }
 
@@ -471,8 +471,9 @@ async fn compete(
     }
     if let Premise::Competes = premise {
         assert!(
-            complete >= 2 * latest,
-            "{} times {complete} Complete and {latest} Latest sends: under 2 to 1",
+            2 * latest <= complete && complete <= 4 * latest,
+            "{} times {complete} Complete and {latest} Latest sends, \
+             not the 3 to 1 share",
             scenario.name,
         );
     }
