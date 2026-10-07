@@ -1217,11 +1217,12 @@ How to read this record:
   so neither class can take the share through the budget (#819). Lost: a connection per
   class, because four handshakes and four congestion controllers compete on one path
   (#55). Settled by the advisor and the coordinator under the person's delegation
-  (#789). A node resets a stream with the stop's code when the stop arrives. A peer
-  breaks the protocol when it sends another class byte, ends a stream inside a message,
-  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
-  The node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`.
+  (#789). A node resets a stream with the stop's code when the stop arrives, and frees
+  the stream's room in the send budget and its turn (#1308). A peer breaks the protocol
+  when it sends another class byte, ends a stream inside a message, sends a message over
+  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
+  the connection with application code 2^32 and the reason as text, and the caller gets
+  `Error::Broken`.
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
