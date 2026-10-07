@@ -44,6 +44,7 @@ pub struct Entry {
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
 /// gives each by its tree key, `<label>.@<kind>`.
+/// Each order of `documents` gives the same entries, or each gives problems.
 ///
 /// # Errors
 ///
