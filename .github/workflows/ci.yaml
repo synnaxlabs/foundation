@@ -43,6 +43,8 @@ jobs:
         ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.deps }}
       models: >-
         ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.models }}
+      wait: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.wait }}
     steps:
       # In the merge queue, the filter diffs the group's base and head in a clone.
       - if: github.event_name == 'merge_group'
@@ -85,6 +87,10 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - 'rust-toolchain*'
+              - '.github/workflows/**'
+            wait:
+              - '.claude/skills/build/wait.sh'
+              - '.claude/skills/build/wait_test.sh'
               - '.github/workflows/**'
 
   check:
@@ -137,6 +143,21 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: Dependencies
         run: cargo deny check advisories bans licenses sources
+
+  wait:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.wait != 'false'"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      # The last cases read merged #1428 through the API.
+      - name: Wait script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh .claude/skills/build/wait_test.sh
 
   loom:
     needs: changes
