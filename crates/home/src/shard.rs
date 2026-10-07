@@ -498,10 +498,11 @@ impl Shard {
     /// samples after the commit that holds it, while the bytes it has spent are
     /// below its credit: a frame spends its [`Frame::charge`]. The first such frame
     /// that finds the credit spent is a miss: the reader gets neither it nor a later
-    /// frame, no grant changes that, and no call reports it. The home does not read
-    /// a missed frame back from disk yet. Close the reader and open a new one. The
-    /// new one starts at the live tail of its open, so the frames from the miss to
-    /// there reach neither reader.
+    /// frame, and no grant changes that. [`woken`](Self::woken) names the reader once
+    /// for a miss with no frame waiting, and not for a miss while frames wait. The
+    /// home does not read a missed frame back from disk yet. Close the reader and
+    /// open a new one. The new one starts at the live tail of its open, so the frames
+    /// from the miss to there reach neither reader.
     ///
     /// # Panics
     ///
@@ -568,7 +569,9 @@ impl Shard {
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
     /// order and with the latest readers of an index first. Complete readers first get
     /// the live frames now on disk. A key is a hint: take from each until
-    /// [`take`](Self::take) gives `None`. Call it after each write and each commit.
+    /// [`take`](Self::take) gives `None`. A complete reader named for a miss
+    /// ([`open_complete`](Self::open_complete)) has no frame to take. Call it after
+    /// each write and each commit.
     /// When a commit ended since the last call, it reads each index with live frames
     /// queued for complete readers; else it reads none. Pass the same `keys` each
     /// time: the shard swaps it for its own, so neither allocates once both are large
@@ -2680,6 +2683,28 @@ mod tests {
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.grant(session, CREDIT);
+                write(&test, &mut shard, a, &[30]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), []);
+            });
+        }
+
+        #[test]
+        fn names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting() {
+            run(110, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_complete(Slot::new(0), 1).into();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                write(&test, &mut shard, a, &[20]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), []);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
