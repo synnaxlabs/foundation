@@ -104,10 +104,11 @@ that pass in CI.
 
 - Tasks, decisions, and approvals live in issues, PRs, and the repo, never only in a
   message or a session's context.
-- An approval is a link to the person's or engineer's own comment, with its UTC time.
-  Never record a paraphrase as an approval.
-- A new decision says "Supersedes <link>". Decision changes ship in their own PRs, never
-  inside code.
+- An approval is a link to the person's or the architect's own comment, with its UTC
+  time. Never record a paraphrase as an approval.
+- A new decision says "Supersedes <link>". A ruling ships in the code PR that needs it,
+  with the link to the architect's comment. A change to the meaning of a ruling needs a
+  new approval before the PR merges.
 - Each issue's last state comment says what is done, the next step, and open questions.
 
 ## Models
