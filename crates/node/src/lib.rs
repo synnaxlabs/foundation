@@ -127,7 +127,8 @@ impl Node {
                 let error = Error::Disk {
                     disk: config.disk,
                     cores,
-                    min: types::byte::Size::from_bytes(small.min * count),
+                    // Past a `u64`, no budget meets `min`, as with the largest.
+                    min: types::byte::Size::from_bytes(small.min.saturating_mul(count)),
                 };
                 Self {
                     stop: Stop::default(),
