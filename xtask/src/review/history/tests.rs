@@ -404,12 +404,9 @@ fn a_merge_round_whose_resolution_changes_code_needs_the_breaker() {
     repo.git(&["merge", "--quiet", "--no-commit", "origin/main"]);
     std::fs::write(repo.dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
     repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
-    let merge = repo.head();
     assert_eq!(
-        repo.code_change(&end, &merge),
-        Ok(Some(format!(
-            "changes code at `a.rs:2` in the resolution of `{merge}`"
-        )))
+        repo.code_change(&end, &repo.head()),
+        Ok(Some("changes code at `a.rs:2`".to_string()))
     );
 }
 
@@ -543,7 +540,7 @@ fn the_file_named_dot_rs_is_rust() {
 }
 
 #[test]
-fn a_line_number_is_in_the_part_of_the_range_it_is_in() {
+fn an_added_line_is_numbered_in_the_end() {
     let (repo, end) = Repo::with_pr("merge-line");
     repo.commit("a.rs", "fn a() {}\n");
     repo.advance_main("c.txt", "main\n");
@@ -551,7 +548,7 @@ fn a_line_number_is_in_the_part_of_the_range_it_is_in() {
     repo.commit("a.rs", "// 1\n// 2\n// 3\nfn a() {}\n");
     assert_eq!(
         repo.code_change(&end, &repo.head()),
-        Ok(Some("changes code at `a.rs:1`".to_string()))
+        Ok(Some("changes code at `a.rs:4`".to_string()))
     );
 }
 
@@ -593,28 +590,50 @@ fn a_conflict_in_a_code_path_that_is_not_utf8_counts() {
 
 #[test]
 fn text_of_the_pr_that_the_base_moves_into_a_code_file_counts() {
-    let (repo, _) = Repo::with_pr("merge-rename");
-    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
-    repo.advance_main("a.md", text);
+    for earlier in [false, true] {
+        let (repo, _) = Repo::with_pr(&format!("merge-rename-{earlier}"));
+        let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+        repo.advance_main("a.md", text);
+        repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+        let end = repo.head();
+        repo.commit("a.md", &format!("fn unreviewed() {{}}\n{text}"));
+        if earlier {
+            repo.advance_main("c.txt", "c\n");
+            repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+        }
+        repo.git(&["switch", "--quiet", "main"]);
+        repo.git(&["mv", "a.md", "a.rs"]);
+        repo.git(&["commit", "--quiet", "-m", "mv"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        repo.git(&["switch", "--quiet", "pr"]);
+        repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+        assert_eq!(
+            repo.git(&["show", "HEAD:a.rs"]).lines().next(),
+            Some("fn unreviewed() {}")
+        );
+        assert_eq!(
+            repo.code_change(&end, &repo.head()),
+            Ok(Some("changes code at `a.rs:1`".to_string())),
+            "{earlier}"
+        );
+    }
+}
+
+#[test]
+fn a_conflict_of_the_start_and_the_base_fails_closed() {
+    let (repo, _) = Repo::with_pr("merge-closed");
+    repo.advance_main("x.rs", "fn a() {}\n// old\n");
     repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
-    let end = repo.head();
-    repo.commit("a.md", &format!("fn unreviewed() {{}}\n{text}"));
-    repo.git(&["switch", "--quiet", "main"]);
-    repo.git(&["mv", "a.md", "a.rs"]);
-    repo.git(&["commit", "--quiet", "-m", "mv"]);
-    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    repo.git(&["switch", "--quiet", "pr"]);
+    let end = repo.commit("x.rs", "fn a() {}\n// pr\n");
+    repo.commit("x.rs", "fn a() {}\n// old\n");
+    repo.advance_main("x.rs", "fn a() {}\n// base\n");
     repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
     let merge = repo.head();
-    assert_eq!(
-        repo.git(&["show", &format!("{merge}:a.rs")]).lines().next(),
-        Some("fn unreviewed() {}")
-    );
+    let first = repo.git(&["rev-parse", "HEAD^1"]);
+    assert_eq!(repo.reaches(&first, &merge), Ok(true));
     assert_eq!(
         repo.code_change(&end, &merge),
-        Ok(Some(format!(
-            "changes code at `a.rs:1` in the resolution of `{merge}`"
-        )))
+        Ok(Some("changes code at `x.rs:2`".to_string()))
     );
 }
 

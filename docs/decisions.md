@@ -2927,11 +2927,12 @@ How to read this record:
   trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
   any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
   added. A merge of the base in the range counts only by its resolution: a conflict that
-  `git merge-tree` finds in a `.rs`, `Cargo.toml`, or `Cargo.lock` file is a code
-  change, and so is code in the change to the merge from the tree that `git merge-tree`
-  makes of the base parent and the start of the range (or the merge of the base before
-  it), so PR text that the base moves into a code file counts. Found by the director at
-  2026-10-07T14:50:33Z
+  `git merge-tree` finds between its parents in a `.rs`, `Cargo.toml`, or `Cargo.lock`
+  file is a code change. The rest of the range is read from the tree that
+  `git merge-tree` makes of its start and the base parent of the last merge, not from
+  its start: the base's code does not count, and PR text that the base moves into a
+  code file does. A file that this tree has a conflict in counts by its conflict
+  markers, so it fails closed. Found by the director at 2026-10-07T14:50:33Z
   (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed
   by #1451. An earlier round's skip is taken as written, since a rebase can drop its
   range from the clone. An earlier round in the fixed format that does not parse fails.

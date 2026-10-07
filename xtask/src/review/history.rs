@@ -54,18 +54,19 @@ impl<'a> History<'a> {
     /// The first line of code that `from..end` adds or removes, as a phrase: "changes
     /// code at `<file>:<line>`". A line of a `.rs` file is code unless, trimmed, it is
     /// empty or starts with `//`; each line of a `Cargo.toml` or `Cargo.lock` is
-    /// code. A moved file counts as removed and added. A merge of the base splits the
-    /// range into parts: the line number is in the newer commit of the part it is in
-    /// for an added line, and in the older one for a removed one.
+    /// code. A moved file counts as removed and added.
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
     /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
-    /// `git merge-tree` finds a conflict in between the parents gives "resolves a
-    /// conflict in `<file>` in `<merge>`". Else the change to the merge from the tree
-    /// that `git merge-tree` makes of the start of the part and the base parent gives
-    /// "changes code at `<file>:<line>` in the resolution of `<merge>`", with the
-    /// line in the merge or in that tree. So text of the part that the base moves
-    /// into a code file counts.
+    /// `git merge-tree` finds a conflict in between its parents gives "resolves a
+    /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
+    /// tree that `git merge-tree` makes of `from` and the base parent of the last such
+    /// merge, not from `from`: the base's code does not count, and text of the range
+    /// that the base moves into a code file does. A file that this tree has a
+    /// conflict in counts by its conflict markers, so it fails closed.
+    ///
+    /// The line number is in `end` for an added line, and in `from` or that tree for
+    /// a removed one.
     ///
     /// `None` when no line is code. `from` and `end` are SHAs or prefixes of at least
     /// 7 digits; text that names no single commit gives the phrase "has `<text>`,
@@ -96,28 +97,25 @@ impl<'a> History<'a> {
             "--parents",
             &range,
         ])?;
-        let mut start = from_sha;
+        let mut last = None;
         for line in chain.lines() {
             let Some((first, second)) = self.base_merge(line, &base)? else {
                 continue;
             };
             let merge = line.split(' ').next().unwrap_or_default();
-            if let Some(change) = self.first_change(&start, first)? {
-                return Ok(Some(change));
-            }
             let merged = self.merged(first, second)?;
             if let Some(path) = merged.conflicts.iter().find(|p| code_path(p)) {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
             }
-            let reviewed = self.merged(&start, second)?;
-            if let Some(change) = self.first_change(&reviewed.tree, merge)? {
-                return Ok(Some(format!("{change} in the resolution of `{merge}`")));
-            }
-            start = merge.to_string();
+            last = Some(second);
         }
-        self.first_change(&start, &end_sha)
+        let old = match last {
+            Some(second) => self.merged(&from_sha, second)?.tree,
+            None => from_sha,
+        };
+        self.first_change(&old, &end_sha)
     }
 
     /// The first line of code that the change from the tree-ish `old` to `new` adds
