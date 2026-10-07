@@ -2942,15 +2942,17 @@ How to read this record:
   on shard 0, once each shard has opened its buffer. It has the shape and the rules of
   `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a panic ends shard 0 and
   fails the node (`Error::Panicked`). Tasks start in the order of their calls. A task
-  that is given before the hub exists, or after a stop, waits or is dropped unrun. A
-  stop drops each running task. The task runs on shard 0's thread, so it may hold
-  values that are not `Send`, such as sessions. `node` depends on `hub`, and
-  `Node::interner` goes away: shard 0 builds the hub with the interner when it comes
-  back from the last shard. `hub::Config` stays as it is, one interner by value for one
-  shard (after
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043797070). A hub
-  on each shard waits for #1566. Decided by `laptop.architect-2`:
+  that is given before the hub exists waits for it. A node that stops or fails before a
+  task starts drops it unrun, and a stop drops each running task. The task runs on shard
+  0's thread, so it may hold values that are not `Send`, such as sessions.
+  `node` depends on `hub`, and `Node::interner` goes away: shard 0 builds the hub with
+  the interner when it comes back from the last shard. Decided by `laptop.architect-2`
+  (2026-10-07T18:04:23Z):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
+  `hub::Config` stays as it is, one interner by value for one shard, and sessions on
+  the home of each shard wait for #1566. Decided by `laptop.architect`
+  (2026-10-07T18:02:03Z):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043797070.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
