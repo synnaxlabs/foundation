@@ -28,7 +28,7 @@ const CANCELLED: Error = Error::Reset { code: Code(0) };
 pub struct Part {
     /// The bytes of the block to send.
     pub range: Range<usize>,
-    /// The zero bytes to send after them, at most 7.
+    /// The zero bytes to send after them.
     pub zeros: u8,
 }
 
@@ -51,6 +51,7 @@ pub struct Part {
 pub struct Sender {
     session: Rc<quic::Session>,
     class: Class,
+    bytes_max: usize,
     /// `None` once a dropped send future reset the stream.
     stream: Option<quic::stream::Sender>,
 }
@@ -64,6 +65,7 @@ impl Sender {
         Self {
             session,
             class,
+            bytes_max: stream.bytes_max(),
             stream: Some(stream),
         }
     }
@@ -78,6 +80,19 @@ impl Sender {
     #[must_use]
     pub fn class(&self) -> Class {
         self.class
+    }
+
+    /// The largest message the peer takes: its `message_bytes_max`. It does not
+    /// change during the session. A message over it gives [`Error::TooLarge`].
+    ///
+    /// ```
+    /// fn fits(sender: &transport::stream::Sender, frame: &block::Block) -> bool {
+    ///     frame.len() <= sender.bytes_max()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn bytes_max(&self) -> usize {
+        self.bytes_max
     }
 
     /// Sends `message` whole. It waits while the peer's flow control has no room,
@@ -170,7 +185,7 @@ impl Sender {
     /// # Panics
     ///
     /// When called after [`finish`](Self::finish), or when a range starts after its
-    /// end, ends past the block, or has more than 7 zeros.
+    /// end or ends past the block.
     ///
     /// ```
     /// use transport::Error;
@@ -764,6 +779,7 @@ mod tests {
                 let tried = sender.try_send(side.block(b"a")).map(|_| ());
                 assert_eq!(tried, Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
+                assert_eq!(sender.bytes_max(), 1 << 16);
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
             },
@@ -808,6 +824,35 @@ mod tests {
             |side| async move {
                 let closed = Error::PeerClosed { code: Code(5) };
                 assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn each_half_gives_the_peers_largest_message() {
+        let small = |config| Config {
+            message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            small,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, _receiver) = opened.expect("a stream");
+                assert_eq!(sender.bytes_max(), 1472);
+                sender.send(side.block(b"a")).await.expect("sent");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let incoming = side.session.accept().await.expect("a stream");
+                let reply = incoming.sender.as_ref().expect("a reply half");
+                assert_eq!(reply.bytes_max(), 1 << 16);
+                let opened = side.session.open_sender(Class::Complete).await;
+                assert_eq!(opened.expect("a stream").bytes_max(), 1 << 16);
+                side.session.close(Code(4));
             },
         );
         assert_eq!(sim.run(), Ok(()));

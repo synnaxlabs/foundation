@@ -1220,15 +1220,24 @@ How to read this record:
   coordinator under the person's delegation (#55). A sender can send one message from
   parts of one block (`send_parts`, `try_send_parts`), and the budgets count it as one
   message, of the sum of its parts. A `stream::Part` is a range of the block, then at
-  most 7 zeros. The stream never sends a byte of the block outside the ranges, because
+  most 255 zeros. The stream never sends a byte of the block outside the ranges, because
   those bytes can hold stale data of another channel; the padding is zeros, which `hub`
   computes from FRAME LAYOUT. Lost: a range that runs past the series, because it sends
   stale block bytes; a pad rule in the stream, because it puts the hub layout in
   `transport` and is wrong for a series split across messages (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575, after
   HUB WIRE
-  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). A
-  receiver can receive into its own buffer (`recv_into`). A message longer than the
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). The
+  stream sends the zeros from one static constant of 255 zero bytes, and `Part` holds no
+  invariant, so its fields are public. Lost: the cap of 7, because it is FRAME LAYOUT's
+  alignment inside `transport` and adds a panic; private fields and a fallible
+  constructor for that cap. `stream::Sender::bytes_max` gives the peer's
+  `message_bytes_max`, which the hello gives before any stream opens, and `hub` cuts
+  each run at it. Lost: a `send_parts` that cuts a run into messages, because the stream
+  knows no key or end of HUB WIRE and `try_send_parts` could then send part of a run; a
+  probe with `TooLarge`, a guess with one failed call for each session (architect,
+  #1197: https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6033870280).
+  A receiver can receive into its own buffer (`recv_into`). A message longer than the
   buffer gives `Error::TooLarge` and stays queued, and so does a message whose future
   drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe. Lost: the
   `Message` type of the proposal, because it changes `send` and `try_send` for each
