@@ -12,6 +12,10 @@ Run each reviewer in a fresh subagent with the Agent tool. Give it only the PR n
 the decisions section the PR builds, and its job. Never give it your reasoning. Keep its
 findings, not its file reads.
 
+Before each round, read this skill as it is on `main` (`git fetch origin main`, then
+`git show origin/main:.claude/skills/review/SKILL.md`), and follow that text. The copy
+on a PR branch can be older.
+
 ## Round 1
 
 Launch in parallel every reviewer the PR needs:
