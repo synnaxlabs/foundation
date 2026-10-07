@@ -190,6 +190,12 @@ fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
             (LEN..=LEN + SLACK).contains(&allocated),
             "{allocated} bytes allocated for {LEN}"
         );
+        // A truncate to the length frees each block past the end and no other.
+        let fd = fs::open(data.join("a"), OFlags::WRONLY, fs::Mode::empty()).unwrap();
+        fs::ftruncate(&fd, LEN).unwrap();
+        drop(fd);
+        let truncated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
+        assert_eq!(truncated, allocated);
     });
 }
 
