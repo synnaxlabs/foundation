@@ -2017,4 +2017,23 @@ mod hub {
         };
         assert_eq!(node.join(), Err(Error::Panicked(shard)));
     }
+
+    /// A panic in a task's closure body fails the node, as one in its future does.
+    #[test]
+    fn a_panic_in_a_task_body_fails_the_node() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (_host, node) = node(&mut sim, 2);
+        node.spawn(|_| -> std::future::Ready<()> { panic!("a task body panics") });
+        let panicked = sim::Error::Panicked {
+            thread: "shard-0".into(),
+            message: "a task body panics".into(),
+            seed: 0,
+        };
+        assert_eq!(sim.run(), Err(panicked));
+        assert_eq!(sim.run(), Ok(()));
+        let shard = thread::Panicked {
+            name: "shard-0".into(),
+        };
+        assert_eq!(node.join(), Err(Error::Panicked(shard)));
+    }
 }
