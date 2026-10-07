@@ -55,8 +55,9 @@ returns (`git worktree remove --force <path>`).
    fix. It ends with two lines. First `Deferred:` and `none`, or the issue of each
    deferred finding, each with the link to the architect's OK in a risk crate. Then
    `Public surface:` and `none`, or each public item and crate dependency that the PR
-   changes (the `architecture` report names them), each with the link to the architect's
-   approval once it exists.
+   changes (the `architecture` report names them, and in a later round the `reviewer`
+   report names those of its range), each with the link to the architect's approval
+   once it exists.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A deferral to an existing issue is a comment on that
@@ -95,9 +96,10 @@ nothing checked again. So when round 1 led to fix commits:
    with the round 1 comment and each architect review attached. Only a range that
    changes no `.rs` line but comments skips `breaker`, and its round comment says so.
    The `reviewer` also gets each answer that changed no code, and checks it against the
-   code. Its report gives the `Hot path:` line for the range, and the round comment
-   copies it. When the line names a function, run `performance` again on the range, and
-   update the Performance section with its numbers.
+   code. Its report gives the `Public surface:` and `Hot path:` lines for the range. The
+   round comment adds each item of the first to its own `Public surface:` line, and
+   copies the second. When the `Hot path:` line names a function, run `performance`
+   again on the range, and update the Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit.
