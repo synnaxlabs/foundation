@@ -3149,15 +3149,17 @@ How to read this record:
   the last round is a later round with `Breaker: skipped`, it fails if its range changes
   code: a `.rs` line that, trimmed, is not blank and does not start with `//` (a doctest
   line is a comment), or any `Cargo.toml` or `Cargo.lock` line. Each line of a moved
-  file counts as removed and added. A merge of the base in the range counts by its
-  resolution and by a base move of the PR's text into a code file: a conflict that
-  `git merge-tree` finds between its parents in a `.rs`, `Cargo.toml`, or `Cargo.lock`
-  file is a code change. The rest of the range is read from the tree that `git merge-tree`
-  makes of its start and the newest base commit that its end holds, not from its start:
-  the base's code does not count, and text that the range changes and the base moves
-  into a code file does. A conflict in this tree in a code file is a code change, also
-  one that leaves no markers, and so is an end that holds more than one newest base
-  commit. Found by the director at 2026-10-07T14:50:33Z
+  file counts as removed and added. A merge of the base in the range counts only by its
+  resolution: a conflict that `git merge-tree` finds between its parents in a `.rs`,
+  `Cargo.toml`, or `Cargo.lock` file is a code change. The rest of the range is read
+  from the tree that `git merge-tree` makes of its start and the newest base commit that
+  its end holds, not from its start: the base's code does not count, and text that the
+  range changes and the base moves into a code file does. So does a path that the start
+  changes since a merge base with that base commit and that this merge moves into a code
+  file, by the merge's own rename detection. A conflict in this tree in a code file is a
+  code change, also one that leaves no markers, and so is an end that holds more than
+  one newest base commit. Found by the
+  director at 2026-10-07T14:50:33Z
   (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed by
   #1451. An earlier round's skip is taken as written, since a rebase can drop its range
   from the clone. An earlier round in the fixed format that does not parse fails. A

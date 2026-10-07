@@ -643,10 +643,7 @@ fn text_of_the_pr_that_the_base_moves_into_a_code_file_counts() {
         );
         assert_eq!(
             repo.code_change(&end, &repo.head()),
-            Ok(Some(
-                "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
-                    .to_string()
-            )),
+            Ok(Some("changes code at `a.rs:1`".to_string())),
             "{earlier}"
         );
     }
@@ -673,6 +670,131 @@ fn text_of_an_earlier_round_that_the_base_moves_into_a_code_file_counts() {
     assert_eq!(repo.reaches(&end, &merge), Ok(false));
     assert_eq!(
         repo.code_change(&end, &merge),
+        Ok(Some(
+            "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn a_base_move_counts_by_the_source_that_the_merge_pairs() {
+    let a = (1..=10)
+        .map(|i| format!("a line {i:02}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let x = (1..=8)
+        .map(|i| format!("x line {i:02}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let near = format!("{a}{}", x.replace("x line 08", "y line 08"));
+    let (repo, _) = Repo::with_pr("move-pairing");
+    repo.advance_main("a.md", &a);
+    repo.advance_main("b.md", &near);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.commit("a.md", &format!("fn unreviewed() {{}}\n{a}"));
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["rm", "--quiet", "a.md", "b.md"]);
+    repo.commit("c.rs", &format!("{a}{x}"));
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merge = repo.head();
+    assert_eq!(
+        repo.git(&["show", "HEAD:c.rs"]).lines().next(),
+        Some("fn unreviewed() {}")
+    );
+    assert_eq!(repo.reaches(&end, &merge), Ok(false));
+    assert_eq!(
+        repo.code_change(&end, &merge),
+        Ok(Some(
+            "the base moves `a.md`, which the PR changes, into the code file `c.rs`"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn a_base_move_that_comes_in_by_another_merge_counts() {
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    for reversed in [false, true] {
+        let (repo, _) = Repo::with_pr(&format!("move-shape-{reversed}"));
+        repo.advance_main("a.md", text);
+        repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+        let end = repo.commit("a.md", &format!("fn unreviewed() {{}}\n{text}"));
+        repo.git(&["switch", "--quiet", "main"]);
+        repo.git(&["mv", "a.md", "a.rs"]);
+        repo.git(&["commit", "--quiet", "-m", "mv"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        if reversed {
+            repo.git(&["merge", "--quiet", "--no-edit", "pr"]);
+            let merge = repo.head();
+            repo.git(&["switch", "--quiet", "pr"]);
+            repo.git(&["merge", "--quiet", "--ff-only", &merge]);
+        } else {
+            repo.git(&["switch", "--quiet", "-c", "local"]);
+            repo.git(&["commit", "--quiet", "--allow-empty", "-m", "empty"]);
+            repo.git(&["switch", "--quiet", "pr"]);
+            repo.git(&["merge", "--quiet", "--no-edit", "local"]);
+        }
+        assert_eq!(
+            repo.git(&["show", "HEAD:a.rs"]).lines().next(),
+            Some("fn unreviewed() {}")
+        );
+        assert_eq!(
+            repo.code_change(&end, &repo.head()),
+            Ok(Some(
+                "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
+                    .to_string()
+            )),
+            "{reversed}"
+        );
+    }
+}
+
+#[test]
+fn a_start_with_two_merge_bases_with_the_base_reads_both() {
+    let (repo, pr) = Repo::with_pr("criss-cross");
+    let main = repo.advance_main("m.txt", "m\n");
+    repo.git(&["merge", "--quiet", "--no-edit", &main]);
+    let end = repo.head();
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--no-edit", &pr]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merge = repo.head();
+    assert_eq!(repo.reaches(&end, &merge), Ok(true));
+    assert_eq!(repo.code_change(&end, &merge), Ok(None));
+}
+
+#[test]
+fn a_base_move_after_two_merge_bases_with_the_base_counts() {
+    let (repo, _) = Repo::with_pr("criss-cross-move");
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    repo.advance_main("a.md", text);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let main = repo.advance_main("m.txt", "m\n");
+    let pr = repo.commit("c.txt", "c\n");
+    repo.git(&["merge", "--quiet", "--no-edit", &main]);
+    let end = repo.commit("a.md", &format!("fn unreviewed() {{}}\n{text}"));
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--no-edit", &pr]);
+    repo.git(&["mv", "a.md", "a.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "mv"]);
+    let base = repo.head();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(
+        repo.git(&["merge-base", "--all", &end, &base])
+            .lines()
+            .count(),
+        2
+    );
+    assert_eq!(repo.reaches(&end, &repo.head()), Ok(false));
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
         Ok(Some(
             "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
                 .to_string()
