@@ -16,7 +16,7 @@ use types::time::Span;
 use super::{Client, Config, Error};
 
 const PORT: u16 = 8086;
-const TIMEOUT: Span = Span::from_nanos(2_000_000_000);
+const TIMEOUT: Span = Span::from_nanos(10_000_000_000);
 const BODY_MAX: usize = 64;
 
 fn shard(name: &str) -> env::shards::Config {
@@ -488,6 +488,8 @@ fn refuses_a_uri_it_cannot_reach() {
         "/write",
         "http://admin:secret@10.0.0.2:8086/",
         "http://:8086/",
+        "http://10.0.0.2:65536/",
+        "http://influx:99999999/",
     ] {
         let error = network.send(get(uri)).expect_err("not reachable");
         assert!(
@@ -496,7 +498,9 @@ fn refuses_a_uri_it_cannot_reach() {
         );
         assert_eq!(
             error.to_string(),
-            format!("{uri} is not an http URI with a host")
+            format!(
+                "{uri} is not an http URI with a host, a valid port, and no user info"
+            )
         );
     }
 }
@@ -541,5 +545,6 @@ fn stream_is_vectored_and_writes_a_whole_plain_write() {
     assert_eq!(text(&seen.lock().expect("no panic")), text(HEAD));
 }
 
+mod common;
 mod name;
 mod pool;

@@ -7,12 +7,12 @@ mod stream;
 use std::cell::Cell;
 use std::fmt;
 use std::future::poll_fn;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::Poll;
 
 use bytes::Bytes;
-use env::clock::Clock;
+use env::clock::{Clock, Sleep};
 use env::net::{self, Net, Tcp, tcp};
 use env::tasks::Tasks;
 use http::uri::{PathAndQuery, Scheme};
@@ -20,11 +20,14 @@ use http::{HeaderValue, Request, Response, Uri, header};
 use http_body::Body as _;
 use hyper::body::Incoming;
 use hyper::client::conn::http1::{self, SendRequest};
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
 use self::body::Whole;
 use self::pool::Pool;
 use self::stream::Stream;
+
+/// The shortest share of the timeout that a connect to one address gets.
+const ATTEMPT_MIN: Span = Span::from_nanos(2 * Span::SECOND.nanos());
 
 const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
@@ -98,13 +101,14 @@ impl Client {
 
     /// Sends `request` and reads the whole response. The URI gives the host and the
     /// port, which defaults to 80. A new connection looks up the host and tries each
-    /// address in order. The client sets `Host` when the request has none, and sends
-    /// the path and query only.
+    /// address in order. Each address but the last gets an equal share of the time
+    /// left, and at least 2 s. The client sets `Host` when the request has none, and
+    /// sends the path and query only.
     ///
     /// # Errors
     ///
-    /// - [`Error::Uri`] when the scheme is not `http`, the URI has no host, or the
-    ///   URI has user info.
+    /// - [`Error::Uri`] when the scheme is not `http`, or the URI has no host, a
+    ///   port that is not a 16-bit number, or user info.
     /// - [`Error::Connect`] when the name lookup failed, or no address of the host
     ///   took the connection.
     /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
@@ -116,23 +120,16 @@ impl Client {
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         let deadline = self.clock.now().checked_add(self.timeout);
-        let mut exchange = Box::pin(self.exchange(request));
-        let mut sleep = deadline.map(|deadline| self.clock.sleep_until(deadline));
-        poll_fn(|cx| {
-            if let Poll::Ready(out) = exchange.as_mut().poll(cx) {
-                return Poll::Ready(out);
-            }
-            match &mut sleep {
-                Some(sleep) => Pin::new(sleep).poll(cx).map(|()| Err(Error::TimedOut)),
-                None => Poll::Pending,
-            }
-        })
-        .await
+        let sleep = deadline.map(|deadline| self.clock.sleep_until(deadline));
+        before(Box::pin(self.exchange(request, deadline)), sleep)
+            .await
+            .unwrap_or(Err(Error::TimedOut))
     }
 
     async fn exchange(
         &self,
         request: Request<Bytes>,
+        deadline: Option<Monotonic>,
     ) -> Result<Response<Bytes>, Error> {
         let (mut parts, body) = request.into_parts();
         let origin = origin(&parts.uri)?;
@@ -159,7 +156,7 @@ impl Client {
             }
             None => request,
         };
-        let mut connection = self.connect(&origin).await?;
+        let mut connection = self.connect(&origin, deadline).await?;
         let response = connection.sender.send_request(request).await?;
         self.read(origin, connection, response).await
     }
@@ -187,8 +184,12 @@ impl Client {
         Ok(Response::from_parts(parts, Bytes::from(bytes)))
     }
 
-    async fn connect(&self, origin: &Origin) -> Result<Connection, Error> {
-        let tcp = self.dial(origin).await.map_err(Error::Connect)?;
+    async fn connect(
+        &self,
+        origin: &Origin,
+        deadline: Option<Monotonic>,
+    ) -> Result<Connection, Error> {
+        let tcp = self.dial(origin, deadline).await.map_err(Error::Connect)?;
         let received = Rc::default();
         let stream = Stream {
             tcp,
@@ -203,16 +204,28 @@ impl Client {
         Ok(Connection { sender, received })
     }
 
-    /// Connects to the first address of `origin` that takes the stream. When none
-    /// does, gives the error of the first.
-    async fn dial(&self, origin: &Origin) -> Result<Tcp, net::Error> {
+    /// Connects to the first address of `origin` that takes the stream. Each
+    /// address but the last gets a share of the time left to `deadline`. When none
+    /// takes it, gives the error of the first.
+    async fn dial(
+        &self,
+        origin: &Origin,
+        deadline: Option<Monotonic>,
+    ) -> Result<Tcp, net::Error> {
+        let remotes = self.net.resolve(&origin.host, origin.port).await?;
         let mut first = None;
-        for remote in self.net.resolve(&origin.host, origin.port).await? {
+        for (i, &remote) in remotes.iter().enumerate() {
             let config = tcp::Config {
                 remote,
                 options: OPTIONS,
             };
-            match self.net.connect(&config).await {
+            let left = remotes.len() - i;
+            let sleep = deadline
+                .filter(|_| left > 1)
+                .map(|deadline| share(self.clock.now(), deadline, left))
+                .map(|end| self.clock.sleep_until(end));
+            let connect = before(self.net.connect(&config), sleep).await;
+            match connect.unwrap_or(Err(net::Error::TimedOut { remote })) {
                 Ok(tcp) => return Ok(tcp),
                 Err(error) => {
                     first.get_or_insert(error);
@@ -221,6 +234,35 @@ impl Client {
         }
         Err(first.expect("invariant: a lookup gives an address"))
     }
+}
+
+/// Polls `future` until it ends, or gives `None` when `sleep` fires first. With no
+/// `sleep`, it waits for `future`.
+async fn before<T>(
+    future: impl Future<Output = T>,
+    mut sleep: Option<Sleep>,
+) -> Option<T> {
+    let mut future = pin!(future);
+    poll_fn(|cx| {
+        if let Poll::Ready(out) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(out));
+        }
+        match &mut sleep {
+            Some(sleep) => Pin::new(sleep).poll(cx).map(|()| None),
+            None => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// The end of a connect to the first of `left` addresses, as in Go: an equal share of
+/// the time from `now` to `deadline`, but at least [`ATTEMPT_MIN`] while that much
+/// is left.
+fn share(now: Monotonic, deadline: Monotonic, left: usize) -> Monotonic {
+    let remaining = (deadline - now).nanos().max(0);
+    let left = i64::try_from(left).expect("invariant: a lookup gives few addresses");
+    let share = (remaining / left).max(ATTEMPT_MIN.nanos().min(remaining));
+    now + Span::from_nanos(share)
 }
 
 /// Where requests go: a host in ASCII lowercase, and a port.
@@ -248,9 +290,15 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
     if authority.as_str().contains('@') || authority.host().is_empty() {
         return Err(fail());
     }
+    // `port_u16` also gives `None` for a port that does not fit in 16 bits.
+    let port = match authority.port_u16() {
+        Some(port) => port,
+        None if authority.as_str().len() <= authority.host().len() + 1 => 80,
+        None => return Err(fail()),
+    };
     Ok(Origin {
         host: authority.host().to_ascii_lowercase(),
-        port: authority.port_u16().unwrap_or(80),
+        port,
     })
 }
 
@@ -288,7 +336,8 @@ fn origin_form(parts: &mut http::request::Parts) {
 /// Why an exchange failed.
 #[derive(Debug)]
 pub enum Error {
-    /// The scheme is not `http`, the URI has no host, or the URI has user info.
+    /// The scheme is not `http`, or the URI has no host, a port that is not a
+    /// 16-bit number, or user info.
     Uri {
         /// The URI of the request.
         uri: Uri,
@@ -320,7 +369,10 @@ impl From<hyper::Error> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Uri { uri } => write!(f, "{uri} is not an http URI with a host"),
+            Self::Uri { uri } => write!(
+                f,
+                "{uri} is not an http URI with a host, a valid port, and no user info"
+            ),
             Self::Connect(error) => write!(f, "the connect failed: {error}"),
             Self::TimedOut => write!(f, "the exchange timed out"),
             Self::TooLarge { max } => {

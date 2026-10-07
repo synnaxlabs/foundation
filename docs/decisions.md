@@ -1680,28 +1680,33 @@ How to read this record:
   turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
   person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
-  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an
-  `httparse` reader) closed: the person told `connector` to use the `hyper` client on
-  2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
-  HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
-  HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
-  Decided by the coordinator with `advisor` on 2026-10-06 (#341). The client keeps one
-  idle connection for each origin. It does not reuse one that is idle longer than 90 s
-  (the `hyper-util` default), read on the `env` clock, and the next send closes it: the
-  client sends no keep-alive, and a firewall or NAT may drop the state of an idle
-  stream. Decided by the coordinator with `advisor` on 2026-10-06
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an `httparse`
+  reader) closed: the person told `connector` to use the `hyper` client on 2026-10-06.
+  `httparse` comes in only as a dependency of `hyper`. The client is HTTP/1.1 only for
+  now: `h2` 0.4 reads the OS clock to expire a reset stream, so HTTP/2 turns on only
+  when `h2` takes its clock through `env`, by an upstream change. Decided by the
+  coordinator with `advisor` on 2026-10-06 (#341). The client keeps one idle connection
+  for each origin. It does not reuse one that is idle longer than 90 s (the `hyper-util`
+  default), read on the `env` clock, and the next send closes it: the client sends no
+  keep-alive, and a firewall or NAT may drop the state of an idle stream. Decided by the
+  coordinator with `advisor` on 2026-10-06
   (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). A
-  request that fails on a reused connection before its response goes once more on a
-  new connection, when the connection did not write it, or when its method is
-  idempotent and no byte of a response came (RFC 9112, as in Go). The pool key is the
-  origin: the host name in lower case, and the port. The client takes only `http`
-  today; with TLS, the key also holds the scheme. The key keeps the host name, because
-  a TLS connection is verified for one name and must never carry a request for
-  another.
-  Decided by the architect on #1111
-  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223). A new
-  connection looks up the host through `env` and tries each address in order. A
-  reused connection does no lookup.
+  request that fails on a reused connection before its response goes once more on a new
+  connection, when the connection did not write it, or when its method is idempotent and
+  no byte of a response came (RFC 9112, as in Go). The pool key is the origin, and it
+  keeps the host name, because a TLS connection is verified for one name and must never
+  carry a request for another. Decided by the architect on #1111
+  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223). The key
+  is the host name in lower case and the port. `influx.` and `influx` are two keys,
+  because a resolver may expand a name with no final dot. The client takes only `http`
+  today; with TLS, the key also holds the scheme. A new connection looks up the host
+  through `env` and tries each address in order, as Go does: each address but the last
+  gets an equal share of the time left, and at least 2 s. A reused connection does no
+  lookup. Lost: Happy Eyeballs (RFC 8305), which needs more code and streams; a separate
+  error variant for a failed lookup, which a caller handles as a failed connect. Decided
+  by `connector` in the plan on #341
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051), after
+  the reviews of #1135.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a

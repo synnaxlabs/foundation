@@ -6,7 +6,7 @@ use sim::name::{self, Answer};
 use sim::node;
 use types::time::Span;
 
-use super::pool::{all_ok, ok};
+use super::common::{all_ok, ok};
 use super::{Network, PORT, Step, TIMEOUT, get, text};
 use crate::http::Error;
 
@@ -168,4 +168,99 @@ fn sends_a_body_to_a_name() {
     all_ok(&network.run(vec![Step::Send(request)]));
     let sent = text(&log.lock().expect("no panic").bytes[0]);
     assert!(sent.ends_with("\r\n\r\nm v=1 5"), "{sent}");
+}
+
+impl Network {
+    /// The address of a new node whose link from the client takes a minute, as when a
+    /// firewall drops the SYN.
+    fn silent(&mut self) -> IpAddr {
+        let node = self.sim.node(node::Config::default());
+        let link = sim::link::Config {
+            delay: Span::MINUTE,
+            ..sim::link::Config::default()
+        };
+        self.sim.link(&self.client, &node, link);
+        node.addresses()[0]
+    }
+}
+
+#[test]
+fn connects_to_the_first_address_that_listens() {
+    let mut network = Network::new(79);
+    let first = network.remote().ip();
+    let first_log = network.serve_each(PORT, ok);
+    network.server = network.sim.node(node::Config::default());
+    let second = network.remote().ip();
+    let second_log = network.serve_each(PORT, ok);
+    network.name("influx", vec![first, second], Span::ZERO);
+    all_ok(&network.run(vec![Step::Send(get(&format!("http://influx:{PORT}/")))]));
+    assert_eq!(first_log.lock().expect("no panic").requests, [0]);
+    assert!(second_log.lock().expect("no panic").requests.is_empty());
+}
+
+#[test]
+fn gives_a_silent_address_half_the_timeout_before_the_next() {
+    let mut network = Network::new(80);
+    let (silent, server) = (network.silent(), network.remote().ip());
+    network.name("influx", vec![silent, server], Span::ZERO);
+    let log = network.serve_each(PORT, ok);
+    all_ok(&network.run(vec![Step::Send(get(&format!("http://influx:{PORT}/")))]));
+    assert_eq!(log.lock().expect("no panic").requests, [0]);
+    let half = Span::from_nanos(TIMEOUT.nanos() / 2);
+    let elapsed = network.elapsed.expect("a send ran");
+    assert!(
+        half < elapsed && elapsed < Span::from_nanos(half.nanos() + 100_000_000),
+        "{elapsed}"
+    );
+}
+
+#[test]
+fn gives_each_silent_address_at_least_2_s() {
+    let mut network = Network::new(81);
+    let mut addresses: Vec<IpAddr> = (0..5).map(|_| network.silent()).collect();
+    addresses.push(network.remote().ip());
+    network.name("influx", addresses, Span::ZERO);
+    let _log = network.serve_each(PORT, ok);
+    let error = network
+        .send(get(&format!("http://influx:{PORT}/")))
+        .expect_err("five silent addresses take the whole timeout");
+    assert!(matches!(error, Error::TimedOut), "{error:?}");
+    assert_eq!(network.elapsed, Some(TIMEOUT));
+}
+
+#[test]
+fn gives_the_time_out_of_a_silent_first_address() {
+    let mut network = Network::new(82);
+    let (silent, deaf) = (network.silent(), network.deaf());
+    network.name("influx", vec![silent, deaf], Span::ZERO);
+    let error = network
+        .send(get(&format!("http://influx:{PORT}/")))
+        .expect_err("no address takes the stream");
+    let remote = SocketAddr::new(silent, PORT);
+    assert!(
+        matches!(
+            error,
+            Error::Connect(net::Error::TimedOut { remote: r }) if r == remote
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("the connect failed: {remote} did not answer in time")
+    );
+}
+
+#[test]
+fn sends_to_port_80_when_the_uri_has_no_port() {
+    let mut network = Network::new(83);
+    let server = network.remote().ip();
+    network.name("influx", vec![server], Span::ZERO);
+    let log = network.serve_each(80, ok);
+    let outcomes = network.run(vec![
+        Step::Send(get("http://influx/")),
+        Step::Send(get("http://influx:/")),
+        Step::Send(get("http://influx:80/")),
+    ]);
+    all_ok(&outcomes);
+    assert_eq!(log.lock().expect("no panic").requests, [0, 0, 0]);
 }
