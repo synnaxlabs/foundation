@@ -197,8 +197,8 @@ async fn replaced(
     for latest in &mut latests {
         read(latest);
     }
-    // The wake after the commit takes the keys of the opens, so the warm writes size
-    // the keys to twelve.
+    // Keep this wait: a commit wake here takes any key put at open, so the warm writes
+    // size the keys to twelve, and a key put at open shows in the last write.
     node.clock().sleep(SETTLE).await;
     for n in 0..2 * WARM {
         let waited: u64 = latests.iter_mut().map(wait).sum();
