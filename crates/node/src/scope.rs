@@ -92,14 +92,15 @@ impl Spawned {
             running.waker.clone_from(cx.waker());
             running.future.as_mut().poll(cx)
         };
-        let Some(running) = self.running.upgrade() else {
+        if self.running.strong_count() == 0 {
             // The future dropped the scope in this poll, so this holds its last
             // reference.
             drop(slot);
             return Poll::Ready(());
-        };
+        }
         if polled.is_ready() {
             drop(slot);
+            let running = self.running.upgrade().expect("invariant: a live scope");
             let done = running.borrow_mut().remove(&self.key);
             // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
