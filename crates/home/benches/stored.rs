@@ -39,8 +39,8 @@ const MIXED: [Type; 9] = [
 /// Bytes of one sample of a type that has no width.
 const VARIABLE: usize = 16;
 
-/// A key set of one group: an index and data series whose types cycle through
-/// `types`.
+/// A key set of one group: an index, and data series whose types cycle through the
+/// types given to [`Case::new`].
 struct Case {
     name: &'static str,
     series: usize,
@@ -120,11 +120,17 @@ fn read(bencher: Bencher<'_, '_>, case: &Case) {
     let frame = case.frame(&pool);
     let parts = store(&pool, &frame, &case.set).parts;
     let body: Vec<u8> = parts.into_iter().flat_map(|part| part.to_vec()).collect();
-    let read: Vec<_> = home::bench::read(&body)
-        .map(|(key, data_type, _)| (key, data_type))
+    let read: Vec<_> = home::bench::read(&body).collect();
+    let entries = case.set.entries();
+    let stored: Vec<_> = frame
+        .iter()
+        .map(|(entry, bytes)| (entries[entry].key, entries[entry].data_type, bytes))
         .collect();
-    let entries = case.set.entries().iter();
-    let stored: Vec<_> = entries.map(|entry| (entry.key, entry.data_type)).collect();
+    assert_eq!(
+        stored.len(),
+        case.series,
+        "{case}: the frame lacks a series"
+    );
     assert_eq!(read, stored, "{case}: the body does not hold each series");
     bencher
         .counter(ItemsCount::new(case.series))

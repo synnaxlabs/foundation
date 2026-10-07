@@ -255,9 +255,9 @@ pub(crate) fn find(name: &str) -> Option<&'static Crate> {
 /// dev-dependency. A dev-dependency may also be test-only, a test edge of `user`, or
 /// `user` itself.
 pub(crate) fn allowed(user: &str, dep: &str, kind: Option<&str>) -> bool {
-    let dev =
+    let dev_only =
         TEST_ONLY.contains(&dep) || TEST_EDGES.contains(&(user, dep)) || dep == user;
-    find(user).is_some_and(|c| c.allows(dep)) || (kind == Some("dev") && dev)
+    find(user).is_some_and(|c| c.allows(dep)) || (kind == Some("dev") && dev_only)
 }
 
 impl Crate {
