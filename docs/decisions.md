@@ -3554,6 +3554,7 @@ How to read this record:
 | MERGE RULE, C9c "a person merges every PR" | MERGE QUEUE |
 | REMOTE CONTROL, `inbox:<name>` issues | MESSAGES |
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
+| 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 
 ---
 
@@ -4457,19 +4458,22 @@ the system is solid.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
 scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
-for one minute, and the `acceptance` tests run both disk budgets. It runs beside FIRST
-SLICE, which keeps priority. The person decided on 2026-10-06 ("Yes that is fine I
-approve", relayed by `monitor`).
+for one hour (one minute since the amendment below), and the `acceptance` tests run
+both disk budgets. It runs beside FIRST SLICE, which keeps priority. The person decided
+on 2026-10-06 ("Yes that is fine I approve", relayed by `monitor`).
 
-Amendment (2026-10-07): the cut is one minute, not one hour, at the same rate. The hour
-writes 3.6e9 samples, and its edge buffer alone does not fit in `sim` on a CI runner
+Amendment (2026-10-07): the cut is one minute, not one hour, at the same rate.
+Supersedes the one-hour cut of 5.5 and of this entry (#1072). The hour writes 3.6e9
+samples, and its edge buffer alone does not fit in `sim` on a CI runner
 (https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6034058219). The
 simulated InfluxDB store gets a compact form first (#1419). No scheduled run on a
-rented host runs the hour. The person decided ("Let's do a smaller scenario. It can
-still prove a significant amount of the behavior." and "Copy, yes I can agree with
-that", relayed by `monitor`:
-https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221). 5.5 sets
-no drain rate: after the heal, the lab waits a drain span sized for the delay before
-the drain and the backlog at the measured rate, times two (#1477, decided by
-architect-2:
+rented host runs the hour. The person decided at 2026-10-07T14:10:57Z ("Let's do a
+smaller scenario. It can still prove a significant amount of the behavior." and "Copy,
+yes I can agree with that", relayed by `monitor`:
+https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221).
+
+5.5 sets no drain rate. Before the two tests lose `#[ignore]`, the drain after the heal
+changes from `OUTAGE` to its own span: two times the sum of the delay before the drain
+starts and the time to send the backlog at the drain rate measured in the lab. Decided
+by `laptop.architect-2` at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
