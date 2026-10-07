@@ -2180,13 +2180,18 @@ mod port {
     /// The key of the peer that dials the node.
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
 
-    /// What the peer saw: its session's peer, the error of the stream's first send
-    /// that failed, and the read of the stream's reply half.
-    type Seen = (
-        Peer,
-        transport::Error,
-        Result<Option<Vec<u8>>, transport::Error>,
-    );
+    /// What the peer saw of the node.
+    #[derive(Debug, PartialEq)]
+    struct Seen {
+        /// The session's peer.
+        peer: Peer,
+        /// The largest message the node takes on the stream.
+        bytes_max: usize,
+        /// The error of the stream's first send that failed.
+        sent: transport::Error,
+        /// The read of the stream's reply half.
+        read: Result<Option<Vec<u8>>, transport::Error>,
+    }
 
     /// A transport on `host` with `key`, at a free port, with its pool.
     fn transport(
@@ -2253,6 +2258,7 @@ mod port {
                 block.copy_from_slice(bytes);
                 block.freeze()
             };
+            let bytes_max = sender.bytes_max();
             let mut sent = sender.send(message(&header)).await;
             while sent.is_ok() {
                 own.clock().sleep(Span::MILLISECOND).await;
@@ -2260,7 +2266,13 @@ mod port {
             }
             let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
             let sent = sent.unwrap_err();
-            *seen.lock().unwrap() = Some(Ok((session.peer(), sent, read)));
+            let peer = session.peer();
+            *seen.lock().unwrap() = Some(Ok(Seen {
+                peer,
+                bytes_max,
+                sent,
+                read,
+            }));
             session.closed().await;
         });
         drop(started.expect("the peer starts"));
@@ -2299,8 +2311,14 @@ mod port {
         let key = node_key(&mut sim::Sim::new(sim::Config::default()));
         let header = wire::header::encode(wire::Protocol::Mesh);
         let code = Code(wire::header::REJECTED);
-        let (peer, sent, read) = rejected(&header, Size::MEBIBYTE);
+        let Seen {
+            peer,
+            bytes_max,
+            sent,
+            read,
+        } = rejected(&header, Size::MEBIBYTE);
         assert_eq!(peer, Peer::Node(key));
+        assert_eq!(bytes_max, 65_536);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -2315,7 +2333,7 @@ mod port {
             Err(wire::header::Error::Protocol { number: 9 })
         );
         let code = Code(wire::header::REJECTED);
-        let (_, sent, read) = rejected(&header, Size::MEBIBYTE);
+        let Seen { sent, read, .. } = rejected(&header, Size::MEBIBYTE);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -2323,13 +2341,11 @@ mod port {
     /// A node whose pool's largest block is below 64 KiB takes messages of that block.
     #[test]
     fn a_node_whose_largest_block_is_below_64_kib_serves_its_port() {
-        let pool = block::Config { budget: 64 << 10 };
-        let memory = block::Heap::new(pool.reservation());
-        assert_eq!(block::Pool::new(pool, memory).largest(), 57_344);
         let header = wire::header::encode(wire::Protocol::Mesh);
-        let (_, sent, _) = rejected(&header, Size::from_bytes(128 << 10));
+        let seen = rejected(&header, Size::from_bytes(128 << 10));
+        assert_eq!(seen.bytes_max, 57_344);
         let code = Code(wire::header::REJECTED);
-        assert_eq!(sent, transport::Error::Stopped { code });
+        assert_eq!(seen.sent, transport::Error::Stopped { code });
     }
 
     /// A session that stays open delays no stream of another session.
@@ -2345,7 +2361,7 @@ mod port {
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
         let sent = |seen: &Arc<Mutex<Option<Result<Seen, _>>>>| {
             let seen = seen.lock().unwrap().take();
-            seen.map(|seen| seen.map(|(_, sent, _)| sent))
+            seen.map(|seen| seen.map(|seen| seen.sent))
         };
         let code = Code(wire::header::REJECTED);
         let stopped = Some(Ok(transport::Error::Stopped { code }));

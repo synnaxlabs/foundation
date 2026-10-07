@@ -67,7 +67,8 @@ mod tests {
 
     use super::header;
 
-    /// A first message is a header only when it is the whole message.
+    /// A first message is a header only when it is the whole message. Each arm rejects
+    /// today, so no peer sees the difference yet.
     #[test]
     fn a_header_with_a_byte_after_it_names_no_protocol() {
         let mut message = wire::header::encode(Protocol::Mesh).to_vec();
