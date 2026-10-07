@@ -21,9 +21,9 @@ pub(crate) enum Deps {
 /// one must be named in the crate's [`Deps`].
 pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 
-/// Stand-ins for a vendor library, each as `(user, stand-in)`: only `user` may take
-/// `stand-in`, and only as a dev-dependency.
-pub(crate) const STUBS: &[(&str, &str)] = &[("connector-ni", "daqmx-stub")];
+/// Edges, each as `(user, dep)`, that `user` may take only as a dev-dependency.
+pub(crate) const TEST_EDGES: &[(&str, &str)] =
+    &[("connector-ni", "daqmx-stub"), ("hub", "buffer")];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
@@ -252,9 +252,9 @@ pub(crate) fn find(name: &str) -> Option<&'static Crate> {
 
 /// Reports whether the crate named `user` may take `dep` as a dependency of `kind`, as
 /// `cargo metadata` names it: `None` for a normal one, `Some("dev")` for a
-/// dev-dependency. A dev-dependency may also be test-only or a stub of `user`.
+/// dev-dependency. A dev-dependency may also be test-only or a test edge of `user`.
 pub(crate) fn allowed(user: &str, dep: &str, kind: Option<&str>) -> bool {
-    let test_only = TEST_ONLY.contains(&dep) || STUBS.contains(&(user, dep));
+    let test_only = TEST_ONLY.contains(&dep) || TEST_EDGES.contains(&(user, dep));
     find(user).is_some_and(|c| c.allows(dep)) || (kind == Some("dev") && test_only)
 }
 
@@ -311,6 +311,22 @@ mod tests {
         ] {
             let entry = find(name).expect("in the map");
             assert_eq!(entry.allows(dep), allowed, "`{name}` on `{dep}`");
+        }
+    }
+
+    #[test]
+    fn allows_buffer_to_hub_only_as_a_dev_dependency() {
+        for (name, dep, kind, expected) in [
+            ("hub", "buffer", Some("dev"), true),
+            ("hub", "buffer", None, false),
+            ("hub", "buffer", Some("build"), false),
+            ("connector-modbus", "buffer", Some("dev"), false),
+        ] {
+            assert_eq!(
+                allowed(name, dep, kind),
+                expected,
+                "{name} -> {dep} {kind:?}"
+            );
         }
     }
 

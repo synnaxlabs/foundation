@@ -237,6 +237,14 @@ fn layout(area: u64, body_max: usize) -> Layout {
     Layout::new(area, body_max).expect("the sizes make a ring")
 }
 
+/// The smallest ring whose records hold a body of at most `body_max` bytes.
+fn least(body_max: usize) -> Layout {
+    let min = Layout::fit(0, body_max)
+        .expect_err("no ring in no bytes")
+        .min;
+    Layout::fit(min, body_max).expect("the least length holds a ring")
+}
+
 fn key(index: u32) -> channel::Key {
     channel::Key::from_u128(u128::from(index))
 }
@@ -740,18 +748,17 @@ fn a_full_ring_queues_nothing() {
     run(5, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, BODY_MAX), &mut slots)
+            .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
         let parts = Parts::from(shard.block(3900));
-        buffer
-            .append([entry(1, a, Path::Live, 0, 1, None, parts.clone())])
-            .expect("the first record has room");
-        buffer
-            .append([entry(1, a, Path::Live, 1, 1, None, parts.clone())])
-            .expect("the second record has room");
-        let full = buffer.append([entry(1, a, Path::Live, 2, 1, None, parts.clone())]);
+        for seq in 0..3 {
+            buffer
+                .append([entry(1, a, Path::Live, seq, 1, None, parts.clone())])
+                .expect("the record has room");
+        }
+        let full = buffer.append([entry(1, a, Path::Live, 3, 1, None, parts.clone())]);
         assert_eq!(
             full,
             Err(Rejected::Full {
@@ -759,9 +766,9 @@ fn a_full_ring_queues_nothing() {
                 free: 0
             })
         );
-        assert_eq!(buffer.tail(a, Path::Live), tail(2, None));
+        assert_eq!(buffer.tail(a, Path::Live), tail(3, None));
         buffer.committed().await.expect("commits");
-        assert_eq!(buffer.durable(a, Path::Live), tail(2, None));
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, None));
     });
 }
 
@@ -770,18 +777,20 @@ fn a_batch_is_queued_whole_or_not_at_all() {
     run(6, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(4 * BLOCK, 8183), &mut slots)
+            .open(layout(8 * BLOCK, 8183), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let first = Parts::from(shard.block(5000));
+        let long = Parts::from(shard.block(5000));
         let parts = Parts::from(shard.block(3900));
-        buffer
-            .append([entry(1, a, Path::Live, 0, 1, None, first)])
-            .expect("the first record has room");
+        for seq in 0..3 {
+            buffer
+                .append([entry(1, a, Path::Live, seq, 1, None, long.clone())])
+                .expect("the record has room");
+        }
         let full = buffer.append([
-            entry(1, a, Path::Live, 1, 1, None, parts.clone()),
-            entry(1, a, Path::Live, 2, 1, None, parts.clone()),
+            entry(1, a, Path::Live, 3, 1, None, parts.clone()),
+            entry(1, a, Path::Live, 4, 1, None, parts.clone()),
         ]);
         assert_eq!(
             full,
@@ -791,15 +800,15 @@ fn a_batch_is_queued_whole_or_not_at_all() {
             }),
             "the first entry alone has room, the batch does not"
         );
-        assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
+        assert_eq!(buffer.tail(a, Path::Live), tail(3, None));
         buffer.committed().await.expect("commits");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(4 * BLOCK, 8183), &mut slots)
+            .open(layout(8 * BLOCK, 8183), &mut slots)
             .await
             .expect("reopens");
-        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(1, None));
+        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(3, None));
     });
 }
 
@@ -2695,7 +2704,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
 fn a_record_over_the_most_entries_is_invalid() {
     for (count, opens) in [(1023_u32, true), (1024, false)] {
         run(102, Memory::default(), move |shard| async move {
-            let ring = layout(64 * BLOCK, 100_000);
+            let ring = least(100_000);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
             let a = slots.assign(key(1));
@@ -3105,12 +3114,12 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
     run(21, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, BODY_MAX), &mut slots)
+            .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
         let parts = Parts::from(shard.block(3900));
-        for seq in 0..2 {
+        for seq in 0..3 {
             buffer
                 .append([entry(1, a, Path::Live, seq, 1, None, parts.clone())])
                 .expect("the record has room");
@@ -3118,7 +3127,7 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
         buffer.committed().await.expect("commits");
         drop(buffer);
         let opened = shard
-            .open(layout(3 * BLOCK, BODY_MAX), &mut Slots::new())
+            .open(layout(4 * BLOCK, BODY_MAX), &mut Slots::new())
             .await;
         assert_eq!(
             opened.map(drop),
@@ -3485,7 +3494,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
-        let ring = layout(128 * BLOCK, 150_000);
+        let ring = least(150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3519,7 +3528,7 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 512 << 10);
-        let ring = layout(320 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3566,7 +3575,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), largest);
-        let ring = layout(320 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3608,7 +3617,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
 #[test]
 fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
     run(156, Memory::default(), |mut shard| async move {
-        let ring = layout(320 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
