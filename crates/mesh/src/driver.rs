@@ -1343,7 +1343,7 @@ mod tests {
     }
 
     // The bound is the 5 s that the leader of the test above gets after its heal. The
-    // measured wait is at most 1 s, and it grows with the cut (#1415).
+    // measured wait is at most 1 s, and a longer cut can give a longer wait (#1415).
     #[test]
     fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
         for run in 0..4 {

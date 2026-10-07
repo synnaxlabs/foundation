@@ -318,35 +318,61 @@ fn a_task_that_waits_in_a_dial_holds_no_block() {
     });
 }
 
+/// A position in the term of the tests.
+fn at(index: u64) -> Position {
+    Position {
+        term: common::TERM,
+        index,
+    }
+}
+
+/// The config of a node 1 with no record of node 4, and the append of node 2 whose
+/// voter set names node 4.
+fn create_stranger(node: &sim::node::Node, tasks: &Tasks) -> (Config, raft::Message) {
+    let members = vec![create_voter(1), common::member(2), common::member(3)];
+    let config = Config {
+        members,
+        ..config_at(node, tasks, 1, PORT, &IDS, &IDS)
+    };
+    let voters = Voters {
+        incoming: [1, 2, 4].map(key).into(),
+        outgoing: IDS.map(key).into(),
+    };
+    let append = Body::Append {
+        prev: Position::default(),
+        entries: vec![Entry {
+            at: at(1),
+            data: Data::Voters(voters),
+        }],
+        commit: 0,
+    };
+    (config, proven(2, 1, append))
+}
+
+// The case of the test after this one: node 1 has a message for node 4 and no record
+// of it.
+#[test]
+fn a_node_queues_a_message_for_a_voter_with_no_member_record() {
+    solo(|node, tasks| async move {
+        let (config, append) = create_stranger(&node, &tasks);
+        let mesh = Mesh::start(config).await.unwrap();
+        assert_eq!(mesh.receive(public(2), append), Ok(()));
+        let clock = node.clock();
+        let sent = within(&clock, seconds(10), pin!(mesh.outgoing(key(4)))).await;
+        let to = sent.map(|message| message.map(|message| message.to));
+        assert_eq!(to, Some(Ok(key(4))));
+        assert_eq!(mesh.member(key(4)), None);
+    });
+}
+
 // Node 1 has no record of node 4 until 10 s after a voter set names it. Node 4 then
 // joins with the address of node 2, so only a task that went on reaches it.
 #[test]
 fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
-        let members = vec![create_voter(1), common::member(2), common::member(3)];
-        let config = Config {
-            members,
-            ..config_at(&node, &tasks, 1, PORT, &IDS, &IDS)
-        };
+        let (config, append) = create_stranger(&node, &tasks);
         let mesh = Mesh::open(config).await.unwrap();
-        let voters = Voters {
-            incoming: [1, 2, 4].map(key).into(),
-            outgoing: IDS.map(key).into(),
-        };
-        let at = |index| Position {
-            term: common::TERM,
-            index,
-        };
-        let entry = |index, data| Entry {
-            at: at(index),
-            data,
-        };
-        let append = Body::Append {
-            prev: Position::default(),
-            entries: vec![entry(1, Data::Voters(voters))],
-            commit: 0,
-        };
-        assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+        assert_eq!(mesh.receive(public(2), append), Ok(()));
         let clock = node.clock();
         clock.sleep(seconds(10)).await;
         assert_eq!(mesh.member(key(4)), None);
@@ -355,6 +381,10 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
         card.addresses = card::addresses::Addresses::new(addresses).unwrap();
         let card = card::Signed::sign(key(4), card, &private(4));
         let join = join_with(&card, 7, Stamp::EPOCH);
+        let entry = |index, data| Entry {
+            at: at(index),
+            data,
+        };
         let append = Body::Append {
             prev: at(1),
             entries: vec![
@@ -500,13 +530,9 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             .await;
         }
         clock.sleep(seconds(10)).await;
-        // A call of `Mesh::outgoing` takes a message or the waker of the task, so the
-        // test reads the count of the messages that wait for the task.
-        let waiting = {
-            let group = mesh.group.borrow();
-            group.queues.get(&key(2)).map(|queue| queue.messages.len())
-        };
-        assert!(waiting > Some(1), "the task of node 2 does not wait");
+        for _ in 0..2 {
+            assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
+        }
         end(node, mesh).await;
         pending::<()>().await;
     };
