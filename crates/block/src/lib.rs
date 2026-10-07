@@ -988,7 +988,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_pointer_width = "64")]
         fn stops_at_a_payload_of_two_gibibytes() {
             assert_eq!(class_payload(CLASSES_MAX - 1), 1 << 31);
             assert_eq!(class_of(1 << 31), CLASSES_MAX - 1);
@@ -2040,7 +2039,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_pointer_width = "64")]
         #[should_panic(expected = "cannot skip 4294967296 bytes of a block of 5 bytes")]
         fn panics_past_a_u32() {
             let pool = create_pool(256);
