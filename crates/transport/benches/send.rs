@@ -20,7 +20,7 @@
 //! gives the share of sends it timed. In each round, a send of each class must end
 //! while the other class waits, and the round must time at least half its sends so
 //! that its figure stands on enough sends. Over the timed rounds, the `Complete`
-//! sends it timed must be from 2 to 4 times its `Latest` sends: the share gives
+//! sends it timed must be from 2.5 to 3.5 times its `Latest` sends: the share gives
 //! `Complete` 3 bytes for each byte of `Latest`, and both classes send messages of
 //! one size. After the rounds, the server must have one stream of each class. If
 //! not, the bench panics. Its control is `complete 1 KiB waiting`, whose send must
@@ -177,7 +177,7 @@ enum Premise {
     Waits,
     /// A `Latest` send and a `Complete` send each end while a send of the other
     /// class waits. Over the timed rounds, the timed `Complete` sends must also be
-    /// from 2 to 4 times the timed `Latest` sends.
+    /// from 2.5 to 3.5 times the timed `Latest` sends.
     Competes,
 }
 
@@ -426,8 +426,9 @@ async fn open(session: &Session, load: Load) -> Vec<Sender> {
 /// # Panics
 ///
 /// When a send fails, when the rounds do not show `premise` (for `Competes`, also
-/// when the timed `Complete` sends are not 2 to 4 times the timed `Latest` sends),
-/// or when the classes the server got in `accepted` are not those of `senders`.
+/// when the timed `Complete` sends are not 2.5 to 3.5 times the timed `Latest`
+/// sends), or when the classes the server got in `accepted` are not those of
+/// `senders`.
 async fn compete(
     pool: &Pool,
     senders: &mut [Sender],
@@ -472,7 +473,7 @@ async fn compete(
     }
     if let Premise::Competes = premise {
         assert!(
-            2 * latest <= complete && complete <= 4 * latest,
+            5 * latest <= 2 * complete && 2 * complete <= 7 * latest,
             "{} times {complete} Complete and {latest} Latest sends, \
              not the 3 to 1 share",
             scenario.name,
