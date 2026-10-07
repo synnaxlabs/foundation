@@ -75,7 +75,9 @@ again once to prove that the failure replays (r16 59).
 ## Rules
 
 - **A bug fix starts with a failing regression test.** Show it fails for the reason you
-  diagnosed, then fix the code.
+  diagnosed, then fix the code. A fix of a test that fails only sometimes is a bug fix
+  too: its regression test makes the cause happen on each run. A run in a reviewer's
+  worktree does not count.
 - **Test what the change is for.** When a change exists to remove work (a clock read, a
   copy, an allocation, a round trip), a test counts that work and fails when the change
   is reverted.
