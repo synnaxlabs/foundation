@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use types::name::Name;
+use types::name::{self, Name};
 
 use crate::definition::Kind;
 
@@ -14,31 +14,30 @@ impl Kind {
     /// # Errors
     ///
     /// The first that applies: [`Error::Long`] when the key would hold more than
-    /// [`Name::MAX_BYTES`], and [`Error::Reserved`] when a segment of `label` starts
-    /// with `@`.
+    /// [`Name::MAX_BYTES`], [`Error::Name`] when `label` is not a name, and
+    /// [`Error::Reserved`] when a segment of `label` starts with `@`.
     #[expect(
         clippy::missing_panics_doc,
         clippy::unwrap_in_result,
         reason = "a checked label and a kind segment always make a name"
     )]
-    pub fn key(self, label: &Name) -> Result<Name, Error> {
+    pub fn key(self, label: &str) -> Result<Name, Error> {
         let segment = match self {
             Self::Connector => None,
             _ => Some(self.as_str()),
         };
-        if let Some(segment) = segment {
-            let most = Name::MAX_BYTES
-                .saturating_sub(segment.len())
-                .saturating_sub(2);
-            if label.as_str().len() > most {
-                return Err(Error::Long { most });
-            }
+        let most = segment.map_or(Name::MAX_BYTES, |segment| {
+            Name::MAX_BYTES - segment.len() - 2
+        });
+        if label.len() > most {
+            return Err(Error::Long { most });
         }
+        let label: Name = label.parse().map_err(Error::Name)?;
         if label.reserved() {
             return Err(Error::Reserved);
         }
         Ok(match segment {
-            None => label.clone(),
+            None => label,
             Some(segment) => format!("{label}.@{segment}").parse().expect(
                 "a short label that is not reserved and a kind segment make a name",
             ),
@@ -63,7 +62,7 @@ impl Kind {
 
 /// A label that makes no tree key. `Display` gives the message: a lower-case clause
 /// with no final period. [`Error::fix`] gives what to do instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A segment of the label starts with `@`.
     Reserved,
@@ -72,17 +71,20 @@ pub enum Error {
         /// The most bytes a label of this kind holds.
         most: usize,
     },
+    /// The label is not a name.
+    Name(name::Error),
 }
 
 impl Error {
     /// What to do instead: a sentence with no final period.
     #[must_use]
-    pub const fn fix(self) -> &'static str {
+    pub fn fix(&self) -> &'static str {
         match self {
             Self::Reserved => "Remove the `@` from each segment",
             Self::Long { .. } => {
                 "Shorten the label to at most the bytes the message gives"
             }
+            Self::Name(error) => error.fix(),
         }
     }
 }
@@ -92,6 +94,7 @@ impl fmt::Display for Error {
         match self {
             Self::Reserved => f.write_str("a segment of the label starts with `@`"),
             Self::Long { most } => write!(f, "the label is longer than {most} bytes"),
+            Self::Name(error) => error.fmt(f),
         }
     }
 }
@@ -118,6 +121,10 @@ mod tests {
         text.parse().unwrap()
     }
 
+    fn error(text: &str) -> name::Error {
+        text.parse::<Name>().unwrap_err()
+    }
+
     #[test]
     fn names_each_kind_by_its_segment() {
         for (kind, segment) in KINDS {
@@ -128,20 +135,17 @@ mod tests {
 
     #[test]
     fn keys_a_connector_at_its_own_name() {
-        let longest = name(&"a".repeat(Name::MAX_BYTES));
-        for label in [name("site_a.modbus"), longest] {
-            assert_eq!(Kind::Connector.key(&label), Ok(label));
+        let longest = "a".repeat(Name::MAX_BYTES);
+        for label in ["site_a.modbus", &longest] {
+            assert_eq!(Kind::Connector.key(label), Ok(name(label)));
         }
-        assert_eq!(
-            Kind::Connector.key(&name("site_a.@modbus")),
-            Err(Error::Reserved)
-        );
+        assert_eq!(Kind::Connector.key("site_a.@modbus"), Err(Error::Reserved));
     }
 
     #[test]
     fn appends_the_kind_segment() {
         for (kind, segment) in KINDS {
-            let key = kind.key(&name("site_a.budget")).unwrap();
+            let key = kind.key("site_a.budget").unwrap();
             assert_eq!(key, name(&format!("site_a.budget.{segment}")));
         }
     }
@@ -149,7 +153,7 @@ mod tests {
     #[test]
     fn refuses_a_reserved_label() {
         for (kind, _) in KINDS {
-            assert_eq!(kind.key(&name("site_a.@changes")), Err(Error::Reserved));
+            assert_eq!(kind.key("site_a.@changes"), Err(Error::Reserved));
         }
         assert_eq!(
             Error::Reserved.to_string(),
@@ -162,9 +166,9 @@ mod tests {
     fn bounds_the_label_by_the_key() {
         for (kind, segment) in KINDS {
             let most = Name::MAX_BYTES - segment.len() - 1;
-            let fits = name(&"a".repeat(most));
+            let fits = "a".repeat(most);
             assert_eq!(kind.key(&fits).unwrap().as_str().len(), Name::MAX_BYTES);
-            let long = name(&"a".repeat(most + 1));
+            let long = "a".repeat(most + 1);
             assert_eq!(kind.key(&long), Err(Error::Long { most }));
         }
         let error = Error::Long { most: 240 };
@@ -177,10 +181,40 @@ mod tests {
 
     #[test]
     fn checks_the_length_before_the_segments() {
-        let label = name(&format!("{}.@x", "a".repeat(240)));
+        let label = format!("{}.@x", "a".repeat(240));
         assert_eq!(
             Kind::NodeSettings.key(&label),
             Err(Error::Long { most: 240 })
+        );
+    }
+
+    #[test]
+    fn checks_the_length_before_the_name() {
+        let label = format!("{}.*", "a".repeat(254));
+        assert_eq!(
+            Kind::NodeSettings.key(&label),
+            Err(Error::Long { most: 240 })
+        );
+        let label = format!("{}.*", "a".repeat(254));
+        assert_eq!(Kind::Connector.key(&label), Err(Error::Long { most: 255 }));
+    }
+
+    #[test]
+    fn refuses_a_label_that_is_not_a_name() {
+        for label in ["", "site_a..budget", "site_a.*", "site a"] {
+            for (kind, _) in KINDS {
+                assert_eq!(kind.key(label), Err(Error::Name(error(label))));
+            }
+            assert_eq!(Kind::Connector.key(label), Err(Error::Name(error(label))));
+        }
+        let error = Error::Name(error("site_a.*"));
+        assert_eq!(
+            error.to_string(),
+            "a wildcard is out of place: \"site_a.*\""
+        );
+        assert_eq!(
+            error.fix(),
+            "Use `*` and `**` only as whole segments of a pattern, never in a name"
         );
     }
 
@@ -191,7 +225,7 @@ mod tests {
             (kind, segment) in prop::sample::select(KINDS.to_vec()),
         ) {
             let label = name(&segments.join("."));
-            let key = kind.key(&label).unwrap();
+            let key = kind.key(label.as_str()).unwrap();
             prop_assert!(key.starts_with(&label));
             prop_assert_eq!(key.segments().last(), Some(segment));
             prop_assert_eq!(key.segments().count(), segments.len() + 1);
