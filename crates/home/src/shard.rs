@@ -1166,13 +1166,20 @@ mod tests {
     /// entry 1 with as many scattered values, and the series of `more`. The shard's
     /// largest block is 1835008 bytes. The writer's pool has larger blocks, and
     /// scattered values do not compress.
-    fn large(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
+    fn over_block(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
         let len = 240_000;
         let stamps: Vec<i64> = (first..).take(len).collect();
         let values = scattered(len);
         let mut series: Vec<(usize, &[i64])> = vec![(0, &stamps), (1, &values)];
         series.extend_from_slice(more);
         frame(&create_pool(4 * POOL), set, &series)
+    }
+
+    /// A frame that no record of the ring holds: entry 0 with 600 stamps from `first`
+    /// and entry 1 with as many scattered values, which do not compress.
+    fn over_record(pool: &Pool, set: &KeySet, first: i64) -> Draft {
+        let stamps: Vec<i64> = (first..).take(600).collect();
+        frame(pool, set, &[(0, &stamps), (1, &scattered(600))])
     }
 
     /// The error of a failed sync of the ring, which the commit of `shard` gives.
@@ -1711,11 +1718,9 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let stamps: Vec<i64> = (10..610).collect();
-            let values = scattered(600);
             for (label, stamp) in [(LIVE, 700), (BACKFILL, 5)] {
-                let large = frame(&test.pool, &set, &[(0, &stamps), (1, &values)]);
-                assert_eq!(shard.write(a, label, large), Err(Error::Large));
+                let over_record = over_record(&test.pool, &set, 10);
+                assert_eq!(shard.write(a, label, over_record), Err(Error::Large));
                 let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
                 assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
             }
@@ -1733,8 +1738,8 @@ mod tests {
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             for (label, stamp) in [(LIVE, 300_000), (BACKFILL, 5)] {
-                let large = large(&set, 10, &[(2, &[stamp])]);
-                assert_eq!(shard.write(a, label, large), Err(Error::Large));
+                let over_block = over_block(&set, 10, &[(2, &[stamp])]);
+                assert_eq!(shard.write(a, label, over_block), Err(Error::Large));
                 let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
                 assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
             }
@@ -1746,14 +1751,13 @@ mod tests {
         run(39, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let stamps: Vec<i64> = (10..610).collect();
-            let large = frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
+            let over_record = over_record(&test.pool, &set, 10);
             let blocks = test.fill();
             let a = shard
                 .open_writer(writer("subject-a", 1, &set))
                 .expect("synced");
             drop(blocks);
-            assert_eq!(shard.write(a, LIVE, large), Err(Error::Large));
+            assert_eq!(shard.write(a, LIVE, over_record), Err(Error::Large));
             shard.committed().await.expect("the commit ends");
             let handoff = handoff_to("subject-a");
             assert_eq!(find(&test.ring().await, &handoff).len(), 1);
@@ -1780,20 +1784,18 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
             }
-            let stamps: Vec<i64> = (10..610).collect();
-            let no_record =
-                || frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
-            assert_eq!(shard.write(a, LIVE, no_record()), Err(Error::Large));
+            let over_record = || over_record(&test.pool, &set, 10);
+            assert_eq!(shard.write(a, LIVE, over_record()), Err(Error::Large));
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
             // The handoff is appended before the bodies, so the size is never checked.
             assert_eq!(
-                shard.write(b, LIVE, no_record()),
+                shard.write(b, LIVE, over_record()),
                 Ok(&[lost(0, 0, 600)][..])
             );
-            let no_block = large(&set, 1000, &[(2, &[stamp])]);
+            let over_block = over_block(&set, 1000, &[(2, &[stamp])]);
             assert_eq!(
-                shard.write(b, LIVE, no_block),
+                shard.write(b, LIVE, over_block),
                 Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
             );
         });
@@ -1986,9 +1988,8 @@ mod tests {
     fn does_not_renew_the_lease_for_a_frame_too_large_for_one_write() {
         run(95, |test| async move {
             let (mut shard, a, set) = test.leased().await;
-            let stamps: Vec<i64> = (10..610).collect();
-            let large = frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
-            assert_eq!(shard.write(a, LIVE, large), Err(Error::Large));
+            let over_record = over_record(&test.pool, &set, 10);
+            assert_eq!(shard.write(a, LIVE, over_record), Err(Error::Large));
             test.clock.sleep(WAIT).await;
             let next = frame(&test.pool, &set, &[(0, &[700]), (1, &[1])]);
             let expired = refused(0, Refusal::Expired);
@@ -2210,13 +2211,11 @@ mod tests {
         fn write(test: &Test, shard: &mut Shard, a: writer::Key, expected: &Error) {
             let set = two_indexes();
             for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
-                let no_block = large(&set, first, &[]);
-                let written = shard.write(a, label, no_block);
+                let over_block = over_block(&set, first, &[]);
+                let written = shard.write(a, label, over_block);
                 assert_eq!(written, Err(expected.clone()), "{label:?}");
-                let stamps: Vec<i64> = (first..first + 600).collect();
-                let series: [(usize, &[i64]); 2] = [(0, &stamps), (1, &scattered(600))];
-                let no_record = frame(&test.pool, &set, &series);
-                let written = shard.write(a, label, no_record);
+                let over_record = over_record(&test.pool, &set, first);
+                let written = shard.write(a, label, over_record);
                 assert_eq!(written, Err(expected.clone()), "{label:?}");
             }
         }
@@ -2257,7 +2256,7 @@ mod tests {
                     [(LIVE, 600_000, 100), (BACKFILL, 100, 500_000)]
                 {
                     let frames =
-                        [small(first), small(refused), large(&set, first, &[])];
+                        [small(first), small(refused), over_block(&set, first, &[])];
                     for (at, draft) in frames.into_iter().enumerate() {
                         let written = shard.write(b, label, draft);
                         assert_eq!(
@@ -2286,10 +2285,10 @@ mod tests {
             let _a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let blocks = test.fill();
             let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
-            let written = shard.write(b, BACKFILL, large(&set, 100, &[]));
+            let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
             assert_eq!(written, Err(Error::Full));
             drop(blocks);
-            let written = shard.write(b, BACKFILL, large(&set, 100, &[]));
+            let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
             assert_eq!(written, Err(Error::Large));
         });
     }
