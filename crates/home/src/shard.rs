@@ -237,7 +237,7 @@ impl Shard {
         let Some(session) = self.writers.remove(&key) else {
             panic!("writer {} is not open", key.0);
         };
-        let (now, mesh) = self.synced();
+        let (now, mesh) = self.time();
         for claim in &session.claims {
             self.indexes[claim.place].gate.close(claim.key, now);
         }
@@ -272,7 +272,7 @@ impl Shard {
         let Some(session) = self.writers.get(&key) else {
             panic!("writer {} is not open", key.0);
         };
-        let (now, mesh) = self.synced();
+        let (now, mesh) = self.time();
         let scratch = &mut self.scratch;
         let mut split = scratch.split.split(&session.set, frame);
         while let Some((group, stamps)) = split.next() {
@@ -428,7 +428,7 @@ impl Shard {
     ///
     /// If the reader is not open.
     pub(crate) fn close_reader(&mut self, slot: Slot, session: delivery::Key) {
-        let (_, mesh) = self.synced();
+        let (_, mesh) = self.time();
         self.readers.close(self.place(slot), session, mesh);
     }
 
@@ -461,7 +461,7 @@ impl Shard {
     ///
     /// Before the node first has mesh time. No session opens before it, and mesh time
     /// stays once known.
-    fn synced(&self) -> (Monotonic, Stamp) {
+    fn time(&self) -> (Monotonic, Stamp) {
         let now = self.now();
         now.expect("invariant: a session opened with mesh time, which stays")
     }
@@ -689,7 +689,7 @@ mod tests {
         node: sim::node::Node,
         pool: Rc<Pool>,
         clock: Clock,
-        mesh: clock::Reader,
+        reader: clock::Reader,
         tasks: Tasks,
         entropy: Entropy,
     }
@@ -699,12 +699,12 @@ mod tests {
         fn new(node: sim::node::Node, tasks: Tasks) -> Self {
             let config = block::Config { budget: POOL };
             let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
-            let (clock, mesh) = clock::Clock::new(node.clock());
+            let (clock, reader) = clock::Clock::new(node.clock());
             let wall = node.wall();
             tasks.spawn(async move { clock.run(wall).await });
             Self {
                 clock: node.clock(),
-                mesh,
+                reader,
                 entropy: node.entropy(),
                 node,
                 pool: Rc::new(pool),
@@ -722,20 +722,20 @@ mod tests {
 
         /// A shard over `buffer`, once the node has mesh time.
         async fn over(&self, buffer: Buffer) -> Shard {
-            while self.mesh.now().mesh.is_none() {
+            while self.reader.now().mesh.is_none() {
                 self.clock.sleep(Span::from_nanos(1)).await;
             }
             Shard::new(Config {
                 buffer,
                 pool: Rc::clone(&self.pool),
-                clock: self.mesh.clone(),
+                clock: self.reader.clone(),
                 limits: LIMITS,
             })
         }
 
         /// Mesh time now: the midpoint of the clock's interval.
         fn now(&self) -> Stamp {
-            let now = self.mesh.now().mesh.expect("the node has mesh time");
+            let now = self.reader.now().mesh.expect("the node has mesh time");
             Stamp::from_nanos(now.earliest.nanos().midpoint(now.latest.nanos()))
         }
 
@@ -1734,7 +1734,7 @@ mod tests {
         run(14, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let edges = test.mesh.now().mesh.expect("the node has mesh time");
+            let edges = test.reader.now().mesh.expect("the node has mesh time");
             let mesh = test.now();
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
