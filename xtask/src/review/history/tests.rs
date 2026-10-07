@@ -518,3 +518,33 @@ fn a_prefix_of_two_commits_names_no_commit() {
         assert_eq!(repo.reaches(sha, sha), Ok(true));
     }
 }
+
+#[test]
+fn a_local_main_does_not_put_a_commit_on_the_base() {
+    let (repo, end) = Repo::with_pr("localmain");
+    repo.git(&["switch", "--quiet", "-c", "side", "origin/main"]);
+    let side = repo.commit("a.rs", "fn unreviewed() {}\n");
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["branch", "--force", "main", &side]);
+    repo.git(&["merge", "--quiet", "--no-edit", &side]);
+    assert_eq!(repo.reaches(&end, &repo.head()), Ok(false));
+}
+
+#[test]
+fn a_tag_does_not_stand_in_for_a_missing_base() {
+    let (repo, end) = Repo::with_pr("nobase");
+    repo.git(&["switch", "--quiet", "-c", "side", "main"]);
+    let side = repo.commit("a.rs", "fn unreviewed() {}\n");
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", &side]);
+    repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    repo.git(&["tag", "refs/remotes/origin/main", &side]);
+    assert_eq!(
+        repo.reaches(&end, &repo.head()),
+        Err(
+            "git show-ref --verify --hash refs/remotes/origin/main: fatal: \
+             'refs/remotes/origin/main' - not a valid ref"
+                .to_string()
+        )
+    );
+}

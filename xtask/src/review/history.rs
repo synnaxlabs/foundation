@@ -6,8 +6,8 @@ use std::process::Command;
 /// The history of a git repository, and the branch that PRs in it merge into.
 pub(crate) struct History<'a> {
     root: &'a Path,
-    /// The full ref of the base, so a tag of the same short name cannot take its
-    /// place.
+    /// The full ref of the base, read only with `show-ref --verify`, so no other ref
+    /// can take its place.
     base: String,
 }
 
@@ -26,11 +26,12 @@ impl<'a> History<'a> {
     ///
     /// # Errors
     ///
-    /// A failed `git` command.
+    /// A failed `git` command, also when the base ref does not exist.
     pub(crate) fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
         let Some(end) = self.named(end)? else {
             return Ok(false);
         };
+        let base = self.git(&["show-ref", "--verify", "--hash", &self.base])?;
         let mut commit =
             self.git(&["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
         while commit != end {
@@ -38,7 +39,7 @@ impl<'a> History<'a> {
             let [_, first, second] = line.split(' ').collect::<Vec<_>>()[..] else {
                 return Ok(false);
             };
-            if !self.on_base(second)? || !self.clean(&commit, first, second)? {
+            if !self.on_base(second, &base)? || !self.clean(&commit, first, second)? {
                 return Ok(false);
             }
             commit = first.to_string();
@@ -179,18 +180,18 @@ impl<'a> History<'a> {
         })
     }
 
-    fn on_base(&self, commit: &str) -> Result<bool, String> {
+    /// Reports whether `commit` is an ancestor of the commit `base`.
+    fn on_base(&self, commit: &str, base: &str) -> Result<bool, String> {
         let status = Command::new("git")
             .current_dir(self.root)
-            .args(["merge-base", "--is-ancestor", commit, &self.base])
+            .args(["merge-base", "--is-ancestor", commit, base])
             .status()
             .map_err(|e| format!("git merge-base: {e}"))?;
         match status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => Err(format!(
-                "git merge-base --is-ancestor {commit} {}: {status}",
-                self.base
+                "git merge-base --is-ancestor {commit} {base}: {status}"
             )),
         }
     }

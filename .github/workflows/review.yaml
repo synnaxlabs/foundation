@@ -5,7 +5,7 @@ name: Review
 # run from a comment reports on `main`, not on the PR.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   issue_comment:
     types: [created, edited, deleted]
   merge_group:
