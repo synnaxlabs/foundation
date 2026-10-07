@@ -33,6 +33,7 @@ mod address;
 mod class;
 mod code;
 pub mod datagram;
+mod dial;
 mod error;
 #[cfg_attr(
     not(test),
@@ -44,8 +45,7 @@ pub mod port;
     not(test),
     expect(
         dead_code,
-        reason = "`Transport::dial` and the streams and datagrams of `Session` are the \
-                  next users (#68)"
+        reason = "the streams and datagrams of `Session` are the next users (#68)"
     )
 )]
 mod quic;
@@ -92,6 +92,7 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// or timed out. Then it frees its [`port::Part`], so a later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
+    clock: env::clock::Clock,
 }
 
 impl Transport {
@@ -113,22 +114,26 @@ impl Transport {
     /// ```
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         config.check()?;
+        let clock = config.clock.clone();
         Ok(Self {
             carrier: quic::Carrier::new(config, part),
+            clock,
         })
     }
 
     /// Connects to `peer` at one of `addresses`, and checks that the peer holds
     /// `peer`'s private key. It tries direct UDP addresses first, then direct TCP,
-    /// then relays. It starts the next address when the current one fails or has not
-    /// answered after a short stagger, and keeps the first session that completes
+    /// then relays. It starts the next address 250 ms after the newest attempt
+    /// started, or at once when it fails, and keeps the first session that completes
     /// (RFC 8305). An address where some other key answers counts as a failure,
     /// because addresses can be stale.
     ///
     /// # Errors
     ///
-    /// [`Error::Unreachable`] with the cause at each address when none gives a
-    /// session.
+    /// [`Error::Network`] when the socket is broken, or breaks before an attempt
+    /// connects, or [`Error::Unreachable`] with the cause at each address when none
+    /// gives a session. A session that connected before a break is given, and ends
+    /// with [`Error::Network`].
     ///
     /// ```
     /// use std::net::SocketAddr;
@@ -146,8 +151,8 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let _ = (peer, addresses);
-        todo!("#68")
+        let dialed = dial::dial(&self.carrier, &self.clock, peer, addresses).await;
+        dialed.map(Session::new)
     }
 
     /// Waits for the next session that a peer opened and the node routed to this
