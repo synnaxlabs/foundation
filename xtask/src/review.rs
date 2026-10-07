@@ -67,8 +67,7 @@ struct Malformed {
 /// or the PR record lacks a field.
 pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
     let found = fetch(pr).and_then(|record| {
-        let base = format!("origin/{}", record.base);
-        let history = history::History::new(root, &base);
+        let history = history::History::new(root, &record.base);
         problems(
             &record,
             head,

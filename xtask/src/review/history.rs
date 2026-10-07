@@ -6,13 +6,16 @@ use std::process::Command;
 /// The history of a git repository, and the branch that PRs in it merge into.
 pub(crate) struct History<'a> {
     root: &'a Path,
-    base: &'a str,
+    /// The full ref of the base, so a tag of the same short name cannot take its
+    /// place.
+    base: String,
 }
 
 impl<'a> History<'a> {
-    /// The history of the repository at `root`, where PRs merge into the ref `base`
-    /// (for example `origin/main`).
-    pub(crate) fn new(root: &'a Path, base: &'a str) -> Self {
+    /// The history of the repository at `root`, where PRs merge into the branch
+    /// `base` (for example `main`) of the remote `origin`.
+    pub(crate) fn new(root: &'a Path, base: &str) -> Self {
+        let base = format!("refs/remotes/origin/{base}");
         Self { root, base }
     }
 
@@ -158,7 +161,9 @@ impl<'a> History<'a> {
     /// least 7 digits, or `None`. A ref is never read, so a tag named like a prefix
     /// cannot take the commit's place.
     fn named(&self, text: &str) -> Result<Option<String>, String> {
-        if text.len() < 7 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !(7..=40).contains(&text.len())
+            || !text.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return Ok(None);
         }
         let objects = self.git(&["rev-parse", &format!("--disambiguate={text}")])?;
@@ -177,7 +182,7 @@ impl<'a> History<'a> {
     fn on_base(&self, commit: &str) -> Result<bool, String> {
         let status = Command::new("git")
             .current_dir(self.root)
-            .args(["merge-base", "--is-ancestor", commit, self.base])
+            .args(["merge-base", "--is-ancestor", commit, &self.base])
             .status()
             .map_err(|e| format!("git merge-base: {e}"))?;
         match status.code() {

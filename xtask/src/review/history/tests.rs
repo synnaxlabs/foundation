@@ -61,11 +61,11 @@ impl Repo {
     }
 
     fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
-        History::new(&self.dir, "origin/main").reaches(end, head)
+        History::new(&self.dir, "main").reaches(end, head)
     }
 
     fn code_change(&self, from: &str, end: &str) -> Result<Option<String>, String> {
-        History::new(&self.dir, "origin/main").code_change(from, end)
+        History::new(&self.dir, "main").code_change(from, end)
     }
 }
 
@@ -475,4 +475,46 @@ fn a_tag_named_like_an_end_prefix_does_not_reach() {
     let head = repo.commit("a.rs", "fn a() {}\n");
     repo.git(&["tag", &end[..8], &head]);
     assert_eq!(repo.reaches(&end[..8], &head), Ok(false));
+}
+
+#[test]
+fn a_tag_named_like_the_base_does_not_put_a_commit_on_it() {
+    let (repo, end) = Repo::with_pr("tagbase");
+    repo.git(&["switch", "--quiet", "-c", "side", "origin/main"]);
+    let side = repo.commit("a.rs", "fn unreviewed() {}\n");
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["tag", "origin/main", &side]);
+    repo.git(&["merge", "--quiet", "--no-edit", &side]);
+    assert_eq!(repo.reaches(&end, &repo.head()), Ok(false));
+}
+
+#[test]
+fn hex_after_a_full_sha_names_no_commit() {
+    let (repo, end) = Repo::with_pr("longhex");
+    for zeros in [1, 25] {
+        let long = format!("{end}{}", "0".repeat(zeros));
+        assert_eq!(repo.reaches(&long, &end), Ok(false));
+        assert_eq!(
+            repo.code_change(&long, &end),
+            Ok(Some(format!("has `{long}`, which names no commit")))
+        );
+    }
+}
+
+#[test]
+fn a_prefix_of_two_commits_names_no_commit() {
+    let (repo, _) = Repo::with_pr("twins");
+    let tree = repo.git(&["hash-object", "-t", "tree", "/dev/null"]);
+    let shas = [17902, 26499].map(|n| {
+        let body = format!(
+            "tree {tree}\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\n{n}\n"
+        );
+        std::fs::write(repo.dir.join("body"), body).unwrap();
+        repo.git(&["hash-object", "-t", "commit", "-w", "body"])
+    });
+    for sha in &shas {
+        assert_eq!(&sha[..7], "303b29b");
+        assert_eq!(repo.reaches(&sha[..7], sha), Ok(false));
+        assert_eq!(repo.reaches(sha, sha), Ok(true));
+    }
 }
