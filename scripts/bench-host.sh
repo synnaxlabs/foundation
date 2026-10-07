@@ -12,10 +12,11 @@
 # It runs base, head, base, head, so a drift of the host shows as a difference
 # between the two runs of one commit.
 #
-# Needs `aws` with credentials for the account of the test budget, `gh`, `ssh`, and
-# `curl`. Before the launch, it checks the spot price and the day's ledger, and posts
-# the cap on the ledger issue. On exit, for any reason, it ends the host, checks that
-# no host of the issue still runs, and posts the hours on the ledger.
+# Runs from any machine with `aws` (credentials for the account of the test budget),
+# `gh`, `ssh`, `curl`, and bash 3.2 or later. It needs no clone. Before the launch,
+# it checks the spot price and the day's ledger, and posts the cap on the ledger
+# issue. On exit, for any reason, it ends the host, checks that no host of the issue
+# still runs, and posts the hours on the ledger.
 #
 # Environment (each has a default):
 #   BENCH_REGION     AWS region (us-east-1)
@@ -55,16 +56,19 @@ for tool in aws gh ssh curl; do
 done
 [[ $minutes -le 240 ]] || fail "a host lives at most 240 min"
 [[ $issue =~ ^[0-9]+$ ]] || fail "the issue is a number"
-base=$(git rev-parse --verify "$base^{commit}")
-head=$(git rev-parse --verify "$head^{commit}")
+base=$(gh api "repos/$repo/commits/$base" --jq .sha)
+head=$(gh api "repos/$repo/commits/$head" --jq .sha)
 
 ec2() { aws ec2 --region "$region" "$@"; }
 
 # The cap is the spot price limit times the lifetime: the host cannot cost more.
 cap=$(awk -v p="$price_max" -v m="$minutes" 'BEGIN { printf "%.2f", p * m / 60 }')
+# The highest price over the zones, because the launch can go to any of them.
 spot=$(ec2 describe-spot-price-history --instance-types "$type" \
-    --product-descriptions Linux/UNIX --max-items 1 \
-    --query 'SpotPriceHistory[0].SpotPrice' --output text)
+    --product-descriptions Linux/UNIX --start-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --query 'SpotPriceHistory[].SpotPrice' --output text | tr '\t' '\n' | sort -n |
+    tail -1)
+[[ -n $spot && $spot != None ]] || fail "no spot price for $type in $region"
 if awk -v s="$spot" -v m="$price_max" 'BEGIN { exit !(s > m) }'; then
     fail "spot $type is $spot USD an hour, over $price_max"
 fi
