@@ -176,6 +176,24 @@ fn poll(set: &Weak<RefCell<Set>>, number: u64, cx: &mut Context<'_>) -> Poll<()>
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
+mod tests {
+    use std::sync::Arc;
+
+    use super::pair;
+
+    #[test]
+    fn a_task_pushed_after_the_inbox_drops_is_dropped() {
+        let (queue, inbox) = pair();
+        assert_eq!(format!("{queue:?}"), "Queue");
+        drop(inbox);
+        let task = Arc::new(());
+        queue.push(Arc::clone(&task));
+        assert_eq!(Arc::strong_count(&task), 1);
+    }
+}
+
+#[cfg(test)]
 #[cfg(loom)]
 mod model {
     use loom::future::block_on;
