@@ -525,6 +525,34 @@ mod tests {
         assert_eq!(head.series, 2);
     }
 
+    /// The head carries the range of the session's index group, not the first group.
+    #[test]
+    fn gives_the_range_of_the_index_group_of_the_session() {
+        let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
+        let mut interner = Interner::new();
+        let [_, _, index, value] =
+            [1, 2, 4, 5].map(|k| interner.slots().assign(key(k)));
+        let set = interner.intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(2), I64)],
+            },
+            Group {
+                index: key(4),
+                data: &[(key(5), I64)],
+            },
+        ]);
+        let lens: Vec<_> = (0..4).map(|entry| (entry, 8)).collect();
+        let mut draft = Draft::new(&pool, &set, Form::Encoded, &lens).expect("room");
+        draft.set_count(0, 1);
+        draft.set_count(1, 3);
+        let frame = draft.freeze(Path::Live);
+        let mut places = Places::new([index, value].into(), index);
+        let head = places.lay(&frame, &set);
+        assert_eq!(Some(head.range), frame.range(1));
+        assert_ne!(frame.range(0), frame.range(1));
+    }
+
     /// A key listed twice has the place of its first listing, and the second listing
     /// holds a place with no series.
     #[test]

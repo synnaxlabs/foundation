@@ -250,6 +250,34 @@ fn opens_a_session_of_known_keys() {
 }
 
 #[test]
+fn finishes_when_the_peer_finishes_before_the_open() {
+    let served = served(59, Class::Complete, false, |mut peer| async move {
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+    assert_eq!(served, Some(Ok(())));
+}
+
+#[test]
+fn finishes_when_the_peer_finishes_in_the_keys_run() {
+    let served = served(60, Class::Complete, false, |mut peer| async move {
+        let open = Open {
+            mode: Mode::Complete { limit_bytes: 0 },
+            channels: 2,
+        };
+        let mut out = vec![0; open.encoded_len()];
+        open.encode(&mut out);
+        peer.send(&out).await.expect("sends the open");
+        let mut out = vec![0; keys::LEN];
+        keys::encode(&[channel::Key::from_u128(1)], &mut out);
+        peer.send(&out).await.expect("sends a key");
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+    assert_eq!(served, Some(Ok(())));
+}
+
+#[test]
 fn stops_an_open_of_an_unknown_key_with_unknown() {
     let served = served(42, Class::Complete, false, |mut peer| async move {
         peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 9]).await;
@@ -577,6 +605,8 @@ fn le(values: &[i64]) -> Vec<u8> {
         .collect()
 }
 
+/// The open lists `value` twice: its series has the place of its first listing, and
+/// `time` has place 2.
 #[test]
 #[ignore = "waits on #68"]
 fn sends_each_frame_through_the_places_of_the_open() {
@@ -592,13 +622,13 @@ fn sends_each_frame_through_the_places_of_the_open() {
         assert_eq!(test.hub.serve(incoming).await, Ok(()));
     };
     session(56, Class::Complete, false, home, |mut peer| async move {
-        let mut reader = open_complete(&mut peer, &[2, 1], 1 << 20).await;
+        let mut reader = open_complete(&mut peer, &[2, 2, 1], 1 << 20).await;
         for (values, stamps) in [(&[10, 20][..], &[0, 1][..]), (&[30], &[2])] {
             let got = got(&mut peer, &mut reader).await.expect("a frame");
             let len = u32::try_from(values.len() * 8).expect("fits");
             assert_eq!(got.head.path, FramePath::Live);
             assert_eq!(got.head.series, 2);
-            assert_eq!(got.ends, [(0, len), (1, 2 * len)]);
+            assert_eq!(got.ends, [(0, len), (2, 2 * len)]);
             let first = i64::from_le_bytes(
                 got.body[values.len() * 8..][..8].try_into().expect("8"),
             );
@@ -608,6 +638,31 @@ fn sends_each_frame_through_the_places_of_the_open() {
                 .collect();
             assert_eq!(got.body, [le(values), le(&stamps)].concat());
         }
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A credit raises a grant of 0, so the session gets the frame written after it.
+#[test]
+#[ignore = "waits on #68"]
+fn sends_a_frame_once_a_credit_raises_the_grant() {
+    let home = |test: Test, incoming| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            write(&mut writer, &[now], &[10]);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+    };
+    session(61, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[2, 1], 0).await;
+        peer.credit(1 << 20).await.expect("sends the credit");
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(got.ends, [(0, 8), (1, 16)]);
+        assert_eq!(got.body[..8], le(&[10]));
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });
