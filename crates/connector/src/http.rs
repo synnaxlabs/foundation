@@ -1,6 +1,7 @@
 //! One HTTP/1.1 client for every connector, over `env`.
 
 mod body;
+mod pool;
 mod stream;
 
 use std::fmt;
@@ -16,10 +17,11 @@ use env::tasks::Tasks;
 use http::uri::{PathAndQuery, Scheme};
 use http::{HeaderValue, Request, Response, Uri, header};
 use http_body::Body as _;
-use hyper::client::conn::http1;
+use hyper::client::conn::http1::{self, SendRequest};
 use types::time::Span;
 
 use self::body::Whole;
+use self::pool::Pool;
 use self::stream::Stream;
 
 const OPTIONS: tcp::Options = tcp::Options {
@@ -29,8 +31,10 @@ const OPTIONS: tcp::Options = tcp::Options {
     delayed: false,
 };
 
-/// Sends HTTP/1.1 requests over `env`. Each request gets its own connection. It stays
-/// on the thread that made it.
+/// Sends HTTP/1.1 requests over `env`. It keeps one idle connection for each origin
+/// and reuses it. It drops an idle connection after 90 s or when the server closes
+/// it, and it drops the connection of a request that failed. A dropped client closes
+/// its idle connections. It stays on the thread that made it.
 ///
 /// ```
 /// use bytes::Bytes;
@@ -50,6 +54,7 @@ pub struct Client {
     tasks: Tasks,
     timeout: Span,
     body_max: usize,
+    pool: Pool,
 }
 
 /// What a [`Client`] needs.
@@ -79,6 +84,7 @@ impl Client {
             tasks: config.tasks,
             timeout: config.timeout.max(Span::ZERO),
             body_max: config.body_max,
+            pool: Pool::default(),
         }
     }
 
@@ -120,16 +126,10 @@ impl Client {
     ) -> Result<Response<Bytes>, Error> {
         let (mut parts, body) = request.into_parts();
         let remote = remote(&parts.uri)?;
-        let config = tcp::Config {
-            remote,
-            options: OPTIONS,
+        let mut sender = match self.pool.take(remote, self.clock.now()) {
+            Some(sender) => sender,
+            None => self.connect(remote).await?,
         };
-        let tcp = self.net.connect(&config).await.map_err(Error::Connect)?;
-        let (mut sender, connection) = http1::handshake(Stream(tcp)).await?;
-        // `hyper` gives a connection error to the request in flight, which reports it.
-        self.tasks.spawn(async move {
-            let _reported: Result<(), hyper::Error> = connection.await;
-        });
         origin_form(&mut parts);
         let response = sender
             .send_request(Request::from_parts(parts, Whole(Some(body))))
@@ -146,7 +146,23 @@ impl Client {
                 bytes.extend_from_slice(&data);
             }
         }
+        self.pool.put(remote, sender, self.clock.now());
         Ok(Response::from_parts(parts, Bytes::from(bytes)))
+    }
+
+    async fn connect(&self, remote: SocketAddr) -> Result<SendRequest<Whole>, Error> {
+        let config = tcp::Config {
+            remote,
+            options: OPTIONS,
+        };
+        let tcp = self.net.connect(&config).await.map_err(Error::Connect)?;
+        let (sender, connection) = http1::handshake(Stream(tcp)).await?;
+        // `hyper` gives a connection error to the request in flight, which reports it.
+        // An idle connection that fails is closed, and the pool does not reuse it.
+        self.tasks.spawn(async move {
+            let _reported: Result<(), hyper::Error> = connection.await;
+        });
+        Ok(sender)
     }
 }
 

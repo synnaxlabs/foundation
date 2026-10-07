@@ -1613,7 +1613,12 @@ How to read this record:
   2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
   HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
   HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
-  Decided by the coordinator with `advisor` on 2026-10-06 (#341).
+  Decided by the coordinator with `advisor` on 2026-10-06 (#341). The client keeps one
+  idle connection for each origin and drops one that is idle longer than 90 s (the
+  `hyper-util` default), read on the `env` clock: it sends no keep-alive, and a
+  firewall or NAT may drop the state of an idle stream. Decided by the coordinator
+  with `advisor` on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
