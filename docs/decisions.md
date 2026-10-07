@@ -2161,11 +2161,12 @@ How to read this record:
   session that other protocols use, and the one session for each pair of nodes is the
   job of `transport` (#1363) (approved by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
-  message for a node of which the group has no record drops in the same way. The
-  tasks end when the group stops or when each `Mesh` drops, also a task that waits in
-  a dial or in a send. The task of a voter that a change removed, to which `raft`
-  sends no more messages, ends only then (#1401) (approved by the architect,
-  2026-10-07T13:40:50Z:
+  message for a node of which the group has no record drops in the same way (approved by
+  the architect, 2026-10-07T17:29:35Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6043221155). The tasks
+  end when the group stops or when each `Mesh` drops, also a task that waits in a dial
+  or in a send. The task of a voter that a change removed, to which `raft` sends no more
+  messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881).
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
