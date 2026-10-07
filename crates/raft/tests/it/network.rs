@@ -183,7 +183,7 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
-    // During `settle`, a pre-candidate's reply at a term past every led one was
+    // During `settle`, a candidate's reply at a term past every led one was
     // refused as unproven: the group cannot prove its term (#1485).
     unprovable: bool,
     crash: Vec<Option<Kept>>,
@@ -657,7 +657,7 @@ impl Network {
                     !self.quorum(to, &proof.voters.keys().copied().collect()),
                     "node {to} refuses a proven {body:?} at {term:?} from {from:?}"
                 );
-                // A pre-candidate at a term past every led one (#1485).
+                // A candidate at a term past every led one (#1485).
                 if proof.grant == Grant::PreVote
                     && self.leaders.keys().all(|&led| led < term)
                 {

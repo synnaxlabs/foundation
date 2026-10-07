@@ -163,10 +163,12 @@ state on `main`.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
-  A second leader of a term whose leader it knows is `Error::SecondLeader`.
-  `raft` counts the keys of a proof, and `mesh::claim` checks each signature
-  against the voter's public key. Until the driver (#471) runs that check before
-  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
+  A second leader of a term whose leader it knows is `Error::SecondLeader`. The
+  exception is a voter that led a term at or above the node's committed one: it can
+  forge a link until #882 (the bullet above). `raft` counts the keys of a proof, and
+  `mesh::claim` checks each signature against the voter's public key. Until the
+  driver (#471) runs that check before `step`, a voter can forge the keys.
+  `raft/tests/it/hostile.rs` pins the refusal and the gap.
 - A voter that was down through a configuration change holds the old configuration.
   The new leader's message carries the chain of configuration entries below its
   term, each with the votes and the signature of the leader that wrote it

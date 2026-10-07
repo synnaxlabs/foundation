@@ -97,8 +97,7 @@ impl Change {
 // The log in memory. Entry `i` has index `i + 1`, and terms start above zero and
 // never decrease. Three indexes trail the end: `committed` is what a quorum holds,
 // `applied` is the last entry given to the caller to apply, and `stable` is the
-// last entry given to the caller to write. `voters` is the index of the last
-// configuration entry, or 0 for `base`, the configuration the node started with.
+// last entry given to the caller to write.
 #[derive(Debug)]
 pub(crate) struct Log {
     entries: Vec<Entry>,

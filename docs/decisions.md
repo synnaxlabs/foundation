@@ -1749,11 +1749,12 @@ How to read this record:
   reads, in its order: the proof's grants, each link of the chain that `step` reads
   (its votes in the link's term, then the change), each change an append carries
   (its votes in the entry's term, then the change), then the sender's grant. It
-  gives no link of a message for a lower term or of a reply from a node that is not
+  gives no claim of a message for a lower term or of a reply from a node that is not
   a peer, which `step` does not check. The list is the one `step` reads only when
   `step` gets the same message, with no call to the node between the two
   (architect, #881,
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078,
+  2026-10-07T06:32:04Z,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z, and
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
@@ -1777,38 +1778,42 @@ How to read this record:
   its commit index, and stops at the first link whose configuration the proof is a
   quorum of. Each link it reads must have a term below the message's, rise from the
   position at the commit index or the last link read (the index rises, the term does
-  not fall), hold `Vote` votes, and hold votes of a quorum of the configuration it
-  trusts: the last link read of a lower term, else the node's last committed
-  configuration entry of a lower term, else the configuration before its entries.
+  not fall), hold `Vote` votes, hold a configuration with at least one incoming
+  voter, and hold votes of a quorum of the configuration it trusts: the last link
+  read of a lower term, else the node's last committed configuration entry of a
+  lower term, else the configuration before its entries.
   The node keeps nothing from the chain: the leader's appends bring the entries. A
   voter that was down through a change so follows the leader that the change elected,
-  and helps elect the next one (`raft/tests/it/behind.rs`). A node that took its
-  term through another node's chain answers a stale message with its hard proof and
-  its own chain, which can fall short of the sender's configuration: the sender then
-  stays in its term until the leader's chain moves it, and the random runs check that
-  a leader's heartbeat or append is never unproven (builder, #881,
-  https://github.com/synnaxlabs/foundation/pull/1488). Known gap: a node that a
-  leave removed can reach, through pre-votes of the old configuration, a term that
-  no configuration entry stands behind; a change that adds it back then needs its
-  ack, and no node passes its term. The random runs reject such a run; the fix is
-  #1485 (architect,
+  and helps elect the next one (`raft/tests/it/behind.rs`). A node that took its term
+  through another node's chain answers a stale message with its hard proof and its own
+  chain, which can fall short of the sender's configuration: the sender then stays in
+  its term until the leader's chain moves it, and the random runs check that a
+  leader's heartbeat or append is never unproven (builder, #881, approved by the
+  architect,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043521735,
+  2026-10-07T17:45:39Z). Known gap: a node that a leave removed can reach, through
+  pre-votes of the old configuration, a term that no configuration entry stands
+  behind; a change that adds it back then needs its ack, and no node passes its term.
+  The random runs reject such a run; the fix is #1485 (architect,
   https://github.com/synnaxlabs/foundation/issues/1485#issuecomment-6042768573,
-  2026-10-07T17:05:00Z). A link is attested by its leader's signature and the votes
-  of its term alone, so a voter that led a term can sign a configuration entry it
-  never wrote, and prove any term with it: `raft` trusts its voters until #882,
-  which gives a link the signed acks of a quorum, and `prove` counts them. The test
-  `a_voter_that_led_a_term_can_forge_a_link_to_itself_and_prove_any_term` pins the
-  gap (architect,
+  2026-10-07T17:05:00Z). A link is attested by its leader's signature and the votes of
+  its term alone, so a voter that led a term can sign a configuration entry it never
+  wrote, and prove any term with it: `raft` trusts its voters until #882, which gives
+  a link the signed acks of a quorum, and `prove` counts them. The test
+  `a_voter_that_led_a_term_can_forge_a_link_to_itself_and_prove_any_term` pins the gap
+  (architect,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423,
-  2026-10-07T17:22:17Z). The chain
-  excludes a leader that a change the node missed made a voter (#1096). The log
-  keeps the indexes of its configuration entries, so a chain costs their number, not
-  the log's: the ruling deferred the index until a measured scan on a large log
-  (architect, #881,
-  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
-  2026-10-07T04:31:40Z), and the review of PR 2 measured a leader of 7 voters with
+  2026-10-07T17:22:17Z). The chain excludes a leader that a change the node missed
+  made a voter (#1096). The log keeps the indexes of its configuration entries, so a
+  chain costs their number, not the log's: the plan deferred the index until a
+  measured scan on a large log (builder, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6040930256,
+  2026-10-07T15:19:54Z), and the review of PR 2 measured a leader of 7 voters with
   1,000,000 entries and 6 silent peers at 41 to 44 ms per tick with the scan
-  (reviewer, https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042889435).
+  (reviewer,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042889435,
+  2026-10-07T17:11:00Z). With the index the same tick, its `ready` included, takes
+  0.33 µs (box1, Intel Xeon Platinum 8488C; `crates/raft/benches/chain.rs`).
   The advisor required a proof on every message and on each refusal, signatures
   only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks
   the signatures (MESH LOG).
@@ -1863,10 +1868,12 @@ How to read this record:
   `Error::Unproven`; `Hard.leader` keeps it through a restart (#750). The person
   approved it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
   A voter that does not lead cannot make a node follow it: a leader claim needs a
-  quorum of grants (RAFT SURFACE, #750). A false `AppendReply` still counts as held
-  (#882). Lost: a lease that drops a heartbeat or an `Append` of a higher term from a
-  node that is not the leader. A reply of a higher term ends any node's lease, and a
-  leader must step down on one; the lease also changed three etcd oracle tests. The
+  quorum of grants (RAFT SURFACE, #750), except a voter that led a term at or above
+  the node's committed one, which can forge a link until #882 (RAFT SURFACE). A
+  false `AppendReply` still counts as held (#882). Lost: a lease that drops a
+  heartbeat or an `Append` of a higher term from a node that is not the leader. A
+  reply of a higher term ends any node's lease, and a leader must step down on one;
+  the lease also changed three etcd oracle tests. The
   coordinator decided on 2026-10-06 under the person's delegation (#391). The person
   may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower

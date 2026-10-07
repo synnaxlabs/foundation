@@ -437,14 +437,16 @@ impl Raft {
         Ok(())
     }
 
-    /// Each claim of `message` that [`step`](Self::step) reads, with its signature:
-    /// the grants of its proof in rising key order; then the votes and the change of
-    /// each link of its chain that `step` reads; then the votes and the change of
-    /// each configuration an append carries; then the sender's grant. The list is
-    /// the one `step` reads only when `step` gets the same message, with no call to
-    /// this node between the two. The caller checks each signature against its
-    /// signer's key before `step`, and refuses a `None`: `step` keeps each signature
-    /// as it came.
+    /// Each claim of `message`, from another node to this one, that
+    /// [`step`](Self::step) reads, with its signature: the grants of its proof in
+    /// rising key order; then the votes and the change of each link of its chain
+    /// that `step` reads; then the votes and the change of each configuration an
+    /// append carries; then the sender's grant. A message for a lower term, or a
+    /// reply from a node that is not a peer, gives no claim: `step` reads none. The
+    /// list is the one `step` reads only when `step` gets the same message, with no
+    /// call to this node between the two. The caller checks each signature against
+    /// its signer's key before `step`, and refuses a `None`: `step` keeps each
+    /// signature as it came.
     pub fn claims<'a>(
         &'a self,
         message: &'a Message,
@@ -890,7 +892,10 @@ impl Raft {
         quorum: impl Fn(&Voters) -> bool,
     ) -> Verdict<'a> {
         let committed = self.log.committed();
-        let chain = &chain[chain.partition_point(|link| link.at.index <= committed)..];
+        // A linear skip: a hostile chain need not be sorted, and a binary search
+        // over one lets a link that `claims` never lists decide the verdict.
+        let above = chain.iter().position(|link| link.at.index > committed);
+        let chain = &chain[above.unwrap_or(chain.len())..];
         let Some(first) = chain.first() else {
             return Verdict {
                 read: chain,
@@ -3114,6 +3119,33 @@ mod tests {
             let mut bad = chain;
             bad[0].change.votes = proof(Grant::PreVote, 9, &[]);
             raft.step(heartbeat(2, bad)).unwrap();
+            assert_eq!((raft.term(), raft.leader()), (Term(2), Some(key(2))));
+        }
+
+        // Only the links before the first one above the commit index are skipped. A
+        // later link at or below it is read in its turn, and fails to rise, unless
+        // a link before it proved the term.
+        #[test]
+        fn an_unsorted_chain_is_read_from_its_first_link_above_the_commit_index() {
+            let [joint, leave] = <[Link; 2]>::try_from(shrink(&ALL)).unwrap();
+            let below = link(position(1, 0), 3, &ALL, plain(&[1, 2, 3]));
+            let unsorted = vec![joint.clone(), below.clone(), leave.clone()];
+            refuses(
+                &mut behind(&ALL),
+                heartbeat(2, unsorted),
+                "below after joint",
+            );
+            let start = Start {
+                entries: vec![Entry {
+                    at: joint.at,
+                    data: Data::Voters(joint.change),
+                }],
+                applied: 1,
+                ..start(&ALL, at_term(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            sent(&mut raft);
+            raft.step(heartbeat(2, vec![leave, below])).unwrap();
             assert_eq!((raft.term(), raft.leader()), (Term(2), Some(key(2))));
         }
 

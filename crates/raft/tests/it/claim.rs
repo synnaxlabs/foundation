@@ -625,7 +625,14 @@ proptest! {
             .claims(&message)
             .filter(|(claim, _)| matches!(claim, Claim::Change { .. }))
             .count();
-        let read = changes - appended;
+        // The receiver's log is empty, so `step` skips the links before the first
+        // one above index 0, and reads `read` links from there.
+        let skipped = message
+            .chain
+            .iter()
+            .position(|link| link.at.index > 0)
+            .unwrap_or(message.chain.len());
+        let read = skipped + changes - appended;
         prop_assert!(read <= message.chain.len());
         let outcome = |message: Message| {
             let mut raft = receiver(0);
