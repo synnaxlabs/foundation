@@ -654,34 +654,44 @@ mod buffer {
         }
     }
 
-    /// The budget holds one least ring, so shard 0's part fits and shard 1's does not.
+    /// With one least ring no part holds a ring; one byte short of two, shard 0's part
+    /// fits and shard 1's does not. Two least rings start.
     #[test]
     fn a_disk_budget_that_holds_no_ring_on_each_shard_starts_no_shard() {
         let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
+        let min = Size::from_bytes(4_227_072);
+        let cases = [(smallest, "2064KiB"), (2 * smallest - 1, "4227071B")];
+        for (bytes, shown) in cases {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let disk = Size::from_bytes(bytes);
+            let node = Node::start(Config {
+                disk,
+                ..config(&host, 1 << 20, Box::new(heap))
+            });
+            assert_eq!(host.shard_starts(), [], "{shown}");
+            assert_eq!(sim.run(), Ok(()));
+            let e = node.join().unwrap_err();
+            assert_eq!(
+                e,
+                Error::Disk {
+                    disk,
+                    cores: 2,
+                    min
+                },
+                "{shown}"
+            );
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "the disk budget {shown} holds no ring on each of 2 shards; it \
+                     needs at least 4128KiB"
+                )
+            );
+        }
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        let node = Node::start(Config {
-            disk: Size::from_bytes(smallest),
-            ..config(&host, 1 << 20, Box::new(heap))
-        });
-        assert_eq!(host.shard_starts(), []);
-        assert_eq!(sim.run(), Ok(()));
-        let e = node.join().unwrap_err();
-        let disk = Size::from_bytes(2_113_536);
-        let min = Size::from_bytes(4_227_072);
-        assert_eq!(
-            e,
-            Error::Disk {
-                disk,
-                cores: 2,
-                min
-            }
-        );
-        assert_eq!(
-            e.to_string(),
-            "the disk budget 2064KiB holds no ring on each of 2 shards; it needs at \
-             least 4128KiB"
-        );
+        assert_eq!(run_on_disk(&mut sim, &host, 2 * smallest), Ok(()));
     }
 
     /// The core count comes from the host. With 2^43 cores no `u64` budget holds a

@@ -107,9 +107,10 @@ impl Node {
     /// directory `shard-<i>` of its files, and makes it there when it is not there.
     /// The shards open their buffers one after another, in order of core. Returns
     /// once each shard runs or one has failed to start. When the disk budget holds no
-    /// ring on each shard, no shard starts. A failed start, a shard with no memory, a
-    /// data directory made for another shard count, or a buffer that does not open
-    /// stops the node, and [`Node::join`] returns its error.
+    /// ring on each shard, no shard starts, and [`Node::join`] gives [`Error::Disk`]
+    /// with the budget, the shard count, and the least budget. A failed start, a shard
+    /// with no memory, a data directory made for another shard count, or a buffer that
+    /// does not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
