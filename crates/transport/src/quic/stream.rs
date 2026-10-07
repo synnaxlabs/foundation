@@ -5972,7 +5972,11 @@ mod tests {
                 assert_eq!(send.write(&own), Ok(own.len()));
                 send.finish().expect("finished");
                 pair.run(RUN);
-                assert_eq!(resets(&mut pair) - before, 2, "a reset of each at the hello");
+                assert_eq!(
+                    resets(&mut pair) - before,
+                    2,
+                    "a reset of each at the hello"
+                );
             });
         }
 
