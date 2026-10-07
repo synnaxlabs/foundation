@@ -2272,10 +2272,11 @@ How to read this record:
   does not hang on the order of the list. A name whose rest is not a count in plain
   decimal (`shards-03`, `shards-+3`), or is zero, is not a record. With no record,
   rings up to `shard-<k>` are a record of `k + 1`, so a data directory made before
-  #1076 is checked too; a crash cannot leave a ring with no record. Each start syncs
-  the data directory before `shard-0`, also when the record is there, because a
-  process crash can leave it unsynced. A one-sector file lost: it needs a block, a
-  write, two syncs, and a decode. Decided by the architect, #1076:
+  #1076 is checked too; a crash cannot leave a ring with no record. A name
+  `shard-<usize::MAX>` is not a ring, because no node has a shard of that index.
+  Each start syncs the data directory before `shard-0`, also when the record is
+  there, because a process crash can leave it unsynced. A one-sector file lost: it
+  needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
   https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
