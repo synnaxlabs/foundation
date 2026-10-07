@@ -279,7 +279,7 @@ const fn code(scalar: Scalar) -> u8 {
 }
 
 /// The scalar with the code `code`, if any. [`code`] is its inverse.
-const fn scalar(code: u8) -> Option<Scalar> {
+pub(crate) const fn scalar(code: u8) -> Option<Scalar> {
     Some(match code {
         0 => Scalar::Bool,
         1 => Scalar::I8,
