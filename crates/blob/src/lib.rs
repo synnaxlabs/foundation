@@ -657,6 +657,20 @@ mod tests {
         }
 
         #[test]
+        fn of_a_chunk_of_the_largest_block_round_trips() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let pool = create_pool(2048);
+                let largest = pool.largest();
+                let store = open_with(&node, pool).await.unwrap();
+                let (digest, block) = chunk(7, largest);
+                store.put(digest, &block).await.unwrap();
+                assert_eq!(*store.get(digest).await.unwrap().unwrap(), *block);
+            })
+            .unwrap();
+        }
+
+        #[test]
         fn of_a_chunk_longer_than_the_largest_block_writes_nothing() {
             let (mut sim, node) = create_default_node(0);
             sim.run_on(&node, |node, _| async move {
@@ -1204,6 +1218,19 @@ mod tests {
                     "{crash:?}: only {torn_chunks} cuts left a chunk in flight absent"
                 );
             }
+        }
+    }
+
+    mod state {
+        use super::*;
+
+        #[test]
+        fn debug_names_each_variant() {
+            assert_eq!(format!("{:?}", State::Listed), "Listed");
+            assert_eq!(format!("{:?}", State::Held), "Held");
+            assert_eq!(format!("{:?}", State::Writing(Vec::new())), "Writing([])");
+            let closing = State::Closing(Box::pin(async {}));
+            assert_eq!(format!("{closing:?}"), "Closing(..)");
         }
     }
 
