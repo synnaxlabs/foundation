@@ -11,6 +11,7 @@ pub mod key;
 pub mod node_settings;
 pub mod placement;
 pub mod region;
+pub mod retention;
 pub mod time;
 pub mod tree;
 pub mod unit;

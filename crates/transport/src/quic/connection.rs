@@ -19,7 +19,7 @@ use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
 /// that endpoint gets the same key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     /// noq-proto's handle, which it gives to a new connection after this one drains.
     pub(super) handle: ConnectionHandle,
@@ -113,6 +113,10 @@ impl Connection {
             } else {
                 break;
             }
+        }
+        // After every event, so that each stop has reset its stream.
+        if self.live() {
+            self.streams.pump(&mut self.inner, events);
         }
         assert!(
             !drained || !self.live(),

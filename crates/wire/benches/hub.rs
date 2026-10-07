@@ -1,8 +1,14 @@
-//! The cost of the hub messages on a frame's path: a head and its ends.
+//! The cost of the hub messages on a frame's path: a head, its ends, its body, and a
+//! credit.
 
 use divan::Bencher;
-use types::frame::{Path, Range};
-use wire::hub::{Head, Reply, ends};
+use types::{
+    channel,
+    frame::{self, Path, Range},
+};
+use wire::hub::{
+    Credit, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply, ends, keys,
+};
 
 const SERIES: [u32; 4] = [1, 3, 1_000, 100_000];
 
@@ -17,6 +23,24 @@ fn run_of(series: u32) -> Vec<u8> {
     run
 }
 
+fn head(series: u32) -> Reply {
+    Reply::Head(Head {
+        path: Path::Live,
+        range: Range { seq: 7, count: 1 },
+        series,
+    })
+}
+
+/// A reader of `places` places that the home opened.
+fn opened(places: u32) -> Reader {
+    let mut reader = Reader::new(&Open {
+        mode: Mode::Latest,
+        channels: places,
+    });
+    reader.decode(&[1]).expect("the session opens");
+    reader
+}
+
 #[divan::bench(args = SERIES)]
 fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
     let mut run =
@@ -27,29 +51,144 @@ fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
     });
 }
 
+/// A home's list of each place and its home entry, sorted by place, with entries in
+/// the reverse order of places, and the series length of each entry.
+fn list_of(series: u32) -> (Vec<(u32, usize)>, Vec<usize>) {
+    let places = (0..series)
+        .map(|place| (place, usize::try_from(series - 1 - place).expect("fits")))
+        .collect();
+    (
+        places,
+        (0..series)
+            .map(|entry| usize::try_from(entry % 13 + 1).expect("fits"))
+            .collect(),
+    )
+}
+
+/// The ends of a frame as the home writes them: from its list by place through
+/// `frame::ends`, in messages of 184 ends.
+#[divan::bench(args = SERIES)]
+fn encode_ends_by_place(bencher: Bencher<'_, '_>, series: u32) {
+    let (places, lens) = list_of(series);
+    let mut run =
+        vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
+    bencher.bench_local(|| {
+        let lens = divan::black_box(&places)
+            .iter()
+            .map(|&(place, entry)| (place, lens[entry]));
+        let mut each = frame::ends(lens)
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
+        for message in run.chunks_mut(184 * ends::LEN) {
+            ends::encode(each.by_ref(), message);
+        }
+    });
+}
+
+/// Decodes the run of ends of a head, in one message.
 #[divan::bench(args = SERIES)]
 fn decode_ends(bencher: Bencher<'_, '_>, series: u32) {
     let run = run_of(series);
+    let mut out = [0; 18];
+    head(series).encode(&mut out);
+    bencher
+        .with_inputs(|| {
+            let mut reader = opened(series);
+            reader.decode(&out).expect("the head decodes");
+            reader
+        })
+        .bench_local_refs(|reader| match reader.decode(divan::black_box(&run)) {
+            Ok(FromHome::Ends { ends, .. }) => sum(ends),
+            other => panic!("the ends did not decode: {other:?}"),
+        });
+}
+
+/// Decodes a frame on one reader: a head, its ends, and its body, one message each.
+#[divan::bench(args = SERIES)]
+fn decode_a_frame(bencher: Bencher<'_, '_>, series: u32) {
+    let run = run_of(series);
+    let body = vec![7; usize::try_from(series * 8).expect("a u32 fits a usize")];
+    let mut out = [0; 18];
+    head(series).encode(&mut out);
+    let mut reader = opened(series);
     bencher.bench_local(|| {
-        ends::decode(divan::black_box(&run))
-            .expect("the run has ends")
-            .fold(0_u64, |sum, (place, end)| {
-                sum.wrapping_add(u64::from(place))
-                    .wrapping_add(u64::from(end))
-            })
+        reader
+            .decode(divan::black_box(&out))
+            .expect("the head decodes");
+        let sum = match reader.decode(divan::black_box(&run)) {
+            Ok(FromHome::Ends { ends, .. }) => sum(ends),
+            other => panic!("the ends did not decode: {other:?}"),
+        };
+        match reader.decode(divan::black_box(&body)) {
+            Ok(FromHome::Body { bytes, last: true }) => {
+                sum.wrapping_add(u64::from(bytes[0]))
+            }
+            other => panic!("the body did not decode: {other:?}"),
+        }
+    });
+}
+
+/// Decodes a body of `messages` messages of 1 024 bytes, with where each starts.
+#[divan::bench(args = [1, 8, 64])]
+fn decode_a_body(bencher: Bencher<'_, '_>, messages: u32) {
+    let mut out = [0; 18];
+    head(1).encode(&mut out);
+    let mut run = [0; ends::LEN];
+    ends::encode([(0, messages * 1_024)], &mut run);
+    let body = vec![7; usize::try_from(messages * 1_024).expect("a u32 fits a usize")];
+    let mut reader = opened(1);
+    bencher.bench_local(|| {
+        reader.decode(&out).expect("the head decodes");
+        reader.decode(&run).expect("the ends decode");
+        body.chunks(1_024).fold(0, |sum: usize, message| {
+            let at = reader.body().expect("the body comes next");
+            match reader.decode(divan::black_box(message)) {
+                Ok(FromHome::Body { bytes, .. }) => sum.wrapping_add(at + bytes.len()),
+                other => panic!("the body did not decode: {other:?}"),
+            }
+        })
     });
 }
 
 #[divan::bench]
 fn encode_and_decode_a_head(bencher: Bencher<'_, '_>) {
-    let head = Reply::Head(Head {
-        path: Path::Live,
-        range: Range { seq: 7, count: 1 },
-        series: 3,
-    });
     let mut out = [0; 18];
-    bencher.bench_local(|| {
-        divan::black_box(head).encode(&mut out);
-        Reply::decode(divan::black_box(&out))
+    bencher
+        .with_inputs(|| opened(3))
+        .bench_local_refs(|reader| {
+            divan::black_box(head(3)).encode(&mut out);
+            match reader.decode(divan::black_box(&out)) {
+                Ok(FromHome::Head(head)) => head,
+                other => panic!("the head did not decode: {other:?}"),
+            }
+        });
+}
+
+/// Decodes a credit on one home, after the open and its keys.
+#[divan::bench]
+fn decode_a_credit(bencher: Bencher<'_, '_>) {
+    let mut open = [0; 5];
+    Open {
+        mode: Mode::Latest,
+        channels: 1,
+    }
+    .encode(&mut open);
+    let mut key = [0; keys::LEN];
+    keys::encode(&[channel::Key::from_u128(1)], &mut key);
+    let mut credit = [0; Credit::LEN];
+    Credit { limit_bytes: 64 }.encode(&mut credit);
+    let mut home = Home::default();
+    for message in [open.as_slice(), &key] {
+        home.decode(message).expect("the open decodes");
+    }
+    bencher.bench_local(|| match home.decode(divan::black_box(&credit)) {
+        Ok(FromReader::Credit(credit)) => credit,
+        other => panic!("the credit did not decode: {other:?}"),
     });
+}
+
+fn sum(ends: ends::Iter<'_>) -> u64 {
+    ends.fold(0, |sum, (place, end)| {
+        sum.wrapping_add(u64::from(place))
+            .wrapping_add(u64::from(end))
+    })
 }
