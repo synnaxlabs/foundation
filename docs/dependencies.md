@@ -19,7 +19,7 @@ approval; pin the version you build against there.
 | `aws-lc-rs` | `transport`, signing, `mesh` (grants), `secret` (sealing) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `crc32c` | `buffer`, the `buffer_open` fuzz target | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
-| `bytes` | `transport`, `connector` (`http`) | The buffer type of `noq-proto`'s stream and datagram calls (#55) | MIT | 1.12.1 | 2026-10-04 |
+| `bytes` | `transport`, `connector` (`http`) | The buffer type of `noq-proto`'s stream and datagram calls (#55), and of the body of each `connector` HTTP request and response, as `hyper` takes it (R7) | MIT | 1.12.1 | 2026-10-04 |
 | `clap` | `ops` | The command line, generated from the operation table (C7, r7 area 8) | MIT or Apache-2.0 | 4.6.7 | 2026-10-05 |
 | `schemars` | `ops` | JSON Schemas of operation inputs for MCP tools (C7, r7 area 8) | MIT | 1.2.2 | 2026-10-05 |
 | `serde` | `ops` | Typed operation input and output for `--json` and MCP | MIT or Apache-2.0 | 1.0.229 | 2026-10-05 |
@@ -29,9 +29,9 @@ approval; pin the version you build against there.
 | `libloading` | `connector-ni` | Loads NI's DAQmx driver at run time, so the binary runs on hosts without it (R7). The person: "Ok libloading is fine" (#436) | ISC | 0.9.0 | 2026-10-06 |
 | `libc` | `os` | `clock_gettime`, `adjtimex`, and `ntp_gettime` for `env::clock` and `env::wall` (CLOCK SUSPEND, OS CLOCK BOUND), and `fcntl(F_PREALLOCATE)` on macOS for `env::files` create (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099); `rustix` has no `adjtimex`, no `ntp_gettime`, and no raw clock on macOS. The person: "Yes" (#117) | MIT or Apache-2.0 | 0.2.190 | 2026-10-06 |
 | `getrandom` | `os` | Random bytes from the OS for `env::entropy`; it handles short reads and the 256-byte limit of `getentropy`. The person: "Yes" (#117) | MIT or Apache-2.0 | 0.4.3 | 2026-10-06 |
-| `hyper` | `connector` (`http`) | The one HTTP client of every connector, with features `client` and `http1` only (R7, #341). Its tree: `httparse`, `want`, `try-lock`, `atomic-waker`, `smallvec`, `pin-project-lite`, `futures-core`, `itoa`, and `tokio` with `sync` only. The person: "Yes, R7 stands" (#341) | MIT | 1.12.0 | 2026-10-06 |
-| `http` | `connector` (`http`) | The request and response types of `hyper`, which the client's surface uses (R7, #341) | MIT or Apache-2.0 | 1.5.0 | 2026-10-06 |
-| `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341) | MIT | 1.1.0 | 2026-10-06 |
+| `hyper` | `connector` (`http`) | The one HTTP client of every connector, with features `client` and `http1` only (R7, #341). Its tree: `httparse`, `want`, `try-lock`, `atomic-waker`, `smallvec`, `pin-project-lite`, `futures-core`, `itoa`, and `tokio` with `sync` only. The person: "Yes, R7 stands" (#213, https://github.com/synnaxlabs/foundation/issues/213#issuecomment-6022143908). Approved on #341 (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.12.0 | 2026-10-06 |
+| `http` | `connector` (`http`) | The request and response types of `hyper`, which the client's surface uses (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT or Apache-2.0 | 1.5.0 | 2026-10-06 |
+| `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.1.0 | 2026-10-06 |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
