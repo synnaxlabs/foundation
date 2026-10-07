@@ -1003,6 +1003,7 @@ mod tests {
             let records: BTreeMap<_, _> = (1..10)
                 .filter_map(|of| Some((of, mesh.member(key(of))?)))
                 .collect();
+            // No call of `Mesh` gives the use count of a ticket.
             let state = mesh.group.borrow().state.clone();
             let mut board = board.lock().unwrap();
             board.states.insert(id, state);
@@ -2502,7 +2503,8 @@ mod tests {
                 assert_eq!(stamped, Err(Error::Unsynced), "{synced_before}");
             });
         }
-        let text = "this node has no mesh time at or after the Unix epoch, so it stamps no join";
+        let text = "this node has no mesh time at or after the Unix epoch, so it \
+                    stamps no join";
         assert_eq!(Error::Unsynced.to_string(), text);
     }
 

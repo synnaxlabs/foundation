@@ -225,7 +225,7 @@ pub(crate) enum Change {
 pub(crate) struct Join {
     /// The public key of the ticket that admits the node.
     pub(crate) ticket: PublicKey,
-    /// The mesh time of the join: the later edge of the proposing voter's mesh time.
+    /// The mesh time of the join: the later edge of the stamping voter's mesh time.
     pub(crate) at: Stamp,
     /// The node's first card, signed by the node.
     pub(crate) card: card::Unchecked,

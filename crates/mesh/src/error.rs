@@ -73,7 +73,8 @@ impl fmt::Display for Error {
                 f.write_str("the private key of this node is not the key of its member")
             }
             Self::Unsynced => f.write_str(
-                "this node has no mesh time at or after the Unix epoch, so it stamps no join",
+                "this node has no mesh time at or after the Unix epoch, so it stamps \
+                 no join",
             ),
             Self::Status(many) => many.fmt(f),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
