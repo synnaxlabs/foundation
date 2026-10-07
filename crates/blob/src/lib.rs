@@ -90,9 +90,10 @@ enum State {
     Held(u64),
     /// A put is in flight, and these calls wait for its end.
     Writing(Vec<Waker>),
-    /// The close of the file of a dropped put. A write open of the path is `Busy`
-    /// until it ends, so a call of the digest drives it to its end first.
-    Closing(Pin<Box<dyn Future<Output = ()>>>),
+    /// A call of a dropped put that must end before the next open of the path: the
+    /// close of its file, or its remove of a file of another length. A dropped call
+    /// still runs, so a call of the digest drives it to its end first.
+    Ending(Pending),
 }
 
 impl fmt::Debug for State {
@@ -103,10 +104,13 @@ impl fmt::Debug for State {
             Self::Writing(wakers) => {
                 f.debug_tuple("Writing").field(&wakers.len()).finish()
             }
-            Self::Closing(_) => f.write_str("Closing(..)"),
+            Self::Ending(_) => f.write_str("Ending(..)"),
         }
     }
 }
+
+/// A file call of a put, kept past a drop of the put.
+type Pending = Pin<Box<dyn Future<Output = Result<(), files::Error>>>>;
 
 /// The chunks of one node, by digest. One shard owns a store; its calls may overlap
 /// in time.
@@ -182,7 +186,7 @@ impl Store {
                 Peek::Absent | Peek::Listed => break,
                 Peek::Held(_) => return Ok(()),
                 Peek::Writing => self.wait(digest).await,
-                Peek::Closing => self.settle(digest).await,
+                Peek::Ending => self.settle(digest).await,
             }
         }
         let serial = self.puts.get();
@@ -208,7 +212,7 @@ impl Store {
                 Peek::Absent => return Ok(None),
                 Peek::Held(_) | Peek::Listed => return self.read(digest).await,
                 Peek::Writing => self.wait(digest).await,
-                Peek::Closing => self.settle(digest).await,
+                Peek::Ending => self.settle(digest).await,
             }
         }
     }
@@ -284,7 +288,10 @@ impl Store {
     /// Ends the close of the file of a dropped put of `digest`, so that the calls of
     /// the put end before the next open of the file. The digest is `Listed` after it.
     async fn settle(&self, digest: Digest) {
-        Flight::new(self, digest).close().await;
+        let ended = Flight::new(self, digest).end().await;
+        // The error of a dropped put's call is not this caller's: the next put makes
+        // the call again.
+        drop(ended);
     }
 
     fn path(&self, digest: Digest) -> PathBuf {
@@ -299,7 +306,7 @@ enum Peek {
     Listed,
     Held(u64),
     Writing,
-    Closing,
+    Ending,
 }
 
 impl Peek {
@@ -309,21 +316,21 @@ impl Peek {
             Some(State::Listed) => Self::Listed,
             Some(State::Held(serial)) => Self::Held(*serial),
             Some(State::Writing(_)) => Self::Writing,
-            Some(State::Closing(_)) => Self::Closing,
+            Some(State::Ending(_)) => Self::Ending,
         }
     }
 }
 
 /// A put in flight. It holds [`State::Writing`] for its digest, and its drop sets the
-/// next state and wakes the calls that waited. The file never drops with the flight:
-/// a drop keeps its close in [`State::Closing`], so that the file's calls end before
-/// the next write open of the path.
+/// next state and wakes the calls that waited. No call of the flight drops with it:
+/// a drop keeps its file's close, or its remove, in [`State::Ending`], so that the
+/// call ends before the next open of the path.
 struct Flight<'a> {
     store: &'a Store,
     digest: Digest,
     file: Option<File>,
-    closing: Option<Pin<Box<dyn Future<Output = ()>>>>,
-    /// The state after the flight, when the file is closed. `None` is absent.
+    pending: Option<Pending>,
+    /// The state after the flight, when no call is pending. `None` is absent.
     after: Option<State>,
 }
 
@@ -334,18 +341,18 @@ impl<'a> Flight<'a> {
             .chunks
             .borrow_mut()
             .insert(digest, State::Writing(Vec::new()));
-        let closing = match before {
+        let pending = match before {
             Some(State::Writing(_)) => {
                 panic!("invariant: one put of a digest is in flight at a time")
             }
-            Some(State::Closing(close)) => Some(close),
+            Some(State::Ending(pending)) => Some(pending),
             Some(State::Listed | State::Held(_)) | None => None,
         };
         Flight {
             store,
             digest,
             file: None,
-            closing,
+            pending,
             after: Some(State::Listed),
         }
     }
@@ -360,7 +367,7 @@ impl<'a> Flight<'a> {
         let file = match store.files.open(&path, mode).await {
             // A file of another length at the name is not the chunk.
             Err(files::Error::Length { .. }) => {
-                store.files.remove(&path).await?;
+                self.remove(&path).await?;
                 store.files.open(&path, mode).await?
             }
             opened => opened?,
@@ -371,36 +378,55 @@ impl<'a> Flight<'a> {
             file.sync().await
         }
         .await;
-        self.close().await;
+        self.close().await?;
         written?;
         store.files.sync_dir(&store.dir).await?;
         Ok(())
     }
 
-    /// Closes the file, which is open or closing. A drop during the close keeps the
-    /// close future, so the file's calls still end before the next open.
-    async fn close(&mut self) {
+    /// Removes the file at `path`, through [`Flight::end`].
+    async fn remove(&mut self, path: &Path) -> Result<(), files::Error> {
+        let files = self.store.files.clone();
+        let path = path.to_path_buf();
+        self.pending = Some(Box::pin(async move { files.remove(&path).await }));
+        self.end().await
+    }
+
+    /// Closes the file, through [`Flight::end`].
+    async fn close(&mut self) -> Result<(), files::Error> {
         if let Some(file) = self.file.take() {
-            self.closing = Some(Box::pin(file.close()));
+            self.pending = Some(Box::pin(async move {
+                file.close().await;
+                Ok(())
+            }));
         }
-        poll_fn(|cx| {
-            let close = self.closing.as_mut().expect("invariant: a close is set");
-            close.as_mut().poll(cx)
+        self.end().await
+    }
+
+    /// Drives the pending call to its end. A drop during it keeps the call, so it
+    /// still ends before the next open of the path.
+    async fn end(&mut self) -> Result<(), files::Error> {
+        let result = poll_fn(|cx| {
+            let pending = self.pending.as_mut().expect("invariant: a call is pending");
+            pending.as_mut().poll(cx)
         })
         .await;
-        self.closing = None;
+        self.pending = None;
+        result
     }
 }
 
 impl Drop for Flight<'_> {
     fn drop(&mut self) {
-        let closing: Option<Pin<Box<dyn Future<Output = ()>>>> = match self.file.take()
-        {
-            Some(file) => Some(Box::pin(file.close())),
-            None => self.closing.take(),
+        let pending: Option<Pending> = match self.file.take() {
+            Some(file) => Some(Box::pin(async move {
+                file.close().await;
+                Ok(())
+            })),
+            None => self.pending.take(),
         };
-        let after = match closing {
-            Some(close) => Some(State::Closing(close)),
+        let after = match pending {
+            Some(pending) => Some(State::Ending(pending)),
             None => self.after.take(),
         };
         let mut chunks = self.store.chunks.borrow_mut();
@@ -763,6 +789,44 @@ mod tests {
                 assert_eq!(&got[..], &block[..]);
             })
             .unwrap();
+        }
+
+        // The first put drops with its remove of a file of another length in
+        // flight. The remove still ends, and must not unlink the next put's file.
+        #[test]
+        fn after_a_put_dropped_in_its_remove_keeps_the_chunk() {
+            for seed in 0..64 {
+                let (mut sim, node) = create_default_node(seed);
+                let (digest, block) = chunk(7, 3000);
+                let put = block.clone();
+                sim.run_on(&node, move |node, _| async move {
+                    let (_, other) = chunk(7, 512);
+                    node.files().create_dir(Path::new(DIR)).await.unwrap();
+                    create_file(&node, &path(digest), &other).await;
+                    let store = open(&node).await.unwrap();
+                    {
+                        let mut first = pin!(store.put(digest, &put));
+                        assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                        assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                    }
+                    store.put(digest, &put).await.unwrap();
+                    node.clock().sleep(Span::SECOND).await;
+                })
+                .unwrap();
+                sim.crash(&node, Crash::Power);
+                sim.run_on(&node, move |node, _| async move {
+                    let store = open(&node).await.unwrap();
+                    let got = store.get(digest).await.unwrap();
+                    assert_eq!(
+                        node.files().list(Path::new(DIR)).await.unwrap(),
+                        vec![PathBuf::from(digest.to_string())],
+                        "seed {seed}"
+                    );
+                    assert_eq!(&got.unwrap()[..], &block[..], "seed {seed}");
+                })
+                .unwrap();
+            }
         }
 
         #[test]
@@ -1314,7 +1378,7 @@ mod tests {
                 let text = format!("{store:?}");
                 assert!(text.contains("Held(0)"), "{text}");
                 assert!(text.contains("Writing(1)"), "{text}");
-                assert!(text.contains("Closing(..)"), "{text}");
+                assert!(text.contains("Ending(..)"), "{text}");
                 assert!(!text.contains("0x"), "{text}");
             })
             .unwrap();
