@@ -24,7 +24,7 @@ impl Mesh {
     ///   one that its stream carries. The stream stops with code 2, but after the
     ///   answer only the half that `serve` reads stops.
     /// - [`Error::Spoofed`], [`Error::NotVoter`], [`Error::PeerNotVoter`],
-    ///   [`Error::Grant`], and [`Error::Raft`] when the group refuses a message.
+    ///   [`Error::Claim`], and [`Error::Raft`] when the group refuses a message.
     /// - [`Error::Pool`] when the pool has no block: while the group waits to write its
     ///   log, which refuses the message, or for the answer to a proposal, which the
     ///   peer then does not get, and the group can hold the entry of the proposal. A
@@ -134,7 +134,7 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Spoofed { .. }
         | Error::NotVoter { .. }
         | Error::PeerNotVoter { .. }
-        | Error::Grant(_)
+        | Error::Claim(_)
         | Error::NotMember(_)
         | Error::Member(_)
         | Error::WrongKey
