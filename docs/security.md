@@ -154,7 +154,15 @@ state on `main`.
   granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
   proof of the refuser's term, so a node that is behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
-  message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
+  message in term `u64::MAX`. Now that message needs a quorum of grants of a
+  configuration the node holds, or of one that a chain of signed configuration
+  entries proves (#750, #881). A link carries only its leader's signature and the
+  votes of its term, so a voter that led a term at or above the node's committed one
+  can sign a configuration entry it never wrote, to a configuration of itself alone,
+  put it in a chain, prove any term with its own grant, and so stop the group for
+  good. `raft` trusts its voters until #882, which gives a link the signed acks of
+  a quorum; `crates/raft/tests/it/hostile.rs` pins the gap (architect,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
   refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
@@ -164,21 +172,26 @@ state on `main`.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
-  A second leader of a term whose leader it knows is `Error::SecondLeader`.
-  `raft` counts the keys of a proof, and `mesh::claim` checks each signature
-  against the voter's public key. `Mesh::receive` runs that check before `step`, and
-  `Mesh::serve` runs it for each `raft` message of a one-way stream. No node serves
-  mesh streams yet (#471). `raft/tests/it/hostile.rs` pins the refusal.
-- A voter that was down through a configuration change holds the old configuration
-  and refuses a leader it cannot prove. It rejoins at the next election whose grants
-  are a quorum of what it holds. When a second node fails before that, the group
-  waits for an operator: wipe the voter's state and start it with no configuration.
-  The chain of proofs over configuration entries closes it (#881, a release
-  blocker). Its first PR gives each configuration entry the votes and the signature
-  of the leader that wrote it (`raft::Change`); the chain and its check are the
-  second PR (architect, #881,
+  A second leader of a term whose leader it knows is `Error::SecondLeader`. The
+  exception is a voter that led a term at or above the node's committed one: it can
+  forge a link until #882 (the bullet above). `raft` counts the keys of a proof, and
+  `mesh::claim` checks each signature against the voter's public key.
+  `Mesh::receive` runs that check before `step`, and `Mesh::serve` runs it for each
+  `raft` message of a one-way stream. No node serves mesh streams yet (#471).
+  `raft/tests/it/hostile.rs` pins the refusal and the gap.
+- A voter that was down through a configuration change holds the old configuration.
+  The new leader's message carries the chain of configuration entries below its
+  term, each with the votes and the signature of the leader that wrote it
+  (`raft::Change`). The voter reads the chain up to the entry whose configuration
+  the leader's votes are a quorum of, checks each signature it reads, and follows
+  the leader; it keeps nothing from the chain. A forged link, or one whose votes are
+  no quorum of the configuration before it, is refused, and the voter does not
+  change (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
-  `raft/tests/it/behind.rs` pins both.
+  `raft/tests/it/behind.rs` and `mesh::claim` pin it. The chain does not cover a
+  leader that the missed change made a voter (#1096), and it cannot prove a term that
+  no configuration entry stands behind: a node that a leave removed can reach such a
+  term, and a change that adds it back then stalls the group (#1485).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -340,5 +353,5 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages, `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
+messages (#1470), `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
 tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.
