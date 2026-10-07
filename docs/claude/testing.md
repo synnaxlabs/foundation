@@ -74,7 +74,9 @@ again once to prove that the failure replays (r16 59).
 - **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
   second test feature (r16 57).
 - **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
-  frames, bad offsets, stale fences) (r16 54).
+  frames, bad offsets, stale fences) (r16 54). A check against a bound has a test at
+  the bound and one on each side. `cargo mutants` turns `>=` only into `<`, so it
+  cannot show that the test past the bound is missing.
 - **Pair assertions.** Check data before it goes to disk or the wire, and again after
   it comes back (r16 55).
 - **No tautological tests.** Never repeat the implementation's formula or assert that
@@ -84,6 +86,11 @@ again once to prove that the failure replays (r16 59).
   a surface is `#[ignore = "waits on #<n>"]`.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
+- **A fixture helper is `create_*`.** A helper that builds the state a test runs
+  against is one: a resource (a pool, a store, files) or a collection that it fills (an
+  interner, the members of a region), also when it writes nothing. A helper that turns
+  its arguments into one value (`key(slot)`, `message(from, to, body)`), or builds the
+  type under test (`index()`, `carried(2)`), is named for that value.
 - **Snapshot tests for text output** (`plan`, diagnostics, formatted HCL, error
   `Display`) and **coverage marks** that prove a test reached a branch. Both need a
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
