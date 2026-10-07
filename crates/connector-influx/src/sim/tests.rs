@@ -75,7 +75,7 @@ fn gives_the_points_in_time_order() {
 #[test]
 fn a_point_outlives_the_tags_that_found_it() {
     let store = stored("m,a=b v=1 10\n");
-    let points: Vec<Point> = store
+    let points: Vec<Point<'_>> = store
         .points("m", &[("a", String::from("b").as_str())])
         .collect();
     assert_eq!(points[0].tags, &BTreeMap::from([("a".into(), "b".into())]));
@@ -352,17 +352,61 @@ fn refuses_a_field_of_another_type_and_stores_no_field_of_its_line() {
         error,
         Error::Conflict {
             line: "m w=1i,v=1i 20".into(),
-            field: "v".into(),
+            key: "v".into(),
             stored: Kind::Float,
             written: Kind::Integer,
         }
     );
     assert_eq!(
         error.to_string(),
-        "the line \"m w=1i,v=1i 20\" writes the float field \"v\" as integer"
+        "the line \"m w=1i,v=1i 20\" writes the float column \"v\" as integer"
     );
     assert_eq!(times(&store, "m", &[]), [10, 30, 40]);
     assert_eq!(times(&store, "n", &[]), [50]);
+}
+
+#[test]
+fn refuses_a_field_with_the_key_of_a_stored_tag() {
+    let (store, error) = refused("m,a=x v=1 10\nm a=1 20\n");
+    assert_eq!(
+        error,
+        Error::Conflict {
+            line: "m a=1 20".into(),
+            key: "a".into(),
+            stored: Kind::Tag,
+            written: Kind::Float,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "the line \"m a=1 20\" writes the tag column \"a\" as float"
+    );
+    assert_eq!(times(&store, "m", &[]), [10]);
+}
+
+#[test]
+fn refuses_a_tag_with_the_key_of_a_stored_field() {
+    let (store, error) = refused("m a=1 10\nm,a=x v=1 20\n");
+    assert_eq!(
+        error,
+        Error::Conflict {
+            line: "m,a=x v=1 20".into(),
+            key: "a".into(),
+            stored: Kind::Float,
+            written: Kind::Tag,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "the line \"m,a=x v=1 20\" writes the float column \"a\" as tag"
+    );
+    assert_eq!(times(&store, "m", &[]), [10]);
+}
+
+#[test]
+fn a_refused_line_stores_no_tag_kind() {
+    let (store, _) = refused("m v=1 10\nm,a=x v=1i 20\nm a=1 30\n");
+    assert_eq!(times(&store, "m", &[]), [10, 30]);
 }
 
 #[test]
@@ -378,6 +422,7 @@ fn names_each_kind() {
     .map(|field| field.kind().to_string())
     .collect();
     assert_eq!(names, ["float", "integer", "unsigned", "boolean", "string"]);
+    assert_eq!(Kind::Tag.to_string(), "tag");
 }
 
 #[test]

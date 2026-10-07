@@ -15,9 +15,10 @@ const TIMES: std::ops::RangeInclusive<i64> = i64::MIN + 2..=i64::MAX - 1;
 /// later write of the same point replaces the fields that it sets.
 ///
 /// It keeps the InfluxDB rules that a writer must keep: the syntax, the time range, the
-/// reserved names, one use of each key, finite floats, and one type for each field.
-/// Where InfluxDB versions differ, it keeps the strictest rule, but it stores a `u`
-/// integer, which InfluxDB 1 OSS refuses.
+/// reserved names, one use of each key, finite floats, and one type for each column,
+/// where a tag is a type. Where InfluxDB versions differ in a rule that it keeps, it
+/// keeps the strictest one, but it stores a `u` integer, which InfluxDB 1 OSS refuses.
+/// It keeps no size limit.
 #[derive(Debug, Default)]
 pub struct Store {
     measurements: BTreeMap<String, Measurement>,
@@ -50,8 +51,8 @@ impl Store {
     /// - [`Error::Duplicate`] for a key that comes more than once, in tags and fields
     ///   together.
     /// - [`Error::Infinite`] for a float that parses to infinity.
-    /// - [`Error::Conflict`] for a field whose type differs from the type stored for
-    ///   that key in the measurement.
+    /// - [`Error::Conflict`] for a tag or field whose type differs from the type stored
+    ///   for that key in the measurement. A tag is a type.
     ///
     /// No field of a line that is not valid is stored.
     pub fn write(&mut self, body: &[u8]) -> Result<(), Error> {
@@ -120,12 +121,23 @@ impl Store {
             }
             Ok(())
         };
+        let kinds = self.measurements.get(name).map(|stored| &stored.kinds);
+        let conflict =
+            |key: &str, written: Kind| match kinds.and_then(|kinds| kinds.get(key)) {
+                Some(&stored) if stored != written => Err(Error::Conflict {
+                    line: text.into(),
+                    key: key.into(),
+                    stored,
+                    written,
+                }),
+                _ => Ok(()),
+            };
         let mut tags = Tags::new();
         for (key, value) in parsed.series.tag_set.iter().flatten() {
             check(key.as_str())?;
+            conflict(key.as_str(), Kind::Tag)?;
             tags.insert(key.as_str().into(), value.as_str().into());
         }
-        let kinds = self.measurements.get(name).map(|stored| &stored.kinds);
         let mut fields = Fields::new();
         for (key, value) in &parsed.field_set {
             let key = key.as_str();
@@ -139,19 +151,13 @@ impl Store {
                     field: key.into(),
                 });
             }
-            if let Some(&stored) = kinds.and_then(|kinds| kinds.get(key))
-                && stored != field.kind()
-            {
-                return Err(Error::Conflict {
-                    line: text.into(),
-                    field: key.into(),
-                    stored,
-                    written: field.kind(),
-                });
-            }
+            conflict(key, field.kind())?;
             fields.insert(key.into(), field);
         }
         let measurement = self.measurements.entry(name.into()).or_default();
+        for key in tags.keys() {
+            measurement.kinds.insert(key.clone(), Kind::Tag);
+        }
         for (key, field) in &fields {
             measurement.kinds.insert(key.clone(), field.kind());
         }
@@ -222,9 +228,11 @@ fn field(value: &FieldValue<'_>) -> Field {
     }
 }
 
-/// The type of a field.
+/// The type of a column: a tag, or the type of a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// A tag. No [`Field`] has it.
+    Tag,
     /// [`Field::Float`].
     Float,
     /// [`Field::Integer`].
@@ -240,6 +248,7 @@ pub enum Kind {
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Tag => "tag",
             Self::Float => "float",
             Self::Integer => "integer",
             Self::Unsigned => "unsigned",
@@ -293,12 +302,13 @@ pub enum Error {
         /// The field key.
         field: String,
     },
-    /// A field's type differs from the type stored for that key in the measurement.
+    /// A key's type differs from the type stored for that key in the measurement. A tag
+    /// is a type, so a key is a tag or a field in each line.
     Conflict {
         /// The line.
         line: String,
-        /// The field key.
-        field: String,
+        /// The tag or field key.
+        key: String,
         /// The stored type.
         stored: Kind,
         /// The type in the line.
@@ -337,12 +347,12 @@ impl fmt::Display for Error {
             }
             Self::Conflict {
                 line,
-                field,
+                key,
                 stored,
                 written,
             } => write!(
                 f,
-                "the line {line:?} writes the {stored} field {field:?} as {written}"
+                "the line {line:?} writes the {stored} column {key:?} as {written}"
             ),
         }
     }
