@@ -483,8 +483,7 @@ impl Readers {
     }
 }
 
-/// Panics because no `Readers` gave `key`. It stays out of line to keep the panic
-/// code out of each caller that inlines a lookup.
+/// Panics because this `Readers` never gave `key`.
 #[cold]
 #[inline(never)]
 fn never_open(key: Key) -> ! {
