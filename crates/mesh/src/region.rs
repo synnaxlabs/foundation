@@ -385,6 +385,14 @@ pub(crate) enum Refused {
         /// The region's prefix.
         region: Name,
     },
+    /// The bytes of a committed entry of a known kind are not the body of that kind,
+    /// as [`Malformed::Body`].
+    Body {
+        /// The kind byte.
+        kind: u8,
+        /// The length of the bytes.
+        length: usize,
+    },
 }
 
 impl From<Unfit> for Refused {
@@ -408,6 +416,11 @@ impl fmt::Display for Refused {
             Self::Outside { prefix, region } => {
                 write!(f, "the prefix {prefix} is not under the region {region}")
             }
+            Self::Body { kind, length } => Malformed::Body {
+                kind: *kind,
+                length: *length,
+            }
+            .fmt(f),
         }
     }
 }
@@ -1047,39 +1060,6 @@ mod tests {
                 format!("the card of node {} is forged", node(3)),
             ),
             (
-                Unfit::Reserved {
-                    name: name("plant.@changes"),
-                }
-                .into(),
-                "the name plant.@changes has a segment that starts with `@`, which is \
-                 reserved for Foundation"
-                    .to_owned(),
-            ),
-            (
-                Unfit::Long {
-                    name: name("plant.a"),
-                    status: name("disk"),
-                }
-                .into(),
-                "the status channel plant.a.disk is longer than 255 bytes".to_owned(),
-            ),
-            (
-                Unfit::Duplicate { key: node(1) }.into(),
-                format!("node {} is already a member", node(1)),
-            ),
-            (
-                Unfit::Taken {
-                    name: name("plant.a"),
-                    key: node(1),
-                }
-                .into(),
-                format!("the name plant.a is taken by node {}", node(1)),
-            ),
-            (
-                Unfit::Reused { key: index(9) }.into(),
-                format!("the status channel key {} is already in use", index(9)),
-            ),
-            (
                 Refused::Unknown { public_key: key7 },
                 format!("no ticket {key7} is recorded"),
             ),
@@ -1092,23 +1072,70 @@ mod tests {
                 format!("ticket {key7} is already recorded"),
             ),
             (
-                Unfit::Outside {
-                    name: name("plants.edge"),
-                    region: name("plant"),
-                }
-                .into(),
-                "the name plants.edge is not under the region plant".to_owned(),
-            ),
-            (
                 Refused::Outside {
                     prefix: name("plants.edge"),
                     region: name("plant"),
                 },
                 "the prefix plants.edge is not under the region plant".to_owned(),
             ),
+            (
+                Refused::Body {
+                    kind: 2,
+                    length: 40,
+                },
+                "a change of kind 2 and 40 bytes is not in the byte form of its kind"
+                    .to_owned(),
+            ),
         ];
         for (refused, text) in cases {
             assert_eq!(refused.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn unfit_says_what_is_wrong() {
+        let cases = [
+            (
+                Unfit::Reserved {
+                    name: name("plant.@changes"),
+                },
+                "the name plant.@changes has a segment that starts with `@`, which is \
+                 reserved for Foundation"
+                    .to_owned(),
+            ),
+            (
+                Unfit::Long {
+                    name: name("plant.a"),
+                    status: name("disk"),
+                },
+                "the status channel plant.a.disk is longer than 255 bytes".to_owned(),
+            ),
+            (
+                Unfit::Duplicate { key: node(1) },
+                format!("node {} is already a member", node(1)),
+            ),
+            (
+                Unfit::Taken {
+                    name: name("plant.a"),
+                    key: node(1),
+                },
+                format!("the name plant.a is taken by node {}", node(1)),
+            ),
+            (
+                Unfit::Reused { key: index(9) },
+                format!("the status channel key {} is already in use", index(9)),
+            ),
+            (
+                Unfit::Outside {
+                    name: name("plants.edge"),
+                    region: name("plant"),
+                },
+                "the name plants.edge is not under the region plant".to_owned(),
+            ),
+        ];
+        for (unfit, text) in cases {
+            assert_eq!(unfit.to_string(), text);
+            assert_eq!(Refused::Unfit(unfit).to_string(), text);
         }
     }
 

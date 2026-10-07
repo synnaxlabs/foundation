@@ -87,8 +87,8 @@ impl From<grant::Error> for Error {
 pub(crate) enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
-    /// The committed entry at `at` is not a change that this build reads. A new open
-    /// stops at the same entry.
+    /// The committed entry at `at` is empty or has a kind that this build does not
+    /// know. A new open stops at the same entry.
     Change {
         /// The position of the entry.
         at: Position,

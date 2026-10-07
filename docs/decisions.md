@@ -1783,10 +1783,18 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
   `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
-  stops when a write of the log fails, when a committed entry is not a change that this
-  build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
-  the first cause, and a watch gives it also after each `Mesh` drops. `member` has no
-  error (#562): it gives the record that the node holds, also after a stop (approved by
+  stops when a write of the log fails, when a committed entry is empty or has a change
+  kind that this build does not know, or when each `Mesh` drops: this build cannot judge
+  such an entry, and a newer build can. A committed entry of a known kind whose body
+  does not decode is `Refused::Body` on every node, and the group goes on, so one voter
+  that proposes bad bytes cannot halt the region. So a change to the body or to a cap of
+  a known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
+  only after the format flag (C9d) allows it; a node of an older build stops at it and
+  never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
+  call gives `Error::Stopped` with the first cause, and a watch gives it also after each
+  `Mesh` drops. `member` has no error (#562): it gives the record that the node holds,
+  also after a stop (approved by
   the architect, 2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
   group does not start again: the node opens the mesh again, and the open makes durable

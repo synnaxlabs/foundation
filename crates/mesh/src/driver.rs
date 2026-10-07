@@ -23,7 +23,7 @@ use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
 use crate::member::Member;
-use crate::region::{self, Change};
+use crate::region::{self, Change, Malformed, Refused};
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -336,10 +336,16 @@ impl Group {
                 Data::Bytes(bytes) => bytes,
                 Data::Empty | Data::Voters(_) => continue,
             };
-            let change = Change::decode(&bytes)
-                .map_err(|cause| Stopped::Change { at, cause })?;
+            let applied = match Change::decode(&bytes) {
+                Ok(change) => self.state.apply(change),
+                // Every node of this build judges a body the same way.
+                Err(Malformed::Body { kind, length }) => {
+                    Err(Refused::Body { kind, length })
+                }
+                Err(cause) => return Err(Stopped::Change { at, cause }),
+            };
             // A refused change is a no-op on every node.
-            if let Ok(Some(_)) = self.state.apply(change) {
+            if let Ok(Some(_)) = applied {
                 self.wake_watches();
             }
         }
@@ -493,7 +499,7 @@ mod tests {
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
-    use crate::region::{Join, Malformed, Unfit};
+    use crate::region::{Join, Unfit};
     use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -1438,6 +1444,32 @@ mod tests {
             admission: common::ticket(7).admission(&card),
             status: BTreeMap::new(),
         }))
+    }
+
+    // A body that does not decode is a refusal on every node of this build, not a
+    // stop, so one voter that proposes bad bytes cannot halt the region.
+    #[test]
+    fn a_committed_join_that_does_not_decode_changes_nothing() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let Change::Join(mut over) = join(3) else {
+                unreachable!()
+            };
+            over.status = (0..65)
+                .map(|i| {
+                    (
+                        format!("s{i:02}").parse().unwrap(),
+                        channel::Key::from_u128(i),
+                    )
+                })
+                .collect();
+            lead(&mesh, &node.clock(), Change::Join(over)).await;
+            mesh.propose(&home(1)).unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            assert_eq!(mesh.member(key(3)), None);
+        });
     }
 
     // Every node refuses the same changes, so a refused change in the log changes no
