@@ -492,7 +492,9 @@ mod tests {
         (draft.freeze(Path::Live), set)
     }
 
-    /// Each series that `places` laid places, as `(place, range, end, zeros)`.
+    /// Each series that `places` laid out, as `(place, range, end, zeros)`. It reads
+    /// private state so each case of the pure layout has a test; the tests through
+    /// `Hub::serve` check the layout on the wire.
     fn laid(places: &Places) -> Vec<(u32, Range<usize>, u32, u8)> {
         places
             .series
@@ -597,7 +599,8 @@ mod tests {
             .collect()
     }
 
-    /// Each message of the cut, as `(range, zeros)` of each part.
+    /// Each message of the cut, as `(range, zeros)` of each part. It reads private
+    /// state for the same reason as `laid`.
     fn cut(series: &[Series], max: usize) -> Vec<Vec<(Range<usize>, u8)>> {
         let (mut cut, mut parts, mut messages) =
             (Cut::default(), Vec::new(), Vec::new());
