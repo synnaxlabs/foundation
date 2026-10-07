@@ -906,14 +906,13 @@ mod tests {
         #[test]
         fn writes_ends_in_place_order_from_a_list_by_place() {
             // Home entry 0 is place 2, entry 1 is place 0, entry 2 is place 1.
-            let lens = [3_u32, 16, 1];
+            let lens = [3, 16, 1];
             let mut places = [(2, 0), (0, 1), (1, 2)];
             places.sort_unstable();
-            let mut end = 0_u32;
-            let ends = places.iter().filter_map(|&(place, entry)| {
-                end = end.next_multiple_of(8) + lens.get(entry)?;
-                Some((place, end))
-            });
+            let ends = types::frame::ends(
+                places.iter().map(|&(place, entry)| (place, lens[entry])),
+            )
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
             let mut out = [0xaa; 24];
             super::super::ends::encode(ends, &mut out);
             assert_eq!(out.as_slice(), encode_ends(&[(0, 16), (1, 17), (2, 27)]));

@@ -1,7 +1,7 @@
 //! The cost of the hub messages on a frame's path: a head and its ends.
 
 use divan::Bencher;
-use types::frame::{Path, Range};
+use types::frame::{self, Path, Range};
 use wire::hub::{Head, Reply, ends};
 
 const SERIES: [u32; 4] = [1, 3, 1_000, 100_000];
@@ -29,25 +29,35 @@ fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
 
 /// A home's list of each place and its home entry, sorted by place, with entries in
 /// the reverse order of places, and the series length of each entry.
-fn list_of(series: u32) -> (Vec<(u32, usize)>, Vec<u32>) {
+fn list_of(series: u32) -> (Vec<(u32, usize)>, Vec<usize>) {
     let places = (0..series)
         .map(|place| (place, usize::try_from(series - 1 - place).expect("fits")))
         .collect();
-    (places, (0..series).map(|entry| entry % 13 + 1).collect())
+    (
+        places,
+        (0..series)
+            .map(|entry| usize::try_from(entry % 13 + 1).expect("fits"))
+            .collect(),
+    )
 }
 
+/// The ends of a frame as the home writes them: from its list by place through
+/// `frame::ends`, in messages of 184 ends.
 #[divan::bench(args = SERIES)]
 fn encode_ends_by_place(bencher: Bencher<'_, '_>, series: u32) {
     let (places, lens) = list_of(series);
     let mut run =
         vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
     bencher.bench_local(|| {
-        let mut end = 0_u32;
-        let ends = divan::black_box(&places).iter().map(|&(place, entry)| {
-            end = end.next_multiple_of(8) + lens[entry];
-            (place, end)
-        });
-        ends::encode(ends, &mut run);
+        let lens = divan::black_box(&places)
+            .iter()
+            .map(|&(place, entry)| (place, lens[entry]));
+        let mut each = frame::ends(lens)
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
+        for message in run.chunks_mut(184 * ends::LEN) {
+            let count = message.len() / ends::LEN;
+            ends::encode(each.by_ref().take(count), message);
+        }
     });
 }
 
