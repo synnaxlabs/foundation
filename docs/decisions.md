@@ -1466,11 +1466,14 @@ How to read this record:
   (#611). A send that does not wait (`try_send`) starts a message only by the same rule
   and when, after a flush, the stream holds no part of an earlier one; else it gives the
   message back with no byte of it sent, and the stream does not wait for room (#597). A
-  receiver takes a block by the same rule, highest class first, within `window_bytes`
-  plus `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that
-  wait for a block never use up the credit that a started message needs, and a peer that
-  breaks the send rule holds at most the receive budget and stops only its
-  own connection. Each node's first one-way stream is its hello, with no class byte:
+  receiver takes room for a message by the same rule, highest class first, within
+  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable` (#611). It
+  holds the bytes of a message outside the pool, and takes a block only when the message
+  is whole. Decided by architect-2 (#1456:
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673). So
+  bytes that wait for a block never use up the credit that a started message needs,
+  and a peer that breaks the send rule holds at most the receive budget and stops only
+  its own connection. Each node's first one-way stream is its hello, with no class byte:
   (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
   0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
   an id it does not know, so an advisory field needs no new ALPN; a field that the peer
@@ -1556,16 +1559,16 @@ How to read this record:
   `transport::Error` has no `Pool` variant, and the read path's "no room now"
   stays private (architect, #68:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032721674). Its doc
-  says that it waits. The message stays queued, and the carrier's per-stream flow
-  control holds the peer, as a read already waits for `Readable` (STREAM WIRE); TLS over
-  TCP must do the same (TRANSPORT SHAPE LOCKED). One timer for each `Transport` retries
-  all of its waiting reads, for both causes; each retry's `alloc` takes back the blocks
-  returned since the last try. The retry interval is a `transport` constant that
+  says that it waits. The whole message keeps its room in the receive budget, and the
+  budget holds the peer (STREAM WIRE). Decided by architect-2 (#1456:
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673). TLS
+  over TCP must do the same (TRANSPORT SHAPE LOCKED). One timer for each `Transport`
+  retries all of its waiting reads, for both causes; each retry's `alloc` takes back the
+  blocks returned since the last try. The retry interval is a `transport` constant that
   simulation tunes (5.3). The waiting reads of one `Transport` take blocks highest class
   first, then oldest first, so `CatchUp` reads cannot starve `Command` reads; other
-  users of the shard pool (M4) are not in this order. A waiting read that then waits
-  for room in its connection's receive budget keeps its place but holds no turn, so a
-  connection that holds its budget stops no read of another connection (STREAM WIRE).
+  users of the shard pool (M4) are not in this order. A read waits for a block only
+  with a whole message that holds its room, so it never waits for room in its place.
   `transport` counts the time that reads wait and each refused commit, and `node`
   publishes them on status channels (BQ11b). `Transport::status` gives
   `Status { waited, refusals }`, pulled, not pushed: `waited` is the time that at least
