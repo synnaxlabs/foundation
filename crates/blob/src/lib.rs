@@ -1094,6 +1094,33 @@ mod tests {
             .unwrap();
         }
 
+        // Two puts of different digests at once on a nearly full disk: a over a file
+        // of another length, b beside it. In seed 13, a's remove ends between b's
+        // sync and b's second create, so the removed file still holds its room and
+        // b gives `Full`, as the disk has no room at that instant. a's final sync
+        // frees the room, and a put of b again stores it.
+        #[test]
+        fn twice_at_once_of_two_digests_on_a_near_full_disk_gives_full_once() {
+            let (mut sim, node) = create_node(13, 64 << 10);
+            sim.run_on(&node, |node, _| async move {
+                let (a, block_a) = chunk(7, 20 << 10);
+                let (b, block_b) = chunk(8, 24 << 10);
+                let (_, other) = chunk(7, 40 << 10);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(a), &other).await;
+                let store = open(&node).await.unwrap();
+                let full = Error::Files(files::Error::Full { path: path(b) });
+                let results =
+                    join(store.put(a, &block_a), store.put(b, &block_b)).await;
+                assert_eq!(results, (Ok(()), Err(full)));
+                assert_absent(&store, b).await;
+                store.put(b, &block_b).await.unwrap();
+                let got = store.get(b).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block_b[..]);
+            })
+            .unwrap();
+        }
+
         #[test]
         fn after_a_failed_put_of_the_digest_writes_itself() {
             let (mut sim, node) = create_default_node(0);
