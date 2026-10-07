@@ -168,7 +168,7 @@ impl<'a> View<'a> {
     }
 }
 
-/// The entry of descriptor `n` and the bytes of its series in the frame's body.
+/// The entry of descriptor `n` and the bounds of its series in the series bytes.
 fn at(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, std::ops::Range<usize>) {
     let (start, end) = bounds(descriptors, n);
     (to_usize(lead(&descriptors[n])), start..end)

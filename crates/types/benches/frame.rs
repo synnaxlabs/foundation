@@ -3,9 +3,10 @@
 //! to look each one up, to give its charge, to view the series bytes, to give the end
 //! of each series, to check and walk the series from stored ends, to give the ends of
 //! series from their lengths, to build a frame from ends and a body, to make a view
-//! through a full, a narrow, an almost full, and a half full mask and walk it, to walk
-//! a narrow view one series at a time, and to make a narrow and an almost full mask,
-//! for a dense frame and for frames of 100,000 channels.
+//! through a full, a narrow, an almost full, and a half full mask and walk it, to give
+//! the bounds of each series of a view through a full, a narrow, and an almost full
+//! mask, to walk a narrow view one series at a time, and to make a narrow and an almost
+//! full mask, for a dense frame and for frames of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
