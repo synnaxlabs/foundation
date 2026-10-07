@@ -102,8 +102,8 @@ impl Client {
 
     /// Sends `request` and reads the whole response. The URI gives the host and the
     /// port, which defaults to 80. A new connection looks up the host and tries each
-    /// address in order. Each address but the last gets an equal share of the time
-    /// left, and at least 2 s. The client sets `Host` when the request has none, and
+    /// address in order. Each address gets an equal share of the time left, but at
+    /// least 2 s or all that is left. The client sets `Host` when the request has none, and
     /// sends the path and query only.
     ///
     /// # Errors
@@ -191,7 +191,7 @@ impl Client {
         origin: &Origin,
         deadline: Option<Monotonic>,
     ) -> Result<Connection, Error> {
-        let tcp = self.dial(origin, deadline).await.map_err(Error::Connect)?;
+        let tcp = self.dial(origin, deadline).await?;
         let received = Rc::default();
         let stream = Stream {
             tcp,
@@ -207,15 +207,16 @@ impl Client {
     }
 
     /// Connects to the first address of `origin` that takes the stream. Each
-    /// address gets a share of the time left to `deadline`, and the one whose share
-    /// is all of it gets no limit of its own. When none takes the stream, gives the
-    /// error of the first.
+    /// address gets a share of the time left to `deadline`. Gives
+    /// [`Error::TimedOut`] when no time is left before an address, and else the
+    /// connect error of the first address when none takes the stream.
     async fn dial(
         &self,
         origin: &Origin,
         deadline: Option<Monotonic>,
-    ) -> Result<Tcp, net::Error> {
-        let remotes = self.net.resolve(&origin.host, origin.port).await?;
+    ) -> Result<Tcp, Error> {
+        let remotes = (self.net.resolve(&origin.host, origin.port).await)
+            .map_err(Error::Connect)?;
         let mut first = None;
         for (i, &remote) in remotes.iter().enumerate() {
             let config = tcp::Config {
@@ -223,8 +224,12 @@ impl Client {
                 options: OPTIONS,
             };
             let left = remotes.len() - i;
+            let now = self.clock.now();
+            if deadline.is_some_and(|deadline| deadline <= now) {
+                return Err(Error::TimedOut);
+            }
             let sleep = deadline
-                .and_then(|deadline| share(self.clock.now(), deadline, left))
+                .and_then(|deadline| share(now, deadline, left))
                 .map(|end| self.clock.sleep_until(end));
             let connect = before(self.net.connect(&config), sleep).await;
             match connect.unwrap_or(Err(net::Error::TimedOut { remote })) {
@@ -234,7 +239,9 @@ impl Client {
                 }
             }
         }
-        Err(first.expect("invariant: a lookup gives an address"))
+        Err(Error::Connect(
+            first.expect("invariant: a lookup gives an address"),
+        ))
     }
 }
 
@@ -259,7 +266,7 @@ async fn before<T>(
 
 /// The end of a connect to the first of `left` addresses, as in Go: an equal share of
 /// the time from `now` to `deadline`, but at least [`ATTEMPT_MIN`]. Gives `None` when
-/// the share is all the time left, so that no later address gets a connect.
+/// the share is all the time left, so that only the request timeout ends the connect.
 fn share(now: Monotonic, deadline: Monotonic, left: usize) -> Option<Monotonic> {
     let remaining = (deadline - now).nanos();
     let left = i64::try_from(left).expect("invariant: a lookup gives few addresses");
@@ -298,15 +305,14 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
     if authority.as_str().contains('@') || !host_valid {
         return Err(fail());
     }
-    let digits = authority
-        .as_str()
-        .strip_prefix(host)
-        .and_then(|rest| rest.strip_prefix(':'))
-        .unwrap_or("");
-    // `u16::from_str` takes a leading `+`, which is not a port.
+    let rest = &authority.as_str()[host.len()..];
+    // `http` takes any text after `]`, and `u16::from_str` takes a leading `+`.
+    let digits = rest.strip_prefix(':').unwrap_or(rest);
     let port = match digits {
         "" => 80,
-        _ if !digits.bytes().all(|b| b.is_ascii_digit()) => return Err(fail()),
+        _ if !rest.starts_with(':') || !digits.bytes().all(|b| b.is_ascii_digit()) => {
+            return Err(fail());
+        }
         _ => digits
             .parse()
             .ok()

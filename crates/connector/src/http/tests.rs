@@ -494,6 +494,9 @@ fn refuses_a_uri_it_cannot_reach() {
         "http://influx:0/",
         "http://[]/",
         "http://[influx]/",
+        "http://[fd00::2]x/",
+        "http://[fd00::2]8086/",
+        "http://[fd00::2]:80x/",
     ] {
         let error = network.send(get(uri)).expect_err("not reachable");
         assert!(

@@ -327,3 +327,42 @@ fn makes_no_connect_once_the_timeout_ends() {
     // each silent address, and none to the refusing ones.
     assert_eq!(*port.lock().expect("no panic"), Some(49_152 + 5));
 }
+
+#[test]
+fn makes_no_connect_when_the_lookup_ends_at_the_timeout() {
+    let mut network = Network::new(87);
+    let silent = network.silent();
+    network.name("influx", vec![silent], TIMEOUT);
+    let port = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&port);
+    network.serve(move |mut stream, _, _| {
+        *slot.lock().expect("no panic") = Some(stream.peer().port());
+        async move {
+            super::write(&mut stream, OK.as_bytes()).await;
+            Some(stream)
+        }
+    });
+    let url = network.url("/");
+    let outcomes = network.run(vec![
+        Step::Send(get(&format!("http://influx:{PORT}/"))),
+        Step::Send(get(&url)),
+    ]);
+    assert!(
+        matches!(outcomes[0], Err(Error::TimedOut)),
+        "{:?}",
+        outcomes[0]
+    );
+    all_ok(&outcomes[1..]);
+    assert_eq!(*port.lock().expect("no panic"), Some(49_152));
+}
+
+#[test]
+fn connects_to_the_next_address_after_a_refusal_in_the_last_2_s() {
+    let mut network = Network::new(88);
+    let mut addresses: Vec<IpAddr> = (0..4).map(|_| network.silent()).collect();
+    addresses.extend([network.deaf(), network.remote().ip()]);
+    network.name("influx", addresses, Span::ZERO);
+    let log = network.serve_each(PORT, ok);
+    all_ok(&network.run(vec![Step::Send(get(&format!("http://influx:{PORT}/")))]));
+    assert_eq!(log.lock().expect("no panic").requests, [0]);
+}
