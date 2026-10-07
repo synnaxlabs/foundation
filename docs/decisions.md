@@ -1344,8 +1344,9 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
-  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
+  `Start.entries`. A node that joins opens with the founding voters from the answer
+  to its join (MEMBER RECORD, architect, #242). An empty `Start.voters` is a voter
+  that an operator wiped. It takes any proof until it holds a `Voters` entry. Then its
   first `Voters` entry shows the configuration before the entries: a joint entry's
   outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
   starts at index 1, so that entry is the joint entry of the group's first change, and
@@ -1505,6 +1506,20 @@ How to read this record:
   voters record membership, and the join is logged on the changes channel. Files name
   nodes only where they matter (voters, placement). Ephemeral nodes are removed after a
   set time offline. Tickets are secrets.
+- **MEMBER RECORD (2026-10-06)** The region's record of a node is a `mesh::Member`:
+  a `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which
+  the node signs over `foundation/card/1` and its `node::Key`), the join ticket's
+  signature over the first card, an ephemeral expiry, and the status channel keys
+  (X27). The seal key is inside the signed card (S8). A join is one `Join` change.
+  Every node that applies it checks the card, and the admission against the ticket's
+  public key, scope, uses, and expiry at the change's mesh time (BQ12), so a ticket is
+  an Ed25519 key pair (#336). The voter that admits a join answers with the founding
+  voters and their cards, and the node opens with them as `Start.voters` (RAFT
+  VOTERS). Until snapshots (#253), a region whose founders all left cannot admit a
+  node. A rotation, a new card, and `Remove` wait for a caller; a rotation that only
+  the node signs lets a stolen key lock the node out. Lost: a record that only the
+  admitting voter checks (a voter that lies admits any key, against BQ12). Decided by
+  the architect (#242).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
@@ -2438,7 +2453,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, name, public key, seal key, version, ephemeral expiry }` in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
