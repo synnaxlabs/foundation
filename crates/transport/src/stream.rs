@@ -2122,3 +2122,6 @@ mod tests {
         got.iter().map(count).collect()
     }
 }
+
+#[cfg(test)]
+mod stress;

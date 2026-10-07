@@ -630,8 +630,9 @@ mod tests {
                 if *at == end {
                     return Ok(Poll::Pending);
                 }
-                *at += 1;
-                Ok(Poll::Ready(Some(batch.slice(*at - 1..*at))))
+                let chunk = batch.slice(*at..=*at);
+                *at = at.saturating_add(1);
+                Ok(Poll::Ready(Some(chunk)))
             };
             let read = reader.read(|_| true, |len| pool.alloc(len).ok(), source)?;
             Ok(read.map(|block| block.map(|block| block.to_vec())))
