@@ -306,7 +306,7 @@ fn a_diff_driver_config_does_not_hide_code() {
     for config in [["diff.x.textconv", "true"], ["diff.external", "true"]] {
         let (repo, _) = Repo::with_pr("driver");
         repo.git(&["config", config[0], config[1]]);
-        repo.commit(".gitattributes", "*.rs diff=x\n");
+        repo.commit(".gitattributes", "* diff=x\n");
         let from = repo.commit("a.rs", "// a\n");
         let code = repo.commit("a.rs", "fn a() {}\n");
         assert_eq!(
@@ -440,5 +440,19 @@ fn names_a_path_that_is_not_utf8() {
              of 1 bytes from index 1"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn a_ref_named_like_a_short_blob_does_not_hide_code() {
+    let (repo, _) = Repo::with_pr("short");
+    let from = repo.commit("a.rs", "// a\n");
+    let code = repo.commit("a.rs", "fn a() {}\n");
+    let raw = repo.git(&["diff", "--raw", &from, &code]);
+    let short = raw.split(' ').nth(3).unwrap().to_string();
+    repo.git(&["tag", &short, &format!("{from}:a.rs")]);
+    assert_eq!(
+        repo.code_change(&from, &code),
+        Ok(Some("changes code at `a.rs:1`".to_string()))
     );
 }

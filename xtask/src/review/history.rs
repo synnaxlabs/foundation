@@ -72,6 +72,7 @@ impl<'a> History<'a> {
             "diff",
             "--raw",
             "-z",
+            "--no-abbrev",
             "--no-renames",
             &from_sha,
             &end_sha,
@@ -123,6 +124,7 @@ impl<'a> History<'a> {
         let diff = self.git(&[
             "diff",
             "--no-ext-diff",
+            "--no-textconv",
             "--no-color",
             "--text",
             "--unified=0",
