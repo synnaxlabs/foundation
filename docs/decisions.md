@@ -2468,9 +2468,9 @@ How to read this record:
   InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two connectors that write one
   index to one database from replacing each other's gap lines. Until a later sample
   comes, the connector keeps one gap per index, and from #1270 one per index and path.
-  After a restart the buffer reports the gap again (READER RULES), so a lost gap line
-  is sent again. The measurement name is fixed, and the kind check (#1153) refuses it
-  as a data measurement.
+  After a restart the buffer reports the gap again (READER RULES), so a lost gap line is
+  sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
+  data measurement.
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
   reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
   `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
@@ -2497,8 +2497,8 @@ How to read this record:
   in the review of #1225
   (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
   https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
-  Amended on #1151: with #1270 (M2), the connector is a recording reader and writes
-  the samples of both paths (A6, A8). Until then it reads the live path only, and the
+  Amended on #1151: with #1270 (M2), the connector is a recording reader and writes the
+  samples of both paths (A6, A8). Until then it reads the live path only, and the
   store-and-forward tests use the live path only. The `path` tag of each gap line is
   `live` until then, so the format does not change at M2. The `path` tag keeps a live
   gap line and a backfill gap line at one stamp as two points, so the sum of `count`
