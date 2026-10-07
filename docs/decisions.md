@@ -2202,8 +2202,34 @@ How to read this record:
   not show that the node owns its public key. The admission does, and `Join` (#336)
   refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
-  https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). Proposed
-  by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
+  https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
+  starts the tasks that send: one for each member, from the first message for it
+  (approved by the architect, 2026-10-07T13:40:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881, which
+  supersedes the start at open in the plan that
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 approved),
+  so a member that is slow holds only its own messages. `mesh` dials and `node` accepts:
+  `node` gives each stream of `wire::Protocol::Mesh` to `serve`. A task dials a session
+  to each member at the addresses of the member's card, as the group holds the card
+  then, and sends each `raft` message as one message of one one-way stream of
+  `Class::Command`, after the stream header (MESH WIRE). `mesh` never closes a session.
+  A message that fails drops, with only the part that failed: the message when the pool
+  has no block for it or when it is too large for the peer (#1361), the stream when the
+  peer stopped it, and the handle of the session on each other error, also when no dial
+  gives a session. The next message then opens a stream, or dials, again. Nothing sends
+  the dropped message again, because `raft` does. A local pool error must not drop a
+  session that other protocols use, and the one session for each pair of nodes is the
+  job of `transport` (#1363) (approved by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
+  message for a node of which the group has no record drops in the same way (approved by
+  the architect, 2026-10-07T17:29:35Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6043221155). The tasks
+  end when the group stops or when each `Mesh` drops, also a task that waits in a dial
+  or in a send. The task of a voter that a change removed, to which `raft` sends no more
+  messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881).
+  Proposed by box1.builder-3, decided by the architect (#471),
+  2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
