@@ -19,6 +19,6 @@ pub struct Member {
     pub expiry: Option<Span>,
     /// The node's status channel keys, by name under the node's name: `clock.offset`
     /// is `<card.name>.clock.offset` (X27). A status name keeps its meaning and data
-    /// type in every release.
+    /// type in every release; a change takes a new name.
     pub status: BTreeMap<Name, channel::Key>,
 }
