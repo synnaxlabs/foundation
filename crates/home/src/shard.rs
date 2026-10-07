@@ -1175,11 +1175,12 @@ mod tests {
         frame(&create_pool(4 * POOL), set, &series)
     }
 
-    /// A frame that no record of the ring holds: entry 0 with 600 stamps from `first`
+    /// A frame that no record of `BODY_MAX` holds: entry 0 with 600 stamps from `first`
     /// and entry 1 with as many scattered values, which do not compress.
     fn over_record(pool: &Pool, set: &KeySet, first: i64) -> Draft {
-        let stamps: Vec<i64> = (first..).take(600).collect();
-        frame(pool, set, &[(0, &stamps), (1, &scattered(600))])
+        let len = 600;
+        let stamps: Vec<i64> = (first..).take(len).collect();
+        frame(pool, set, &[(0, &stamps), (1, &scattered(len))])
     }
 
     /// The error of a failed sync of the ring, which the commit of `shard` gives.
@@ -1713,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_frame_too_large_for_one_write_and_spends_nothing() {
+    fn refuses_a_frame_over_the_record_and_spends_nothing() {
         run(38, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
@@ -1732,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_frame_whose_group_no_block_of_the_shard_holds() {
+    fn refuses_a_frame_whose_group_is_over_the_block() {
         run(45, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
@@ -1747,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn records_a_waiting_handoff_before_a_frame_too_large_for_one_write() {
+    fn records_a_waiting_handoff_before_a_frame_over_the_record() {
         run(39, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
@@ -1784,15 +1785,13 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
             }
-            let over_record = || over_record(&test.pool, &set, 10);
-            assert_eq!(shard.write(a, LIVE, over_record()), Err(Error::Large));
+            let written = shard.write(a, LIVE, over_record(&test.pool, &set, 10));
+            assert_eq!(written, Err(Error::Large));
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
             // The handoff is appended before the bodies, so the size is never checked.
-            assert_eq!(
-                shard.write(b, LIVE, over_record()),
-                Ok(&[lost(0, 0, 600)][..])
-            );
+            let written = shard.write(b, LIVE, over_record(&test.pool, &set, 10));
+            assert_eq!(written, Ok(&[lost(0, 0, 600)][..]));
             let over_block = over_block(&set, 1000, &[(2, &[stamp])]);
             assert_eq!(
                 shard.write(b, LIVE, over_block),
@@ -1985,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_renew_the_lease_for_a_frame_too_large_for_one_write() {
+    fn does_not_renew_the_lease_for_a_frame_over_the_record() {
         run(95, |test| async move {
             let (mut shard, a, set) = test.leased().await;
             let over_record = over_record(&test.pool, &set, 10);
@@ -2206,8 +2205,8 @@ mod tests {
 
     #[test]
     fn fails_a_large_frame_after_a_failed_sync() {
-        /// Writes, on each path, a frame that no block holds and a frame that no
-        /// record holds. Each passes the order check of its path, so its size counts.
+        /// Writes, on each path, a frame over the block and a frame over the record.
+        /// Each passes the order check of its path, so its size counts.
         fn write(test: &Test, shard: &mut Shard, a: writer::Key, expected: &Error) {
             let set = two_indexes();
             for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
@@ -2250,7 +2249,7 @@ mod tests {
             let writers = create_pool(4 * POOL);
             let small = |stamp: i64| frame(&writers, &set, &[(0, &[stamp]), (1, &[1])]);
             // On each path: a frame of one sample, a frame that the order check
-            // refuses, and a frame that no block holds.
+            // refuses, and a frame over the block.
             let mut write = |state: &str| {
                 for (label, first, refused) in
                     [(LIVE, 600_000, 100), (BACKFILL, 100, 500_000)]
@@ -2278,7 +2277,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_large_backfill_frame_whose_handoff_finds_no_room() {
+    fn refuses_a_backfill_frame_over_the_block_whose_handoff_finds_no_room() {
         run(113, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
