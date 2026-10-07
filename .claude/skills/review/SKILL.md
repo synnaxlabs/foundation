@@ -10,7 +10,8 @@ description:
 
 Run each reviewer in a fresh subagent with the Agent tool. Give it only the PR number,
 the decisions section the PR builds, and its job. Never give it your reasoning. Keep its
-findings, not its file reads.
+findings, not its file reads. The author never does a reviewer's work: when a reviewer
+cannot start, another session runs it, and the round comment names that session.
 
 Before each round, read this skill as it is on `main` (`git fetch origin main`, then
 `git show origin/main:.claude/skills/review/SKILL.md`), and follow that text. The copy
