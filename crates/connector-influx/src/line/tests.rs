@@ -289,6 +289,95 @@ fn refuses_a_tab_or_nul_in_any_part() {
     ]);
 }
 
+/// Characters that InfluxDB 1 and 2 with `validate-keys` drop: each is outside the
+/// general categories L, M, N, P, and S, or is U+FFFD.
+const DROPPED: [char; 11] = [
+    '\u{1}',    // Cc
+    '\u{7f}',   // Cc
+    '\u{85}',   // Cc
+    '\u{a0}',   // Zs
+    '\u{3000}', // Zs
+    '\u{2028}', // Zl
+    '\u{2029}', // Zp
+    '\u{200b}', // Cf
+    '\u{e000}', // Co
+    '\u{378}',  // Cn
+    '\u{fffd}', // So, which InfluxDB refuses by name
+];
+
+#[test]
+fn refuses_a_character_influxdb_drops() {
+    refuses(&[
+        (
+            Measurement::new("m\u{1}x", &[], &["f"]),
+            Error::Character {
+                part: Part::Measurement,
+                text: "m\u{1}x".into(),
+                character: '\u{1}',
+            },
+            "the measurement name \"m\\u{1}x\" holds '\\u{1}', \
+             which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[("k\u{a0}", "v")], &["f"]),
+            Error::Character {
+                part: Part::TagKey,
+                text: "k\u{a0}".into(),
+                character: '\u{a0}',
+            },
+            "the tag key \"k\\u{a0}\" holds '\\u{a0}', which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[("k", "a\u{fffd}b")], &["f"]),
+            Error::Character {
+                part: Part::TagValue("k".into()),
+                text: "a\u{fffd}b".into(),
+                character: '\u{fffd}',
+            },
+            "the value \"a\u{fffd}b\" of the tag \"k\" holds '\u{fffd}', \
+             which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[], &["f\u{378}"]),
+            Error::Character {
+                part: Part::FieldKey,
+                text: "f\u{378}".into(),
+                character: '\u{378}',
+            },
+            "the field key \"f\\u{378}\" holds '\\u{378}', which a line cannot hold",
+        ),
+    ]);
+}
+
+#[test]
+fn accepts_each_general_category_influxdb_prints() {
+    let printed = [
+        'Z', 'é', 'ǅ', 'ʰ', '中', // Lu, Ll, Lt, Lm, Lo
+        '\u{301}', '\u{903}', '\u{20dd}', // Mn, Mc, Me
+        '7', 'Ⅻ', '½', // Nd, Nl, No
+        '_', '-', '(', ')', '«', '»', '!', ',', '=', // Pc, Pd, Ps, Pe, Pi, Pf, Po
+        '+', '$', '^', '°', // Sm, Sc, Sk, So
+        ' ', // U+0020, the one Zs that InfluxDB prints
+    ];
+    for c in printed {
+        let text = format!("a{c}");
+        let t = text.as_str();
+        for got in [
+            Measurement::new(t, &[], &["f"]),
+            Measurement::new("m", &[(t, "v")], &["f"]),
+            Measurement::new("m", &[("k", t)], &["f"]),
+            Measurement::new("m", &[], &[t]),
+        ] {
+            assert!(got.is_ok(), "{c:?}: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn reads_general_categories_of_unicode_17() {
+    assert_eq!(unicode_properties::UNICODE_VERSION, (17, 0, 0));
+}
+
 #[test]
 fn names_the_first_refused_character() {
     refuses(&[(
@@ -368,8 +457,11 @@ fn allows_what_is_reserved_only_elsewhere() {
 }
 
 fn name() -> impl Strategy<Value = String> {
-    "[^_#\\\\\n\r\t\0][^\\\\\n\r\t\0]{0,8}"
-        .prop_filter("not time", |name| name != "time")
+    concat!(
+        r"[[\pL\pM\pN\pP\pS ]--[_#\\\x{fffd}]]",
+        r"[[\pL\pM\pN\pP\pS ]--[\\\x{fffd}]]{0,8}",
+    )
+    .prop_filter("not time", |name| name != "time")
 }
 
 fn field_value() -> impl Strategy<Value = Value> {
@@ -419,7 +511,9 @@ proptest! {
     fn refuses_a_refused_character_anywhere(
         name in name(),
         at in any::<proptest::sample::Index>(),
-        character in proptest::sample::select(vec!['\\', '\n', '\r', '\t', '\0']),
+        character in proptest::sample::select(
+            [['\\', '\n', '\r', '\t', '\0'].as_slice(), &DROPPED].concat()
+        ),
         part in 0..4_usize,
     ) {
         let mut chars: Vec<char> = name.chars().collect();

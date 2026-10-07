@@ -5,6 +5,7 @@ use std::fmt;
 use std::io::Write as _;
 
 use types::time::Stamp;
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 /// One measurement's name, tags, and field keys, checked and escaped once.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,7 +22,8 @@ impl Measurement {
     ///
     /// - [`Error::Empty`] for an empty name, key, or tag value.
     /// - [`Error::Character`] for one with a backslash, a newline, a carriage
-    ///   return, a tab, or NUL.
+    ///   return, a tab, NUL, U+FFFD, or a character outside the general categories
+    ///   L, M, N, P, and S other than the space U+0020.
     /// - [`Error::Reserved`] for a name or key that starts with `_`, or a key
     ///   `time`.
     /// - [`Error::Comment`] for a name that starts with `#`.
@@ -244,10 +246,7 @@ fn escape(
     if text.is_empty() {
         return Err(Error::Empty(part));
     }
-    if let Some(character) = text
-        .chars()
-        .find(|c| matches!(c, '\\' | '\n' | '\r' | '\t' | '\0'))
-    {
+    if let Some(character) = text.chars().find(|&c| refused(c)) {
         return Err(Error::Character {
             part,
             text: text.into(),
@@ -261,6 +260,20 @@ fn escape(
         out.push(byte);
     }
     Ok(())
+}
+
+/// Whether a line refuses `c`. A control character, which holds the newline, the
+/// carriage return, the tab, and NUL, is in the group `Other`. InfluxDB 1 and 2 with
+/// `validate-keys` drop each character outside L, M, N, P, and S but U+0020, and
+/// U+FFFD.
+fn refused(c: char) -> bool {
+    c == '\\'
+        || c == char::REPLACEMENT_CHARACTER
+        || c != ' '
+            && matches!(
+                c.general_category_group(),
+                GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other
+            )
 }
 
 #[cfg(test)]

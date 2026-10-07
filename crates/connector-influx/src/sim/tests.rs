@@ -480,7 +480,10 @@ fn gives_the_error_of_the_first_line_that_is_not_valid() {
 fn name() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("time".to_owned()),
-        "[^_#\\\\\n\r\t\0][^\\\\\n\r\t\0]{0,8}",
+        concat!(
+            r"[[\pL\pM\pN\pP\pS ]--[_#\\\x{fffd}]]",
+            r"[[\pL\pM\pN\pP\pS ]--[\\\x{fffd}]]{0,8}",
+        ),
     ]
 }
 
