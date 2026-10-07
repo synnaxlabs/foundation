@@ -2639,6 +2639,18 @@ How to read this record:
   `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
   architect on #1062 (#1174):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+- **SHARD DISK (2026-10-07)** Until segments exist, `node` gives each shard's ring
+  `disk / n` of the node's disk budget (`node::Config::disk`), and shard 0 also gets
+  the remainder, as SHARD POOLS does. The budget bounds the ring files: `node` takes
+  the largest ring whose file fits each part (`buffer::Layout::fit`), so the format
+  stays in `buffer`. A part that holds no ring starts no shard, and `join` gives
+  `Error::Disk` with the core; `config` cannot check it, as for the pool part (NODE
+  SETTINGS). The ring is the whole store. A ring already there keeps its size until
+  a new area can take effect at the next wrap (#451). Oldest first (B1) then holds
+  per shard, not per node: a patch. The long-term path is small rings for commits,
+  then segments that draw from one node-wide allowance (#1081). The 5.5 lab sizes
+  the budget for the shard that holds the index. Decided by the architect, #342:
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

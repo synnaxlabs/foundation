@@ -52,6 +52,10 @@ pub struct Config<M> {
     pub files: Box<dyn FnMut() -> Box<dyn FnOnce() -> env::files::Files + Send>>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
+    /// The most bytes the node's rings take on disk, split evenly across its
+    /// shards; shard 0 also takes the remainder. It sets the size of each ring that
+    /// the start makes. A ring already there keeps its size.
+    pub disk: u64,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -62,6 +66,7 @@ impl<M> fmt::Debug for Config<M> {
             .field("wall", &self.wall)
             .field("budget", &self.budget)
             .field("entropy", &self.entropy)
+            .field("disk", &self.disk)
             .finish_non_exhaustive()
     }
 }
@@ -87,8 +92,6 @@ struct Shard {
     failed: Arc<OnceLock<Error>>,
 }
 
-/// The size of each shard's write-ahead ring, until the disk budget sets it (#342).
-const AREA: u64 = 64 << 20;
 /// The largest record body of each shard's ring: one group commit.
 const BODY_MAX: usize = 1 << 20;
 /// The longest an entry waits for its group commit to start.
@@ -97,45 +100,62 @@ const COMMIT: Span = Span::from_nanos(2_000_000);
 impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
-    /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
-    /// takes the remainder. Unless the node stops first, the start records the shard
-    /// count in the data directory, or checks the one there, and each shard opens its
-    /// buffer in directory `shard-<i>` of its files, and makes it there when it is
-    /// not there. The shards open their buffers one after another, in order of core.
-    /// Returns once each shard runs or one has failed to start. A failed start, a
-    /// shard with no memory, a data directory made for another shard count, or a
-    /// buffer that does not open stops the node, and [`Node::join`] returns its error.
+    /// Each shard owns a `block::Pool` with an even part of the budget, and a ring
+    /// with an even part of the disk budget; shard 0 also takes each remainder.
+    /// Unless the node stops first, the start records the shard count in the data
+    /// directory, or checks the one there, and each shard opens its buffer in
+    /// directory `shard-<i>` of its files, and makes it there when it is not there.
+    /// The shards open their buffers one after another, in order of core. Returns
+    /// once each shard runs or one has failed to start. A part of the disk budget
+    /// that holds no ring starts no shard. A failed start, a shard with no memory, a
+    /// data directory made for another shard count, or a buffer that does not open
+    /// stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
     /// If a shard's part of the budget needs more address space than a `usize` holds.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
+        match parts(config.budget, config.disk, config.shards.cores().get()) {
+            Ok(parts) => Self::spawn(config, parts),
+            Err(error) => Self {
+                stop: Stop::default(),
+                shards: Vec::new(),
+                failed: Some(error),
+                interner: handoff::pair().1,
+            },
+        }
+    }
+
+    /// Starts the shards of `config`, each with its part in `parts`.
+    fn spawn<M: block::Memory + 'static>(
+        config: Config<M>,
+        parts: Vec<(block::Config, buffer::Layout)>,
+    ) -> Self {
         let Config {
             shards,
             clock: monotonic,
             wall,
-            budget,
+            budget: _,
             mut memory,
             mut files,
             entropy,
+            disk: _,
         } = config;
-        let (mesh, _reader) = clock::Clock::new(monotonic.clone());
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
+        let cores = shards.cores().get();
+        let (mesh, _reader) = clock::Clock::new(monotonic.clone());
         // Shard 0 runs the mesh clock, and gives the first interner once it has
         // claimed the data directory.
         let mut first = Some((mesh, wall, give));
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
-        let cores = shards.cores().get();
-        for core in 0..cores {
+        for (core, (config, layout)) in parts.into_iter().enumerate() {
             // A shard that does not start drops `give`, so `interner` gives `None`.
             let (give, take) = handoff::pair();
             let take = std::mem::replace(&mut interner, take);
-            let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
-            let config = block::Config { budget };
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
                 Err(e) => {
@@ -156,6 +176,7 @@ impl Node {
                 give,
                 clock: monotonic.clone(),
                 entropy: entropy.clone(),
+                layout,
                 failed: Arc::clone(&failed),
                 stop: stop.clone(),
             };
@@ -198,8 +219,9 @@ impl Node {
     ///
     /// # Errors
     ///
-    /// The first failure: [`Error::Start`] for a shard that could not start or pin,
-    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Shards`] or
+    /// The first failure: [`Error::Disk`] for a part of the disk budget that holds
+    /// no ring, [`Error::Start`] for a shard that could not start or pin, or
+    /// [`Error::Memory`] for a shard with no memory, else [`Error::Shards`] or
     /// [`Error::Directory`] for a data directory that shard 0 could not claim, else
     /// [`Error::Buffer`] for the first shard by core whose buffer did not open, else
     /// [`Error::Panicked`] for the first shard by core that panicked. Any failed
@@ -244,8 +266,33 @@ struct Open {
     give: Give<Interner>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
+    layout: buffer::Layout,
     failed: Arc<OnceLock<Error>>,
     stop: Stop,
+}
+
+/// The pool of each shard from its part of `budget`, and the layout of its ring from
+/// its part of `disk`, in order of core.
+fn parts(
+    budget: usize,
+    disk: u64,
+    cores: usize,
+) -> Result<Vec<(block::Config, buffer::Layout)>, Error> {
+    (0..cores)
+        .map(|core| {
+            let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
+            let layout = buffer::Layout::fit(part(disk, cores, core), BODY_MAX)
+                .map_err(|error| Error::Disk { core, error })?;
+            Ok((block::Config { budget }, layout))
+        })
+        .collect()
+}
+
+/// The part of `disk` of the shard on `core` of `cores`: an even part, and the
+/// remainder for shard 0.
+fn part(disk: u64, cores: usize, core: usize) -> u64 {
+    let count = u64::try_from(cores).expect("invariant: a core count fits a u64");
+    disk / count + if core == 0 { disk % count } else { 0 }
 }
 
 impl Open {
@@ -308,8 +355,7 @@ impl Open {
             clock: self.clock,
             tasks,
             entropy: self.entropy,
-            layout: buffer::Layout::new(AREA, BODY_MAX)
-                .expect("invariant: the ring sizes of node make a ring"),
+            layout: self.layout,
             commit: COMMIT,
         };
         match buffer::Buffer::open(config, interner.slots()).await {
@@ -363,6 +409,13 @@ pub enum Error {
     /// A file call that reads or records the shard count of the data directory
     /// failed.
     Directory(env::files::Error),
+    /// The part of the disk budget of the shard on `core` holds no ring.
+    Disk {
+        /// The core of the shard.
+        core: usize,
+        /// The ring sizes that the part gives.
+        error: buffer::Unfit,
+    },
 }
 
 impl fmt::Display for Error {
@@ -384,6 +437,12 @@ impl fmt::Display for Error {
             Self::Directory(error) => write!(
                 f,
                 "cannot read or record the shard count of the data directory: {error}"
+            ),
+            Self::Disk { core, error } => write!(
+                f,
+                "the part of the disk budget of shard-{core} holds no ring: an area \
+                 of {} bytes and a body of at most {} bytes make no ring",
+                error.area, error.body_max
             ),
         }
     }
