@@ -100,16 +100,17 @@ impl Places {
             return charge(descriptors.len(), body.len());
         }
         // The body holds each series padded, but the last in place order unpadded.
-        let (mut series, mut padding) = (0, 0);
-        let mut last: Option<(u32, usize)> = None;
+        let (mut series, mut padding, mut last, mut len) = (0, 0, 0, 0);
         each(held, frame, |at, bounds| {
             let place = held.entries[at].1;
             series += 1;
             padding += padded(bounds.len());
-            // Places are unique, so the length never decides.
-            last = last.max(Some((place, bounds.len())));
+            // Places are unique, so only the first series can equal `last`.
+            if place >= last {
+                (last, len) = (place, bounds.len());
+            }
         });
-        let body = last.map_or(0, |(_, len)| padding - padded(len) + len);
+        let body = padding - padded(len) + len;
         charge(series, body)
     }
 }

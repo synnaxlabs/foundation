@@ -127,6 +127,38 @@ fn release_places_reversed(bencher: Bencher<'_, '_>) {
     });
 }
 
+/// The first frame of [`wide`] to a new session of places of every channel, last
+/// first, which learns the key set.
+#[divan::bench(sample_count = 100)]
+fn release_places_first(bencher: Bencher<'_, '_>) {
+    let (frame, set) = wide();
+    let slots: Box<[channel::Slot]> =
+        set.entries().iter().rev().map(|entry| entry.slot).collect();
+    bencher
+        .with_inputs(|| {
+            let mut readers = Readers::new(0);
+            let start = Start::At(Position {
+                live: 0,
+                backfill: Some(0),
+            });
+            let key = readers
+                .open(
+                    Reader::Unnamed,
+                    start,
+                    u64::MAX,
+                    Charge::Places(slots.clone()),
+                )
+                .key;
+            readers.queue(&frame, &set, 0..1);
+            (readers, key)
+        })
+        .bench_local_values(|(mut readers, key)| {
+            divan::black_box(readers.release(1));
+            divan::black_box(readers.take(key.into()));
+            readers
+        });
+}
+
 /// Releases each frame of [`wide`] to one session of the places that `slots` gives.
 fn release_through(
     bencher: Bencher<'_, '_>,
