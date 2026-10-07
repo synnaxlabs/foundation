@@ -2162,6 +2162,30 @@ fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
     });
 }
 
+/// One header block is zero, as a crash leaves it. The open does not repair it.
+#[test]
+fn an_open_that_finds_an_invalid_record_leaves_a_zero_header_block_as_read() {
+    for lost in [0, to_usize(BLOCK)] {
+        run(110, Memory::default(), move |shard| async move {
+            shard.create_two_records().await;
+            shard.memory.put(RING, lost, &[0; SECTOR]);
+            shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+            shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+        });
+    }
+}
+
+/// A checkpoint is in the first sector of its block. The open keeps the other bytes.
+#[test]
+fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
+    run(111, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.memory.put(RING, COVER, b"past the sector");
+        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
 #[test]
 fn a_record_of_an_unknown_kind_is_invalid() {
     run(109, Memory::default(), |shard| async move {

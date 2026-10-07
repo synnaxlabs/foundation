@@ -95,7 +95,8 @@ pub enum Error {
     /// another version or a defect wrote it. The ring reads as it did before the
     /// open.
     Invalid {
-        /// The offset of the record in the ring, or 0 for a header block.
+        /// The offset of the record in the ring. A header block gives 0, which is also
+        /// the offset of the first record of a ring.
         offset: u64,
     },
 }
