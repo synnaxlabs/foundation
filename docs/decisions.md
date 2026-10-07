@@ -597,12 +597,18 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
-- **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
-  write: the writer's key set with only that group present, its range, and its
-  encoded series. The home stores it, keeps it as the index's newest frame, and later
-  gives it to readers. B7, the log, the seq, and reader positions are per index. A
-  write with more than one present group pays one copy of its series into the index
-  frames. Decided by the `write-path` builder; approved by the coordinator (#191).
+- **INDEX FRAMES (#191)** The home makes one index frame for each present group with
+  samples of a write: the writer's key set with only that group present, its range,
+  and its encoded series. The home stores it, keeps it as the index's newest frame,
+  and later gives it to readers. B7, the log, the seq, and reader positions are per
+  index. A write with more than one present group pays one copy of its series into
+  the index frames. Decided by the `write-path` builder; approved by the coordinator
+  (#191). A group with no samples gets no index frame and no data entry. It still
+  records its handoff and renews its lease, spends a seq range of zero, and is
+  applied, also when another group of the write is lost. A write with no samples
+  still reports a failed commit. Decided by the coordinator with the advisor on
+  2026-10-06 (#885):
+  https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
