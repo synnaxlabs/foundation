@@ -63,6 +63,9 @@ fn after(span: Span) -> Monotonic {
     node::Config::default().monotonic + span
 }
 
+/// The error of an I/O call on a failed socket or listener.
+const EIO: env::net::Error = env::net::Error::Io { code: crate::EIO };
+
 /// The default delay.
 fn delay() -> Span {
     link::Config::default().delay

@@ -13,6 +13,10 @@ use types::time::Monotonic;
 
 use super::wire::{Packet, Wire};
 use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, ip_header, node, receives};
+use crate::EIO;
+
+/// The key and the pair of the end of a stream that a listener accepts, or its error.
+type Accepted = Result<(u64, Pair), Error>;
 
 /// The bytes of the TCP header of a segment, with no options.
 const HEADER: usize = 20;
@@ -184,6 +188,9 @@ struct Listening {
     /// order of their SYNs.
     queue: VecDeque<u64>,
     waker: Option<Waker>,
+    /// From a fault until the listener drops: its queue holds only queued streams,
+    /// each accept gives `EIO` once the queue is empty, and a SYN gets an RST.
+    failed: bool,
 }
 
 /// The order of the segments in flight in each direction, and the first case that
@@ -376,6 +383,7 @@ impl<'a> Tcp<'a> {
             options: config.options,
             queue: VecDeque::new(),
             waker: None,
+            failed: false,
         };
         let listener = self.sockets.key();
         self.sockets.listeners.insert(listener, listening);
@@ -388,25 +396,57 @@ impl<'a> Tcp<'a> {
     pub(crate) fn unlisten(&mut self, now: Monotonic, listener: u64) -> Option<Waker> {
         let listening = self.sockets.listeners.remove(&listener)?;
         for key in listening.queue {
-            let end = self.sockets.remove(key);
-            if !end.reset {
-                let (pair, stream) = (end.pair, end.stream);
-                self.sockets
-                    .lanes
-                    .send(self.wire, now, pair, stream, Kind::Rst);
-            }
+            self.abort(now, key);
         }
         listening.waker
     }
 
+    /// Makes the listener of `node` at `local` fail, and resets the streams in its
+    /// handshake. Returns a waker for the caller to wake after it releases the lock:
+    /// that of an accept that waits, or one that does nothing. Returns `None` when no
+    /// listener of `node` is at `local`.
+    pub(crate) fn fail(
+        &mut self,
+        now: Monotonic,
+        node: usize,
+        local: SocketAddr,
+    ) -> Option<Waker> {
+        let (&listener, listening) =
+            (self.sockets.listeners.iter_mut()).find(|(_, listening)| {
+                listening.node == node && listening.local == local
+            })?;
+        listening.failed = true;
+        let waker = (listening.waker.take()).unwrap_or_else(|| Waker::noop().clone());
+        let ends = &self.sockets.ends;
+        let (accepting, queued) = (listening.queue.iter())
+            .partition(|key| ends[key].phase == Phase::Accepting(listener));
+        listening.queue = queued;
+        for key in accepting {
+            self.abort(now, key);
+        }
+        Some(waker)
+    }
+
+    /// Removes end `key`, and resets its peer unless the peer reset it.
+    fn abort(&mut self, now: Monotonic, key: u64) {
+        let end = self.sockets.remove(key);
+        if !end.reset {
+            let (pair, stream) = (end.pair, end.stream);
+            self.sockets
+                .lanes
+                .send(self.wire, now, pair, stream, Kind::Rst);
+        }
+    }
+
     /// Takes the next stream that `listener` has, and gives the key and the pair of
-    /// its end, or keeps `waker`. A listener that a power cut ended never has one.
-    /// Returns the old waker, for the caller to drop after it releases the lock.
+    /// its end, or `EIO` when the listener failed and has none, or keeps `waker`. A
+    /// listener that a power cut ended never has one. Returns the old waker, for the
+    /// caller to drop after it releases the lock.
     pub(crate) fn accept(
         &mut self,
         listener: u64,
         waker: &Waker,
-    ) -> (Poll<(u64, Pair)>, Option<Waker>) {
+    ) -> (Poll<Accepted>, Option<Waker>) {
         let Some(listening) = self.sockets.listeners.get_mut(&listener) else {
             return (Poll::Pending, None);
         };
@@ -414,12 +454,15 @@ impl<'a> Tcp<'a> {
         let queued = (listening.queue.iter())
             .position(|key| ends[key].phase == Phase::Queued(listener));
         let Some(index) = queued else {
+            if listening.failed {
+                return (Poll::Ready(Err(Error::Io { code: EIO })), None);
+            }
             return (Poll::Pending, listening.waker.replace(waker.clone()));
         };
         let key = (listening.queue.remove(index)).expect("invariant: found");
         let end = (ends.get_mut(&key)).expect("invariant: queued");
         end.phase = Phase::Open;
-        (Poll::Ready((key, end.pair)), None)
+        (Poll::Ready(Ok((key, end.pair))), None)
     }
 
     /// Connects from `node` to `remote`: sends a SYN from the next free port after
@@ -689,14 +732,14 @@ impl<'a> Tcp<'a> {
     }
 
     /// Takes a SYN of `stream` to `pair` from its peer: a listener that receives it
-    /// answers, and otherwise an RST does.
+    /// and has not failed answers, and otherwise an RST does.
     fn syn(&mut self, at: Monotonic, pair: Pair, stream: u64, edge: usize) {
         if self.sockets.routes.contains_key(&pair) {
             self.sockets.lanes.yet.get_or_insert(REOPENED);
             return;
         }
         let listener = (self.sockets.listeners.iter_mut()).find(|(_, listening)| {
-            receives(listening.node, listening.local, pair.local)
+            !listening.failed && receives(listening.node, listening.local, pair.local)
         });
         let Some((&listener, listening)) = listener else {
             self.sockets

@@ -1,0 +1,13 @@
+placement "a" {
+  select = "x"
+  home = "n"
+}
+node_settings "a" {
+  select = "x"
+  disk = "1GiB"
+}
+retention "@b" {
+  keep = 3
+  other = 1
+}
+x = 1
