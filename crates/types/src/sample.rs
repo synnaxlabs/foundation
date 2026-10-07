@@ -214,16 +214,22 @@ fn element(text: &str) -> Result<Scalar, Error> {
 
 /// The count that `text` writes in ASCII digits with no leading zero.
 fn count(text: &str) -> Result<u32, Error> {
-    let digits = text.bytes().all(|byte| byte.is_ascii_digit());
+    digits(text)?.parse().map_err(|_over_u32| Error::Count)
+}
+
+/// The length of a matrix side that `text` writes as a [`count`]. A count over 65535,
+/// of any size, is [`Error::Matrix`].
+fn side(text: &str) -> Result<u16, Error> {
+    digits(text)?.parse().map_err(|_over_u16| Error::Matrix)
+}
+
+/// `text` when it is one or more ASCII digits with no leading zero.
+fn digits(text: &str) -> Result<&str, Error> {
+    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     if !digits || (text.len() > 1 && text.starts_with('0')) {
         return Err(Error::Count);
     }
-    text.parse().map_err(|_not_a_u32| Error::Count)
-}
-
-/// The length of a matrix side that `text` writes as a [`count`].
-fn side(text: &str) -> Result<u16, Error> {
-    u16::try_from(count(text)?).map_err(|_over_u16| Error::Matrix)
+    Ok(text)
 }
 
 /// Why a text is not a sample type. `Display` gives the message: a lower-case clause
@@ -420,7 +426,7 @@ mod tests {
             ("f32[2][03]", Error::Count),
             ("f32[2]][3]", Error::Count),
             ("f32[2] [3]", Error::Count),
-            ("f32[2][4294967296]", Error::Count),
+            ("f32[2][4294967296]", Error::Matrix),
             ("f32[2][3", Error::Syntax),
             ("f32[2][3][", Error::Syntax),
             ("string[2][3]", Error::Element),
@@ -430,7 +436,8 @@ mod tests {
             ("u8[65535][65536]", Error::Matrix),
             ("u8[65536][0]", Error::Matrix),
             ("u8[4294967295][2]", Error::Matrix),
-            ("u8[2][4294967296]", Error::Count),
+            ("u8[2][4294967296]", Error::Matrix),
+            ("u8[99999999999999999999][1]", Error::Matrix),
         ];
         for (text, error) in cases {
             assert_eq!(text.parse::<Type>(), Err(error), "{text:?}");
