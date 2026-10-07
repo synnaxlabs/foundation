@@ -9,6 +9,7 @@ use types::authority::Authority;
 use types::channel;
 use types::frame::key_set::{Group, KeySet};
 use types::frame::{self, Draft, Form, Label};
+use types::hash;
 use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
@@ -80,21 +81,19 @@ impl Writer {
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;
         let mut groups: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = Vec::new();
+        let mut positions = hash::Map::default();
+        let mut data = hash::Set::default();
         for name in &channels {
             let channel = borrowed
                 .channels
                 .get(name)
                 .ok_or_else(|| Error::Unknown(name.clone()))?;
-            let at = groups.iter().position(|(i, _)| *i == channel.index);
-            let at = at.unwrap_or_else(|| {
+            let at = *positions.entry(channel.index).or_insert_with(|| {
                 groups.push((channel.index, Vec::new()));
                 groups.len() - 1
             });
-            let data = &mut groups[at].1;
-            if channel.key != channel.index
-                && data.iter().all(|&(k, _)| k != channel.key)
-            {
-                data.push((channel.key, channel.data_type));
+            if channel.key != channel.index && data.insert(channel.key) {
+                groups[at].1.push((channel.key, channel.data_type));
             }
         }
         let groups: Vec<_> = groups

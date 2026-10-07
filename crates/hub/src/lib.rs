@@ -58,6 +58,8 @@ struct State {
     interner: Interner,
     pool: Rc<block::Pool>,
     channels: hash::Map<Name, Channel>,
+    /// The index of each channel in `channels`, by key.
+    indexes: hash::Map<types::channel::Key, types::channel::Key>,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// The readers that [`::home::Shard::woken`] gave last.
@@ -83,6 +85,7 @@ impl Hub {
             interner,
             pool,
             channels: hash::Map::default(),
+            indexes: hash::Map::default(),
             wakers: hash::Map::default(),
             woken: Vec::new(),
             commit: commit::Signal::default(),
@@ -101,9 +104,9 @@ impl Hub {
     pub fn define(&self, channel: Channel) {
         let mut state = self.0.borrow_mut();
         let state = &mut *state;
-        let known = state.channels.values().find(|c| c.key == channel.key);
         assert!(
-            known.is_none() && !state.channels.contains_key(&channel.name),
+            !state.indexes.contains_key(&channel.key)
+                && !state.channels.contains_key(&channel.name),
             "a channel with key {} or name {} is known already",
             channel.key,
             channel.name
@@ -112,14 +115,14 @@ impl Hub {
             let slot = state.interner.slots().assign(channel.key);
             state.home.carry(slot);
         } else {
-            let index = state.channels.values().find(|c| c.key == channel.index);
             assert!(
-                index.is_some_and(|index| index.index == index.key),
+                state.indexes.get(&channel.index) == Some(&channel.index),
                 "the index {} of channel {} is not a known index",
                 channel.index,
                 channel.name
             );
         }
+        state.indexes.insert(channel.key, channel.index);
         state.channels.insert(channel.name.clone(), channel);
     }
 
