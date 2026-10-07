@@ -24,7 +24,7 @@ const STREAK: u32 = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Each live frame, after the commit that holds it. A session that misses a frame
-    /// gets no later frame, with no error, until it closes: it misses one when it
+    /// ends with [`Ended::Behind`] after the frames before it: it misses one when it
     /// leaves a window of frames untaken, or when one commit holds more than a window
     /// of frames. The hub has no catch-up from the buffer yet.
     Complete,
@@ -47,12 +47,17 @@ pub struct Received<'a> {
 pub enum Ended {
     /// The shard's buffer failed.
     Buffer(env::files::Error),
+    /// A complete reader missed a frame ([`Mode::Complete`]).
+    Behind,
 }
 
 impl fmt::Display for Ended {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Buffer(error) => write!(f, "the buffer of the shard failed: {error}"),
+            Self::Behind => f.write_str(
+                "the reader missed a frame and gets no later one: open a new reader",
+            ),
         }
     }
 }
@@ -159,13 +164,12 @@ impl Reader {
     /// The next frame, as a view of the reader's channels. The view borrows the
     /// reader, so the frame stays in use until the next call or the drop. After 128
     /// frames in a row, it wakes its task and waits once, so a task that loops on it
-    /// lets the shard's other tasks run. A complete session that missed a frame waits
-    /// with no end ([`Mode::Complete`]).
+    /// lets the shard's other tasks run.
     ///
     /// # Errors
     ///
     /// [`Ended`] once no frame waits and the session can give no more, on this and
-    /// every later call.
+    /// every later call: [`Ended::Behind`] before [`Ended::Buffer`].
     #[expect(
         clippy::missing_panics_doc,
         reason = "the interner holds the key set of each frame a writer made"
@@ -188,6 +192,11 @@ impl Reader {
                     credit.taken_bytes += frame.charge();
                 }
                 return Poll::Ready(Ok(frame));
+            }
+            if let Some(credit) = &self.credit
+                && state.home.behind(credit.key)
+            {
+                return Poll::Ready(Err(Ended::Behind));
             }
             if let Some(error) = &state.failed {
                 return Poll::Ready(Err(Ended::Buffer(error.clone())));

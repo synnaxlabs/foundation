@@ -546,6 +546,19 @@ impl Shard {
         self.readers.take(self.place(key.slot), key.session)
     }
 
+    /// Whether the complete reader `key` missed a live frame, so it gets no later
+    /// one: it has no credit for the frame, or it opened past a frame no longer in
+    /// memory. [`woken`](Self::woken) names it once when it misses one with no frame
+    /// waiting. `false` for a closed reader.
+    ///
+    /// # Panics
+    ///
+    /// If the shard never gave `key`.
+    #[must_use]
+    pub fn behind(&self, key: reader::complete::Key) -> bool {
+        self.readers.behind(self.place(key.slot), key.session)
+    }
+
     /// Closes the reader `key`. Its waiting frames do not go out, and
     /// [`woken`](Self::woken) does not name it. A close of a closed reader changes
     /// nothing.
@@ -2708,8 +2721,10 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
+                assert!(!shard.behind(session));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
+                assert!(shard.behind(session));
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.grant(session, CREDIT);
                 write(&test, &mut shard, a, &[30]);

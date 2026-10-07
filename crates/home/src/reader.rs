@@ -130,6 +130,19 @@ impl Set {
         self.entries[place].readers.take(session)
     }
 
+    /// Whether the complete reader `session` on the index at `place` missed a frame.
+    ///
+    /// # Panics
+    ///
+    /// If the index never gave `session`.
+    pub(crate) fn behind(
+        &self,
+        place: usize,
+        session: delivery::complete::Key,
+    ) -> bool {
+        self.entries[place].readers.behind(session)
+    }
+
     /// Closes the reader `session` on the index at `place`. Its waiting frames do not
     /// go out, and [`woken`](Self::woken) does not name it. A close of a closed reader
     /// changes nothing.

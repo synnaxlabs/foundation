@@ -6,7 +6,7 @@
 
 use std::cell::Cell;
 use std::path::{Path as FilePath, PathBuf};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +32,11 @@ const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
 const BODY_MAX: usize = 1 << 16;
+/// The area and body max of a ring that takes a frame past the window of a reader.
+const WIDE_AREA: u64 = 1 << 24;
+const WIDE_BODY_MAX: usize = 1 << 22;
+/// Samples per series of a frame whose charge is past the window of a reader.
+const PAST_WINDOW: i64 = 140_000;
 const POOL: usize = 1 << 23;
 const COMMIT: Span = Span::from_nanos(10_000_000);
 /// Past the commit of a write.
@@ -68,8 +73,8 @@ struct Test {
 }
 
 impl Test {
-    /// A hub on a new ring of `node`, whose mesh clock does not run yet.
-    async fn new(node: sim::node::Node, tasks: Tasks) -> Self {
+    /// A hub on a new ring of `node` with `layout`, whose mesh clock does not run yet.
+    async fn new(node: sim::node::Node, tasks: Tasks, layout: buffer::Layout) -> Self {
         let config = block::Config { budget: POOL };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         let (unsynced, mesh) = clock::Clock::new(node.clock());
@@ -81,7 +86,7 @@ impl Test {
             clock: node.clock(),
             tasks: tasks.clone(),
             entropy: node.entropy(),
-            layout: buffer::Layout::new(AREA, BODY_MAX).expect("a ring"),
+            layout,
             commit: COMMIT,
         };
         let buffer = buffer::Buffer::open(config, interner.slots())
@@ -172,7 +177,18 @@ fn run<F>(seed: u64, main: impl FnOnce(Test) -> F + Send + 'static)
 where
     F: Future<Output = ()> + 'static,
 {
-    unsynced(seed, |mut test| async move {
+    run_on(seed, (AREA, BODY_MAX), main);
+}
+
+/// Runs `main` as [`run`] does, on a ring of the area and body max in `ring`.
+fn run_on<F>(
+    seed: u64,
+    ring: (u64, usize),
+    main: impl FnOnce(Test) -> F + Send + 'static,
+) where
+    F: Future<Output = ()> + 'static,
+{
+    unsynced_on(seed, ring, |mut test| async move {
         test.sync().await;
         main(test).await;
     });
@@ -183,13 +199,24 @@ fn unsynced<F>(seed: u64, main: impl FnOnce(Test) -> F + Send + 'static)
 where
     F: Future<Output = ()> + 'static,
 {
+    unsynced_on(seed, (AREA, BODY_MAX), main);
+}
+
+fn unsynced_on<F>(
+    seed: u64,
+    (area, body_max): (u64, usize),
+    main: impl FnOnce(Test) -> F + Send + 'static,
+) where
+    F: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
     });
     let node = sim.node(sim::node::Config::default());
-    sim.run_on(&node, |node, tasks| async move {
-        main(Test::new(node, tasks).await).await;
+    sim.run_on(&node, move |node, tasks| async move {
+        let layout = buffer::Layout::new(area, body_max).expect("a ring");
+        main(Test::new(node, tasks, layout).await).await;
     })
     .expect("the run ends");
 }
@@ -256,7 +283,13 @@ fn keys(received: &Received<'_>) -> Vec<u128> {
 /// do not compress.
 fn write_wide(writer: &mut Writer, now: i64, n: i64) {
     const SAMPLES: i64 = 1000;
-    let stamps: Vec<_> = (0..SAMPLES).map(|s| now + n * SAMPLES + s).collect();
+    write_samples(writer, now + n * SAMPLES, SAMPLES);
+}
+
+/// Writes `samples` samples per series from `start`, with values that do not
+/// compress.
+fn write_samples(writer: &mut Writer, start: i64, samples: i64) {
+    let stamps: Vec<_> = (start..start + samples).collect();
     let values: Vec<_> = stamps
         .iter()
         .map(|&s| {
@@ -302,22 +335,6 @@ fn applied(seq: u64) -> Outcome {
 /// Polls `future` once, with a waker that does nothing.
 fn poll_once<F: Future>(future: F) -> Poll<F::Output> {
     pin!(future).poll(&mut Context::from_waker(Waker::noop()))
-}
-
-/// The charge of each frame that waits for `reader`, in order. A `Pending` after a
-/// frame may be the yield of `next`, so only two in a row end it.
-fn drain(reader: &mut Reader) -> Vec<u64> {
-    let (mut charges, mut pending) = (Vec::new(), 0);
-    while pending < 2 {
-        match poll_once(reader.next()) {
-            Poll::Ready(received) => {
-                charges.push(received.expect("a frame").view.charge());
-                pending = 0;
-            }
-            Poll::Pending => pending += 1,
-        }
-    }
-    charges
 }
 
 #[test]
@@ -524,7 +541,8 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
             }
         }
         assert!(bytes > 3 * WINDOW, "{bytes} bytes are past three windows");
-        let charges = drain(&mut lagger);
+        let (charges, ended) = take_all(&mut lagger).await;
+        assert_behind(&ended);
         let last = charges.last().copied().unwrap_or(0);
         spent += charges.iter().sum::<u64>();
         let limit = first + WINDOW;
@@ -731,7 +749,9 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
             write_wide(&mut writer, now, n);
             test.clock.sleep(SETTLE).await;
         }
-        let spent: u64 = drain(&mut lagger).iter().sum();
+        let (charges, ended) = take_all(&mut lagger).await;
+        assert_behind(&ended);
+        let spent: u64 = charges.iter().sum();
         assert!(WINDOW <= spent, "{spent} bytes reach the window");
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         write_wide(&mut writer, now, frames);
@@ -747,6 +767,112 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
 /// A waker that notes that it was woken.
 #[derive(Default)]
 struct Flag(AtomicBool);
+
+/// Takes each frame of `reader` until it ends: their charges, and how it ended.
+async fn take_all(reader: &mut Reader) -> (Vec<u64>, Ended) {
+    let mut charges = Vec::new();
+    loop {
+        match reader.next().await {
+            Ok(received) => charges.push(received.view.charge()),
+            Err(ended) => return (charges, ended),
+        }
+    }
+}
+
+fn assert_behind(ended: &Ended) {
+    assert_eq!(*ended, Ended::Behind);
+    assert_eq!(
+        ended.to_string(),
+        "the reader missed a frame and gets no later one: open a new reader"
+    );
+}
+
+/// Polls `next` once with a waker that sets a flag, and returns the flag.
+fn poll_flagged<F: Future>(next: Pin<&mut F>) -> (Poll<F::Output>, Arc<Flag>) {
+    let flag = Arc::new(Flag::default());
+    let waker = Waker::from(Arc::clone(&flag));
+    (next.poll(&mut Context::from_waker(&waker)), flag)
+}
+
+#[test]
+fn wakes_and_ends_a_waiting_complete_reader_that_misses_a_frame() {
+    for seed in 0..32 {
+        run_on(seed, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let mut writer = test.writer("a", &["value"]).await;
+            let now = test.now();
+            write_samples(&mut writer, now, PAST_WINDOW);
+            let charge = reader.next().await.expect("a frame").view.charge();
+            assert!(charge > WINDOW, "{charge} bytes spend the window");
+            let mut next = pin!(reader.next());
+            let (polled, flag) = poll_flagged(next.as_mut());
+            assert!(polled.is_pending(), "no frame waits");
+            write_samples(&mut writer, now + PAST_WINDOW, 1);
+            test.clock.sleep(SETTLE).await;
+            assert!(flag.0.load(Ordering::Relaxed), "the miss wakes the reader");
+            let Poll::Ready(Err(ended)) = poll_once(next) else {
+                panic!("the reader ends");
+            };
+            assert_behind(&ended);
+        });
+    }
+}
+
+#[test]
+fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window() {
+    for seed in 0..32 {
+        run(seed, |test| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let mut writer = test.writer("a", &["value"]).await;
+            let now = test.now();
+            let flag = {
+                let (polled, flag) = poll_flagged(pin!(reader.next()));
+                assert!(polled.is_pending(), "no frame waits");
+                flag
+            };
+            for n in 0..200 {
+                write_wide(&mut writer, now, n);
+            }
+            test.clock.sleep(SETTLE).await;
+            assert!(
+                flag.0.load(Ordering::Relaxed),
+                "the commit wakes the reader"
+            );
+            let (charges, ended) = take_all(&mut reader).await;
+            assert_behind(&ended);
+            assert!(charges.len() < 200, "the reader misses a frame");
+            let spent: u64 = charges.iter().sum();
+            assert!(spent >= WINDOW, "{spent} bytes spend the window");
+            assert_behind(&reader.next().await.expect_err("the reader ended"));
+        });
+    }
+}
+
+#[test]
+fn ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame() {
+    for seed in 0..32 {
+        run(seed, |test| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let mut writer = test.writer("a", &["value"]).await;
+            let now = test.now();
+            for n in 0..20 {
+                write_wide(&mut writer, now, n);
+            }
+            test.clock.sleep(SETTLE).await;
+            for n in 20..200 {
+                write_wide(&mut writer, now, n);
+            }
+            test.clock.sleep(SETTLE).await;
+            let (charges, ended) = take_all(&mut reader).await;
+            assert_behind(&ended);
+            assert!(
+                20 < charges.len() && charges.len() < 200,
+                "{}",
+                charges.len()
+            );
+        });
+    }
+}
 
 impl Wake for Flag {
     fn wake(self: Arc<Self>) {
