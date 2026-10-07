@@ -1,7 +1,8 @@
 #!/bin/sh
 # Waits until pull request $1 merges or needs its author, then prints why it stopped.
 # Exit 0: merged. Exit 1: closed, a failed check, a canceled required check, a
-# conflict, requested changes, the PR left the merge queue, or the query failed.
+# conflict, requested changes, the PR left the merge queue, a wrong query, or no such
+# PR. It waits through any other error: network, HTTP, rate limit, or server timeout.
 #
 # Only the latest run of each workflow counts, and in it the latest run of each job,
 # so a new run or a rerun replaces the old one. A canceled run counts only on a
@@ -16,10 +17,7 @@ q='query($n:Int!){repository(owner:"synnaxlabs",name:"foundation"){
     ... on CheckRun{name databaseId conclusion isRequired(pullRequestNumber:$n)
       checkSuite{workflowRun{databaseId workflow{name}}}}
     ... on StatusContext{state}}}}}}}}}}'
-jq='if .errors then
-    if any(.errors[]; .type == "RATE_LIMITED") then "waiting"
-    else "has a query error: \(.errors[0].message)" end
-  else .data.repository.pullRequest |
+jq='.data.repository.pullRequest |
   (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $nodes |
   ([$nodes[] | select(.__typename == "CheckRun")]
     | group_by(.checkSuite.workflowRun.workflow.name)
@@ -40,13 +38,16 @@ jq='if .errors then
   elif .mergeable == "CONFLICTING" then "conflicts with main"
   elif .reviewDecision == "CHANGES_REQUESTED" then "has requested changes"
   elif .isInMergeQueue or .autoMergeRequest != null then "waiting"
-  else "left the merge queue" end end'
+  else "left the merge queue" end'
 while :; do
-  # A GraphQL error comes on stdout with a nonzero exit; a network error gives no
-  # stdout, and the script waits through it.
-  a=$(gh api graphql -F n="$1" -f query="$q" 2>/dev/null)
-  s=$(printf '%s' "$a" | jq -r "$jq" 2>/dev/null)
-  case ${s:-waiting} in
+  # When gh fails, it skips the jq and prints the answer body, if any.
+  if ! s=$(gh api graphql -F n="$1" -f query="$q" --jq "$jq" 2>/dev/null); then
+    case $s in
+      *'"extensions":{"code":'* | *'"type":"NOT_FOUND"'*) s="has a query error: $s" ;;
+      *) s=waiting ;;
+    esac
+  fi
+  case $s in
     merged) echo "#$1 merged"; exit 0 ;;
     waiting) sleep 120 ;;
     *) echo "#$1 $s"; exit 1 ;;
