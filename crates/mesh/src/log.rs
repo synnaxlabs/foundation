@@ -15,6 +15,11 @@
 //! that it finds, the records as read and then zeros, in blocks of whole sectors. So a
 //! torn record leaves nothing that a later open reads as a header, and a record whose
 //! sync failed is durable.
+//!
+//! A write puts a record in blocks of whole sectors, one block of the pool at a time.
+//! When the pool gives no block for a part, the bytes of the parts before it stay after
+//! the end of the log. The next write puts zeros over them, and syncs, before it writes
+//! its record.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

@@ -1130,6 +1130,23 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_changes_that_the_pool_cannot_hold_commits() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                pool: small_pool(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            lead(&mesh, &node.clock(), home(1)).await;
+            for id in 2..=100 {
+                mesh.propose(home(id)).unwrap();
+            }
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+            assert_eq!(mesh.group.borrow().state.home(INDEX), Some(key(100)));
+        });
+    }
+
+    #[test]
     fn a_full_pool_holds_a_message_until_a_block_is_free() {
         solo(|node, tasks| async move {
             let pool = small_pool();

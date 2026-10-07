@@ -1511,7 +1511,16 @@ How to read this record:
   entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
-  holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
+  holds a record. A write puts its record in blocks of whole sectors, one block of the
+  pool at a time and of 64 KiB at most, and then syncs one time. So a pool that opens
+  holds each write. A write that a file call fails, or that its caller drops, poisons
+  the log (`Error::Poisoned`). A write that the pool stops between two blocks
+  (`Error::Pool`) does not: the log holds what it held, and the bytes of the stopped
+  write stay after its end. The next write puts zeros over those bytes and syncs, and
+  only then writes its record: with one sync, a power cut can keep the record and not
+  the zeros (SIM CRASH), and an open then reads the old bytes as a header (PR 1 of
+  #1091, approved by the architect, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973). A
   header never crosses a `SECTOR`: a record whose header would cross one starts at the
   next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
   header is whole or absent. At a restart, zeros where a record should start, or a good
@@ -1571,12 +1580,12 @@ How to read this record:
   system refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. Nothing
-  bounds the proposals and the messages that the group takes in that time, and a write
-  whose blocks the pool can never hold at one time waits with no end (#1091). A free
-  block of a size with a block in use keeps its budget (#291), so a write can also wait
-  while the budget has room for its blocks: with no end when the block in use is its
-  own (#1091), and else until the other user of the pool drops its block (#1134). A pool
-  whose largest block is less than one sector does not open (MESH LOG), so no write
+  bounds the proposals and the messages that the group takes in that time (#1091). A
+  write holds one block of the pool at a time (MESH LOG), so no record is too large for
+  a pool that opens, and a write does not wait for a block of its own. A free block of a
+  size with a block in use keeps its budget (#291), so a write can wait while the budget
+  has room for its block, until the other user of the pool drops its block (#1134). A
+  pool whose largest block is less than one sector does not open (MESH LOG), so no write
   gives `TooLarge` and the group does not stop for it (decided by the architect,
   2026-10-07T06:32:47Z:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
