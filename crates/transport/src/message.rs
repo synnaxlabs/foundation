@@ -12,6 +12,7 @@ use std::mem;
 use std::task::Poll;
 
 use block::{Block, Unique};
+use bytes::{Bytes, BytesMut};
 
 use crate::Error;
 use crate::varint::{self, Varint};
@@ -31,6 +32,9 @@ pub(crate) fn prefix(len: usize) -> Varint {
 pub(crate) struct Reader {
     bytes_max: usize,
     state: State,
+    /// The bytes of the current message, as the source gave them. Its capacity
+    /// stays for the next message.
+    chunks: Vec<Bytes>,
 }
 
 #[derive(Debug)]
@@ -42,10 +46,16 @@ enum State {
         have: usize,
         len: usize,
     },
-    /// A message of `len` bytes, with no block yet.
+    /// A message of `len` bytes, with no room yet.
     Sized { len: u64 },
-    /// A message's block, with `have` of its bytes.
-    Body { block: Unique, have: usize },
+    /// A message of `len` bytes that has room, with `have` of its bytes. They are
+    /// in `chunks`, or in `copy` when the source gave more than
+    /// [`chunks_max`] chunks.
+    Body {
+        len: usize,
+        have: usize,
+        copy: Option<BytesMut>,
+    },
 }
 
 const START: State = State::Prefix {
@@ -54,12 +64,20 @@ const START: State = State::Prefix {
     len: 1,
 };
 
+/// The most chunks that a message of `len` bytes holds before its bytes go into one
+/// copy. Each chunk can keep a whole received batch in memory, and a peer that
+/// sends a message in tiny frames must not make it keep one per byte.
+fn chunks_max(len: usize) -> usize {
+    8_usize.saturating_add(len / 512)
+}
+
 impl Reader {
     /// A reader that refuses a message over `bytes_max` bytes.
     pub(crate) fn new(bytes_max: usize) -> Self {
         Self {
             bytes_max,
             state: START,
+            chunks: Vec::new(),
         }
     }
 
@@ -81,19 +99,27 @@ impl Reader {
                 len,
             }
         };
-        Self { bytes_max, state }
+        Self {
+            bytes_max,
+            state,
+            chunks: Vec::new(),
+        }
     }
 
-    /// Reads the next whole message into a block. `take(len)` gives a block of
-    /// exactly `len` bytes for the next message, or `None` when it may not have one
-    /// now. `source(max)` gives the stream's next 1 to `max` bytes, `Pending` when it
-    /// has none now, or `None` when the stream has ended. The reader never asks for a
-    /// byte past the current message, so later messages stay with the source.
+    /// Reads the next whole message into a block. `admit(len)` says whether the
+    /// next message, of `len` bytes, may take its bytes now. `take(len)` gives a
+    /// block of exactly `len` bytes for a whole message, or `None` when it may not
+    /// have one now. `source(max)` gives the stream's next 1 to `max` bytes,
+    /// `Pending` when it has none now, or `None` when the stream has ended. The
+    /// reader never asks for a byte past the current message, so later messages
+    /// stay with the source. It holds the bytes of a message until the message is
+    /// whole, and copies them once, into the block.
     ///
-    /// Returns the message, `Pending` when `take` gives no block or the source has
-    /// no more bytes now, or `None` when the stream ended between two messages. After
-    /// `Pending`, the next call goes on where this one stopped. After an error inside
-    /// a message's body, the reader holds no block.
+    /// Returns the message, `Pending` when `admit` or `take` refuses or the source
+    /// has no more bytes now, or `None` when the stream ended between two messages.
+    /// After `Pending`, the next call goes on where this one stopped: it asks
+    /// `admit` again only when it refused, and `take` only for a whole message.
+    /// After an error, the reader holds no bytes of a message.
     ///
     /// # Errors
     ///
@@ -104,10 +130,11 @@ impl Reader {
     /// # Panics
     ///
     /// When the source gives no bytes or more than `max`.
-    pub(crate) fn read<B: AsRef<[u8]>>(
+    pub(crate) fn read(
         &mut self,
+        mut admit: impl FnMut(usize) -> bool,
         mut take: impl FnMut(usize) -> Option<Unique>,
-        mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
+        mut source: impl FnMut(usize) -> Result<Poll<Option<Bytes>>, Error>,
     ) -> Result<Poll<Option<Block>>, Error> {
         loop {
             match &mut self.state {
@@ -142,35 +169,79 @@ impl Reader {
                             ),
                         });
                     };
-                    let Some(block) = take(len) else {
+                    if !admit(len) {
+                        return Ok(Poll::Pending);
+                    }
+                    self.state = State::Body {
+                        len,
+                        have: 0,
+                        copy: None,
+                    };
+                }
+                State::Body { len, have, copy } if *have < *len => {
+                    let rest = len.saturating_sub(*have);
+                    let error = match source(rest) {
+                        Ok(Poll::Pending) => return Ok(Poll::Pending),
+                        Ok(Poll::Ready(Some(chunk))) => {
+                            assert!(
+                                !chunk.is_empty(),
+                                "the source gives at least one byte"
+                            );
+                            assert!(
+                                chunk.len() <= rest,
+                                "the source gives at most the bytes asked for"
+                            );
+                            *have = have.saturating_add(chunk.len());
+                            hold(&mut self.chunks, copy, *len, chunk);
+                            continue;
+                        }
+                        Ok(Poll::Ready(None)) => ended(),
+                        Err(error) => error,
+                    };
+                    self.state = START;
+                    self.chunks.clear();
+                    return Err(error);
+                }
+                State::Body { len, copy, .. } => {
+                    let Some(mut block) = take(*len) else {
                         return Ok(Poll::Pending);
                     };
-                    self.state = State::Body { block, have: 0 };
-                }
-                State::Body { block, have } => {
-                    if *have < block.len() {
-                        let error = match pull(&mut source, block, have) {
-                            Ok(Poll::Pending) => return Ok(Poll::Pending),
-                            Ok(Poll::Ready(true)) => None,
-                            Ok(Poll::Ready(false)) => Some(ended()),
-                            Err(error) => Some(error),
-                        };
-                        if let Some(error) = error {
-                            self.state = START;
-                            return Err(error);
-                        }
+                    let mut rest: &mut [u8] = &mut block;
+                    let held = copy.iter().map(AsRef::as_ref);
+                    for chunk in held.chain(self.chunks.iter().map(AsRef::as_ref)) {
+                        let (head, tail) =
+                            mem::take(&mut rest).split_at_mut(chunk.len());
+                        head.copy_from_slice(chunk);
+                        rest = tail;
                     }
-                    if *have == block.len() {
-                        let State::Body { block, .. } =
-                            mem::replace(&mut self.state, START)
-                        else {
-                            unreachable!("this arm matched a body");
-                        };
-                        return Ok(Poll::Ready(Some(block.freeze())));
-                    }
+                    self.chunks.clear();
+                    self.state = START;
+                    return Ok(Poll::Ready(Some(block.freeze())));
                 }
             }
         }
+    }
+}
+
+/// Holds `chunk`, the next bytes of a message of `len` bytes, in `chunks`, or in
+/// `copy` once `chunks` would pass [`chunks_max`].
+fn hold(
+    chunks: &mut Vec<Bytes>,
+    copy: &mut Option<BytesMut>,
+    len: usize,
+    chunk: Bytes,
+) {
+    if let Some(copy) = copy {
+        copy.extend_from_slice(&chunk);
+    } else if chunks.len() < chunks_max(len) {
+        chunks.push(chunk);
+    } else {
+        let mut bytes = BytesMut::with_capacity(len);
+        for held in chunks.drain(..) {
+            bytes.extend_from_slice(&held);
+        }
+        bytes.extend_from_slice(&chunk);
+        *copy = Some(bytes);
     }
 }
 
@@ -182,8 +253,8 @@ fn ended() -> Error {
 
 /// Copies the source's next bytes into `buffer` after its first `have`. Returns
 /// `false` when the stream has ended.
-fn pull<B: AsRef<[u8]>>(
-    source: &mut impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
+fn pull(
+    source: &mut impl FnMut(usize) -> Result<Poll<Option<Bytes>>, Error>,
     buffer: &mut [u8],
     have: &mut usize,
 ) -> Result<Poll<bool>, Error> {
@@ -194,11 +265,10 @@ fn pull<B: AsRef<[u8]>>(
     let Some(chunk) = chunk else {
         return Ok(Poll::Ready(false));
     };
-    let chunk = chunk.as_ref();
     assert!(!chunk.is_empty(), "the source gives at least one byte");
     rest.get_mut(..chunk.len())
         .expect("the source gives at most the bytes asked for")
-        .copy_from_slice(chunk);
+        .copy_from_slice(&chunk);
     *have = have.saturating_add(chunk.len());
     Ok(Poll::Ready(true))
 }
@@ -248,7 +318,7 @@ mod tests {
             }
         }
 
-        fn take(&mut self, max: usize) -> Poll<Option<Vec<u8>>> {
+        fn take(&mut self, max: usize) -> Poll<Option<Bytes>> {
             let n = max.min(self.split).min(self.bytes.len());
             if n == 0 {
                 return if self.open {
@@ -258,7 +328,7 @@ mod tests {
                 };
             }
             self.given = self.given.saturating_add(n);
-            Poll::Ready(Some(self.bytes.drain(..n).collect()))
+            Poll::Ready(Some(self.bytes.drain(..n).collect::<Vec<_>>().into()))
         }
     }
 
@@ -268,8 +338,8 @@ mod tests {
         pool: &Pool,
         source: &mut Source,
     ) -> Result<Poll<Option<Vec<u8>>>, Error> {
-        let read =
-            reader.read(|len| pool.alloc(len).ok(), |max| Ok(source.take(max)))?;
+        let take = |len| pool.alloc(len).ok();
+        let read = reader.read(|_| true, take, |max| Ok(source.take(max)))?;
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
@@ -425,7 +495,8 @@ mod tests {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
             let read = reader
-                .read::<Vec<u8>>(
+                .read(
+                    |_| true,
                     |len| pool.alloc(len).ok(),
                     |_| {
                         Err(Error::Reset {
@@ -443,16 +514,17 @@ mod tests {
         }
 
         #[test]
-        fn when_source_fails_inside_a_message_it_gives_the_error_and_drops_the_block() {
-            // A 100-byte block takes 192 bytes of the budget, so the pool holds one.
-            let pool = pool(300);
+        fn when_source_fails_inside_a_message_it_gives_the_error_and_drops_its_bytes() {
+            let pool = pool(1 << 16);
             let mut reader = Reader::new(1_000);
             let part = encode(&[vec![9; 100]]).into_iter().take(10).collect();
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.chunks.len(), 1);
             let read = reader
-                .read::<Vec<u8>>(
+                .read(
+                    |_| true,
                     |len| pool.alloc(len).ok(),
                     |_| {
                         Err(Error::Reset {
@@ -467,21 +539,23 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
-            drop(pool.alloc(100).expect("the reader dropped its block"));
+            assert!(reader.chunks.is_empty());
+            assert!(matches!(reader.state, State::Prefix { have: 0, .. }));
         }
 
         #[test]
-        fn when_take_gives_no_block_it_takes_no_body_bytes_then_goes_on() {
+        fn when_admit_refuses_it_takes_no_body_bytes_then_goes_on() {
             let pool = pool(1 << 16);
             let mut source = Source::new(encode(&[vec![4; 100]]), 64);
             let mut reader = Reader::new(1_000);
             let mut asked = Vec::new();
             for _ in 0..2 {
-                let take = |len| {
+                let admit = |len| {
                     asked.push(len);
-                    None
+                    false
                 };
-                let read = reader.read(take, |max| Ok(source.take(max)));
+                let take = |_| panic!("a message with no room takes no block");
+                let read = reader.read(admit, take, |max| Ok(source.take(max)));
                 assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
             }
             assert_eq!(asked, [100, 100]);
@@ -493,13 +567,77 @@ mod tests {
         }
 
         #[test]
+        fn when_take_gives_no_block_it_holds_the_whole_message_then_goes_on() {
+            let pool = pool(1 << 16);
+            let mut source = Source::new(encode(&[vec![4; 100], vec![5; 3]]), 64);
+            let mut reader = Reader::new(1_000);
+            let (mut admitted, mut asked) = (Vec::new(), Vec::new());
+            for _ in 0..2 {
+                let admit = |len| {
+                    admitted.push(len);
+                    true
+                };
+                let take = |len| {
+                    asked.push(len);
+                    None
+                };
+                let read = reader.read(admit, take, |max| Ok(source.take(max)));
+                assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+            }
+            assert_eq!((admitted, asked), (vec![100], vec![100, 100]));
+            assert_eq!(source.given, 102);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Ok(vec![vec![4; 100], vec![5; 3]])
+            );
+        }
+
+        #[test]
+        fn holds_chunks_up_to_the_limit_then_copies_them() {
+            let pool = pool(1 << 16);
+            let message: Vec<u8> = (0..=255).cycle().take(1_024).collect();
+            let stream = encode(&[message.clone()]);
+            let (start, rest) = stream.split_at(2 + 10);
+            let mut source = Source::new(start.to_vec(), 1);
+            source.open = true;
+            let mut reader = Reader::new(1_024);
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert_eq!(reader.chunks.len(), chunks_max(1_024));
+            assert_eq!(chunks_max(1_024), 10);
+            assert!(matches!(reader.state, State::Body { copy: None, .. }));
+            let (next, rest) = rest.split_at(1);
+            source.bytes.extend(next);
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            assert!(reader.chunks.is_empty());
+            let State::Body {
+                copy: Some(copy), ..
+            } = &reader.state
+            else {
+                panic!("the reader copies at the 11th chunk: {:?}", reader.state);
+            };
+            assert_eq!(copy[..], message[..11]);
+            source.bytes.extend(rest);
+            source.split = 100;
+            source.open = false;
+            assert_eq!(read_all(&mut reader, &pool, &mut source), Ok(vec![message]));
+            assert!(matches!(reader.state, State::Prefix { have: 0, .. }));
+        }
+
+        #[test]
+        fn chunks_max_grows_by_one_each_512_bytes() {
+            let max = [0, 511, 512, 1_023, 1_024, 70_000].map(chunks_max);
+            assert_eq!(max, [8, 8, 9, 9, 10, 144]);
+        }
+
+        #[test]
         #[should_panic(expected = "the source gives at least one byte")]
         fn when_source_gives_no_bytes_it_panics() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
             drop(reader.read(
+                |_| true,
                 |len| pool.alloc(len).ok(),
-                |_| Ok(Poll::Ready(Some([0_u8; 0]))),
+                |_| Ok(Poll::Ready(Some(Bytes::new()))),
             ));
         }
 
@@ -543,25 +681,33 @@ mod tests {
         }
 
         #[test]
-        fn when_readers_that_hold_large_blocks_drop_a_small_message_reads() {
+        fn messages_in_progress_hold_no_block() {
             let bytes_max = 1 << 10;
-            let pool = pool(2 * block::footprint(bytes_max));
+            let pool = pool(block::footprint(bytes_max));
+            let large = vec![2; bytes_max];
+            let part: Vec<u8> =
+                encode(&[large.clone()]).into_iter().take(500).collect();
             let mut readers = Vec::new();
             for _ in 0..2 {
-                let mut source = Source::new(prefix(bytes_max).to_vec(), 64);
+                let mut source = Source::new(part.clone(), 64);
                 source.open = true;
                 let mut reader = Reader::new(bytes_max);
                 assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-                readers.push(reader);
+                readers.push((reader, source));
             }
             let mut source = Source::new(encode(&[vec![1; 10]]), 64);
             let mut reader = Reader::new(bytes_max);
-            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            drop(readers);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
                 Ok(vec![vec![1; 10]])
             );
+            for (reader, source) in &mut readers {
+                source
+                    .bytes
+                    .extend(encode(&[large.clone()]).into_iter().skip(500));
+                source.open = false;
+                assert_eq!(read_all(reader, &pool, source), Ok(vec![large.clone()]));
+            }
         }
     }
 }

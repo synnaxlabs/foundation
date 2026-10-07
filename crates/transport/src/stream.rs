@@ -1735,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_that_waits_for_a_block_holds_the_peers_send() {
+    fn a_message_that_waits_for_a_block_holds_the_peers_send_when_the_window_fills() {
         let narrow = |config| {
             let config = scarce(config, heap());
             Config {
@@ -1750,11 +1750,11 @@ mod tests {
                 let clock = side.node.clock();
                 let opened = side.session.open_sender(Class::Complete).await;
                 let mut sender = opened.expect("a stream");
-                sender
-                    .send(side.block(&vec![0; LARGE]))
-                    .await
-                    .expect("sent");
-                let mut send = Box::pin(sender.send(side.block(&vec![1; LARGE])));
+                for byte in 0..2 {
+                    let block = side.block(&vec![byte; LARGE]);
+                    sender.send(block).await.expect("sent");
+                }
+                let mut send = Box::pin(sender.send(side.block(&vec![2; LARGE])));
                 pending_for(
                     &clock,
                     spans(Span::MILLISECOND, 100),
@@ -1781,9 +1781,11 @@ mod tests {
                 let message = read.await.expect("a message").expect("a block");
                 assert_eq!(message.to_vec(), vec![0; LARGE]);
                 drop(message);
-                let read = incoming.receiver.recv().await;
-                let message = read.expect("a message").expect("a block");
-                assert_eq!(message.to_vec(), vec![1; LARGE]);
+                for byte in 1..3 {
+                    let read = incoming.receiver.recv().await;
+                    let message = read.expect("a message").expect("a block");
+                    assert_eq!(message.to_vec(), vec![byte; LARGE]);
+                }
                 side.session.close(Code(4));
             },
         );
@@ -2033,16 +2035,28 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    /// The server's pool holds one message of its largest, and its window is two.
-    /// A `Complete` stream sends 2 such messages and a `Latest` stream sends 3. The
-    /// server reads both streams at once and drops each message when it gets it.
     #[test]
     fn streams_read_at_once_from_a_scarce_pool_get_every_message() {
+        assert_eq!(read_from_a_scarce_pool(1), [[2, 3]]);
+    }
+
+    #[test]
+    fn sessions_that_share_a_scarce_pool_get_every_message() {
+        assert_eq!(read_from_a_scarce_pool(2), [[2, 3], [2, 3]]);
+    }
+
+    /// The client dials the server `sessions` times. On each session, a `Complete`
+    /// stream sends 2 messages of the largest size and a `Latest` stream sends 3.
+    /// The server's one pool holds one such message, and its window is two. It reads
+    /// each stream at once and drops each message when it gets it. Gives the count
+    /// of messages that each session's streams got.
+    fn read_from_a_scarce_pool(sessions: usize) -> Vec<[u32; 2]> {
         let (mut sim, client, server) = testing::nodes(0);
         let at = [Address::Udp(testing::address(&server))];
-        let got: Arc<[AtomicU32; 2]> = Arc::default();
+        let got: Arc<Vec<[AtomicU32; 2]>> =
+            Arc::new((0..sessions).map(|_| Default::default()).collect());
         let counts = Arc::clone(&got);
-        testing::shard(&server, testing::SERVER, |config, node| async move {
+        testing::shard(&server, testing::SERVER, move |config, node| async move {
             let tasks = config.tasks.clone();
             let config = scarce(config, heap());
             let largest = config.message_bytes_max.get();
@@ -2052,20 +2066,26 @@ mod tests {
             };
             let part = testing::part(&node.net(), testing::address(&node));
             let transport = Transport::new(config, part).expect("a transport");
-            let session = transport.accept().await.expect("a session");
-            for _ in 0..2 {
-                let mut receiver = session.accept().await.expect("a stream").receiver;
-                let counts = Arc::clone(&counts);
-                tasks.spawn(async move {
-                    while let Some(message) = receiver.recv().await.expect("a read") {
-                        assert_eq!(message.len(), largest);
-                        let index = usize::from(message[0]);
-                        counts[index].fetch_add(1, Ordering::Relaxed);
-                    }
-                });
+            let mut held = Vec::new();
+            for index in 0..sessions {
+                let session = transport.accept().await.expect("a session");
+                for _ in 0..2 {
+                    let incoming = session.accept().await.expect("a stream");
+                    let mut receiver = incoming.receiver;
+                    let counts = Arc::clone(&counts);
+                    tasks.spawn(async move {
+                        while let Some(message) = receiver.recv().await.expect("a read")
+                        {
+                            assert_eq!(message.len(), largest);
+                            let class = usize::from(message[0]);
+                            counts[index][class].fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+                held.push(session);
             }
             std::future::pending::<()>().await;
-            drop((transport, session));
+            drop((transport, held));
         });
         testing::shard(&client, testing::CLIENT, move |config, node| async move {
             let tasks = config.tasks.clone();
@@ -2073,25 +2093,32 @@ mod tests {
             let part = testing::part(&node.net(), testing::address(&node));
             let transport = Transport::new(config, part).expect("a transport");
             let server = crate::tls::public(&testing::SERVER);
-            let session = transport.dial(server, &at).await.expect("a session");
-            for (byte, class, count) in [(0, Class::Complete, 2), (1, Class::Latest, 3)] {
-                let opened = session.open_sender(class).await;
-                let mut sender = opened.expect("a stream");
-                let pool = Rc::clone(&pool);
-                tasks.spawn(async move {
-                    for _ in 0..count {
-                        let message = vec![byte; sender.bytes_max()];
-                        let block = testing::block(&pool, &message);
-                        sender.send(block).await.expect("sent");
-                    }
-                    sender.finish().expect("finished");
-                });
+            let mut held = Vec::new();
+            for _ in 0..sessions {
+                let session = transport.dial(server, &at).await.expect("a session");
+                let streams = [(0, Class::Complete, 2), (1, Class::Latest, 3)];
+                for (byte, class, count) in streams {
+                    let opened = session.open_sender(class).await;
+                    let mut sender = opened.expect("a stream");
+                    let pool = Rc::clone(&pool);
+                    tasks.spawn(async move {
+                        for _ in 0..count {
+                            let message = vec![byte; sender.bytes_max()];
+                            let block = testing::block(&pool, &message);
+                            sender.send(block).await.expect("sent");
+                        }
+                        sender.finish().expect("finished");
+                    });
+                }
+                held.push(session);
             }
             std::future::pending::<()>().await;
-            drop((transport, session));
+            drop((transport, held));
         });
         assert_eq!(sim.run_for(spans(Span::SECOND, 60)), Ok(()));
-        let got = got.each_ref().map(|count| count.load(Ordering::Relaxed));
-        assert_eq!(got, [2, 3]);
+        let count = |counts: &[AtomicU32; 2]| {
+            counts.each_ref().map(|count| count.load(Ordering::Relaxed))
+        };
+        got.iter().map(count).collect()
     }
 }

@@ -1181,8 +1181,8 @@ impl Streams {
     /// that `take(len)` gives, as [`Reader::read`]. `Ready(None)` at the end.
     /// `Pending` when no whole message is here yet, the next has no room in the
     /// receive budget or waits behind a stream of its class or a higher class, or
-    /// `take` gives no block for it. A message with no block holds no room. The
-    /// receivers that get the freed room get [`Event::Readable`] in `events`.
+    /// `take` gives no block for it. The receivers that get the freed room get
+    /// [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
@@ -1210,15 +1210,13 @@ impl Streams {
         let (mut result, mut missed) = (Ok(Poll::Pending), false);
         if !receiving.waits(claim) {
             let mut chunks = recv.read(true).expect(RECEIVING);
+            let admit = |len| receiving.charge(*key, len, claim, Order::RANK);
             let take = |len| {
-                if !receiving.charge(*key, len, claim, Order::RANK) {
-                    return None;
-                }
                 let block = take(len);
                 missed = block.is_none();
                 block
             };
-            result = reader.read(take, |max| match chunks.next(max) {
+            result = reader.read(admit, take, |max| match chunks.next(max) {
                 Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
                 Err(ReadError::Blocked) => Ok(Poll::Pending),
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
@@ -1231,7 +1229,7 @@ impl Streams {
         {
             result = Err(reset_error(error));
         }
-        if !matches!(result, Ok(Poll::Pending)) || missed {
+        if !matches!(result, Ok(Poll::Pending)) {
             receiving.release(claim, Order::RANK, |stream| {
                 events.push_back(Event::Readable { stream });
             });
@@ -2035,29 +2033,30 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_past_the_budget_wait_and_take_no_more_of_the_pool() {
+    fn prefixes_take_no_block() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             prefixes(&mut pair, testing::STREAMS_MAX);
             let before = shard.committed();
             let receivers = wait(&mut pair);
             assert_eq!(receivers.len(), 16);
-            let taken = shard.committed() - before;
-            assert_eq!(taken, 3 * block::footprint(MESSAGE_MAX));
+            assert_eq!(shard.committed(), before);
         });
     }
 
     #[test]
-    fn a_read_that_finds_the_pool_full_gives_back_its_budget() {
+    fn a_whole_message_that_finds_the_pool_full_keeps_its_room() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let config = block::Config {
-                budget: 3 * block::footprint(MESSAGE_MAX) - 1,
+                budget: block::footprint(MESSAGE_MAX),
             };
             let memory = Heap::new(config.reservation());
+            let pool = Rc::new(Pool::new(config, memory));
+            let held = pool.alloc(MESSAGE_MAX).expect("room");
             let config = Config {
                 window_bytes: NARROW,
-                pool: Rc::new(Pool::new(config, memory)),
+                pool,
                 ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             pair.server.endpoint =
@@ -2065,21 +2064,24 @@ mod tests {
             pair.server.key = None;
             pair.dial(tls::public(&pair::SERVER_KEY));
             pair.run(RUN);
-            prefixes(&mut pair, 3);
-            let (now, server) = (pair.now(), key(&pair.server));
-            let mut receivers = Vec::new();
-            while let Some(incoming) = pair.server.endpoint.accept(server) {
-                receivers.push(incoming.receiver);
-            }
-            assert_eq!(receivers.len(), 3);
-            for receiver in &mut receivers[..2] {
-                assert_eq!(next(&mut pair.server, now, receiver), Ok(Poll::Pending));
-            }
-            for _ in 0..2 {
-                assert!(missed(&mut pair.server, now, &mut receivers[2]));
+            prefixes(&mut pair, 2);
+            let mut receivers = wait(&mut pair);
+            let large = vec![3; MESSAGE_MAX];
+            let prefix = message::prefix(MESSAGE_MAX);
+            let bytes = [[byte(Class::Complete)].as_slice(), &*prefix, &large].concat();
+            raw(pair.client.connection(), Dir::Uni, &bytes, true);
+            pair.run(RUN);
+            let mut whole = accept(&mut pair.server);
+            for tries in 0.. {
+                let now = pair.now();
+                if missed(&mut pair.server, now, &mut whole.receiver) {
+                    break;
+                }
+                assert!(tries < 100, "the message never became whole");
+                pair.run(STEP);
             }
             // The budget holds three of the largest messages, so a fourth message
-            // reads only when the third gave back its room.
+            // reads only when one of the three gives back its room.
             let message = [7; 100];
             let prefix = message::prefix(message.len());
             let bytes =
@@ -2088,6 +2090,11 @@ mod tests {
             pair.run(RUN);
             let mut fourth = accept(&mut pair.server);
             let now = pair.now();
+            assert!(!missed(&mut pair.server, now, &mut fourth.receiver));
+            assert!(missed(&mut pair.server, now, &mut whole.receiver));
+            let first = receivers.remove(0);
+            pair.server.endpoint.stop(now, first, Code(0));
+            drop(held);
             let read = drain(&mut pair.server, now, &mut fourth.receiver);
             assert_eq!(read, (vec![message.to_vec()], true));
         });

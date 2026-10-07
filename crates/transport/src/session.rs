@@ -202,16 +202,13 @@ pub enum Peer {
 
 #[cfg(test)]
 mod tests {
-    use std::future::poll_fn;
-    use std::num::NonZeroUsize;
     use std::pin::pin;
-    use std::rc::Rc;
 
     use types::time::Span;
 
     use crate::testing::{self, CLIENT, IDLE, SERVER, join, poll_once, spans};
     use crate::tls::public;
-    use crate::{Address, Class, Code, Config, Error, Transport, message};
+    use crate::{Class, Code, Config, Error, message};
 
     #[test]
     fn a_session_stays_open_until_its_last_clone_drops() {
@@ -467,100 +464,5 @@ mod tests {
             },
         );
         assert_eq!(sim.run(), Ok(()));
-    }
-
-    const LEN: usize = 40_000;
-
-    #[test]
-    fn a_read_that_waits_for_budget_room_lets_a_read_of_another_session_take_a_block() {
-        let (mut sim, client, server) = testing::nodes(0);
-        let at = [Address::Udp(testing::address(&server))];
-        testing::shard(&server, SERVER, |config, node| async move {
-            let memory = block::Config {
-                budget: 3 * block::footprint(LEN),
-            };
-            let heap = block::Heap::new(memory.reservation());
-            let pool = Rc::new(block::Pool::new(memory, heap));
-            // The receive budget is the window plus the largest message: 100_000.
-            let config = Config {
-                message_bytes_max: NonZeroUsize::new(50_000).expect("not zero"),
-                window_bytes: 50_000,
-                pool: Rc::clone(&pool),
-                ..config
-            };
-            let part = testing::part(&node.net(), testing::address(&node));
-            let transport = Transport::new(config, part).expect("a transport");
-            let first = transport.accept().await.expect("a session");
-            let second = transport.accept().await.expect("a session");
-            let clock = node.clock();
-            let held = [(); 3].map(|()| pool.alloc(LEN).expect("room"));
-            let mut a = first.accept().await.expect("a stream").receiver;
-            let mut b = second.accept().await.expect("a stream").receiver;
-            let mut a_read = Box::pin(a.recv());
-            let mut b_read = Box::pin(b.recv());
-            assert!(poll_once(a_read.as_mut()).await.is_none());
-            assert!(poll_once(b_read.as_mut()).await.is_none());
-            let mut stalled = Vec::new();
-            for _ in 0..2 {
-                let incoming = first.accept().await.expect("a stream");
-                assert_eq!(incoming.class, Class::Command);
-                stalled.push(incoming.receiver);
-            }
-            let [h1, h2, h3] = held;
-            drop((h1, h2));
-            // Each `Command` message takes a block, and holds 40_000 bytes of the
-            // first session's budget, so `a` has no room when the pool next does.
-            for receiver in &mut stalled {
-                assert!(poll_once(pin!(receiver.recv())).await.is_none());
-            }
-            drop(h3);
-            let read = poll_fn(|cx| {
-                assert!(a_read.as_mut().poll(cx).is_pending());
-                b_read.as_mut().poll(cx)
-            });
-            let message = read.await.expect("a message").expect("a block");
-            assert_eq!(message.to_vec(), vec![2; LEN]);
-            drop((message, stalled));
-            let message = a_read.await.expect("a message").expect("a block");
-            assert_eq!(message.to_vec(), vec![1; LEN]);
-            first.close(Code(4));
-            second.close(Code(4));
-            clock.sleep(Span::MILLISECOND).await;
-        });
-        testing::shard(&client, CLIENT, move |config, node| async move {
-            send_and_stall(config, node, at).await;
-        });
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    /// Dials the server two times. Sends a message of [`LEN`] bytes of 1 on the first
-    /// session and one of 2 on the second, then on the first two `Command` streams
-    /// that each hold the prefix of a message of [`LEN`] bytes and only part of it.
-    /// Waits for the server to close each session with code 4.
-    async fn send_and_stall(config: Config, node: sim::node::Node, at: [Address; 1]) {
-        let pool = Rc::clone(&config.pool);
-        let part = testing::part(&node.net(), testing::address(&node));
-        let transport = Transport::new(config, part).expect("a transport");
-        let server = public(&SERVER);
-        let first = transport.dial(server, &at).await.expect("a session");
-        let second = transport.dial(server, &at).await.expect("a session");
-        for (session, byte) in [(&first, 1), (&second, 2)] {
-            let opened = session.open_sender(Class::Complete).await;
-            let mut sender = opened.expect("a stream");
-            sender
-                .send(testing::block(&pool, &vec![byte; LEN]))
-                .await
-                .expect("sent");
-            sender.finish().expect("finished");
-        }
-        node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
-        let command = 0;
-        let part = [&[command], &*message::prefix(LEN), &[3; 1_000]].concat();
-        for _ in 0..2 {
-            first.0.raw(&part);
-        }
-        let closed = Error::PeerClosed { code: Code(4) };
-        assert_eq!(first.closed().await, closed);
-        assert_eq!(second.closed().await, closed);
     }
 }
