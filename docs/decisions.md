@@ -1030,43 +1030,46 @@ How to read this record:
   that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
   in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
   frame (its slot order), the index too, so a place is an entry of the reader's frame
-  and a session has `channels` places. An open of no channel is not valid. Only the
-  fixed part of `Open` and of `Head` is one message. The rest is one run of bytes, in
-  messages of at most the peer's `message_bytes_max`, back to back with no prefix: after
-  `Open`, the keys; after `Head`, the place and end of each series in the body, then the
-  body. A message never splits a key or an end, so each side decodes each message as it
-  arrives. The keys run holds exactly `channels` keys and the ends run exactly the
-  head's number of series, so each side counts them to find where a run ends, and the
-  body starts a new message. So no count of channels or series has a cap, and the reader
-  fills one block of its frame's length: the header, the range, a descriptor for each
-  series, and the body to the last end. A run message with more keys or ends than remain
-  is not valid. A head of no series is not valid, since a frame holds its index. The
-  home checks each key as it arrives and never allocates by the peer's count. A head
-  with more series than places, or an end with a place the session does not have or that
-  is not above the place before it, is not valid; `wire::hub::Reader` checks the head as
-  it arrives and `types` checks the ends, so the reader holds no more ends than it has
-  places. The ends and the body are in place order: the home writes the series of each
-  place it has, from 0, each from the frame's block as a slice, with ends it computes in
-  that order. The first series starts at 0, and each other at the end before it rounded
-  up to a multiple of 8. So the body is the series bytes of the reader's own frame
-  (FRAME LAYOUT), and the reader builds that frame in one block: the header and
-  descriptors that `types` writes, then the body as it arrives, with no copy of a series
-  after the receive. An end below the start of its series is not valid; `types` refuses
-  it, as `frame::check` does. The padding may hold any bytes (FRAME LAYOUT). Each
-  direction has its own messages: the reader sends `Open`, then `Credit`; the home sends
-  a `Reply`, `Opened` or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not
-  know), 17 `NOT_HOME` (the node is not the home of the index), and 2
-  `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
-  or breaks a rule above), which every protocol may use. Lost: a `message_bytes_max` of
-  at least the largest pool block (a client or a foreign peer can set 1472, and it ties
-  `transport` to the pool); a cap of 91 channels a session, the most that fit in 1472
-  bytes; the index in its own field of `Open`, because the home knows its index and a
-  second copy needs a check; the whole `Frame::body` (a reader gets only its view); an
-  `UNSYNCED` code, because an unnamed open needs no mesh time (READER RULES), and a
-  later named open can add one; grants for many sessions in one message, which wait
-  until a link carries a second session. The coordinator approved the messages
-  (2026-10-05); the architect decided the rest (#561, 2026-10-06) and the run, the index
-  place, and `MALFORMED` on #1064
+  and a session has `channels` places. An open whose keys do not hold the index is not
+  valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
+  `UNKNOWN`; the architect, 2026-10-07,
+  https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
+  of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
+  message. The rest is one run of bytes, in messages of at most the peer's
+  `message_bytes_max`, back to back with no prefix: after `Open`, the keys; after
+  `Head`, the place and end of each series in the body, then the body. A message never
+  splits a key or an end, so each side decodes each message as it arrives. The keys run
+  holds exactly `channels` keys and the ends run exactly the head's number of series, so
+  each side counts them to find where a run ends, and the body starts a new message. So
+  no count of channels or series has a cap, and the reader fills one block of its
+  frame's length: the header, the range, a descriptor for each series, and the body to
+  the last end. A run message with more keys or ends than remain is not valid. A head of
+  no series is not valid, since a frame holds its index. The home checks each key as it
+  arrives and never allocates by the peer's count. A head with more series than places,
+  or an end with a place the session does not have or that is not above the place before
+  it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
+  the ends, so the reader holds no more ends than it has places. The ends and the body
+  are in place order: the home writes the series of each place it has, from 0, each from
+  the frame's block as a slice, with ends it computes in that order. The first series
+  starts at 0, and each other at the end before it rounded up to a multiple of 8. So the
+  body is the series bytes of the reader's own frame (FRAME LAYOUT), and the reader
+  builds that frame in one block: the header and descriptors that `types` writes, then
+  the body as it arrives, with no copy of a series after the receive. An end below the
+  start of its series is not valid; `types` refuses it, as `frame::check` does. The
+  padding may hold any bytes (FRAME LAYOUT). Each direction has its own messages: the
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
+  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
+  decode, comes from the wrong side, or breaks a rule above), which every protocol may
+  use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
+  a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
+  because the home knows its index and a second copy needs a check; the whole
+  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
+  open needs no mesh time (READER RULES), and a later named open can add one; grants for
+  many sessions in one message, which wait until a link carries a second session. The
+  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
+  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
   whole keys and ends and one message type for each direction
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
