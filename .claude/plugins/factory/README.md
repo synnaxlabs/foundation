@@ -49,6 +49,8 @@ disconnect the subscriber.
 - A repeated message id gets an ack and no second turn.
 - When a message gets no ack in 60 s, the sender gets one notice turn for that
   receiver, and no other until the receiver acks again.
+- One turn takes all the messages waiting when the session goes idle. A message's later
+  lines are indented two spaces, so no line passes for a header.
 - Messages start at most 30 turns an hour. Past that they wait, and the status line
   says so.
 - The status line shows the name, the link, messages in and out, the queue, the cost,
