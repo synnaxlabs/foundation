@@ -1033,12 +1033,12 @@ mod directory {
         }
     }
 
-    /// A shard with no memory stops the node before the claim starts.
+    /// A shard with no memory stops the node before the claim starts, so the claim
+    /// records no shard count.
     #[test]
-    fn a_shard_with_no_memory_skips_a_claim_that_would_be_refused() {
+    fn a_shard_with_no_memory_skips_the_claim() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        record(&mut sim, &host, 3);
         let refused = os::memory::Error::Refused;
         let node = Node::start(config(&host, 1 << 20, refuse(1, refused)));
         assert_eq!(sim.run(), Ok(()));
@@ -1050,6 +1050,7 @@ mod directory {
                 error: refused
             })
         );
+        assert_eq!(listed(&mut sim, &host, ""), Vec::<PathBuf>::new());
     }
 
     /// A claim that started before a shard panicked runs to its end, and `join` gives

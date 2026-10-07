@@ -205,11 +205,12 @@ impl Node {
     /// [`Error::Panicked`] for the first shard by core that panicked. Any failed
     /// shard stops the node.
     pub fn join(self) -> Result<(), Error> {
-        let shards = self.shards.into_iter();
-        first(
-            self.failed,
-            shards.map(|shard| (shard.handle.join(), shard.failed.get().cloned())),
-        )
+        let shards = self.shards.into_iter().map(|shard| {
+            // The shard sets `failed` on its own thread, so read it after the join.
+            let joined = shard.handle.join();
+            (joined, shard.failed.get().cloned())
+        });
+        first(self.failed, shards)
     }
 }
 
