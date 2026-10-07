@@ -72,7 +72,7 @@ enum Rest {
     Caller,
     /// The stream, with no call from the caller: the message came from a write that
     /// does not wait.
-    Stream,
+    Pump,
     /// The stream, which then finishes: the caller finished it.
     Finish,
 }
@@ -638,7 +638,7 @@ impl Sending {
     /// Writes the message that `half` holds to `inner`, and ends it once noq-proto
     /// took it all. `Pending` while noq-proto takes no more now, the message waits
     /// for room in the budget, or it waits its turn.
-    fn start(
+    fn write(
         &mut self,
         inner: &mut noq_proto::Connection,
         half: &mut Half,
@@ -668,7 +668,7 @@ impl Sending {
         if let Some(code) = half.stopped {
             return Err(Error::Stopped { code });
         }
-        if half.holds() && self.start(inner, half).is_pending() {
+        if half.holds() && self.write(inner, half).is_pending() {
             return Ok(None);
         }
         Ok(Some(half))
@@ -895,6 +895,7 @@ impl Streams {
                 self.sending.end(half);
                 if half.rest == Rest::Finish {
                     self.halves.remove(&id);
+                    return Ok(None);
                 }
                 Ok(Some(Event::Writable { stream: stream(id) }))
             }
@@ -968,7 +969,7 @@ impl Streams {
             return Ok(Poll::Ready(()));
         };
         half.load(message, Rest::Caller);
-        Ok(self.sending.start(inner, half))
+        Ok(self.sending.write(inner, half))
     }
 
     /// Writes the rest of the message that `sender`'s stream of `inner` holds, then
@@ -1005,8 +1006,8 @@ impl Streams {
             allowed && budget.admit(next.len(), &mut half.claim, order)
         };
         if let Some(taken) = message.take_if(admitted) {
-            half.load(taken, Rest::Stream);
-            _ = self.sending.start(inner, half);
+            half.load(taken, Rest::Pump);
+            _ = self.sending.write(inner, half);
         }
         Ok(())
     }
@@ -1015,7 +1016,7 @@ impl Streams {
     /// so that its caller writes the rest. A stream whose message came from a write
     /// that does not wait, or that the caller finished, writes the rest to `inner`
     /// itself, and gets the event once noq-proto took it all. A finished stream then
-    /// finishes.
+    /// finishes, with no event.
     pub(super) fn pump(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -1029,13 +1030,14 @@ impl Streams {
                 continue;
             }
             let caller = half.rest == Rest::Caller;
-            if !caller && self.sending.start(inner, half).is_pending() {
+            if !caller && self.sending.write(inner, half).is_pending() {
                 continue;
             }
-            events.push_back(Event::Writable { stream: half.key });
             if half.rest == Rest::Finish {
                 self.halves.remove(&id);
                 finish(inner, id);
+            } else {
+                events.push_back(Event::Writable { stream: half.key });
             }
         }
     }
@@ -1062,7 +1064,7 @@ impl Streams {
         }
         if half.holds() {
             half.rest = Rest::Finish;
-            if self.sending.start(inner, half).is_pending() {
+            if self.sending.write(inner, half).is_pending() {
                 return Ok(());
             }
         }
@@ -3424,7 +3426,7 @@ mod tests {
             let mut pair = connected(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
             let count = fill(&mut pair, shard, &mut sender);
-            let now = pair.now();
+            let (now, seen) = (pair.now(), pair.client.events.len());
             assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
             pair.run(RUN);
             let mut incoming = accept(&mut pair.server);
@@ -3442,6 +3444,10 @@ mod tests {
             }
             let expected: Vec<_> = (0..count).map(|i| vec![i; MESSAGE_MAX]).collect();
             assert_eq!((read, ended), (expected, true));
+            let writable = Event::Writable {
+                stream: sender.key(),
+            };
+            assert!(!got(&pair.client, seen, &writable));
         });
     }
 
@@ -4007,6 +4013,35 @@ mod tests {
             let now = pair.now();
             let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
+        });
+    }
+
+    #[test]
+    fn a_stop_of_a_finished_sender_that_holds_part_of_a_message_drops_it() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let [mut first, second] = hold(&mut pair, shard);
+            let now = pair.now();
+            assert_eq!(pair.client.endpoint.finish(now, &mut first), Ok(()));
+            pair.run(RUN);
+            let id = accept(&mut pair.server).receiver.key().id;
+            assert_eq!(id, first.key().id);
+            let stopped = pair.server.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            let seen = pair.client.events.len();
+            pair.run(RUN);
+            let [first_writable, second_writable] =
+                [&first, &second].map(|sender| Event::Writable {
+                    stream: sender.key(),
+                });
+            assert!(got(&pair.client, seen, &second_writable));
+            assert!(!got(&pair.client, seen, &first_writable));
+            let connection = crate::quic::find(
+                &mut pair.client.endpoint.connections,
+                first.key().connection,
+            );
+            let streams = &connection.expect("a connection").streams;
+            assert!(!streams.halves.contains_key(&id));
         });
     }
 
