@@ -87,7 +87,8 @@ use crate::{handoff, order, split, stored};
 ///     },
 /// });
 /// shard.carry(index);
-/// let reader = shard.open_complete(index, 1 << 20, home::reader::complete::Charge::Whole);
+/// let charge = home::reader::complete::Charge::Whole;
+/// let reader = shard.open_complete(index, 1 << 20, charge);
 ///
 /// let mut frame = Draft::new(shard.pool(), &set, Form::Raw, &[(0, 8), (1, 8)])?;
 /// for (entry, sample) in [(0, 10_i64), (1, 7)] {

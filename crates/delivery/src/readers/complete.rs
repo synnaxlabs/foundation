@@ -75,12 +75,12 @@ impl Cost {
         }
     }
 
-    /// What `frame`, of key set `set`, costs the session. Time is O(m log(n/m)) for
-    /// m places in `set` and n series in `frame`. Allocates only for the first frame
-    /// of a key set.
-    pub(super) fn charge(&mut self, frame: &Frame, set: &KeySet) -> u64 {
+    /// What `frame`, of key set `set` and [`Frame::charge`] `whole`, costs the
+    /// session. Time is O(m log(n/m)) for m places in `set` and n series in `frame`.
+    /// Allocates only for the first frame of a key set.
+    pub(super) fn charge(&mut self, frame: &Frame, set: &KeySet, whole: u64) -> u64 {
         match self {
-            Self::Whole => frame.charge(),
+            Self::Whole => whole,
             Self::Places(places) => {
                 let (series, body_len) = places.size(frame, set);
                 frame::charge(series, body_len)

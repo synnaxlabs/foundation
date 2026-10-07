@@ -53,7 +53,10 @@ pub struct Readers {
     flows: Vec<Flow>,
     /// The live frames not yet on disk, with their seq, oldest first. Empty when no
     /// complete session is open.
-    queue: VecDeque<(Frame, Arc<KeySet>, Range<u64>)>,
+    queue: VecDeque<(Frame, Range<u64>)>,
+    /// The key set of each run of queued frames of one key set, oldest first. The
+    /// front may be the set of frames already released.
+    sets: VecDeque<Arc<KeySet>>,
     /// The end of the last live frame queued, or the live seq at start.
     queued: u64,
     /// The end of the newest live frame with samples that was released, or dropped
@@ -122,6 +125,7 @@ impl Readers {
             complete: Vec::new(),
             flows: Vec::new(),
             queue: VecDeque::new(),
+            sets: VecDeque::new(),
             queued: live,
             released: live,
             closed: Vec::new(),
@@ -170,10 +174,10 @@ impl Readers {
     }
 
     /// Starts a complete session with credit for `limit_bytes` since it opens, its
-    /// first grant, that `charge` charges for each frame. A named reader's open session in either mode is taken over. A
-    /// session that starts below a live frame that memory no longer holds gets no live
-    /// frame: it is [`behind`](Readers::behind) at once, and no [`Readers::release`]
-    /// names it.
+    /// first grant, that `charge` charges for each frame. A named reader's open session
+    /// in either mode is taken over. A session that starts below a live frame that
+    /// memory no longer holds gets no live frame: it is [`behind`](Readers::behind) at
+    /// once, and no [`Readers::release`] names it.
     ///
     /// # Panics
     ///
@@ -269,9 +273,9 @@ impl Readers {
     }
 
     /// Queues `frame`, of key set `set`, stored on the live path with the samples
-    /// `seq`, for the complete sessions. [`Readers::release`] gives it to them once it is on disk.
-    /// Keeps nothing when no complete session is open. A frame with no samples
-    /// reaches no session.
+    /// `seq`, for the complete sessions. [`Readers::release`] gives it to them once it
+    /// is on disk. Keeps nothing when no complete session is open. A frame with no
+    /// samples reaches no session.
     ///
     /// # Panics
     ///
@@ -305,7 +309,10 @@ impl Readers {
         if self.complete.is_empty() {
             self.released = seq.end;
         } else {
-            self.queue.push_back((frame.clone(), Arc::clone(set), seq));
+            if self.sets.back().is_none_or(|last| last.key() != set.key()) {
+                self.sets.push_back(Arc::clone(set));
+            }
+            self.queue.push_back((frame.clone(), seq));
         }
     }
 
@@ -318,15 +325,20 @@ impl Readers {
     #[must_use]
     pub fn release(&mut self, durable: u64) -> &[complete::Key] {
         self.woken_complete.clear();
-        while let Some((frame, set, seq)) =
-            self.queue.pop_front_if(|(_, _, seq)| seq.end <= durable)
+        while let Some((frame, seq)) =
+            self.queue.pop_front_if(|(_, seq)| seq.end <= durable)
         {
+            while self.sets[0].key() != frame.key_set() {
+                self.sets.pop_front();
+            }
+            let set = &self.sets[0];
+            let whole = frame.charge();
             let mut last: Option<&mut VecDeque<Frame>> = None;
             for (session, flow) in iter::zip(&self.complete, &mut self.flows) {
                 if flow.behind || seq.end <= session.position.live {
                     continue;
                 }
-                if !flow.credit.spend(flow.cost.charge(&frame, &set)) {
+                if !flow.credit.spend(flow.cost.charge(&frame, set, whole)) {
                     flow.behind = true;
                     // A session with frames waiting sees the miss after it takes them.
                     if flow.waiting.is_empty() {
@@ -447,11 +459,12 @@ impl Readers {
     /// Removes the complete session at `i`. The last one drops the queued frames.
     fn end(&mut self, i: usize) -> Session {
         let session = self.remove(i);
-        if self.complete.is_empty()
-            && let Some((_, _, seq)) = self.queue.back()
-        {
-            self.released = seq.end;
+        if self.complete.is_empty() {
+            if let Some((_, seq)) = self.queue.back() {
+                self.released = seq.end;
+            }
             self.queue.clear();
+            self.sets.clear();
         }
         session
     }
@@ -2249,8 +2262,8 @@ pub(super) mod tests {
             readers.flows[0].credit.spent_bytes
         }
 
-        /// Opens a session that `charge` charges, with a credit of 1 byte, which lets one
-        /// frame through, gives it `frame`, and gives what it spent.
+        /// Opens a session that `charge` charges, with a credit of 1 byte, which lets
+        /// one frame through, gives it `frame`, and gives what it spent.
         fn charged(charge: Charge, frame: &Frame, set: &Arc<KeySet>) -> u64 {
             let mut readers = Readers::new(0);
             let key = readers
@@ -2357,9 +2370,13 @@ pub(super) mod tests {
                 // Places 10 and 11 are slots that the key set lacks.
                 let slots: Vec<_> = places
                     .iter()
-                    .map(|&place| match place {
-                        0..10 => sets.slot(place),
-                        _ => channel::Slot::new(1000 + u32::try_from(place).expect("few")),
+                    .map(|&place| {
+                        let lacking = 1000 + u32::try_from(place).expect("few");
+                        if place < 10 {
+                            sets.slot(place)
+                        } else {
+                            channel::Slot::new(lacking)
+                        }
                     })
                     .collect();
                 let mut seen = Vec::new();

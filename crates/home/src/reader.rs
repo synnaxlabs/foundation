@@ -168,8 +168,9 @@ impl Set {
     }
 
     /// Gives `frame`, of key set `set`, stored in the buffer at `seq`, to the readers
-    /// of the index at `place`. A live frame is the newest frame at once, and goes to complete readers
-    /// after the commit that holds it. A backfill frame goes to no reader.
+    /// of the index at `place`. A live frame is the newest frame at once, and goes to
+    /// complete readers after the commit that holds it. A backfill frame goes to no
+    /// reader.
     pub(crate) fn applied(
         &mut self,
         place: usize,
