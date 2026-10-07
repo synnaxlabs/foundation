@@ -468,8 +468,15 @@ How to read this record:
   frame. A remote complete reader gets only the series of its view (M2): the home sends
   a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
   that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
-  frames"), #267. The charge is part of the wire contract: a change to `block`'s header
-  or size classes needs a new wire version (C9d). The classes changed to four per
+  frames"), #267. Each complete session has a `delivery::complete::Charge`: `Whole` (a
+  local reader) spends the home's frame, and `Places` (a remote reader) spends the
+  frame of one series for each slot it lists that the frame holds, in listing order,
+  the first listing of a slot only. Catch-up uses the same `Charge`. So a remote
+  session pins home blocks up to its window times the ratio of the home's frame to its
+  view. laptop.architect decided this on 2026-10-07T22:47:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
   window counts charges, not wire bytes. Per-connection framing in `wire` (X35) pins no
   pool memory and does not count. Credits apply only to complete delivery, which is

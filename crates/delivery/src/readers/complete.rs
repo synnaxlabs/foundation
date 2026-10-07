@@ -64,7 +64,7 @@ struct Held {
     set: key_set::Key,
     mask: Mask,
     /// Each entry that a place names, with the first place that names it, by entry.
-    entries: Vec<(usize, usize)>,
+    entries: Vec<(u32, u32)>,
 }
 
 impl Cost {
@@ -88,11 +88,12 @@ impl Cost {
         };
         // The body holds each series but the last in place order padded, then the last.
         let (mut series, mut others) = (0, 0);
-        let mut last: Option<(usize, usize)> = None;
+        let mut last: Option<(u32, usize)> = None;
         let mut entries = held.entries.iter().peekable();
         View::new(frame, &held.mask)
             .bounds()
             .for_each(|(entry, bounds)| {
+                let entry = to_u32(entry);
                 while entries.next_if(|&&(held, _)| held < entry).is_some() {}
                 let Some(&(_, place)) = entries.next_if(|&&(held, _)| held == entry)
                 else {
@@ -124,7 +125,7 @@ impl Held {
         let mut entries: Vec<_> = slots
             .iter()
             .enumerate()
-            .filter_map(|(place, &slot)| Some((set.find(slot)?, place)))
+            .filter_map(|(place, &slot)| Some((to_u32(set.find(slot)?), to_u32(place))))
             .collect();
         entries.sort_unstable();
         entries.dedup_by_key(|&mut (entry, _)| entry);
@@ -134,4 +135,10 @@ impl Held {
             entries,
         }
     }
+}
+
+/// An entry or a place as a `u32`, which halves the cache that a session's places take.
+fn to_u32(n: usize) -> u32 {
+    u32::try_from(n)
+        .expect("invariant: a key set's entries and an open's keys fit a u32")
 }
