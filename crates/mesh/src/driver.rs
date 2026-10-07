@@ -985,10 +985,7 @@ mod tests {
                 };
                 let append = Body::Append {
                     prev: Position::default(),
-                    entries: vec![Entry {
-                        at,
-                        data: Data::Voters(joint),
-                    }],
+                    entries: vec![common::change(2, at, joint)],
                     commit: 0,
                 };
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));

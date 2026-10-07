@@ -110,7 +110,8 @@ pub(crate) fn put_optional_key(key: Option<node::Key>, out: &mut Vec<u8>) {
 ///
 /// # Panics
 ///
-/// When `signature` is `None`: the caller signs every grant before it encodes one.
+/// When `signature` is `None`: the caller signs every grant and change before it
+/// encodes one.
 pub(crate) fn put_signature(signature: Option<Signature>, out: &mut Vec<u8>) {
     let Signature(bytes) =
         signature.expect("invariant: a grant is signed before it is encoded");
@@ -122,9 +123,7 @@ pub(crate) fn take_signature(bytes: &mut &[u8]) -> Option<Signature> {
     take(bytes).map(Signature)
 }
 
-/// Adds a presence byte, then the proof when there is one: its grant as one byte,
-/// the candidate, a count of voters as 8 little-endian bytes, then each voter's key
-/// and signature in rising key order.
+/// Adds a presence byte, then the proof when there is one, as [`put_proof`].
 ///
 /// # Panics
 ///
@@ -134,14 +133,24 @@ pub(crate) fn put_optional_proof(proof: Option<&Proof>, out: &mut Vec<u8>) {
         None => out.push(ABSENT),
         Some(proof) => {
             out.push(PRESENT);
-            put_grant(proof.grant, out);
-            put_key(proof.candidate, out);
-            put_count(proof.voters.len(), out);
-            for (&voter, &signature) in &proof.voters {
-                put_key(voter, out);
-                put_signature(signature, out);
-            }
+            put_proof(proof, out);
         }
+    }
+}
+
+/// Adds a proof: its grant as one byte, the candidate, a count of voters as 8
+/// little-endian bytes, then each voter's key and signature in rising key order.
+///
+/// # Panics
+///
+/// When a voter has no signature, as [`put_signature`].
+pub(crate) fn put_proof(proof: &Proof, out: &mut Vec<u8>) {
+    put_grant(proof.grant, out);
+    put_key(proof.candidate, out);
+    put_count(proof.voters.len(), out);
+    for (&voter, &signature) in &proof.voters {
+        put_key(voter, out);
+        put_signature(signature, out);
     }
 }
 
@@ -154,8 +163,7 @@ pub(crate) fn take_present(bytes: &mut &[u8]) -> Option<bool> {
     }
 }
 
-/// Takes what [`put_optional_proof`] gives after its presence byte. `None` when the
-/// voters are not in rising order.
+/// Takes what [`put_proof`] gives. `None` when the voters are not in rising order.
 pub(crate) fn take_proof(bytes: &mut &[u8]) -> Option<Proof> {
     let grant = match u8::from_le_bytes(take(bytes)?) {
         PRE_VOTE => Grant::PreVote,

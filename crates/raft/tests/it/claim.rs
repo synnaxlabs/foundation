@@ -1,7 +1,10 @@
 //! What each signature in a message attests, and how `Ready::sign` fills them.
 
 use proptest::prelude::*;
-use raft::{Answer, Body, Claim, Grant, Hard, Message, Proof, Ready, Signature, Term};
+use raft::{
+    Answer, Body, Change, Claim, Data, Entry, Grant, Hard, Message, Position, Proof,
+    Ready, Signature, Term, Voters,
+};
 use types::node;
 
 use crate::check::{body, proof};
@@ -35,8 +38,9 @@ fn a_message_claims_its_proof_in_its_term_then_its_grant() {
     let body = Body::VoteReply {
         answer: Answer::Granted(Some(signature(9))),
     };
-    let claims: Vec<_> = message(7, body, Some(proof)).claims().collect();
-    let claim = |voter, grant, candidate| Claim {
+    let message = message(7, body, Some(proof));
+    let claims: Vec<_> = message.claims().collect();
+    let claim = |voter, grant, candidate| Claim::Grant {
         voter: key(voter),
         grant,
         term: Term(7),
@@ -55,8 +59,9 @@ fn a_pre_vote_grant_claims_a_pre_vote_to_the_receiver() {
     let body = Body::PreVoteReply {
         answer: Answer::Granted(None),
     };
-    let claims: Vec<_> = message(4, body, None).claims().collect();
-    let claim = Claim {
+    let message = message(4, body, None);
+    let claims: Vec<_> = message.claims().collect();
+    let claim = Claim::Grant {
         voter: key(1),
         grant: Grant::PreVote,
         term: Term(4),
@@ -101,22 +106,23 @@ fn sign_fills_the_hard_proof_in_its_term_and_each_grant_in_its_message_term() {
     };
     let mut signed = Vec::new();
     ready.sign(|claim| {
-        signed.push(*claim);
+        signed.push(Network::signature(claim));
         Network::signature(claim)
     });
-    let own = Claim {
+    let own = Claim::Grant {
         voter: key(1),
         grant: Grant::Vote,
         term: Term(5),
         candidate: key(1),
     };
-    let granted = Claim {
+    let granted = Claim::Grant {
         voter: key(1),
         grant: Grant::PreVote,
         term: Term(6),
         candidate: key(2),
     };
-    assert_eq!(signed, vec![own, granted]);
+    let want = [Network::signature(&own), Network::signature(&granted)];
+    assert_eq!(signed, want);
     let voters = &ready.hard.unwrap().proof.unwrap().voters;
     let want = [
         (key(1), Some(Network::signature(&own))),
@@ -128,6 +134,74 @@ fn sign_fills_the_hard_proof_in_its_term_and_each_grant_in_its_message_term() {
     assert_eq!(ready.messages[1].body, Body::PreVoteReply { answer });
 }
 
+// The change of leader 2 at index 3 of term 5, with each signature `with` gives.
+fn change(with: &dyn Fn(u8) -> Option<Signature>) -> Entry {
+    let voters = Voters {
+        incoming: [key(1), key(2)].into(),
+        outgoing: [key(1), key(2), key(3)].into(),
+    };
+    let proof = Proof {
+        grant: Grant::Vote,
+        candidate: key(2),
+        voters: [(key(1), with(1)), (key(2), with(2))].into(),
+    };
+    Entry {
+        at: Position {
+            term: Term(5),
+            index: 3,
+        },
+        data: Data::Voters(Change {
+            voters,
+            votes: proof,
+            signature: with(0),
+        }),
+    }
+}
+
+#[test]
+fn sign_fills_each_change_in_entries_committed_and_appends_and_keeps_the_rest() {
+    let unsigned = change(&|_| None);
+    let kept = change(&|voter| Some(signature(voter)));
+    let append = |entries| Body::Append {
+        prev: Position::default(),
+        entries,
+        commit: 0,
+    };
+    let mut ready = Ready {
+        entries: vec![unsigned.clone(), kept.clone()],
+        committed: vec![unsigned.clone()],
+        messages: vec![message(5, append(vec![kept.clone(), unsigned]), None)],
+        ..Ready::default()
+    };
+    ready.sign(Network::signature);
+    let own = |voter: u8| {
+        let claim = match voter {
+            0 => Claim::Change {
+                leader: key(2),
+                at: Position {
+                    term: Term(5),
+                    index: 3,
+                },
+                voters: &Voters {
+                    incoming: [key(1), key(2)].into(),
+                    outgoing: [key(1), key(2), key(3)].into(),
+                },
+            },
+            voter => Claim::Grant {
+                voter: key(u128::from(voter)),
+                grant: Grant::Vote,
+                term: Term(5),
+                candidate: key(2),
+            },
+        };
+        Some(Network::signature(&claim))
+    };
+    let signed = change(&own);
+    assert_eq!(ready.entries, [signed.clone(), kept.clone()]);
+    assert_eq!(ready.committed, std::slice::from_ref(&signed));
+    assert_eq!(ready.messages[0].body, append(vec![kept, signed]));
+}
+
 proptest! {
     #[test]
     fn sign_gives_each_claim_a_signature_and_keeps_each_it_had(
@@ -135,17 +209,24 @@ proptest! {
         body in body(),
         proof in prop::option::of(proof(5)),
     ) {
+        // A claim borrows its message, so each is kept as its stand-in signature.
+        let signed = |message: &Message| -> Vec<(Signature, Option<Signature>)> {
+            message
+                .claims()
+                .map(|(claim, had)| (Network::signature(&claim), had))
+                .collect()
+        };
         let message = message(term, body, proof);
-        let before: Vec<_> = message.claims().collect();
+        let before = signed(&message);
         let mut ready = Ready {
             messages: vec![message],
             ..Ready::default()
         };
         ready.sign(Network::signature);
-        let after: Vec<_> = ready.messages[0].claims().collect();
+        let after = signed(&ready.messages[0]);
         let want: Vec<_> = before
             .into_iter()
-            .map(|(claim, had)| (claim, had.or(Some(Network::signature(&claim)))))
+            .map(|(claim, had)| (claim, had.or(Some(claim))))
             .collect();
         prop_assert_eq!(after, want);
     }

@@ -295,9 +295,15 @@ mod tests {
         let data = prop_oneof![
             Just(Data::Empty),
             prop::collection::vec(any::<u8>(), 0..48).prop_map(Data::Bytes),
-            (keys(), keys()).prop_map(|(incoming, outgoing)| {
-                Data::Voters(Voters { incoming, outgoing })
-            }),
+            (keys(), keys(), a_proof(), a_signature()).prop_map(
+                |(incoming, outgoing, votes, signature)| {
+                    Data::Voters(raft::Change {
+                        voters: Voters { incoming, outgoing },
+                        votes,
+                        signature: Some(signature),
+                    })
+                },
+            ),
         ];
         (a_position(), data).prop_map(|(at, data)| Entry { at, data })
     }
@@ -389,6 +395,30 @@ mod tests {
 
     fn signature(byte: u8) -> Signature {
         Signature([byte; 64])
+    }
+
+    // An append of one change to the incoming voters `keys`, with no outgoing voter.
+    fn change_append(keys: [u128; 2]) -> Vec<u8> {
+        raft(Body::Append {
+            prev: at(0, 0),
+            entries: vec![Entry {
+                at: at(3, 1),
+                data: Data::Voters(raft::Change {
+                    voters: Voters {
+                        incoming: keys.map(node).into(),
+                        outgoing: BTreeSet::new(),
+                    },
+                    votes: Proof {
+                        grant: Grant::Vote,
+                        candidate: node(1),
+                        voters: [(node(1), Some(signature(1)))].into(),
+                    },
+                    signature: Some(signature(2)),
+                }),
+            }],
+            commit: 0,
+        })
+        .encode()
     }
 
     fn raft(body: Body) -> Message {
@@ -534,29 +564,16 @@ mod tests {
             let proof = [&[1, 1][..], &key(1), &le(2), &voters.concat()].concat();
             [&head()[..proof_at], &proof, &[6]].concat()
         };
-        let voters = |keys: [u128; 2]| {
-            raft(Body::Append {
-                prev: at(0, 0),
-                entries: vec![Entry {
-                    at: at(3, 1),
-                    data: Data::Voters(Voters {
-                        incoming: keys.map(node).into(),
-                        outgoing: BTreeSet::new(),
-                    }),
-                }],
-                commit: 0,
-            })
-            .encode()
-        };
-        // Two keys that fall, and one key twice: the keys of each set are 16 bytes
-        // before the count of the second set.
-        let mut falling = voters([1, 2]);
+        // Two keys that fall, and one key twice: the count of the outgoing set, the
+        // votes of one voter, and the signature follow the two incoming keys.
+        let after = 8 + (1 + 16 + 8 + 16 + 64) + 64;
+        let mut falling = change_append([1, 2]);
         let len = falling.len();
-        falling.swap(len - 40, len - 24);
-        let mut twice = voters([1, 2]);
-        twice.swap(len - 40, len - 24);
-        twice[len - 40] = 2;
-        twice[len - 24] = 2;
+        falling.swap(len - after - 32, len - after - 16);
+        let mut twice = change_append([1, 2]);
+        twice.swap(len - after - 32, len - after - 16);
+        twice[len - after - 32] = 2;
+        twice[len - after - 16] = 2;
         let cases: [(&str, &[u8]); 14] = [
             ("no bytes", &[]),
             ("an unknown kind", &[0]),
@@ -579,7 +596,7 @@ mod tests {
         for (name, bytes) in cases {
             assert_eq!(Message::decode(bytes), None, "{name}");
         }
-        assert!(Message::decode(&voters([1, 2])).is_some());
+        assert!(Message::decode(&change_append([1, 2])).is_some());
         assert!(Message::decode(&proven([1, 2])).is_some());
         assert!(Message::decode(&granted).is_some());
     }

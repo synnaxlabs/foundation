@@ -8,9 +8,10 @@ use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::strategy::Union;
 use raft::{
-    Answer, Body, Claim, Config, Data, Entry, Error, Grant, Hard, Message, Position,
-    Raft, Ready, Role, Signature, Start, Term, Voters,
+    Answer, Body, Change, Claim, Config, Data, Entry, Error, Grant, Hard, Message,
+    Position, Proof, Raft, Ready, Role, Signature, Start, Term, Voters,
 };
+use types::digest::Digest;
 use types::node;
 
 pub(crate) const ELECTION: u32 = 5;
@@ -151,11 +152,24 @@ impl Disk {
     }
 }
 
+// A configuration entry's data as `leader` writes it, with no signature yet.
+pub(crate) fn change(leader: node::Key, voters: Voters) -> Data {
+    Data::Voters(Change {
+        voters,
+        votes: Proof {
+            grant: Grant::Vote,
+            candidate: leader,
+            voters: [(leader, None)].into(),
+        },
+        signature: None,
+    })
+}
+
 // Signs as the caller of `raft` does, and checks that `raft` leaves only this node's
-// grants with no signature.
+// grants and changes with no signature.
 fn sign(key: node::Key, ready: &mut Ready) {
     ready.sign(|claim| {
-        assert_eq!(claim.voter, key, "{key:?} leaves {claim:?} unsigned");
+        assert_eq!(claim.signer(), key, "{key:?} leaves {claim:?} unsigned");
         Network::signature(claim)
     });
 }
@@ -245,16 +259,38 @@ impl Network {
     }
 
     /// The stand-in signature of `claim`: its fields themselves, so a check can
-    /// rebuild it.
-    pub(crate) fn signature(claim: &Claim) -> Signature {
+    /// rebuild it. A change carries a digest of its voters.
+    pub(crate) fn signature(claim: &Claim<'_>) -> Signature {
         let mut bytes = [0; 64];
-        bytes[0] = match claim.grant {
-            Grant::PreVote => 1,
-            Grant::Vote => 2,
-        };
-        bytes[1..9].copy_from_slice(&claim.term.0.to_le_bytes());
-        bytes[9..25].copy_from_slice(&claim.candidate.as_u128().to_le_bytes());
-        bytes[25..41].copy_from_slice(&claim.voter.as_u128().to_le_bytes());
+        match *claim {
+            Claim::Grant {
+                voter,
+                grant,
+                term,
+                candidate,
+            } => {
+                bytes[0] = match grant {
+                    Grant::PreVote => 1,
+                    Grant::Vote => 2,
+                };
+                bytes[1..9].copy_from_slice(&term.0.to_le_bytes());
+                bytes[9..25].copy_from_slice(&candidate.as_u128().to_le_bytes());
+                bytes[25..41].copy_from_slice(&voter.as_u128().to_le_bytes());
+            }
+            Claim::Change { leader, at, voters } => {
+                bytes[0] = 3;
+                bytes[1..9].copy_from_slice(&at.term.0.to_le_bytes());
+                bytes[9..17].copy_from_slice(&at.index.to_le_bytes());
+                bytes[17..33].copy_from_slice(&leader.as_u128().to_le_bytes());
+                let keys: Vec<u8> = voters
+                    .incoming
+                    .iter()
+                    .chain(&voters.outgoing)
+                    .flat_map(|key| key.as_u128().to_le_bytes())
+                    .collect();
+                bytes[33..].copy_from_slice(&Digest::of(&keys).0[..31]);
+            }
+        }
         Signature(bytes)
     }
 
@@ -300,7 +336,7 @@ impl Network {
             .rev()
             .filter(|entry| entry.at.index <= disk.applied)
             .find_map(|entry| match &entry.data {
-                Data::Voters(voters) => Some(voters),
+                Data::Voters(change) => Some(&change.voters),
                 Data::Empty | Data::Bytes(_) => None,
             });
         committed.map_or_else(|| self.base(), Voters::clone)
@@ -484,8 +520,11 @@ impl Network {
                     outgoing: before.incoming,
                 };
                 let index = usize::try_from(at.index - 1).unwrap();
-                let written = self.disks[node].entries.get(index).map(|e| &e.data);
-                let joint = Data::Voters(joint);
+                let written = self.disks[node].entries.get(index);
+                let written = written.and_then(|e| match &e.data {
+                    Data::Voters(change) => Some(&change.voters),
+                    Data::Empty | Data::Bytes(_) => None,
+                });
                 assert_eq!(written, (!lost).then_some(&joint), "the joint entry");
             }
             (role, Err(Error::NotLeader { leader })) if role != Role::Leader => {
@@ -522,7 +561,7 @@ impl Network {
             .rev()
             .filter(|entry| entry.at.index < pending.index)
             .find_map(|entry| match &entry.data {
-                Data::Voters(voters) => Some(voters),
+                Data::Voters(change) => Some(&change.voters),
                 Data::Empty | Data::Bytes(_) => None,
             });
         Some(before.map_or_else(|| self.base(), Voters::clone))
@@ -653,17 +692,46 @@ impl Network {
         }
     }
 
-    // Each signature a node sends is the one its claim's voter made: a signature
-    // moved to another term, grant, candidate, or voter fails.
+    // Each signature a node sends is the one its claim's signer made: a signature
+    // moved to another term, grant, candidate, or voter fails. Each change an append
+    // carries is signed by its leader, with the votes of its term signed.
     fn check_signatures(at: usize, message: &Message) {
         for (claim, signature) in message.claims() {
-            let own = Self::signature(&claim);
-            assert_eq!(
-                signature,
-                Some(own),
-                "node {at} carries a wrong signature of {claim:?}"
-            );
+            Self::check_signature(at, &claim, signature);
         }
+        let Body::Append { entries, .. } = &message.body else {
+            return;
+        };
+        for entry in entries {
+            let Data::Voters(change) = &entry.data else {
+                continue;
+            };
+            let leader = change.votes.candidate;
+            assert_eq!(change.votes.grant, Grant::Vote, "node {at} sent {entry:?}");
+            for (&voter, &signature) in &change.votes.voters {
+                let claim = Claim::Grant {
+                    voter,
+                    grant: Grant::Vote,
+                    term: entry.at.term,
+                    candidate: leader,
+                };
+                Self::check_signature(at, &claim, signature);
+            }
+            let claim = Claim::Change {
+                leader,
+                at: entry.at,
+                voters: &change.voters,
+            };
+            Self::check_signature(at, &claim, change.signature);
+        }
+    }
+
+    fn check_signature(at: usize, claim: &Claim<'_>, signature: Option<Signature>) {
+        assert_eq!(
+            signature,
+            Some(Self::signature(claim)),
+            "node {at} carries a wrong signature of {claim:?}"
+        );
     }
 
     // A vote goes only to a candidate whose log is at least as new as the voter's.

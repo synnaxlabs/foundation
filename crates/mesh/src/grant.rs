@@ -1,6 +1,7 @@
-//! Signs this node's grants and checks the grants of other nodes. A voter signs a
-//! [`Claim`] with its node key: `foundation/grant/1`, the voter, the grant byte, the
-//! term, and the candidate.
+//! Signs this node's claims and checks the claims of other nodes. A node signs a
+//! [`Claim`] with its node key. A grant signs `foundation/grant/1`, the voter, the
+//! grant byte, the term, and the candidate. A change signs `foundation/voters/1`, the
+//! leader, the term, the index, the incoming voters, and the outgoing voters.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -9,9 +10,10 @@ use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use raft::{Claim, Message, Ready, Signature};
 use types::node::{self, PrivateKey, PublicKey};
 
-use crate::bytes::{put_grant, put_key};
+use crate::bytes::{put_grant, put_key, put_keys, put_position};
 
-const TAG: &[u8] = b"foundation/grant/1";
+const GRANT: &[u8] = b"foundation/grant/1";
+const CHANGE: &[u8] = b"foundation/voters/1";
 
 /// Signs this node's grants with its node key.
 pub(crate) struct Signer {
@@ -27,22 +29,23 @@ impl Signer {
         Self { key, pair }
     }
 
-    /// Whether `public` checks the grants that this signer signs.
+    /// Whether `public` checks the claims that this signer signs.
     pub(crate) fn owns(&self, public: PublicKey) -> bool {
         self.pair.public_key().as_ref() == public.to_bytes()
     }
 
-    /// Signs each grant in `ready` that has no signature, before the write and the
-    /// sends.
+    /// Signs each grant and change in `ready` that has no signature, before the
+    /// write and the sends.
     ///
     /// # Panics
     ///
-    /// When a grant of another node has no signature: the caller stepped a message
-    /// that did not pass [`check`].
+    /// When a grant or a change of another node has no signature: the caller stepped
+    /// a message that did not pass [`check`].
     pub(crate) fn sign(&self, ready: &mut Ready) {
         ready.sign(|claim| {
             assert_eq!(
-                claim.voter, self.key,
+                claim.signer(),
+                self.key,
                 "invariant: each message passed `check` before `step`"
             );
             let signature = self.pair.sign(&statement(claim));
@@ -72,14 +75,24 @@ pub(crate) fn check(
     members: &BTreeMap<node::Key, PublicKey>,
 ) -> Result<(), Error> {
     for (claim, signature) in message.claims() {
-        let voter = claim.voter;
-        let public = members.get(&voter).ok_or(Error::NotMember { voter })?;
-        let Signature(bytes) =
-            signature.expect("invariant: decode gives each grant a signature");
-        let public = UnparsedPublicKey::new(&ED25519, public.to_bytes());
-        if public.verify(&statement(&claim), &bytes).is_err() {
-            return Err(Error::Forged { voter });
-        }
+        verify(&claim, signature, members)?;
+    }
+    Ok(())
+}
+
+// Checks `signature` against the public key of the signer of `claim`.
+fn verify(
+    claim: &Claim<'_>,
+    signature: Option<Signature>,
+    members: &BTreeMap<node::Key, PublicKey>,
+) -> Result<(), Error> {
+    let voter = claim.signer();
+    let public = members.get(&voter).ok_or(Error::NotMember { voter })?;
+    let Signature(bytes) =
+        signature.expect("invariant: decode gives each grant a signature");
+    let public = UnparsedPublicKey::new(&ED25519, public.to_bytes());
+    if public.verify(&statement(claim), &bytes).is_err() {
+        return Err(Error::Forged { voter });
     }
     Ok(())
 }
@@ -112,15 +125,32 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-// The bytes a voter signs for `claim`. They name the voter, so members that share a
+// The bytes a node signs for `claim`. They name the signer, so members that share a
 // key cannot share a signature.
-fn statement(claim: &Claim) -> Vec<u8> {
-    let mut bytes = TAG.to_vec();
-    put_key(claim.voter, &mut bytes);
-    put_grant(claim.grant, &mut bytes);
-    bytes.extend(claim.term.0.to_le_bytes());
-    put_key(claim.candidate, &mut bytes);
-    bytes
+fn statement(claim: &Claim<'_>) -> Vec<u8> {
+    match *claim {
+        Claim::Grant {
+            voter,
+            grant,
+            term,
+            candidate,
+        } => {
+            let mut bytes = GRANT.to_vec();
+            put_key(voter, &mut bytes);
+            put_grant(grant, &mut bytes);
+            bytes.extend(term.0.to_le_bytes());
+            put_key(candidate, &mut bytes);
+            bytes
+        }
+        Claim::Change { leader, at, voters } => {
+            let mut bytes = CHANGE.to_vec();
+            put_key(leader, &mut bytes);
+            put_position(at, &mut bytes);
+            put_keys(&voters.incoming, &mut bytes);
+            put_keys(&voters.outgoing, &mut bytes);
+            bytes
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,7 +159,10 @@ mod tests {
 
     use proptest::prelude::*;
     use proptest::sample::Index;
-    use raft::{Answer, Body, Config, Data, Grant, Hard, Raft, Start, Term, Voters};
+    use raft::{
+        Answer, Body, Change, Config, Data, Grant, Hard, Position, Raft, Start, Term,
+        Voters,
+    };
 
     use super::*;
     use crate::bytes::put_optional_proof;
@@ -154,18 +187,120 @@ mod tests {
         expected.push(1);
         expected.extend([7, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let claim = Claim {
+        let claim = |grant| Claim::Grant {
             voter: key(3),
-            grant: Grant::Vote,
+            grant,
             term: Term(7),
             candidate: key(9),
         };
-        assert_eq!(statement(&claim), expected);
-        let pre_vote = Claim {
-            grant: Grant::PreVote,
-            ..claim
+        assert_eq!(statement(&claim(Grant::Vote)), expected);
+        assert_eq!(statement(&claim(Grant::PreVote))[34], 0);
+    }
+
+    #[test]
+    fn the_signed_bytes_of_a_change_are_the_tag_leader_position_and_voters() {
+        let mut expected = b"foundation/voters/1".to_vec();
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([7, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([5, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([2, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([1, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let voters = Voters {
+            incoming: [key(3), key(9)].into(),
+            outgoing: [key(3)].into(),
         };
-        assert_eq!(statement(&pre_vote)[34], 0);
+        let claim = Claim::Change {
+            leader: key(3),
+            at: Position {
+                term: Term(7),
+                index: 5,
+            },
+            voters: &voters,
+        };
+        assert_eq!(statement(&claim), expected);
+    }
+
+    // The joint configuration that leader 1 wrote at index 2 of `TERM`.
+    fn joint() -> Voters {
+        Voters {
+            incoming: [key(1), key(2), key(4)].into(),
+            outgoing: [key(1), key(2), key(3)].into(),
+        }
+    }
+
+    fn written() -> Position {
+        Position {
+            term: TERM,
+            index: 2,
+        }
+    }
+
+    fn signed_change() -> Change {
+        let Data::Voters(change) = common::change(1, written(), joint()).data else {
+            unreachable!()
+        };
+        change
+    }
+
+    #[test]
+    fn sign_fills_the_votes_and_the_signature_of_a_change_this_node_wrote() {
+        let change = signed_change();
+        assert_eq!(change.votes, proven().proof.unwrap());
+        let joint = joint();
+        let claim = Claim::Change {
+            leader: key(1),
+            at: written(),
+            voters: &joint,
+        };
+        let signature = change.signature;
+        assert_eq!(verify(&claim, signature, &members(&[1, 2, 3])), Ok(()));
+        let unknown = Err(Error::NotMember { voter: key(1) });
+        assert_eq!(verify(&claim, signature, &members(&[2, 3])), unknown);
+    }
+
+    #[test]
+    fn a_change_signature_moved_to_another_position_voters_or_leader_is_forged() {
+        let signature = signed_change().signature;
+        let members = members(&[1, 2, 3]);
+        let joint = joint();
+        let later = Position {
+            index: 3,
+            ..written()
+        };
+        let left = Voters {
+            outgoing: BTreeSet::new(),
+            ..joint.clone()
+        };
+        let moved = [
+            (key(1), later, &joint),
+            (key(1), written(), &left),
+            (key(2), written(), &joint),
+        ];
+        for (leader, at, voters) in moved {
+            let claim = Claim::Change { leader, at, voters };
+            let forged = Err(Error::Forged { voter: leader });
+            assert_eq!(verify(&claim, signature, &members), forged, "{claim:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: each message passed `check` before `step`")]
+    fn sign_panics_on_an_unsigned_change_of_another_node() {
+        let mut change = signed_change();
+        change.votes.candidate = key(2);
+        change.signature = None;
+        let entry = raft::Entry {
+            at: written(),
+            data: Data::Voters(change),
+        };
+        let mut ready = Ready {
+            entries: vec![entry],
+            ..Ready::default()
+        };
+        signer(1).sign(&mut ready);
     }
 
     #[test]

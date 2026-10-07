@@ -11,7 +11,7 @@ use raft::{
 
 use types::node;
 
-use crate::network::{Action, Network, run};
+use crate::network::{Action, Network, change, run};
 
 const CASES: u32 = 2000;
 
@@ -31,7 +31,7 @@ fn entry() -> impl Strategy<Value = Entry> {
     let data = prop_oneof![
         Just(Data::Empty),
         Just(Data::Bytes(vec![7])),
-        Just(Data::Voters(Voters::default())),
+        Just(change(node::Key::from_u128(1), Voters::default())),
     ];
     (position(), data).prop_map(|(at, data)| Entry { at, data })
 }
