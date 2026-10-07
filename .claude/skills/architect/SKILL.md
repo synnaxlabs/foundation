@@ -53,10 +53,10 @@ person's:
 1. Launch a fresh `architecture` agent with the PR number and the decisions section.
 2. Check yourself that the surface matches its interface issue and the decisions, and
    that each new public item has a caller on the milestone path.
-3. Post one PR comment. Start it with your rating and summary of the PR (`/review`,
-   "Rating"), then approved at `<sha>`, or the findings. A later push needs a new
-   approval only when it changes the public surface or the meaning of a ruling. A fix
-   of wording, links, or code behind the surface needs none.
+3. Post one PR comment. Start it with your name line, then your rating and summary of
+   the PR (`/review`, "Rating"), then approved at `<sha>`, or the findings. A later push
+   needs a new approval only when it changes the public surface or the meaning of a
+   ruling. A fix of wording, links, or code behind the surface needs none.
 
 ## Contract disagreements
 

@@ -38,7 +38,7 @@ For each code PR, launch a fresh subagent with the PR number. It checks, with fi
 It also gives the rating and summary that `/review` "Rating" defines. It judges the
 PR by the rules at its merge commit (`git show <merge>:<path>`), never by a rule in an
 open PR or in your branch. Post the verdict as one comment on the PR that starts with
-them, as given. Then act on each problem:
+its name line, then them, as given. Then act on each problem:
 
 - A defect: an issue with its `crate:` label.
 - A contract question: send it to the crate's architect.
@@ -68,8 +68,8 @@ person.
 ## Red-team PRs
 
 Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
-that each new test fails on the code it targets. Post one comment that starts with the
-rating and summary of the last round, as given, then the line
+that each new test fails on the code it targets. Post one comment that starts with its
+name line, then the rating and summary of the last round, as given, then the line
 ``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. Send
 each approval, with the PR number and the sha, to `laptop.monitor`, which approves the
 PR on the person's account, marks it ready, and queues it. A later push needs a new

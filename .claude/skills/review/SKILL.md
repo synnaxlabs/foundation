@@ -49,17 +49,17 @@ returns (`git worktree remove --force <path>`).
 1. Check each finding against the code yourself. Drop the ones you cannot confirm, and
    say so.
 2. Post one PR comment for each round, also a round that finds nothing, after each of
-   its reviewers returns. It starts with the rating and summary from the `reviewer`'s
-   report, as given (Rating). Then its reviewers, its range (`<from>..<head sha>`), and
-   the confirmed findings, most severe first: file and line, what goes wrong, and the
-   fix. It ends with three lines. First `Deferred:` and `none`, or the issue of each
-   deferred finding, each with the link to the architect's OK in a risk crate. Then
-   `Public surface:` and `none`, or each public item and crate dependency that the PR
-   changes (the `architecture` report names them, and in a later round the `reviewer`
-   report names those of its range), each with the link to the architect's approval
-   once it exists. A later round keeps each item of the round before it. Then
-   `Hot path:` as the `architecture` report gives it, or in a later round the
-   `reviewer` report.
+   its reviewers returns. It starts with its name line, then the rating and summary from
+   the `reviewer`'s report, as given (Rating). Then its reviewers, its range
+   (`<from>..<head sha>`), and the confirmed findings, most severe first: file and line,
+   what goes wrong, and the fix. It ends with three lines. First `Deferred:` and `none`,
+   or the issue of each deferred finding, each with the link to the architect's OK in a
+   risk crate. Then `Public surface:` and `none`, or each public item and crate
+   dependency that the PR changes (the `architecture` report names them, and in a later
+   round the `reviewer` report names those of its range), each with the link to the
+   architect's approval once it exists. A later round keeps each item of the round
+   before it. Then `Hot path:` as the `architecture` report gives it, or in a later
+   round the `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A deferral to an existing issue is a comment on that
@@ -80,7 +80,8 @@ returns (`git worktree remove --force <path>`).
 ## Rating
 
 Each round comment, architect review, director verdict, and red-team approval starts
-with two lines for a person who has not read the code:
+with its name line (`docs/factory.md`, "GitHub is the record"), then two lines for a
+person who has not read the code:
 
 1. `Quality: <n>/10` for the whole PR at its head. 10: nothing to improve. 8: small
    fixes only. 5: it works, with real problems in tests, design, or performance. 3: a
@@ -95,6 +96,7 @@ The required check `review` (`cargo xtask review`) reads only comments by
 `synnax-foundation-factory[bot]`, and parses this text. Write each round comment so:
 
 ```
+**<session>** · <role>
 Quality: <n>/10
 <summary>
 
