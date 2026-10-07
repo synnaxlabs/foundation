@@ -4,10 +4,11 @@
 //! writes reads back.
 //!
 //! Input: one byte, the places of the session less 1, then the messages from the home
-//! (`fuzz::messages`).
+//! (`fuzz::hub::messages`).
 
 #![no_main]
 
+use fuzz::hub::Run;
 use libfuzzer_sys::{
     arbitrary::{self, Unstructured},
     fuzz_target,
@@ -18,24 +19,12 @@ use wire::hub::{Error, FromHome, Head, Mode, Open, Reader, Reply, ends};
 /// The most ends of a written run.
 const RUN_MAX: u32 = 4;
 
-/// The kind byte of an opened.
-const OPENED: u8 = 1;
-
-/// The kind byte of a head.
-const HEAD: u8 = 2;
-
-/// Where a head holds the count of its series.
-const SERIES_AT: usize = 14;
-
 /// What a reader must take next, kept apart from the reader.
 #[derive(Clone, Copy, Debug)]
 enum Next {
     Opened,
     Head,
-    /// `remain` ends of the run are still to come.
-    Ends {
-        remain: u32,
-    },
+    Ends(Run),
     /// `remain` bytes of a body of `end` bytes are still to come.
     Body {
         end: usize,
@@ -43,39 +32,54 @@ enum Next {
     },
 }
 
-/// Whether `error` says only that the bytes of a message are no reply.
-fn malformed(error: Error) -> bool {
-    matches!(
-        error,
-        Error::Empty
-            | Error::Kind { .. }
-            | Error::Length { .. }
-            | Error::Series
-            | Error::Path { .. }
-    )
+/// A reader of `places` places that decoded nothing.
+fn reader(places: u32) -> Reader {
+    Reader::new(&Open {
+        mode: Mode::Latest,
+        channels: places,
+    })
+}
+
+/// The reply in `message`, read where its kind is in order: an opened by a reader that
+/// decoded nothing, and a head by a reader that has a place for each series.
+fn reply(message: &[u8]) -> Result<Reply, Error> {
+    if let Ok(FromHome::Opened) = reader(u32::MAX).decode(message) {
+        return Ok(Reply::Opened);
+    }
+    match opened(u32::MAX).decode(message)? {
+        FromHome::Head(head) => Ok(Reply::Head(head)),
+        event => panic!("{event:?} came where only a head is in order"),
+    }
+}
+
+/// The kind byte that the encoder writes for `reply`.
+fn kind(reply: Reply) -> u8 {
+    let mut out = vec![0; reply.encoded_len()];
+    reply.encode(&mut out);
+    out[0]
 }
 
 /// Whether a reader of `places` places that must take `next` refuses `message` with
-/// `error`. For a message of a run or of a body, only one error is correct.
+/// `error`. Only one error is correct.
 fn refused(next: Next, places: u32, message: &[u8], error: Error) -> bool {
     let len = message.len();
     match next {
-        Next::Opened => match error {
-            Error::Unopened { kind } => kind == HEAD && message.first() == Some(&HEAD),
-            error => message != [OPENED] && malformed(error),
+        Next::Opened => match reply(message) {
+            Ok(Reply::Opened) => false,
+            Ok(head) => error == Error::Unopened { kind: kind(head) },
+            Err(malformed) => error == malformed,
         },
-        Next::Head => match error {
-            Error::Reopen { kind } => kind == OPENED && message == [OPENED],
-            Error::Places {
-                series,
-                places: limit,
-            } => {
-                let named = message.get(SERIES_AT..) == Some(&series.to_le_bytes()[..]);
-                named && limit == places && series > places
+        Next::Head => match reply(message) {
+            Ok(Reply::Opened) => {
+                let kind = kind(Reply::Opened);
+                error == Error::Reopen { kind }
             }
-            error => message != [OPENED] && malformed(error),
+            Ok(Reply::Head(Head { series, .. })) => {
+                series > places && error == Error::Places { series, places }
+            }
+            Err(malformed) => error == malformed,
         },
-        Next::Ends { remain } => fuzz::run_refused(message, ends::LEN, remain, error),
+        Next::Ends(run) => run.refused(message, error),
         Next::Body { .. } if len == 0 => error == Error::Empty,
         Next::Body { remain, .. } => {
             len > remain && error == Error::Body { len, remain }
@@ -91,15 +95,12 @@ fn read(bytes: &[u8]) {
         return;
     };
     let places = u32::from(*places) + 1;
-    let mut reader = Reader::new(&Open {
-        mode: Mode::Latest,
-        channels: places,
-    });
+    let mut reader = reader(places);
     let mut next = Next::Opened;
-    for message in fuzz::messages(rest) {
+    for message in fuzz::hub::messages(rest) {
         next = match (next, reader.decode(message)) {
             (Next::Opened, Ok(FromHome::Opened)) => {
-                assert_eq!(message, [OPENED], "the opened changed");
+                assert_eq!(message, [kind(Reply::Opened)], "the opened changed");
                 Next::Head
             }
             (Next::Head, Ok(FromHome::Head(head))) => {
@@ -107,25 +108,19 @@ fn read(bytes: &[u8]) {
                 Reply::Head(head).encode(&mut out);
                 assert_eq!(out, message, "the head changed");
                 assert!(head.series <= places, "a head has more series than places");
-                Next::Ends {
-                    remain: head.series,
-                }
+                Next::Ends(Run::new(ends::LEN, head.series))
             }
-            (Next::Ends { remain }, Ok(FromHome::Ends { ends, last })) => {
+            (Next::Ends(run), Ok(FromHome::Ends { ends, last })) => {
                 let ends: Vec<_> = ends.collect();
                 let mut out = vec![0; message.len()];
                 ends::encode(ends.iter().copied(), &mut out);
                 assert_eq!(out, message, "the ends changed");
-                let remain = u32::try_from(ends.len())
-                    .ok()
-                    .and_then(|count| remain.checked_sub(count))
-                    .expect("a run message has more ends than remain");
-                assert_eq!(last, remain == 0, "the run ends at another message");
-                match ends.last() {
-                    None => panic!("a run message has no end"),
-                    Some(_) if !last => Next::Ends { remain },
-                    Some(&(_, 0)) => Next::Head,
-                    Some(&(_, end)) => {
+                let run = run.take(ends.len(), last);
+                let &(_, end) = ends.last().expect("the run took an end");
+                match (run, end) {
+                    (Some(run), _) => Next::Ends(run),
+                    (None, 0) => Next::Head,
+                    (None, end) => {
                         let end = usize::try_from(end).expect("a usize holds a u32");
                         Next::Body { end, remain: end }
                     }
@@ -163,10 +158,7 @@ fn read(bytes: &[u8]) {
 
 /// A reader of `places` places that decoded the home's `Opened`.
 fn opened(places: u32) -> Reader {
-    let mut reader = Reader::new(&Open {
-        mode: Mode::Latest,
-        channels: places,
-    });
+    let mut reader = reader(places);
     let mut out = vec![0; Reply::Opened.encoded_len()];
     Reply::Opened.encode(&mut out);
     match reader.decode(&out) {

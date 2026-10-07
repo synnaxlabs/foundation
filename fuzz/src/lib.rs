@@ -1,7 +1,8 @@
 //! What the fuzz targets have in common.
 
 use types::sample::Scalar;
-use wire::hub::Error;
+
+pub mod hub;
 
 // Append only: the first byte of each input in `oracles/fuzz/codec_series` and
 // `oracles/fuzz/codec_encoder` is an index into this table.
@@ -74,32 +75,4 @@ where
         Ok(&value),
         "{printed:?} does not read back"
     );
-}
-
-/// The stream messages in a hub input: each is a length byte and then that many bytes.
-/// The last message ends with the input.
-pub fn messages(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    std::iter::from_fn(move || {
-        let (&len, rest) = bytes.split_first()?;
-        let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
-        bytes = rest;
-        Some(message)
-    })
-}
-
-/// Whether `error` is the refusal of a hub `message` where a run of items of `width`
-/// bytes continues, with `remain` items still to come. Only one error is correct, and a
-/// message that the run takes has none.
-#[must_use]
-pub fn run_refused(message: &[u8], width: usize, remain: u32, error: Error) -> bool {
-    let len = message.len();
-    if len == 0 {
-        error == Error::Empty
-    } else if !len.is_multiple_of(width) {
-        error == Error::Length { len }
-    } else {
-        let items = len / width;
-        u32::try_from(items).is_ok_and(|items| items > remain)
-            && error == Error::Run { items, remain }
-    }
 }
