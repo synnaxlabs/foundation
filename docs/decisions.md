@@ -250,9 +250,14 @@ How to read this record:
   again. Between reads, the caller keeps the mark the last read gave, in memory
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at
-  a crash restores as closed at the restore. Complete and latest sessions have
-  separate key types, so a call in the wrong mode does not compile (#725). Only a
-  named complete session needs mesh time to close: `Readers::close_named` and
+  a crash restores as closed at the restore. The home drops a grant, ack, or close for a
+  key it gave that is no longer open: a late message after a close or a takeover. A take
+  of such a key gives nothing. A key is the home's own value, in memory only, and keys
+  start again at a restore. No hub message carries a key: the home maps each one to a
+  key it gave, so a key it never gave is a defect of the home and panics. Complete and
+  latest sessions have separate key types, so a call in the wrong mode does not compile
+  (advisor, #725; the take and the key rule: architect, #1038). Only a named complete
+  session needs mesh time to close: `Readers::close_named` and
   `Readers::open_named_latest` take a stamp, and no other open or close does, so the
   home opens unnamed readers before the first estimate. A named complete session has a
   `complete::Key`, and the wrong close of an open session panics; the architect decided
@@ -3124,7 +3129,8 @@ conclusion together". Each one is listed below.
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
   generated names as strings (#701), and POLICY NAMES (#474).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
-  the STREAM WIRE hello (#55), a reader session key type per mode (#725).
+  the STREAM WIRE hello (#55), a reader session key type per mode and the drop of a
+  late reader call (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
