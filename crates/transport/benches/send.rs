@@ -472,7 +472,7 @@ async fn compete(
     if let Premise::Competes = premise {
         assert!(
             complete >= 2 * latest,
-            "{} times {complete} Complete and {latest} Latest sends: one class",
+            "{} times {complete} Complete and {latest} Latest sends: under 2 to 1",
             scenario.name,
         );
     }
