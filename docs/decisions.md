@@ -625,7 +625,7 @@ How to read this record:
   spends a seq range of zero, and is applied, also when another group of a live write
   is lost or its own handoff finds no room in a live write. A backfill write with no
   room gets `Full` whole (B5). A write with no samples still reports a failed commit.
-  Decided by the coordinator with the advisor on 2026-10-06 (#885):
+  Decided by the coordinator with the advisor at 2026-10-06T15:30:26Z (#885):
   https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440
   A group with no samples is confirmed with the entries appended before it. It appends
   no entry of its own and moves no stored mark, but a handoff that it records does. A
