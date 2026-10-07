@@ -147,9 +147,13 @@ How to read this record:
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
   or virtual flag. Amended: no `name` field, because the name is the tree key, and
-  `Kind::Data(Data)` has private fields. `Data::new` refuses an array or list that
-  holds no element (`channel::Error::Empty`). Decided by the architect, #756
-  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098).
+  `Kind::Data(Data)` has private fields. An array or list of size 0 is valid: no
+  caller divides by its width, and a refusal, when one is needed, goes in
+  `sample::Type`, which every format reads. The spec numbers its scalar codes in its
+  own table, apart from STORED BODY, so a change to one format does not change the
+  other. Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
+  https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -2458,7 +2462,7 @@ Storage classes used in the table:
 | --- | --- | --- | --- | --- |
 | Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
-| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number and an array or list that holds no element. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
+| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |

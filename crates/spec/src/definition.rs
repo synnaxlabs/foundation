@@ -46,8 +46,8 @@
 //!
 //! A `data_type` is a scalar, an array, a list, a string, bytes, or quality, in that
 //! order from 0. A `scalar` is bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7,
-//! u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. `len` and `max` are at least
-//! 1. Only a scalar, an array, or a list of a scalar from 1 to 10 has a unit.
+//! u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. Only a scalar from 1 to 10,
+//! or an array or list of one, has a unit.
 
 #![deny(
     clippy::indexing_slicing,

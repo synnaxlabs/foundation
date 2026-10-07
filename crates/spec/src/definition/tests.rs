@@ -942,46 +942,34 @@ fn refuses_a_data_channel_that_cannot_exist() {
     string.extend_from_slice(&1_u64.to_le_bytes());
     string.push(b'V');
     let at = DATA_TYPE_AT;
-    for (rest, error) in [
-        (
-            string,
-            channel::Error::Unit {
-                data_type: DataType::Sample(sample::Type::String),
-            },
-        ),
-        (
-            vec![1, 10, 0, 0, 0, 0, 0],
-            channel::Error::Empty { data_type: f64s(0) },
-        ),
+    let bools = sample::Type::Array {
+        element: Scalar::Bool,
+        len: 0,
+    };
+    for (rest, data_type) in [
+        (string, sample::Type::String),
         (
             vec![1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, b'V'],
-            channel::Error::Empty {
-                data_type: DataType::Sample(sample::Type::Array {
-                    element: Scalar::Bool,
-                    len: 0,
-                }),
-            },
-        ),
-        (
-            vec![2, 10, 0, 0, 0, 0, 0],
-            channel::Error::Empty {
-                data_type: DataType::Sample(sample::Type::List {
-                    element: Scalar::F64,
-                    max: 0,
-                }),
-            },
+            bools,
         ),
     ] {
+        let data_type = DataType::Sample(data_type);
+        let error = channel::Error::Unit { data_type };
         let error = Error::Channel { at, error };
         assert_eq!(Definition::decode(&data_bytes(&rest)), Err(error));
     }
     let error = Error::Channel {
         at,
-        error: channel::Error::Empty { data_type: f64s(0) },
+        error: channel::Error::Unit {
+            data_type: DataType::Quality,
+        },
     };
     assert_eq!(
         error.to_string(),
-        format!("the data channel at byte {at}: an array or a list holds no element")
+        format!(
+            "the data channel at byte {at}: a unit is on a data type that holds no \
+             number"
+        )
     );
 }
 
@@ -1138,7 +1126,7 @@ fn channel_strategy() -> impl Strategy<Value = Definition> {
         .prop_map(|(error, control)| channel::Kind::Index { error, control });
     let unit = prop::option::of("[!-~]{1,32}".prop_map(|u| Unit::new(&u).unwrap()));
     let data = (key.clone(), optional, data_type_strategy(), unit).prop_filter_map(
-        "a data channel that cannot exist",
+        "a unit on a type that holds no number",
         |(index, quality, data_type, unit)| {
             let data = Data::new(index, quality, data_type, unit);
             data.ok().map(channel::Kind::Data)

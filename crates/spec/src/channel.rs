@@ -46,17 +46,13 @@ impl Data {
     ///
     /// # Errors
     ///
-    /// [`Error::Empty`] when `data_type` is an array or a list that holds no element,
-    /// else [`Error::Unit`] when `unit` is set and `data_type` holds no number.
+    /// [`Error::Unit`] when `unit` is set and `data_type` holds no number.
     pub fn new(
         index: channel::Key,
         quality: Option<channel::Key>,
         data_type: DataType,
         unit: Option<Unit>,
     ) -> Result<Self, Error> {
-        if data_type.empty() {
-            return Err(Error::Empty { data_type });
-        }
         if unit.is_some() && !data_type.numeric() {
             return Err(Error::Unit { data_type });
         }
@@ -112,16 +108,6 @@ impl DataType {
         }
     }
 
-    /// Reports whether the values are arrays or lists that hold no element.
-    const fn empty(&self) -> bool {
-        matches!(
-            self,
-            Self::Sample(
-                sample::Type::Array { len: 0, .. } | sample::Type::List { max: 0, .. }
-            )
-        )
-    }
-
     /// Reports whether the values are numbers, so they can have a unit.
     const fn numeric(&self) -> bool {
         let element = match self {
@@ -146,11 +132,6 @@ impl DataType {
 /// with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// An array of length 0 or a list of at most 0 elements.
-    Empty {
-        /// The data type.
-        data_type: DataType,
-    },
     /// A unit is on a data type that holds no number: a bool, a stamp, a span, a UUID,
     /// a string, bytes, or quality.
     Unit {
@@ -164,7 +145,6 @@ impl Error {
     #[must_use]
     pub const fn fix(&self) -> &'static str {
         match self {
-            Self::Empty { .. } => "Give the array or list a size of at least 1",
             Self::Unit { .. } => "Remove the unit, or give the channel a numeric type",
         }
     }
@@ -173,7 +153,6 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty { .. } => f.write_str("an array or a list holds no element"),
             Self::Unit { .. } => {
                 f.write_str("a unit is on a data type that holds no number")
             }
@@ -252,41 +231,18 @@ mod tests {
     }
 
     #[test]
-    fn refuses_an_array_or_list_that_holds_no_element() {
-        let element = Scalar::F64;
-        for data_type in [
-            sample::Type::Array { element, len: 0 },
-            sample::Type::List { element, max: 0 },
-        ]
-        .map(DataType::Sample)
-        {
-            for unit in [None, Some("kPa")] {
-                let data_type = data_type.clone();
-                assert_eq!(
-                    data(data_type.clone(), unit),
-                    Err(Error::Empty { data_type })
-                );
+    fn accepts_an_array_or_list_that_holds_no_element() {
+        for element in [Scalar::F64, Scalar::Bool] {
+            for data_type in [
+                sample::Type::Array { element, len: 0 },
+                sample::Type::List { element, max: 0 },
+            ]
+            .map(DataType::Sample)
+            {
+                let data = data(data_type.clone(), None).unwrap();
+                assert_eq!(data.data_type(), &data_type);
             }
         }
-        let bools = DataType::Sample(sample::Type::Array {
-            element: Scalar::Bool,
-            len: 0,
-        });
-        assert_eq!(
-            data(bools.clone(), Some("kPa")),
-            Err(Error::Empty { data_type: bools })
-        );
-        for len in [1, u32::MAX] {
-            let array = DataType::Sample(sample::Type::Array { element, len });
-            data(array, None).unwrap();
-            let list = DataType::Sample(sample::Type::List { element, max: len });
-            data(list, None).unwrap();
-        }
-        let error = Error::Empty {
-            data_type: DataType::Quality,
-        };
-        assert_eq!(error.to_string(), "an array or a list holds no element");
-        assert_eq!(error.fix(), "Give the array or list a size of at least 1");
     }
 
     #[test]
