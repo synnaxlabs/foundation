@@ -55,10 +55,11 @@ fn window(body_max: usize) -> Option<u64> {
     body.contains(&body_max).then(|| to_u64(window))
 }
 
-/// The smallest area with a largest record of `window` bytes: the restart record,
-/// the skip of less than a record before the end of the area, then the record.
+/// The smallest area with a largest record of `window` bytes. It holds three
+/// commits of one record in a row and the blocks that one wrap skips, so, when each
+/// commit trims, a steady load of one record in each commit gets no [`Full`].
 fn area_min(window: u64) -> u64 {
-    to_u64(RESTART) + (window - BLOCK) + window
+    4 * window
 }
 
 /// An offset that is not on a block boundary.
@@ -151,10 +152,10 @@ impl Layout {
     /// [`Unfit`] when `body_max` is under 4087 bytes (one block less the record
     /// header), over `u32::MAX`, or so large that the largest record does not fit in a
     /// `usize`. Also when `area` is not a multiple of [`ALIGN`], when it is less than
-    /// twice the largest record (a 9-byte header and `body_max`, in whole 4096-byte
-    /// blocks), or when the ring file (two header blocks and the area) does not fit in
-    /// a `u64`. A ring of that length that holds only its restart record takes any
-    /// record, wherever the restart record is.
+    /// four times the largest record (a 9-byte header and `body_max`, in whole
+    /// 4096-byte blocks), or when the ring file (two header blocks and the area) does
+    /// not fit in a `u64`. A ring of that area that holds only its restart record
+    /// takes any record, wherever the restart record is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         match window(body_max) {
             Some(window)
@@ -959,10 +960,21 @@ mod tests {
         Layout::new(AREA, BODY_MAX).expect("the test sizes make a ring")
     }
 
+    /// A ring of `blocks` blocks that [`Layout::new`] refuses: less than four of its
+    /// largest record. No public call makes one, so its tests build it from its
+    /// fields.
+    fn refused(blocks: u64) -> Layout {
+        assert!(blocks < BLOCKS, "{blocks} blocks are not under the minimum");
+        Layout {
+            area: blocks * 4096,
+            ..layout()
+        }
+    }
+
     /// A ring of 8 blocks, two of its largest record. The recorded cases of the
     /// properties ran on it, and replay what they found only on it.
     fn recorded() -> Layout {
-        Layout::new(8 * 4096, BODY_MAX).expect("the test sizes make a ring")
+        refused(8)
     }
 
     /// A ring of 32 blocks whose largest record takes 4, so the headroom of a trim
@@ -1324,7 +1336,17 @@ mod tests {
                 ("a body under one block less the header", 8 * block, 4086),
                 ("an area of one record of two blocks", 2 * block, 4088),
                 ("an area of one record of one block", block, 4087),
-                ("an area of two records less a block", 3 * block, 4088),
+                ("an area of two records", 4 * block, 4088),
+                (
+                    "an area of four one-block records less a block",
+                    3 * block,
+                    4087,
+                ),
+                (
+                    "an area of four two-block records less a block",
+                    7 * block,
+                    4088,
+                ),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
                 ("a file over u64", u64::MAX - 4095, 4087),
@@ -1401,24 +1423,24 @@ mod tests {
         }
 
         #[test]
-        fn takes_an_area_of_two_records() {
+        fn takes_an_area_of_four_records() {
             assert_eq!(
-                Layout::new(2 * 4096, 4087).map(|layout| layout.window),
+                Layout::new(4 * 4096, 4087).map(|layout| layout.window),
                 Ok(4096)
             );
-            assert_eq!(Layout::new(4 * 4096, 4088).map(|l| l.window), Ok(8192));
+            assert_eq!(Layout::new(8 * 4096, 4088).map(|l| l.window), Ok(8192));
         }
 
         #[test]
         fn fits_the_smallest_ring_in_its_file_and_no_ring_in_a_byte_less() {
-            let min = 4 * 4096;
+            let min = 6 * 4096;
             assert_eq!(Layout::fit(min, 4087).map(Layout::file_len), Ok(min));
             for len in [min - 1, 8191, 0] {
                 assert_eq!(Layout::fit(len, 4087), Err(Small { len, min }));
             }
             assert_eq!(
                 Small { len: 8191, min }.to_string(),
-                "a ring file of 8191 bytes holds no ring; it needs at least 16384 bytes"
+                "a ring file of 8191 bytes holds no ring; it needs at least 24576 bytes"
             );
             let _: &dyn std::error::Error = &Small { len: 8191, min };
         }
@@ -1476,8 +1498,8 @@ mod tests {
         }
 
         proptest! {
-            /// The smallest area is twice the largest record. A ring of that area
-            /// that holds only its restart record takes its largest record,
+            /// The smallest area is four times the largest record. A ring of that
+            /// area that holds only its restart record takes its largest record,
             /// wherever the restart record is.
             #[test]
             fn takes_the_largest_record_after_the_restart_record_at_any_tail(
@@ -1485,11 +1507,11 @@ mod tests {
                 tail in 0..64u64,
             ) {
                 let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
-                let under = 2 * record - 4096;
+                let under = 4 * record - 4096;
                 let unfit = Unfit { area: under, body_max };
                 prop_assert_eq!(Layout::new(under, body_max), Err(unfit));
                 let layout =
-                    Layout::new(2 * record, body_max).expect("the smallest area");
+                    Layout::new(4 * record, body_max).expect("the smallest area");
                 let mut cursor = Cursor::new(layout, at(tail, 0), PIECE);
                 let zeros = vec![0; cursor.window().len];
                 prop_assert_eq!(cursor.next(&zeros), Ok(Step::End));
@@ -1961,6 +1983,19 @@ mod tests {
             })
         }
 
+        /// [`steady`] with one record in each commit. A `late` record is placed
+        /// after the release of the trim before it, and each other one before it.
+        fn singles(layout: Layout, lens: Vec<(usize, bool)>) -> Option<(usize, Full)> {
+            let commits = lens.into_iter().map(|(len, late)| {
+                if late {
+                    (vec![], vec![len])
+                } else {
+                    (vec![len], vec![])
+                }
+            });
+            steady(layout, commits)
+        }
+
         proptest! {
             /// A ring of four of its largest record refuses no record when each
             /// commit holds one, of any length, placed before or after the release
@@ -1972,11 +2007,47 @@ mod tests {
             ) {
                 let area = (16 + extra) * 4096;
                 let layout = Layout::new(area, BODY_MAX).expect("a ring");
-                let commits = lens.into_iter().map(|(len, late)| {
-                    if late { (vec![], vec![len]) } else { (vec![len], vec![]) }
-                });
-                prop_assert_eq!(steady(layout, commits), None);
+                prop_assert_eq!(singles(layout, lens), None);
             }
+
+            /// So does the smallest ring of any `body_max`.
+            #[test]
+            fn the_smallest_ring_refuses_no_record_of_a_steady_load(
+                body_max in BODY_MIN..=6 * ALIGN - HEADER_LEN,
+                lens in prop::collection::vec(
+                    any::<(prop::sample::Index, bool)>(),
+                    0..400,
+                ),
+            ) {
+                let min = Layout::fit(0, body_max).expect_err("no ring in 0 bytes").min;
+                let layout = Layout::fit(min, body_max).expect("the least length");
+                let lens = lens
+                    .into_iter()
+                    .map(|(len, late)| (len.index(body_max + 1), late));
+                prop_assert_eq!(singles(layout, lens.collect()), None);
+            }
+
+            /// One block less than the minimum still holds three records and the
+            /// blocks of one wrap skip.
+            #[test]
+            fn four_records_less_one_block_refuse_no_record_of_a_steady_load(
+                lens in prop::collection::vec((bodies(), any::<bool>()), 0..400),
+            ) {
+                prop_assert_eq!(singles(refused(15), lens), None);
+            }
+        }
+
+        /// Commits of 2, 4, 4, and 4 blocks. A trim cannot free the commit in its
+        /// sync, so the ring must hold the last three and the blocks that the wrap
+        /// skips.
+        #[test]
+        fn a_ring_under_four_records_less_one_block_refuses_a_steady_load() {
+            let lens = [2 * ALIGN - HEADER_LEN, BODY_MAX, BODY_MAX, BODY_MAX];
+            let load = || lens.iter().map(|len| (*len, false)).collect();
+            let full = |needed, free| Some((3, Full { needed, free }));
+            assert_eq!(singles(refused(13), load()), full(24576, 20480));
+            assert_eq!(singles(refused(14), load()), full(28672, 24576));
+            assert_eq!(singles(refused(15), load()), None);
         }
 
         #[test]
@@ -2180,13 +2251,13 @@ mod tests {
             let _writer = cursor.writer(4096, 2);
         }
 
-        /// A ring of two blocks holds one restart record after any number of opens
+        /// The smallest ring holds one restart record after any number of opens
         /// with no data, so it takes its largest record.
         #[test]
         fn takes_the_largest_record_after_opens_with_no_data() {
-            let layout = Layout::new(2 * 4096, 4087).expect("an area of two blocks");
-            let mut area = vec![0; 2 * 4096];
-            for chain in 1..=3 {
+            let layout = Layout::new(4 * 4096, 4087).expect("the smallest area");
+            let mut area = vec![0; 4 * 4096];
+            for chain in 1..=5 {
                 let mut cursor = Cursor::new(layout, START, PIECE);
                 loop {
                     let Window { place, len } = cursor.window();

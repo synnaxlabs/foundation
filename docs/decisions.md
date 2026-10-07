@@ -401,21 +401,23 @@ How to read this record:
   blocks of one wrap skip must fit in the area. Four of the largest record less one
   block always hold them, and a smaller ring can refuse a live write under a steady
   load: with a largest record of four blocks, commits of 2, 4, 4, and 4 blocks get
-  `Full` on a ring of 13 or 14 blocks. `Layout::new` accepts two of the largest record
-  today, and #1276 sets the minimum to four before the trim turns on. That minimum is
-  for one record in each commit: on a ring of 16 blocks, a steady load of one record of
-  four blocks and one of two in each commit is refused at its third commit. A trim moves
-  the tail to the boundary after a record of any kind: a wrap record and a restart
-  record also end where a tail can go. Steady pressure in the ruling means a load whose
-  commits fit the area. The ring size for a real load is the sizing of `node` (SHARD
-  DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
+  `Full` on a ring of 13 or 14 blocks. So `Layout::new` refuses an area under four of
+  the largest record (#1276), and a ring file with a smaller area does not open. That
+  minimum is for one record in each commit: on a ring of 16 blocks, a steady load of one
+  record of four blocks and one of two in each commit is refused at its third commit. A
+  trim moves the tail to the boundary after a record of any kind: a wrap record and a
+  restart record also end where a tail can go. Steady pressure in the ruling means a
+  load whose commits fit the area. The ring size for a real load is the sizing of `node`
+  (SHARD DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
   (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557),
   the area that the bound needs (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034545693,
   2026-10-07T08:57:53Z, and with the skip in the `4c` case
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034791932,
-  2026-10-07T09:12:31Z), and the boundaries and the deferral of the minimum to #1276
-  (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
+  2026-10-07T09:12:31Z), and the boundaries and the minimum of `Layout::new`, built in
+  #1276 (#1222,
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998,
+  2026-10-07T08:16:51Z).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -554,12 +556,13 @@ How to read this record:
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
-  is the offset modulo the area length. The area is at least twice the largest
-  record, so a ring that holds only its restart record takes any record (#637). A
-  ring whose head reaches the end of the offsets is full for good. A body is at most
-  `u32::MAX` bytes and at least one block less the record header (4087 bytes): a
-  record takes whole blocks, so a smaller one saves no disk and only holds less per
-  commit.
+  is the offset modulo the area length. The area is at least four times the largest
+  record (#1276), so a ring that holds only its restart record takes any record (#637),
+  and a steady load of one record in each commit gets no `Full` (STORE TRIM). This
+  supersedes the two times of #637. A ring whose head reaches the end of the offsets is
+  full for good. A body is at most `u32::MAX` bytes and at least one block less the
+  record header (4087 bytes): a record takes whole blocks, so a smaller one saves no
+  disk and only holds less per commit.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,

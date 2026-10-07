@@ -364,11 +364,17 @@ mod tests {
         let part = (8 * 4096u64 + 1).to_le_bytes();
         let off = 4097u64.to_le_bytes();
         let small = 4086u32;
-        let cases: [(&str, Patch<'_>, Error); 4] = [
+        let short = (3 * 4096u64).to_le_bytes();
+        let cases: [(&str, Patch<'_>, Error); 5] = [
             (
                 "a body under one block less the header",
                 &[(18, &small.to_le_bytes())],
                 unfit(8 * 4096, 4086),
+            ),
+            (
+                "an area under four records",
+                &[(10, &short)],
+                unfit(3 * 4096, 4087),
             ),
             (
                 "an area of a part block",
