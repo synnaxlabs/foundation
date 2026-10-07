@@ -450,16 +450,13 @@ impl Shard {
         }
         // An empty append still reports a failed commit.
         let appended = room(self.buffer.append(entries.drain(..)));
-        let appended = match made {
-            Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
-                appended.and(Err(Error::Large))
-            }
-            _ => appended,
-        };
+        let large =
+            matches!(made, Err(block::Error::TooLarge { .. })) && recorded == Ok(true);
         let room =
             recorded
                 .and(appended)
                 .and_then(|room| match (room && ready, path) {
+                    _ if large => Err(Error::Large),
                     (false, Path::Backfill) => Err(Error::Full),
                     (room, _) => Ok(room),
                 });
