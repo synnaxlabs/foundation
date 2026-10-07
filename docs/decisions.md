@@ -4339,7 +4339,9 @@ credentials (the person,
 https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
 2026-10-07T16:48:27Z). Supersedes: BENCH SPEND, and the coordinator as the session that
 rents and ends the ARM RUNNER hosts. Those hosts stay under AWS CEILING, outside the
-test budget and "Cloud machines" steps 2, 3, and 6.
+test budget, its limits, and "Cloud machines" step 3. Each launch and end of one still
+gets its line on #15, with its 72-hour renewal stop as its end time. Step 4 checks each
+instance by itself, because those hosts have no `issue` tag.
 
 ### 5.6 First phase
 
