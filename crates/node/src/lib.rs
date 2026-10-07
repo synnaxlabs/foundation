@@ -210,14 +210,14 @@ impl Node {
             let joined = shard.handle.join();
             (joined, shard.failed.get().cloned())
         });
-        first(self.failed, shards)
+        error(self.failed, shards)
     }
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
 /// the first panic by core. Takes each item of `shards`, which gives each shard's
 /// join and error in order of core.
-fn first(
+fn error(
     failed: Option<Error>,
     shards: impl Iterator<Item = (Result<(), env::thread::Panicked>, Option<Error>)>,
 ) -> Result<(), Error> {
@@ -234,9 +234,10 @@ fn first(
     first.or(panicked).map_or(Ok(()), Err)
 }
 
-/// The open of a shard's buffer, made before the shard starts. The shards open one
-/// after another, in order of core, because each open assigns slots in the node's
-/// one interner.
+/// The disk steps of a shard, made before the shard starts: shard 0's claim of the
+/// data directory, and the open of the shard's buffer. The shards open one after
+/// another, in order of core, because each open assigns slots in the node's one
+/// interner.
 struct Open {
     core: usize,
     take: Take<Interner>,

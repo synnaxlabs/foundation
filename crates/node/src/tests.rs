@@ -431,7 +431,7 @@ fn join_gives_errors_in_order_of_precedence() {
         (Ok(()), Some(shards(4))),
     ];
     let all = all.into_iter().inspect(|_| joined += 1);
-    assert_eq!(crate::first(Some(memory.clone()), all), Err(memory));
+    assert_eq!(crate::error(Some(memory.clone()), all), Err(memory));
     assert_eq!(joined, 2);
     let cases = [
         (
@@ -452,9 +452,9 @@ fn join_gives_errors_in_order_of_precedence() {
         ),
     ];
     for (shards, error) in cases {
-        assert_eq!(crate::first(None, shards.into_iter()), Err(error));
+        assert_eq!(crate::error(None, shards.into_iter()), Err(error));
     }
-    assert_eq!(crate::first(None, [(Ok(()), None)].into_iter()), Ok(()));
+    assert_eq!(crate::error(None, [(Ok(()), None)].into_iter()), Ok(()));
 }
 
 mod buffer {
