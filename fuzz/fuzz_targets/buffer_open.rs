@@ -1,6 +1,10 @@
-//! `Buffer::open` never panics on a ring file that a local writer changed, what
-//! `committed` reported durable is what a reopen gives, and `Buffer::read` gives
-//! each path of an open ring by the read rules, the same in one read and in steps.
+//! `Buffer::open` never panics on a ring file that a local writer changed, and what
+//! `committed` reported durable is what a reopen gives.
+//!
+//! `Buffer::read` gives each path of a ring that opens as its doc says: every entry
+//! up to the tail, a gap only for seqs that no entry holds, and the same entries in
+//! one read, in reads of one entry, from inside an entry or a gap, and after a
+//! reopen.
 //!
 //! Input: batches that the production path writes, then edits on the file bytes.
 //! Two edits seal a CRC: a header block (at offset 42, over its first 512-byte
@@ -14,11 +18,16 @@
 
 #![no_main]
 
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::iter;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Mark, Parts, Rejected, Tail};
+use buffer::{
+    Buffer, Config, Entry, Error, Layout, Mark, Parts, Read, Rejected, Stored, Tail,
+};
 use env::files::{File, Mode};
 use env::tasks::Tasks;
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
@@ -49,16 +58,17 @@ const CHECK_PART: usize = 512;
 /// The check's batch and its table, of 51 bytes an entry, fit one record.
 const _: () = assert!(4 + INDEXES * PATHS.len() * (51 + CHECK_PART) <= BODY_MAX);
 const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
-/// More reads than the area holds entries, at 51 table bytes an entry.
-const READS_MAX: usize = BLOCKS * BODY_MAX / 51 + 1;
-/// What the build and the check put in each entry.
+/// A key that no build writes. Its slot comes after each slot an open made.
+const SPARE: channel::Key = channel::Key::from_u128(u128::MAX);
 const STORED_AT: Stamp = Stamp::from_nanos(7);
 const CHECK_LAST: Stamp = Stamp::from_nanos(9);
-const CHECK_FILL: u8 = 0xa5;
+/// The build and the check fill their bytes apart, so a read cannot give the bytes
+/// of one for the other.
 const BUILD_FILL: u8 = 0x5a;
+const CHECK_FILL: u8 = 0xa5;
 
 /// One entry of a path, as appended or as a read gave it, with its bytes off the
-/// pool.
+/// pool, so the entries of one read do not take the blocks of the next.
 #[derive(Debug, PartialEq, Eq)]
 struct Given {
     first: u64,
@@ -69,8 +79,29 @@ struct Given {
     bytes: Vec<u8>,
 }
 
+impl From<&Stored> for Given {
+    fn from(entry: &Stored) -> Self {
+        let Stored {
+            first,
+            len,
+            stored_at,
+            last,
+            tag,
+            bytes,
+        } = entry;
+        Self {
+            first: *first,
+            len: *len,
+            stored_at: *stored_at,
+            last: *last,
+            tag: *tag,
+            bytes: bytes.to_vec(),
+        }
+    }
+}
+
 /// One entry the build phase appends.
-#[derive(Debug)]
+#[derive(Debug, Hash)]
 struct Append {
     index: usize,
     path: frame::Path,
@@ -79,7 +110,7 @@ struct Append {
 }
 
 /// One change to the file bytes.
-#[derive(Debug)]
+#[derive(Debug, Hash)]
 enum Edit {
     Put { at: usize, bytes: Vec<u8> },
     Zero { at: usize, len: usize },
@@ -87,7 +118,7 @@ enum Edit {
     SealRecord { block: usize },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash)]
 struct Input {
     batches: Vec<Vec<Append>>,
     edits: Vec<Edit>,
@@ -189,12 +220,15 @@ fn key(index: usize) -> channel::Key {
     channel::Key::from_u128(index as u128)
 }
 
+/// Opens the ring. Gives the slot of each index of the build, then each other slot
+/// the open made: an edit can change the index of an entry. An edit that writes
+/// `SPARE` hides the slots after it.
 async fn open(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,
-    slots: &mut Slots,
-) -> std::result::Result<Buffer, Error> {
+) -> std::result::Result<(Buffer, Vec<Slot>), Error> {
+    let mut slots = Slots::new();
     let config = Config {
         files: node.files(),
         dir: PathBuf::from(DIR),
@@ -205,7 +239,15 @@ async fn open(
         layout: Layout::new(AREA, BODY_MAX).expect("invariant: the sizes make a ring"),
         commit: COMMIT,
     };
-    Buffer::open(config, slots).await
+    let buffer = Buffer::open(config, &mut slots).await?;
+    let mut slot_of: Vec<Slot> =
+        (0..INDEXES).map(|index| slots.assign(key(index))).collect();
+    let edited: Vec<Slot> = (0..slots.assign(SPARE).get())
+        .map(Slot::new)
+        .filter(|slot| !slot_of.contains(slot))
+        .collect();
+    slot_of.extend(edited);
+    Ok((buffer, slot_of))
 }
 
 /// Writes the batches to a new ring and returns the durable tail and the entries of
@@ -216,15 +258,10 @@ async fn build(
     pool: &Rc<Pool>,
     input: &Input,
 ) -> (Vec<Tail>, Vec<Vec<Given>>) {
-    let mut slots = Slots::new();
-    let buffer = open(node, tasks, pool, &mut slots)
-        .await
-        .expect("a new ring opens");
-    let slot_of: Vec<Slot> =
-        (0..INDEXES).map(|index| slots.assign(key(index))).collect();
+    let (buffer, slot_of) = open(node, tasks, pool).await.expect("a new ring opens");
     let mut next = vec![[0u64; 2]; INDEXES];
-    let mut given: Vec<Vec<Given>> = Vec::new();
-    given.resize_with(INDEXES * PATHS.len(), Vec::new);
+    let mut written: Vec<[Vec<Given>; 2]> =
+        iter::repeat_with(Default::default).take(INDEXES).collect();
     for batch in &input.batches {
         let mut firsts = next.clone();
         let mut appended = Vec::new();
@@ -239,7 +276,8 @@ async fn build(
                 let last =
                     Some(Stamp::from_nanos(i64::try_from(first).expect("small")));
                 appended.push((
-                    append.index * PATHS.len() + path,
+                    append.index,
+                    path,
                     Given {
                         first,
                         len: append.len,
@@ -268,14 +306,21 @@ async fn build(
             Err(other) => panic!("append failed: {other}"),
         }
         buffer.committed().await.expect("the batch commits");
-        for (place, entry) in appended {
-            given[place].push(entry);
+        for (index, path, entry) in appended {
+            written[index][path].push(entry);
         }
     }
-    (tails(&buffer, &slot_of), given)
+    let written = written.into_iter().flatten().collect();
+    (tails(&buffer, &slot_of), written)
 }
 
 /// Every entry of each path from the start, in slot then path order.
+///
+/// # Panics
+///
+/// When a read breaks a rule of [`read_path`], or when reads of one entry, a read
+/// from inside a gap, or a read from inside an entry give other entries than one
+/// read of the path.
 async fn read_paths(buffer: &Buffer, slot_of: &[Slot]) -> Vec<Vec<Given>> {
     let mut paths = Vec::new();
     for slot in slot_of {
@@ -283,36 +328,87 @@ async fn read_paths(buffer: &Buffer, slot_of: &[Slot]) -> Vec<Vec<Given>> {
             let whole = read_path(buffer, *slot, path, usize::MAX).await;
             let stepped = read_path(buffer, *slot, path, 1).await;
             assert_eq!(stepped, whole, "reads in steps gave other entries");
+            let mut at = 0;
+            for entry in &whole {
+                if entry.first - at > 1 {
+                    let gap = at + 1..entry.first;
+                    read_first(buffer, *slot, path, Some(gap), entry).await;
+                }
+                if entry.len > 1 {
+                    read_first(buffer, *slot, path, None, entry).await;
+                }
+                at = entry.first + u64::from(entry.len);
+            }
             paths.push(whole);
         }
     }
     paths
 }
 
-/// Every entry of `path` from the start, in reads of `budget`. Each read keeps the
-/// read rules: a gap only before its first entry and only when the entry starts
-/// past the mark, no gap between its entries, and `next` after its last entry.
+/// Reads from the start of `gap`, or with no gap from the second seq of `entry`.
+/// The read must report the gap and give `entry` first, whole.
+async fn read_first(
+    buffer: &Buffer,
+    slot: Slot,
+    path: frame::Path,
+    gap: Option<Range<u64>>,
+    entry: &Given,
+) {
+    let from = gap.as_ref().map_or(entry.first + 1, |gap| gap.start);
+    let read = read(buffer, slot, path, Mark::at(from), 1).await;
+    assert_eq!(read.gap, gap, "the gap of a read from seq {from}");
+    let first = read.entries.first().map(Given::from);
+    assert_eq!(first.as_ref(), Some(entry), "a read from seq {from}");
+}
+
+async fn read(
+    buffer: &Buffer,
+    slot: Slot,
+    path: frame::Path,
+    from: Mark,
+    budget: usize,
+) -> Read {
+    match buffer.read(slot, path, from, budget).await {
+        Ok(read) => read,
+        Err(error) => panic!("a read of an open ring failed: {error}"),
+    }
+}
+
+/// Every entry of `path` from the start, in reads of `budget`.
+///
+/// # Panics
+///
+/// When a read breaks the doc of `Buffer::read`: a gap only before its first entry
+/// and only when the entry starts past the mark, no entry below the mark, no gap
+/// between its entries, at most one entry past the budget, and a `next` after its
+/// last entry and past the mark. A read gives nothing only at the durable tail, and
+/// it does not move the mark.
 async fn read_path(
     buffer: &Buffer,
     slot: Slot,
     path: frame::Path,
     budget: usize,
 ) -> Vec<Given> {
-    let mut given = Vec::new();
+    let mut given: Vec<Given> = Vec::new();
     let mut from = Mark::at(0);
-    for _ in 0..READS_MAX {
-        let read = match buffer.read(slot, path, from, budget).await {
-            Ok(read) => read,
-            Err(error) => panic!("a read of an open ring failed: {error}"),
-        };
+    loop {
+        let read = read(buffer, slot, path, from, budget).await;
         if read.entries.is_empty() {
             assert_eq!(read.gap, None, "a gap with no entry");
             assert_eq!(read.next, from, "an empty read moved the mark");
+            let tail = buffer.durable(slot, path);
+            assert_eq!(from.seq, tail.seq, "the reads did not end at the tail");
+            let stamp = given.iter().rev().find_map(|entry| entry.last);
+            assert_eq!(stamp, tail.stamp, "the reads did not give the tail stamp");
             return given;
         }
         let mut at = from.seq;
+        let mut spent = 0;
         for (number, entry) in read.entries.iter().enumerate() {
+            assert!(spent < budget, "entry {number} came past the budget");
+            spent += block::footprint(entry.bytes.len());
             if number == 0 {
+                assert!(entry.first >= at, "the first entry is below the mark");
                 let gap = (entry.first > at).then_some(at..entry.first);
                 assert_eq!(read.gap, gap, "the gap before the first entry");
             } else {
@@ -322,19 +418,15 @@ async fn read_path(
                 .first
                 .checked_add(u64::from(entry.len))
                 .expect("an entry ends past the last seq");
-            given.push(Given {
-                first: entry.first,
-                len: entry.len,
-                stored_at: entry.stored_at,
-                last: entry.last,
-                tag: entry.tag,
-                bytes: entry.bytes.to_vec(),
-            });
+            given.push(Given::from(entry));
         }
         assert_eq!(read.next.seq, at, "next is not after the last entry");
+        assert!(
+            read.next > from,
+            "a read with entries did not move the mark"
+        );
         from = read.next;
     }
-    panic!("the reads of a path did not end");
 }
 
 /// The durable tail of each path, in slot then path order.
@@ -390,30 +482,25 @@ async fn check(
     pool: &Rc<Pool>,
     input: &Input,
     built: &[Tail],
-    given: &[Vec<Given>],
+    written: &[Vec<Given>],
 ) {
-    let mut slots = Slots::new();
-    let buffer = match open(node, tasks, pool, &mut slots).await {
-        Ok(buffer) => buffer,
+    let (buffer, slot_of) = match open(node, tasks, pool).await {
+        Ok(opened) => opened,
         Err(Error::Pool(_) | Error::Files(_)) => panic!("open failed outside the ring"),
         Err(_) => return,
     };
-    let slot_of: Vec<Slot> =
-        (0..INDEXES).map(|index| slots.assign(key(index))).collect();
+    let read = read_paths(&buffer, &slot_of).await;
     if input.edits.is_empty() {
         assert_eq!(
             tails(&buffer, &slot_of),
             built,
             "an open lost what the build wrote"
         );
-    }
-    let read = read_paths(&buffer, &slot_of).await;
-    if input.edits.is_empty() {
-        assert_eq!(read, given, "a read lost what the build wrote");
+        assert_eq!(read, written, "a read lost what the build wrote");
     }
     let mut entries = Vec::new();
-    let mut wanted = Vec::new();
-    for (index, slot) in slot_of.iter().enumerate() {
+    let mut commits = Vec::new();
+    for (index, slot) in slot_of[..INDEXES].iter().enumerate() {
         for path in PATHS {
             let tail = buffer.tail(*slot, path);
             if tail.seq == u64::MAX {
@@ -421,7 +508,7 @@ async fn check(
             }
             let mut part = pool.alloc(CHECK_PART).expect("the pool has a block");
             part.fill(CHECK_FILL);
-            wanted.push(Given {
+            commits.push(Given {
                 first: tail.seq,
                 len: 1,
                 stored_at: STORED_AT,
@@ -450,19 +537,16 @@ async fn check(
     buffer.committed().await.expect("the entries commit");
     let durable = tails(&buffer, &slot_of);
     let stored = read_paths(&buffer, &slot_of).await;
-    for (path, wanted) in stored.iter().zip(&wanted) {
-        assert_eq!(path.last(), Some(wanted), "a read lost the commit");
+    for (given, commit) in stored.iter().zip(&commits) {
+        assert_eq!(given.last(), Some(commit), "a read lost the commit");
     }
     drop(buffer);
-    let mut slots = Slots::new();
     // An open costs one block for its restart record. No room is full, not lost.
-    let reopened = match open(node, tasks, pool, &mut slots).await {
-        Ok(reopened) => reopened,
+    let (reopened, slot_of) = match open(node, tasks, pool).await {
+        Ok(opened) => opened,
         Err(Error::Full { .. }) => return,
         Err(other) => panic!("a ring with a commit did not reopen: {other}"),
     };
-    let slot_of: Vec<Slot> =
-        (0..INDEXES).map(|index| slots.assign(key(index))).collect();
     let recovered: Vec<Tail> = slot_of
         .iter()
         .flat_map(|slot| PATHS.map(|path| reopened.tail(*slot, path)))
@@ -476,7 +560,14 @@ async fn check(
 }
 
 fuzz_target!(|input: Input| {
-    let mut sim = sim::Sim::new(sim::Config::default());
+    // The random values of the run come from the input. An edit can then not hold the
+    // chain that a later open draws, which no bytes on a disk can.
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    let mut sim = sim::Sim::new(sim::Config {
+        seed: hasher.finish(),
+        ..sim::Config::default()
+    });
     let node = sim.node(sim::node::Config::default());
     let config = env::shards::Config {
         name: DIR.into(),
@@ -488,7 +579,7 @@ fuzz_target!(|input: Input| {
             let config = block::Config { budget: 1 << 21 };
             let pool =
                 Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-            let (built, given) = build(&node, &tasks, &pool, &input).await;
+            let (built, written) = build(&node, &tasks, &pool, &input).await;
             let file = node
                 .files()
                 .open(Path::new(RING), Mode::Write)
@@ -496,7 +587,7 @@ fuzz_target!(|input: Input| {
                 .expect("the ring is there");
             edit(&file, &pool, &input.edits).await;
             drop(file);
-            check(&node, &tasks, &pool, &input, &built, &given).await;
+            check(&node, &tasks, &pool, &input, &built, &written).await;
         })
         .expect("the shard starts");
     sim.run().expect("the run ends");

@@ -303,7 +303,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
-| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; each path reads by the read rules, the same in one read, in steps, and after a reopen |
+| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
