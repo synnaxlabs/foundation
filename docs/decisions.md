@@ -605,9 +605,10 @@ How to read this record:
   entry or group count: an entry or group past the key set is absent. A frame is at
   most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
   their order and padding are part of the disk and wire format version (C9d). A change
-  to either needs a new version. A node writes zeros in the padding, and no reader reads
-  it, so `frame::check` does not check it, and a frame from a peer may hold other bytes
-  there (decided by the architect, #1064:
+  to either needs a new version. A `Draft` writes zeros in the padding, and no reader
+  reads it, so `frame::check` does not check it. A frame from a peer may hold other
+  bytes there, and copy mode stores and sends them as they are (decided by the
+  architect, #1064:
   https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642). The
   padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
   1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
@@ -1004,15 +1005,15 @@ How to read this record:
   below the start of its series is not valid; `types::frame::check` refuses it. The
   padding may hold any bytes (FRAME LAYOUT), and the reader ignores it: the reader
   copies each series into a frame of its own, whose entry order follows its own slots,
-  and its `Draft` zeroes that padding. Each direction has its own messages: the reader
-  sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop codes:
-  16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not the
-  home of the index), and 2 `wire::header::MALFORMED` (a message that does not decode,
-  comes from the wrong side, or breaks a rule above), which every protocol may use.
-  Lost: a `message_bytes_max` of at least the largest pool block (a client or a foreign
-  peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels a
-  session, the most that fit in 1472 bytes; the index in its own field of `Open`,
-  because the home knows its index and a second copy needs a check; the whole
+  and its `Draft` writes zeros in the padding of that frame. Each direction has its own
+  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
+  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
+  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
+  that does not decode, comes from the wrong side, or breaks a rule above), which every
+  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
+  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
+  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
+  `Open`, because the home knows its index and a second copy needs a check; the whole
   `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
   open needs no mesh time (READER RULES), and a later named open can add one; grants for
   many sessions in one message, which wait until a link carries a second session. The
