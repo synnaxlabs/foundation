@@ -290,19 +290,19 @@ struct Open {
 }
 
 /// Shard 0's own steps: it runs the mesh clock, and gives the first interner once it
-/// has claimed the data directory for the node's `cores`.
+/// has claimed the data directory for the node's shards.
 struct First {
     mesh: clock::Clock,
     wall: env::wall::Wall,
     give: Give<Interner>,
-    cores: usize,
     /// One end for each other shard, which ends once that shard has closed its ring.
     closed: Vec<Take<()>>,
 }
 
 /// The part a shard plays in the node's start and stop.
 enum Role {
-    /// Shard 0's.
+    /// Shard 0's: it runs the mesh clock, claims the data directory, and holds the
+    /// lock until each other shard's ring has closed.
     First(Box<First>),
     /// Each other shard's: the end it drops once its ring has closed.
     Next(Give<()>),
@@ -322,7 +322,6 @@ impl Role {
             mesh,
             wall,
             give,
-            cores,
             closed,
         };
         iter::once(Self::First(Box::new(first))).chain(ends.into_iter().map(Self::Next))
@@ -359,10 +358,8 @@ fn part(total: u64, cores: usize, core: usize) -> u64 {
 }
 
 impl Open {
-    /// Runs the shard to its end in its `role`. Shard 0 first runs the mesh clock and
-    /// claims the data directory, and holds the lock until each shard's ring has
-    /// closed, so a node that takes the lock finds no ring open. Each other shard
-    /// drops its end once its ring has closed.
+    /// Runs the shard to its end in its `role`. Shard 0 holds the lock until each
+    /// shard's ring has closed, so a node that takes the lock finds no ring open.
     async fn main(
         self,
         role: Role,
@@ -377,11 +374,10 @@ impl Open {
                     mesh,
                     wall,
                     give,
-                    cores,
                     closed,
                 } = *first;
                 tasks.spawn(async { mesh.run(wall).await });
-                let lock = self.claim(&files, cores, give).await;
+                let lock = self.claim(&files, closed.len() + 1, give).await;
                 self.keep(files, pool, tasks, guard).await;
                 for shard in closed {
                     shard.await;
