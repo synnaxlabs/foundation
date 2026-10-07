@@ -639,7 +639,7 @@ mod tests {
 
     use super::*;
     use crate::bytes::{PRESENT, VOTE};
-    use crate::common::pool;
+    use crate::common::create_pool;
 
     const DIR: &str = "mesh";
 
@@ -660,7 +660,7 @@ mod tests {
     }
 
     async fn open(node: &sim::node::Node) -> Result<(Log, Stored), Error> {
-        Log::open(node.files(), DIR.into(), pool()).await
+        Log::open(node.files(), DIR.into(), create_pool()).await
     }
 
     /// What the log of `node` holds when it opens.
@@ -679,7 +679,7 @@ mod tests {
     async fn put(node: &sim::node::Node, file: &str, offset: u64, bytes: &[u8]) {
         let path = Path::new(DIR).join(file);
         let file = node.files().open(&path, Mode::Write).await.unwrap();
-        let mut block = pool().alloc(bytes.len()).unwrap();
+        let mut block = create_pool().alloc(bytes.len()).unwrap();
         block.copy_from_slice(bytes);
         file.write_at(offset, &[block.freeze()]).await.unwrap();
         file.sync().await.unwrap();

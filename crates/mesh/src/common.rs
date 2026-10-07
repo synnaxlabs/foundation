@@ -39,7 +39,7 @@ pub(crate) fn member(id: u8) -> Member {
         name: format!("plant.node{id}").parse().unwrap(),
         public_key: public(id),
         seal_key: SealKey::new([9; 32]).unwrap(),
-        addresses: Vec::new(),
+        addresses: card::addresses::Addresses::new(Vec::new()).unwrap(),
         version: 1,
     };
     Member {
@@ -55,7 +55,7 @@ pub(crate) fn members(ids: &[u8]) -> Vec<Member> {
 }
 
 /// A pool of 4 MiB.
-pub(crate) fn pool() -> Rc<Pool> {
+pub(crate) fn create_pool() -> Rc<Pool> {
     let config = block::Config { budget: 4 << 20 };
     let memory = block::Heap::new(config.reservation());
     Rc::new(Pool::new(config, memory))

@@ -214,6 +214,11 @@ impl Sender {
         self.key
     }
 
+    /// The peer's largest message.
+    pub(crate) fn bytes_max(&self) -> usize {
+        self.bytes_max
+    }
+
     /// Whether [`Endpoint::finish`](super::Endpoint::finish) took it.
     pub(crate) fn finished(&self) -> bool {
         self.finished
