@@ -67,7 +67,8 @@ returns (`git worktree remove --force <path>`).
    dispute about what a rule in `CLAUDE.md` or `docs/claude/` means goes to
    `laptop.director`. A refusal that names a trigger for later work is a deferral: file
    its issue with the trigger, or write the trigger in the decisions entry that the
-   ruling cites.
+   ruling cites. So is an answer that a later PR does the work, also a later PR of the
+   same issue.
 
 ## Rating
 
