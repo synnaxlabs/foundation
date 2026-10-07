@@ -254,7 +254,9 @@ impl std::error::Error for Error {}
 
 /// Resolves when every group applied and every handoff appended before
 /// [`Shard::committed`] is on disk, or with the error that ended the buffer first. It
-/// does not borrow the shard, and it holds the shard's ring open until it drops.
+/// does not borrow the shard, and it holds the shard's ring open until it drops. Held
+/// past the drop of the shard, it resolves only once the buffer ended, after the
+/// buffer wrote what was queued at the drop.
 #[derive(Debug)]
 pub struct Commit(buffer::Commit);
 
@@ -481,6 +483,7 @@ impl Shard {
     /// that holds the last of them. A lost group and a handoff that found no room are
     /// not appended, so it does not wait for them. Commits run without this future,
     /// so a caller may drop it. Call [`woken`](Self::woken) after it resolves.
+    /// [`Commit`] says when one held past the drop of the shard resolves.
     ///
     /// # Errors
     ///
@@ -3177,6 +3180,26 @@ mod tests {
             test.clock.sleep(SYNC).await;
             let handoff = handoff_to("subject-a");
             assert_eq!(find(&test.ring().await, &handoff).len(), 0);
+        });
+    }
+
+    #[test]
+    fn resolves_a_commit_future_held_past_the_drop_once_the_buffer_ended() {
+        run(108, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let mut none = shard.committed();
+            shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            let mut commit = shard.committed();
+            drop(shard);
+            assert_eq!(polled(&mut none), Poll::Pending);
+            assert_eq!(polled(&mut commit), Poll::Pending);
+            commit.await.expect("the buffer ends");
+            assert_eq!(polled(&mut none), Poll::Ready(Ok(())));
+            let handoff = handoff_to("subject-a");
+            assert_eq!(find(&test.ring().await, &handoff).len(), 2);
         });
     }
 
