@@ -1509,8 +1509,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035156093): reset
   only when bytes of the message may have gone. Amended again
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035820204): the
-  rule names the fact, a byte went, and not the proxy, the stream took it. `send`, `try_send`, `send_parts`, and
-  `try_send_parts` check in this order: the range panic (`*_parts`), the panic after
+  rule names the fact, a byte went, and not the proxy, the stream took it. `send`,
+  `try_send`, `send_parts`, and `try_send_parts` check in this order: the range panic (`*_parts`), the panic after
   `finish`, `Error::TooLarge`, then the state errors (`Reset` after a dropped send
   future, `Stopped`, or the error that ended the session). The limit is fixed for the
   session, so a size defect shows in every state of the stream

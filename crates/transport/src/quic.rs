@@ -341,7 +341,7 @@ impl Endpoint {
         sender: &Sender,
         message: &mut Option<Block>,
     ) -> Result<Poll<()>, Error> {
-        sender.check_unfinished();
+        sender.check_open();
         if let Some(message) = message {
             stream::check_size(message.len(), sender.bytes_max())?;
         }
@@ -374,7 +374,7 @@ impl Endpoint {
         sender: &Sender,
         message: Block,
     ) -> Result<Option<Block>, Error> {
-        sender.check_unfinished();
+        sender.check_open();
         stream::check_size(message.len(), sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
@@ -405,7 +405,7 @@ impl Endpoint {
         now: Monotonic,
         sender: &mut Sender,
     ) -> Result<(), Error> {
-        sender.check_unfinished();
+        sender.check_open();
         let stream = sender.key();
         self.streams(now, stream.connection, (), |streams, inner, _, _| {
             streams.finish(inner, stream.id)?;
@@ -448,7 +448,8 @@ impl Endpoint {
     /// the stream's blocks go back to the pool at the latest when the peer
     /// acknowledges the reset. A stream this side opened that resets before its first
     /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
-    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
+    /// [`Error::Reset`] with code 0. Does nothing when the connection ended. Each
+    /// later call with `sender` panics.
     pub(crate) fn reset(&mut self, now: Monotonic, sender: &mut Sender, code: Code) {
         sender.end();
         let key = sender.key().connection;

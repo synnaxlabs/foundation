@@ -415,7 +415,7 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`.
+    /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
     pub(crate) fn poll_write(
         &self,
         cx: &mut Context<'_>,
@@ -445,10 +445,10 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`.
+    /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
         self.with(|endpoint, clock, slot, _| {
-            sender.check_unfinished();
+            sender.check_open();
             if let Some(error) = &slot.end {
                 return Err(error.clone());
             }
@@ -465,7 +465,7 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`.
+    /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
     pub(crate) fn try_write(
         &self,
         sender: &Sender,

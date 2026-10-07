@@ -37,7 +37,7 @@ pub(crate) struct Key {
 #[derive(Debug)]
 pub(crate) struct Sender {
     key: Key,
-    finished: bool,
+    ended: bool,
     /// The peer's largest message.
     bytes_max: usize,
 }
@@ -224,7 +224,7 @@ impl Sender {
     fn new(key: Key, bytes_max: usize) -> Self {
         Self {
             key,
-            finished: false,
+            ended: false,
             bytes_max,
         }
     }
@@ -241,20 +241,20 @@ impl Sender {
 
     /// Whether [`Endpoint::finish`](super::Endpoint::finish) or
     /// [`Endpoint::reset`](super::Endpoint::reset) took it.
-    pub(crate) fn finished(&self) -> bool {
-        self.finished
+    pub(crate) fn ended(&self) -> bool {
+        self.ended
     }
 
     /// Marks the stream finished or reset.
     pub(super) fn end(&mut self) {
-        self.finished = true;
+        self.ended = true;
     }
 
     /// # Panics
     ///
     /// After `end`.
-    pub(super) fn check_unfinished(&self) {
-        assert!(!self.finished, "a sender is used after finish");
+    pub(super) fn check_open(&self) {
+        assert!(!self.ended, "a sender is used after finish or reset");
     }
 }
 
@@ -304,17 +304,10 @@ impl Half {
         self.left() > 0
     }
 
-    /// Whether no byte of the message in hand went, its header included. Then the
-    /// next message starts the stream as this one would have.
-    fn unload(&mut self) -> bool {
+    /// Whether a byte of the message in hand went, its header included.
+    fn sent(&self) -> bool {
         // Index 0 of `header` is the class byte, which belongs to no message.
-        if self.unsent.start > 1 {
-            return false;
-        }
-        if self.unsent.start == 0 && self.holds() {
-            self.started = false;
-        }
-        true
+        self.unsent.start > 1
     }
 
     /// # Errors
@@ -919,6 +912,10 @@ impl Streams {
                 let Some(half) = self.halves.get_mut(&id) else {
                     return Ok(None);
                 };
+                // A cancel that reset the stream first keeps its error.
+                if half.ended.is_some() {
+                    return Ok(None);
+                }
                 half.ended = Some(Error::Stopped { code });
                 self.sending.end(half);
                 if half.rest == Rest::Finish {
@@ -1127,9 +1124,12 @@ impl Streams {
         sender: &Sender,
     ) {
         let half = self.halves.get_mut(&sender.key.id).expect(HALF);
-        if !half.unload() {
+        if half.sent() {
             reset(inner, half.key.id, Code(0));
             half.ended = Some(Error::Reset { code: Code(0) });
+        } else if half.unsent.start == 0 {
+            // Not even the class byte went, so the next message opens the stream.
+            half.started = false;
         }
         self.sending.end(half);
     }
@@ -2404,6 +2404,31 @@ mod tests {
             let now = pair.now();
             let read = next(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, Err(reset));
+        });
+    }
+
+    #[test]
+    fn a_peer_stop_after_a_cancel_reset_keeps_the_reset() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let message = shard.block(&[0xc; 100]);
+            spend(&mut pair, shard, &mut sender, message::prefix(100).len());
+            let now = pair.now();
+            let written = pair.client.endpoint.write(now, &sender, &mut Some(message));
+            assert_eq!(written, Ok(Poll::Pending));
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let now = pair.now();
+            pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+            pair.client.endpoint.cancel(now, &sender);
+            pair.run(RUN);
+            let now = pair.now();
+            let message = shard.block(b"d");
+            let written = pair.client.endpoint.write(now, &sender, &mut Some(message));
+            assert_eq!(written, Err(Error::Reset { code: Code(0) }));
+            let finished = pair.client.endpoint.finish(now, &mut sender);
+            assert_eq!(finished, Err(Error::Reset { code: Code(0) }));
         });
     }
 
@@ -3709,7 +3734,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a sender is used after finish")]
+    #[should_panic(expected = "a sender is used after finish or reset")]
     fn a_write_after_finish_panics_before_it_checks_the_size() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
@@ -3723,7 +3748,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a sender is used after finish")]
+    #[should_panic(expected = "a sender is used after finish or reset")]
     fn a_second_finish_panics() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
@@ -3929,7 +3954,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a sender is used after finish")]
+    #[should_panic(expected = "a sender is used after finish or reset")]
     fn a_write_that_does_not_wait_after_finish_panics() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);

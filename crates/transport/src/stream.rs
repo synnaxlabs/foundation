@@ -272,7 +272,7 @@ impl Sender {
 
 impl Drop for Sender {
     fn drop(&mut self) {
-        if !self.stream.finished() {
+        if !self.stream.ended() {
             self.session.reset(&mut self.stream, Code(0));
         }
     }
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn a_try_send_taken_in_part_goes_whole_before_a_later_send_a_finish_or_a_drop() {
+    fn a_try_send_taken_in_part_goes_whole_unless_the_sender_drops() {
         for then in [Then::Send, Then::Finish, Then::DropSend, Then::Drop] {
             let counted = Arc::new(AtomicUsize::new(0));
             let read = Arc::clone(&counted);
@@ -1183,7 +1183,7 @@ mod tests {
         );
         let panicked = sim::Error::Panicked {
             thread: "transport".into(),
-            message: "a sender is used after finish".into(),
+            message: "a sender is used after finish or reset".into(),
             seed: 0,
         };
         assert_eq!(sim.run(), Err(panicked));
