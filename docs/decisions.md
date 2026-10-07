@@ -242,8 +242,8 @@ How to read this record:
   takes over. Out connectors carry reader settings in their config. Current readers and
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
-- **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps the holds
-  on the indexes it selects by store time (READER RULES), so `buffer` may trim a sample
+- **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps by store
+  time the holds on the indexes it selects (READER RULES), so `buffer` may trim a sample
   past the cap (STORE TRIM). Retention deletes nothing: a ring frees only at its tail,
   so a time on one index cannot free its samples. It keeps no history window. An index
   that no policy selects has no time cap. `keep` is zero or more. At `0s` a reader that
@@ -285,12 +285,13 @@ How to read this record:
   named reader holds from its position until `hold` after the close, in mesh time; an
   unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
   a negative hold (#94). The floor per path is the lowest held position, or none.
-  Retention caps the holds: the floor of a path is at least its first sample stored at
-  or after the cutoff, the mesh time of `home` minus `keep`, or past its last sample
-  when none is (RETENTION). After a failover the store times of a path need not rise
-  with its seq, so a sample stored before the cutoff can stay held a little longer, and
-  no sample stored at or after the cutoff loses its hold (decided by `laptop.architect`,
-  2026-10-07T13:39:39Z:
+  Retention caps the holds: the floor of a path is at least the lowest seq whose store
+  time is at or after the cutoff (the mesh time of `home` minus `keep`), or past its
+  last sample when no seq is (RETENTION). The cutoff moves with time, so `home` gives it
+  on its interval, not only when a position moves. After a failover the store times of a
+  path need not rise with its seq, so a sample stored before the cutoff can stay held a
+  little longer, and no sample stored at or after the cutoff loses its hold (decided by
+  `laptop.architect`, 2026-10-07T13:39:39Z:
   https://github.com/synnaxlabs/foundation/issues/1080#issuecomment-6039184732). A trim
   follows STORE TRIM: under disk pressure, at the tail of the ring, whatever the floors
   (decided by `laptop.architect`, 2026-10-07T12:59:37Z:
@@ -3382,7 +3383,7 @@ How to read this record:
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
 | r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
-| Retention trims a held sample: RETENTION (#895), READER RULES (2026-10-04), HANDOFF RECORD (#191) | RETENTION, STORE TRIM |
+| Retention trims a held sample: RETENTION (#895), READER RULES (2026-10-04), HANDOFF RECORD (#191) | RETENTION, READER RULES, STORE TRIM |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
