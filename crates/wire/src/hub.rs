@@ -267,8 +267,7 @@ pub mod keys {
 
     use types::channel;
 
-    use super::{Error, run};
-    use crate::common::slots;
+    use super::{Error, run, slots};
 
     /// The bytes of one key.
     pub const LEN: usize = 16;
@@ -279,7 +278,14 @@ pub mod keys {
     ///
     /// When `keys` is empty, or `out` is not 16 bytes for each key.
     pub fn encode(keys: &[channel::Key], out: &mut [u8]) {
-        for (out, key) in slots::<LEN>(out, keys.len()).iter_mut().zip(keys) {
+        let slots = slots::<LEN>(out);
+        assert!(
+            slots.len() == keys.len(),
+            "out holds {} keys, and the message has {}",
+            slots.len(),
+            keys.len()
+        );
+        for (out, key) in slots.iter_mut().zip(keys) {
             *out = key.as_u128().to_le_bytes();
         }
     }
@@ -324,7 +330,7 @@ pub mod keys {
 pub mod ends {
     use std::slice;
 
-    use super::{Error, run};
+    use super::{Error, run, slots};
 
     /// The bytes of one end.
     pub const LEN: usize = 8;
@@ -338,16 +344,7 @@ pub mod ends {
     /// When `out` is empty or not a whole count of ends, or when `ends` gives fewer ends
     /// than `out` holds.
     pub fn encode(ends: impl IntoIterator<Item = (u32, u32)>, out: &mut [u8]) {
-        let len = out.len();
-        let (slots, rest) = out.as_chunks_mut::<LEN>();
-        assert!(
-            rest.is_empty(),
-            "out has {len} bytes, not a whole count of ends"
-        );
-        assert!(
-            !slots.is_empty(),
-            "a message of a run holds at least one item"
-        );
+        let slots = slots::<LEN>(out);
         let count = slots.len();
         let written = slots
             .iter_mut()
@@ -517,6 +514,25 @@ fn rest_of_run(remain: u32, items: usize) -> Result<u32, Error> {
         .ok()
         .and_then(|count| remain.checked_sub(count))
         .ok_or(Error::Run { items, remain })
+}
+
+/// The slots of one message of a run: `out` as items of `N` bytes, to fill.
+///
+/// # Panics
+///
+/// When `out` is empty or not a whole count of items.
+fn slots<const N: usize>(out: &mut [u8]) -> &mut [[u8; N]] {
+    let len = out.len();
+    let (slots, rest) = out.as_chunks_mut::<N>();
+    assert!(
+        rest.is_empty(),
+        "out has {len} bytes, not a whole count of {N}-byte items"
+    );
+    assert!(
+        !slots.is_empty(),
+        "a message of a run holds at least one item"
+    );
+    slots
 }
 
 /// The items of `N` bytes in `message`, one message of a run.
@@ -882,9 +898,17 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 15 bytes, and the message has 16")]
-        fn panics_when_out_has_the_wrong_length() {
+        #[should_panic(
+            expected = "out has 15 bytes, not a whole count of 16-byte items"
+        )]
+        fn panics_on_a_partial_key_in_out() {
             super::super::keys::encode(&[key(1)], &mut [0; 15]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out holds 2 keys, and the message has 1")]
+        fn panics_when_out_holds_another_count_of_keys() {
+            super::super::keys::encode(&[key(1)], &mut [0; 32]);
         }
     }
 
@@ -956,13 +980,13 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 9 bytes, not a whole count of ends")]
+        #[should_panic(expected = "out has 9 bytes, not a whole count of 8-byte items")]
         fn panics_on_a_partial_end_in_out() {
             super::super::ends::encode([(0, 1)], &mut [0; 9]);
         }
 
         #[test]
-        #[should_panic(expected = "out has 7 bytes, not a whole count of ends")]
+        #[should_panic(expected = "out has 7 bytes, not a whole count of 8-byte items")]
         fn panics_on_an_out_shorter_than_an_end() {
             super::super::ends::encode([(0, 1)], &mut [0; 7]);
         }
@@ -1002,7 +1026,9 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 17 bytes, not a whole count of ends")]
+        #[should_panic(
+            expected = "out has 17 bytes, not a whole count of 8-byte items"
+        )]
         fn panics_on_a_partial_end_after_two_ends() {
             super::super::ends::encode([(0, 1), (1, 2)], &mut [0; 17]);
         }

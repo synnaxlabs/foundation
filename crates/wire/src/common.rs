@@ -29,17 +29,6 @@ impl<'o> Writer<'o> {
     }
 }
 
-/// The slots of one message of a run, `items` of `N` bytes each, to fill.
-///
-/// # Panics
-///
-/// When `items` is 0, or `out` is not `items * N` bytes.
-pub(crate) fn slots<const N: usize>(out: &mut [u8], items: usize) -> &mut [[u8; N]] {
-    assert!(items > 0, "a message of a run holds at least one item");
-    Writer::new(out, items.saturating_mul(N));
-    out.as_chunks_mut::<N>().0
-}
-
 /// Reads the fields of one message from the front. A message that ends inside a
 /// field, or that has bytes after its last field, gives `length`: the error of the
 /// caller that names the message's length.
