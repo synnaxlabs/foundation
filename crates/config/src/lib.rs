@@ -1381,5 +1381,42 @@ mod tests {
                 )])
             );
         }
+
+        #[test]
+        fn refuses_only_the_unknown_attribute_of_a_retention_with_a_negative_keep() {
+            let documents = retention(&[
+                ("select", string("edge.**")),
+                ("keep", string("-1s")),
+                ("hold", string("1d")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 14),
+                    "`hold` is not an attribute of the `retention` block",
+                    "Use `select` or `keep`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_retention() {
+            let [mut documents] =
+                retention(&[("select", string("edge.**")), ("keep", string("3d"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![refused(
+                    "config.unknown-block",
+                    at(0, 50),
+                    "the `retention` block cannot hold the `inner` block",
+                    "Remove it",
+                )])
+            );
+        }
     }
 }
