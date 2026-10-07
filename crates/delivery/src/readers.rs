@@ -300,7 +300,8 @@ impl Readers {
     /// on disk, to each complete session, in seq order. A session gets each frame that
     /// ends past its position while it has credit for it, and no frame after the first
     /// it has no credit for. Returns the complete sessions that had no waiting frame and
-    /// now have one, each once: wake them.
+    /// now have one, or that missed a frame now and have none waiting, each once: wake
+    /// them.
     #[must_use]
     pub fn release(&mut self, durable: u64) -> &[complete::Key] {
         self.woken_complete.clear();
@@ -315,6 +316,10 @@ impl Readers {
                 }
                 if !flow.credit.spend(charge) {
                     flow.behind = true;
+                    // A session with frames waiting sees the miss after it takes them.
+                    if flow.waiting.is_empty() {
+                        self.woken_complete.push(session.key);
+                    }
                     continue;
                 }
                 if flow.waiting.is_empty() {
@@ -330,6 +335,17 @@ impl Readers {
             self.released = seq.end;
         }
         &self.woken_complete
+    }
+
+    /// Whether the complete session missed a live frame, so it gets no later live
+    /// frame. `false` for a closed session.
+    ///
+    /// # Panics
+    ///
+    /// If this `Readers` never gave `key`.
+    #[must_use]
+    pub fn behind(&self, key: complete::Key) -> bool {
+        self.find(key).is_some_and(|i| self.flows[i].behind)
     }
 
     /// Whether a queued live frame waits to be on disk. While one does, call
@@ -1512,6 +1528,8 @@ pub(super) mod tests {
             assert_eq!(released(&mut readers, 6), [current]);
             assert_eq!(taken(&mut readers, behind), []);
             assert_eq!(taken(&mut readers, current), [2]);
+            assert!(readers.behind(behind));
+            assert!(!readers.behind(current));
         }
 
         #[test]
@@ -1641,7 +1659,8 @@ pub(super) mod tests {
             readers.open(named("a", 10), Start::At(live(0)), 10 * CHARGE);
             let new = readers.open(named("a", 10), resume(live(0)), 0).key;
             readers.queue(&frames.frame(1), 0..1);
-            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(released(&mut readers, 1), [new]);
+            assert!(readers.behind(new));
             assert_eq!(taken(&mut readers, new), []);
         }
 
@@ -1685,7 +1704,8 @@ pub(super) mod tests {
             let new = readers.open(named("a", 10), resume(live(0)), 0).key;
             readers.grant(old, 10 * CHARGE);
             readers.queue(&frames.frame(1), 0..1);
-            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(released(&mut readers, 1), [new]);
+            assert!(readers.behind(new));
             assert_eq!(taken(&mut readers, new), []);
         }
 
@@ -1716,6 +1736,60 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn wakes_a_session_once_when_it_misses_a_frame_with_none_waiting() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), [key]);
+            assert_eq!(taken(&mut readers, key), [1]);
+            assert!(!readers.behind(key));
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [key]);
+            assert!(readers.behind(key));
+            readers.queue(&frames.frame(3), 2..3);
+            assert_eq!(released(&mut readers, 3), []);
+            assert_eq!(taken(&mut readers, key), []);
+        }
+
+        #[test]
+        fn wakes_a_session_once_for_a_frame_and_a_miss_in_one_release() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), 0..1);
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [key]);
+            assert!(readers.behind(key));
+            assert_eq!(taken(&mut readers, key), [1]);
+        }
+
+        #[test]
+        fn wakes_no_session_with_frames_waiting_when_it_misses_one() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), [key]);
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), []);
+            assert!(readers.behind(key));
+            assert_eq!(taken(&mut readers, key), [1]);
+        }
+
+        #[test]
+        fn gives_no_closed_session_as_behind() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 0);
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), [key]);
+            assert!(readers.behind(key));
+            readers.close(key.into());
+            assert!(!readers.behind(key));
+        }
+
+        #[test]
         fn wakes_nothing_without_a_frame_on_disk() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
@@ -1742,10 +1816,10 @@ pub(super) mod tests {
         fn drops_a_frame_no_session_got() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
-            opened(&mut readers, 0, 0);
+            let key = opened(&mut readers, 0, 0);
             readers.queue(&frames.frame(1), 0..1);
             assert!(!frames.spare());
-            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(released(&mut readers, 1), [key]);
             assert!(frames.spare());
         }
 
@@ -2243,6 +2317,8 @@ pub(super) mod tests {
         struct Got {
             position: u64,
             behind: bool,
+            /// The session missed a frame in the last release.
+            missed: bool,
             limit: u64,
             spent: u64,
             frames: Vec<u64>,
@@ -2322,6 +2398,9 @@ pub(super) mod tests {
                     .filter(|(_, got)| got.taken == got.frames.len())
                     .map(|(&key, _)| key)
                     .collect();
+                for got in self.open.values_mut() {
+                    got.missed = false;
+                }
                 let held = self.queued.iter_mut().filter(|queued| queued.held);
                 for queued in held.filter(|queued| queued.seq.end <= durable) {
                     queued.held = false;
@@ -2331,6 +2410,7 @@ pub(super) mod tests {
                         }
                         if got.spent >= got.limit {
                             got.behind = true;
+                            got.missed = true;
                             continue;
                         }
                         got.spent += CHARGE;
@@ -2340,7 +2420,8 @@ pub(super) mod tests {
                 self.open
                     .iter()
                     .filter(|(key, got)| {
-                        idle.contains(key) && got.taken < got.frames.len()
+                        idle.contains(key)
+                            && (got.taken < got.frames.len() || got.missed)
                     })
                     .map(|(&key, _)| key)
                     .collect()
@@ -2370,8 +2451,8 @@ pub(super) mod tests {
         /// released frame with a sample at or past its position, in seq order, while it
         /// has credit, and none after the first it has no credit for. A session that
         /// starts at or below a sample no longer in memory gets none, and nothing is
-        /// kept with no session open. A release wakes each session that had no frame waiting and now
-        /// has one.
+        /// kept with no session open. A release wakes each session that had no frame
+        /// waiting and now has one or missed one.
         ///
         /// The `n`th open takes `limits[n]`, or 0 past the end of `limits`.
         fn check_live(steps: Vec<Live>, limits: &[u64]) {
@@ -2437,6 +2518,9 @@ pub(super) mod tests {
                     }
                 }
                 assert_eq!(readers.pending(), model.pending());
+                for (&key, got) in &model.open {
+                    assert_eq!(readers.behind(key), got.behind, "session {key:?}");
+                }
                 dropped_closed(&mut readers, |key| model.open.contains_key(key));
             }
         }
