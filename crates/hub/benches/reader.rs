@@ -19,9 +19,12 @@
 //!
 //! A `next` that gives `Pending` while a frame waits is the yield after a run of
 //! frames: it is polled again, and only the poll that gives the frame is timed. Any
-//! other result panics, so no figure holds a wait on the sim. To compare two builds,
-//! run each several times in turn on one pinned core and compare p10 and p50 with the
-//! control.
+//! other result panics, so no figure holds a wait on the sim.
+//!
+//! The write reads the sim clock once, which costs less than an `os` read, so compare a
+//! figure only with the control or with another build. The `timer` floor is more than
+//! half of a poll's figure, so judge a change in a poll by `net`, its p50 less the
+//! floor's. To compare two builds, run each several times in turn on one pinned core.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -79,6 +82,13 @@ impl Line {
     fn add(&mut self, (nanos, allocations): (u64, u64)) {
         self.round.0 += nanos;
         self.round.1 += allocations;
+    }
+
+    /// The ns per call of the round at `percent`.
+    fn at(&self, percent: usize) -> u64 {
+        let mut nanos = self.nanos.clone();
+        nanos.sort_unstable();
+        nanos[ROUNDS * percent / 100]
     }
 
     /// Ends a round, and keeps its figures when it is `timed`.
@@ -202,20 +212,19 @@ fn print(lines: &[Line]) {
     println!("ns per call over {ROUNDS} rounds of {FRAMES} frames");
     println!("pN: the round at percentile N");
     println!(
-        "{:<14} {:>9} {:>9} {:>9} {:>13}",
-        "line", "p10", "p50", "p90", "allocs/call"
+        "{:<14} {:>9} {:>9} {:>9} {:>9} {:>13}",
+        "line", "p10", "p50", "p90", "net", "allocs/call"
     );
+    let floor = lines[0].at(50);
     for line in lines {
-        let mut nanos = line.nanos.clone();
-        nanos.sort_unstable();
-        let at = |percent: usize| nanos[ROUNDS * percent / 100];
         let allocations = per(line.allocations) / per(ROUNDS) / per(line.calls);
         println!(
-            "{:<14} {:>9} {:>9} {:>9} {allocations:>13.2}",
+            "{:<14} {:>9} {:>9} {:>9} {:>9} {allocations:>13.2}",
             line.name,
-            at(10),
-            at(50),
-            at(90)
+            line.at(10),
+            line.at(50),
+            line.at(90),
+            line.at(50).saturating_sub(floor)
         );
     }
 }
