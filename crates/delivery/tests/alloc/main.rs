@@ -1,8 +1,8 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
-//! make none once each session got a frame, nor a release that wakes sessions that
-//! missed a frame. An ack makes none, and no call on a closed key of either mode makes
-//! one. This binary has no test harness: the count covers each
+//! make none once each session got a frame, nor a release in which sessions miss a
+//! frame, with frames waiting or not. An ack makes none, and no call on a closed key of
+//! either mode makes one. This binary has no test harness: the count covers each
 //! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -157,7 +157,10 @@ fn missed(frame: &impl Fn() -> Frame) {
     for _ in 0..2 {
         flow(&mut readers, &warm, frame, &mut seq);
     }
-    let keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers, seq, 0)).collect();
+    // A session of credit 1 takes the first frame and misses with one frame waiting.
+    let keys: Vec<_> = (0..SESSIONS)
+        .map(|i| open(&mut readers, seq, u64::from(i % 2 == 1)))
+        .collect();
     let (woken, allocations) =
         ALLOCATOR.count(|| flow(&mut readers, &warm, frame, &mut seq));
     assert_eq!(
