@@ -213,7 +213,7 @@ impl State {
                 // Only an accept has no slot: a dial's drop ends its connection.
                 if let Some(slot) = self.sessions.get_mut(&key) {
                     slot.peer = Some(peer);
-                    slot.wake();
+                    slot.wake_status();
                     return;
                 }
                 let Some(accepted) = &mut self.accepted else {
@@ -231,12 +231,12 @@ impl State {
             Event::Closed { key, error } => self.end(key, error),
             Event::Incoming { key } => {
                 if let Some(slot) = self.sessions.get_mut(&key) {
-                    slot.accepting.drain(..).for_each(Waker::wake);
+                    slot.incoming.drain(..).for_each(Waker::wake);
                 }
             }
             Event::Available { key } => {
                 if let Some(slot) = self.sessions.get_mut(&key) {
-                    slot.opening.drain(..).for_each(Waker::wake);
+                    slot.available.drain(..).for_each(Waker::wake);
                 }
             }
             Event::Readable { stream } => {
@@ -260,7 +260,7 @@ impl State {
     fn end(&mut self, key: connection::Key, error: Error) {
         if let Some(slot) = self.sessions.get_mut(&key) {
             slot.end = Some(error);
-            slot.wake_all();
+            slot.wake();
         }
     }
 
@@ -271,7 +271,7 @@ impl State {
             slot.end.get_or_insert_with(|| Error::Network {
                 error: error.clone(),
             });
-            slot.wake_all();
+            slot.wake();
         }
         self.accepting.drain(..).for_each(Waker::wake);
         self.failed = Some(error);
@@ -286,11 +286,11 @@ struct Slot {
     /// Why the connection ended.
     end: Option<Error>,
     /// The wakers of the calls that wait for the handshake or the end.
-    wakers: Vec<Waker>,
+    status: Vec<Waker>,
     /// The wakers of the opens that wait for the peer to allow a stream.
-    opening: Vec<Waker>,
+    available: Vec<Waker>,
     /// The wakers of the accepts that wait for a stream.
-    accepting: Vec<Waker>,
+    incoming: Vec<Waker>,
     /// The waker of the read that waits on each stream.
     reading: Map<StreamId, Waker>,
     /// The waker of the write that waits on each stream.
@@ -298,15 +298,15 @@ struct Slot {
 }
 
 impl Slot {
-    fn wake(&mut self) {
-        self.wakers.drain(..).for_each(Waker::wake);
+    fn wake_status(&mut self) {
+        self.status.drain(..).for_each(Waker::wake);
     }
 
     /// Wakes each call that waits on the session, for its end.
-    fn wake_all(&mut self) {
-        self.wake();
-        self.opening.drain(..).for_each(Waker::wake);
-        self.accepting.drain(..).for_each(Waker::wake);
+    fn wake(&mut self) {
+        self.wake_status();
+        self.available.drain(..).for_each(Waker::wake);
+        self.incoming.drain(..).for_each(Waker::wake);
         self.reading.drain().for_each(|(_, waker)| waker.wake());
         self.writing.drain().for_each(|(_, waker)| waker.wake());
     }
@@ -343,7 +343,7 @@ impl Session {
             if let Some(error) = &slot.end {
                 return Poll::Ready(error.clone());
             }
-            register(&mut slot.wakers, cx.waker());
+            register(&mut slot.status, cx.waker());
             Poll::Pending
         })
         .await
@@ -358,7 +358,7 @@ impl Session {
     ) -> Poll<Result<(Sender, Receiver), Error>> {
         self.poll_queue(
             cx,
-            |slot| &mut slot.opening,
+            |slot| &mut slot.available,
             |endpoint, now, key| endpoint.open(now, key, class),
         )
     }
@@ -371,7 +371,7 @@ impl Session {
     ) -> Poll<Result<Sender, Error>> {
         self.poll_queue(
             cx,
-            |slot| &mut slot.opening,
+            |slot| &mut slot.available,
             |endpoint, now, key| endpoint.open_sender(now, key, class),
         )
     }
@@ -384,7 +384,7 @@ impl Session {
     ) -> Poll<Result<Incoming, Error>> {
         self.poll_queue(
             cx,
-            |slot| &mut slot.accepting,
+            |slot| &mut slot.incoming,
             |endpoint, _, key| endpoint.accept(key),
         )
     }
@@ -398,8 +398,8 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After [`Session::finish`], or when `message` is `Some` and `sender` holds part
-    /// of a message.
+    /// After [`Session::finish`], or as [`Endpoint::write`] does while the session is
+    /// live.
     pub(crate) fn poll_write(
         &self,
         cx: &mut Context<'_>,
@@ -407,9 +407,7 @@ impl Session {
         message: &mut Option<Block>,
     ) -> Poll<Result<(), Error>> {
         self.with(|endpoint, now, slot| {
-            if message.is_some() {
-                sender.check();
-            }
+            sender.check_unfinished();
             if let Some(error) = &slot.end {
                 return Poll::Ready(Err(error.clone()));
             }
@@ -459,10 +457,11 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// As [`Endpoint::finish`].
+    /// After [`Session::finish`], or as [`Endpoint::finish`] does while the session is
+    /// live.
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
         self.with(|endpoint, now, slot| {
-            sender.check();
+            sender.check_unfinished();
             if let Some(error) = &slot.end {
                 return Err(error.clone());
             }
@@ -587,7 +586,7 @@ impl Session {
         if let Some(error) = &slot.end {
             return Poll::Ready(Err(error.clone()));
         }
-        register(&mut slot.wakers, cx.waker());
+        register(&mut slot.status, cx.waker());
         Poll::Pending
     }
 }

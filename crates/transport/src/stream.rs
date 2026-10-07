@@ -802,4 +802,33 @@ mod tests {
         );
         assert_eq!(sim.run(), Ok(()));
     }
+
+    #[test]
+    fn a_close_that_cuts_a_message_ends_each_later_send_and_finish() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let body = vec![7; 60_000];
+                let closed = Error::PeerClosed { code: Code(5) };
+                let ended = loop {
+                    if let Err(error) = sender.send(side.block(&body)).await {
+                        break error;
+                    }
+                };
+                assert_eq!(ended, closed);
+                let sent = sender.send(side.block(b"a")).await;
+                assert_eq!(sent, Err(closed.clone()));
+                assert_eq!(sender.finish(), Err(closed));
+            },
+            |side| async move {
+                let _incoming = side.session.accept().await.expect("a stream");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                side.session.close(Code(5));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
 }
