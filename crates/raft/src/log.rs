@@ -601,6 +601,22 @@ mod tests {
     }
 
     #[test]
+    fn a_link_claims_what_the_entry_of_its_change_claims() {
+        let mut entry = config(3, 2, 7);
+        entry.sign(&mut |_| Signature([9; 64]));
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
+        };
+        let link = crate::Link {
+            at: entry.at,
+            change: change.clone(),
+        };
+        let claims: Vec<_> = link.claims().collect();
+        assert_eq!(claims, entry.claims().collect::<Vec<_>>());
+        assert_eq!(claims.len(), 2);
+    }
+
+    #[test]
     fn holds_the_last_configuration_it_wrote() {
         let mut log = log(&[1]);
         assert_eq!(log.voters(), (Position::default(), &Voters::default()));

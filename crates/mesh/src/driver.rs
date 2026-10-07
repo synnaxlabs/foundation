@@ -2292,7 +2292,7 @@ mod tests {
         use super::*;
         use crate::common::{TERM, proven_at};
 
-        fn later() -> Term {
+        pub(super) fn later() -> Term {
             Term(common::TERM.0 + 1)
         }
 
@@ -2317,7 +2317,7 @@ mod tests {
             }
         }
 
-        fn changes(changes: &[Change]) -> Vec<Data> {
+        pub(super) fn changes(changes: &[Change]) -> Vec<Data> {
             let bytes = changes.iter().map(|change| Data::Bytes(encoded(change)));
             bytes.collect()
         }
@@ -2340,12 +2340,16 @@ mod tests {
 
         /// A heartbeat from `leader` to node 1 in `term`, with the votes of each
         /// `(voter, signer)`.
-        fn heartbeat(leader: u8, term: Term, votes: &[(u8, u8)]) -> raft::Message {
+        pub(super) fn heartbeat(
+            leader: u8,
+            term: Term,
+            votes: &[(u8, u8)],
+        ) -> raft::Message {
             proven_at(leader, 1, term, votes, Body::Heartbeat { commit: 0 })
         }
 
         /// Gives node 1 the append of `data` from leader 2, and waits for its write.
-        async fn write(mesh: &Mesh, data: Vec<Data>) {
+        pub(super) async fn write(mesh: &Mesh, data: Vec<Data>) {
             let append = proven(2, 1, append(common::TERM, data));
             assert_eq!(mesh.receive(public(2), append), Ok(()));
             mesh.outgoing(key(2)).await.unwrap();
@@ -2575,30 +2579,36 @@ mod tests {
             });
         }
 
+        /// The append of leader 3 that replaces a written join of 4 with the real
+        /// one, and makes 4 a voter.
+        pub(super) fn replacing_forged() -> raft::Message {
+            let mut data = changes(&[join(4)]);
+            data.extend([
+                voters(later(), &[2, 3, 4], &[2, 3]),
+                voters(later(), &[2, 3, 4], &[]),
+            ]);
+            let replace = append(later(), data);
+            proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace)
+        }
+
+        /// The refusal of a heartbeat of 3 in the term after [`later`] with a vote
+        /// of 4 under the key of 5.
+        pub(super) fn forged_unproven() -> Error {
+            Error::Raft(raft::Error::Unproven {
+                term: Term(common::TERM.0 + 2),
+                from: key(3),
+            })
+        }
+
         #[test]
         fn a_step_that_replaces_a_forged_join_removes_its_key_before_the_write() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
-                let Change::Join(mut forged) = join(4) else {
-                    unreachable!()
-                };
-                forged.card.card.public_key = public(5);
-                write(&mesh, changes(&[Change::Join(forged)])).await;
-                let mut data = changes(&[join(4)]);
-                data.extend([
-                    voters(later(), &[2, 3, 4], &[2, 3]),
-                    voters(later(), &[2, 3, 4], &[]),
-                ]);
-                let replace = append(later(), data);
-                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
-                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                write(&mesh, changes(&[stale_join()])).await;
+                assert_eq!(mesh.receive(public(3), replacing_forged()), Ok(()));
                 let next = Term(later().0 + 1);
                 let forged = heartbeat(3, next, &[(3, 3), (4, 5)]);
-                let unproven = raft::Error::Unproven {
-                    term: next,
-                    from: key(3),
-                };
-                assert_eq!(mesh.receive(public(3), forged), Err(Error::Raft(unproven)));
+                assert_eq!(mesh.receive(public(3), forged), Err(forged_unproven()));
                 assert_eq!(term(&mesh), later());
                 let reply = message(4, 1, Body::HeartbeatReply);
                 let spoofed = Error::Spoofed { from: key(4) };
@@ -2608,7 +2618,7 @@ mod tests {
 
         /// The join of node 4 with the key of node 5: a forgery that no leader
         /// committed.
-        fn stale_join() -> Change {
+        pub(super) fn stale_join() -> Change {
             let Change::Join(mut forged) = join(4) else {
                 unreachable!()
             };
@@ -2619,7 +2629,7 @@ mod tests {
         /// The log of leader 3 of `later`, which 2 and 3 elected: the join of node
         /// 4 and the change that makes it a voter. Then the change of leader 2 of
         /// the term after, which 2 and 4 elected.
-        fn replacing() -> Vec<Entry> {
+        pub(super) fn replacing() -> Vec<Entry> {
             let next = Term(common::TERM.0 + 2);
             let at = |term, index| Position { term, index };
             let set = |incoming: &[u8], outgoing: &[u8]| Voters {
@@ -2644,7 +2654,7 @@ mod tests {
 
         /// The append of `entries` after `prev` from leader 3 of the term after the
         /// one of `replacing`, to node 1.
-        fn replace(prev: Position, entries: Vec<Entry>) -> raft::Message {
+        pub(super) fn replace(prev: Position, entries: Vec<Entry>) -> raft::Message {
             let body = Body::Append {
                 prev,
                 entries,
@@ -2663,13 +2673,13 @@ mod tests {
             let entries = solo_stored(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 write(&mesh, changes(&[stale_join()])).await;
-                let mut entries = replacing();
-                let rest = entries.split_off(3);
-                let prev = entries[2].at;
-                let first = replace(Position::default(), entries);
+                let first = replace(Position::default(), replacing());
                 assert_eq!(mesh.receive(public(3), first), Ok(()));
                 let reply = mesh.outgoing(key(3)).await.unwrap();
                 assert_eq!(reply.body, Body::AppendReply { last: 3 });
+                let mut entries = replacing();
+                let rest = entries.split_off(3);
+                let prev = entries[2].at;
                 assert_eq!(mesh.receive(public(3), replace(prev, rest)), Ok(()));
                 let reply = mesh.outgoing(key(3)).await.unwrap();
                 assert_eq!(reply.body, Body::AppendReply { last: 4 });
