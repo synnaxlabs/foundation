@@ -82,6 +82,7 @@ fn leader_start_replication() {
                 commit: li,
             },
             proof: None,
+            chain: Vec::new(),
         })
         .to_vec();
     assert_eq!(messages, expected);
@@ -208,6 +209,7 @@ fn follower_check_msg_app() {
             term: Term(2),
             body,
             proof: None,
+            chain: Vec::new(),
         };
         assert_eq!(disk.store(raft.ready()), [expected], "#{i}");
     }
@@ -250,6 +252,7 @@ fn follower_append_entries() {
             term: Term(term),
             body: Body::AppendReply { last },
             proof: None,
+            chain: Vec::new(),
         };
         assert_eq!(disk.store(ready), [answer], "#{i}");
         assert_eq!(disk.hard.term, Term(term), "#{i}");
@@ -300,6 +303,7 @@ fn leader_sync_follower_log() {
             term: Term(term + 1),
             body,
             proof: None,
+            chain: Vec::new(),
         };
         network.send(from_3(Body::PreVoteReply {
             answer: Answer::Granted(None),
