@@ -328,9 +328,7 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
         clock.sleep(seconds(10)).await;
         // A campaign can start at this tick, and the task of node 4 then runs next.
         clock.sleep(Span::MILLISECOND).await;
-        let group = mesh.group.borrow();
-        let waiting = group.queues.get(&key(4)).map(|queue| queue.messages.len());
-        assert_eq!(waiting, Some(0));
+        assert!(quiet(&mesh, 4).await, "the task of node 4 took no message");
     });
 }
 
@@ -460,6 +458,8 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             .await;
         }
         clock.sleep(seconds(10)).await;
+        // No public call tells a task that waits in a send from one that sends: only
+        // the count of the messages that wait for it does.
         let waiting = {
             let group = mesh.group.borrow();
             group.queues.get(&key(2)).map(|queue| queue.messages.len())
