@@ -1,4 +1,5 @@
-//! The placement policy: where copies of the connectors and indexes it selects live.
+//! The placement policy: where the connectors and indexes it selects live: a home, a
+//! standby, and copies.
 
 use std::fmt;
 
@@ -145,6 +146,12 @@ mod tests {
                 Err(Error::Overlap(name("n_1")))
             );
         }
+        let both = nodes(Some("n_2"), Some("n_1"), &["n_1", "n_2"]);
+        assert_eq!(
+            Policy::new(select(), both),
+            Err(Error::Overlap(name("n_2"))),
+            "the home comes before the standby"
+        );
         assert_eq!(
             Error::Overlap(name("n_1")).to_string(),
             "node n_1 has more than one role in the placement"

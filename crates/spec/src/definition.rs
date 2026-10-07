@@ -176,8 +176,8 @@ impl Definition {
             Self::Placement(policy) => {
                 out.push(PLACEMENT);
                 patterns(&mut out, policy.select());
-                optional_name(&mut out, policy.home());
-                optional_name(&mut out, policy.standby());
+                optional(&mut out, policy.home().map(Name::as_str));
+                optional(&mut out, policy.standby().map(Name::as_str));
                 names(&mut out, policy.copies());
             }
             Self::Time(policy) => {
@@ -327,13 +327,7 @@ fn channel(out: &mut Vec<u8>, definition: &Channel) {
             key(out, data.index());
             optional_key(out, data.quality());
             data_type(out, data.data_type());
-            match data.unit() {
-                None => out.push(0),
-                Some(unit) => {
-                    out.push(1);
-                    text(out, unit.as_str());
-                }
-            }
+            optional(out, data.unit().map(Unit::as_str));
         }
     }
 }
@@ -365,12 +359,12 @@ fn patterns(out: &mut Vec<u8>, selector: &Selector) {
     }
 }
 
-fn optional_name(out: &mut Vec<u8>, found: Option<&Name>) {
+fn optional(out: &mut Vec<u8>, found: Option<&str>) {
     match found {
         None => out.push(0),
-        Some(name) => {
+        Some(found) => {
             out.push(1);
-            text(out, name.as_str());
+            text(out, found);
         }
     }
 }
@@ -513,7 +507,6 @@ impl<'a> Reader<'a> {
             .map_err(|error| Error::Name { at, error })
     }
 
-    /// Reads a list of names in strict name order.
     fn optional_name(&mut self) -> Result<Option<Name>, Error> {
         if self.flag()? {
             self.name().map(Some)
@@ -522,6 +515,7 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Reads a list of names in strict name order.
     fn names(&mut self) -> Result<Vec<Name>, Error> {
         let n = self.count(TEXT_MIN)?;
         let mut names = Vec::with_capacity(n);
