@@ -199,7 +199,8 @@ impl Client {
         };
         let (sender, connection) = http1::handshake(stream).await?;
         // `hyper` gives a connection error to the request in flight, which reports it.
-        // An idle connection that fails is closed, and the pool does not reuse it.
+        // An idle connection that fails is closed, and `try_send_request` gives back
+        // its request.
         self.tasks.spawn(async move {
             let _reported: Result<(), hyper::Error> = connection.await;
         });

@@ -218,19 +218,25 @@ fn post(network: &Network) -> Request<Bytes> {
         .expect("a valid request")
 }
 
+/// Checks that a POST sent `wait` nanoseconds after the first send, which `hyper`
+/// does not write on the closed idle stream, goes once more on a new stream.
+fn check_post_again(wait: i64) {
+    let mut network = Network::new(50);
+    let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
+    let second = post(&network);
+    let steps = race_at(&mut network, second, wait);
+    all_ok(&network.run(steps));
+    assert_eq!(log.lock().expect("no panic").requests, [0, 1]);
+}
+
 #[test]
-fn sends_a_post_again_when_the_close_came_before_the_write() {
-    // At the first wait, the FIN reaches the client as the second send starts. At
-    // the second, the client has read the FIN. In each, `hyper` does not write the
-    // request and gives it back.
-    for wait in [0, Span::MILLISECOND.nanos()].map(|late| RACE_IDLE.nanos() + late) {
-        let mut network = Network::new(50);
-        let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
-        let second = post(&network);
-        let steps = race_at(&mut network, second, wait);
-        all_ok(&network.run(steps));
-        assert_eq!(log.lock().expect("no panic").requests, [0, 1], "{wait}");
-    }
+fn sends_a_post_again_when_the_fin_arrives_at_the_send() {
+    check_post_again(RACE_IDLE.nanos());
+}
+
+#[test]
+fn sends_a_post_again_after_the_client_read_the_fin() {
+    check_post_again(RACE_IDLE.nanos() + Span::MILLISECOND.nanos());
 }
 
 #[test]
