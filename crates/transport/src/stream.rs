@@ -1559,4 +1559,39 @@ mod tests {
         );
         assert_eq!(sim.run(), Ok(()));
     }
+
+    #[test]
+    fn a_recv_that_waits_for_a_block_gives_a_reset_at_once() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let sent = sender.send(side.block(&vec![0; LARGE])).await;
+                sent.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                sender.reset(Code(9));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let held = side.pool.alloc(LARGE).expect("room");
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut read = pin!(incoming.receiver.recv());
+                let mut deadline = pin!(side.node.clock().sleep(spans(IDLE, 1)));
+                let read = poll_fn(|cx| {
+                    if let Poll::Ready(read) = read.as_mut().poll(cx) {
+                        return Poll::Ready(Some(bytes(read)));
+                    }
+                    deadline.as_mut().poll(cx).map(|()| None)
+                })
+                .await;
+                assert_eq!(read, Some(Err(Error::Reset { code: Code(9) })));
+                drop(held);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
 }

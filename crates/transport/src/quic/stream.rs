@@ -1036,8 +1036,9 @@ impl Streams {
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
             });
         }
-        // The reader takes no bytes while it waits, so only this finds a reset.
-        if receiving.waits(claim)
+        // The reader takes no bytes while it waits for room or a block, so only this
+        // finds a reset.
+        if (missed || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
             result = Err(reset_error(error));
