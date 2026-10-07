@@ -1429,7 +1429,7 @@ mod tests {
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
             node.clock().sleep(spans(IDLE, 3)).await;
-            // A private read: no public call shows the drain.
+            // Private reads: no public call shows the drain or gives the pool.
             assert!(session.state.borrow().endpoint.drained());
             let block = || testing::block(&session.state.borrow().endpoint.pool, b"a");
             let mut message = Some(block());
