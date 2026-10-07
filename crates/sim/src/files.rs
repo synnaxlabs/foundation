@@ -402,6 +402,7 @@ impl Files {
             closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
             let drawn = (matches!(flight.call, Call::Open(Mode::Create { .. }))
+                && !flight.failed
                 && self.disks[node].makes(&flight.path))
             .then(|| match self.rng.below(2 + u64::from(power)) {
                 0 => Cut::Whole,

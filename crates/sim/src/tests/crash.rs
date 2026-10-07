@@ -682,6 +682,9 @@ fn a_crash_in_a_create_that_makes_no_file_draws_no_state() {
     let held = |node: node::Node| async move {
         Box::leak(Box::new(create(&node, "a", 0).await));
     };
+    let failed = |node: node::Node| async move {
+        node.fail_file(Path::new("a"), Operation::Open);
+    };
     for crash in [Crash::Process, Crash::Power] {
         for seed in 0..8 {
             let at = format!("{crash:?} {seed}");
@@ -690,6 +693,7 @@ fn a_crash_in_a_create_that_makes_no_file_draws_no_state() {
             assert!(!draws(seed, crash, "x/a", nothing), "x/a: {at}");
             assert!(!draws(seed, crash, "a/", nothing), "a/: {at}");
             assert!(!draws(seed, crash, "a", held), "held a: {at}");
+            assert!(!draws(seed, crash, "a", failed), "failed a: {at}");
         }
     }
 }
