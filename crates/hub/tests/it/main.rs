@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
-use block::{Heap, Pool};
+use block::{Heap, Pool, Unique};
 use env::clock::Clock;
 use env::files::Operation;
 use env::tasks::Tasks;
@@ -147,6 +147,11 @@ impl Test {
 
     /// How many blocks the pool gives, largest first, until it has no room.
     fn free(&self) -> usize {
+        self.fill().len()
+    }
+
+    /// Every block the pool gives, largest first, until it has no room.
+    fn fill(&self) -> Vec<Unique> {
         let mut blocks = Vec::new();
         let mut len = self.pool.largest();
         while len > 0 {
@@ -155,7 +160,7 @@ impl Test {
             }
             len -= len.div_ceil(16);
         }
-        blocks.len()
+        blocks
     }
 }
 
@@ -501,6 +506,50 @@ fn opens_a_writer_on_each_channel_once_with_its_index() {
     });
 }
 
+/// Defines a channel of `I64` on `index` in a new hub, which panics.
+fn define(key: u128, channel: &'static str, index: u128) {
+    run(18, move |test| async move {
+        test.hub.define(Channel {
+            key: channel::Key::from_u128(key),
+            name: name(channel),
+            data_type: I64,
+            index: channel::Key::from_u128(index),
+        });
+    });
+}
+
+#[test]
+#[should_panic(
+    expected = "a channel with key 00000000-0000-0000-0000-000000000002 or name other is known already"
+)]
+fn define_panics_on_a_known_key() {
+    define(2, "other", 1);
+}
+
+#[test]
+#[should_panic(
+    expected = "a channel with key 00000000-0000-0000-0000-000000000009 or name value is known already"
+)]
+fn define_panics_on_a_known_name() {
+    define(9, "value", 1);
+}
+
+#[test]
+#[should_panic(
+    expected = "the index 00000000-0000-0000-0000-000000000002 of channel other is not a known index"
+)]
+fn define_panics_on_an_index_that_is_a_data_channel() {
+    define(9, "other", 2);
+}
+
+#[test]
+#[should_panic(
+    expected = "the index 00000000-0000-0000-0000-000000000008 of channel other is not a known index"
+)]
+fn define_panics_on_an_unknown_index() {
+    define(9, "other", 8);
+}
+
 #[test]
 fn gives_a_reader_the_key_set_of_each_frame() {
     run(13, |test| async move {
@@ -660,4 +709,62 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff() {
             drop(writer);
         });
     }
+}
+
+#[test]
+fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
+    run(18, |test| async move {
+        let mut complete = test.reader(&["value"], Mode::Complete).await;
+        let blocks = test.fill();
+        // The handoff finds no block, so it waits for the next write.
+        let mut writer = test.writer("a", &["value"]).await;
+        drop(blocks);
+        test.clock.sleep(SETTLE).await;
+        test.node.fail_file(FilePath::new(RING), Operation::Sync);
+        let now = test.now();
+        let stamps: Vec<i64> = (0..10_000).map(|s| now + s).collect();
+        let values: Vec<i64> = stamps
+            .iter()
+            .map(|&s| {
+                let x = s.wrapping_mul(6_364_136_223_846_793_005);
+                x ^ (x >> 29)
+            })
+            .collect();
+        let set = writer.set();
+        let (time, value) = (entry(set, 1), entry(set, 2));
+        let group = set.entries()[time].group;
+        let series = [(time, stamps.len() * 8), (value, values.len() * 8)];
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        for (entry, samples) in [(time, &stamps), (value, &values)] {
+            let bytes = draft.series_mut(entry).expect("the series is present");
+            for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(samples)
+            {
+                *bytes = sample.to_le_bytes();
+            }
+        }
+        draft.set_count(group, 10_000);
+        let written = writer.write(LIVE, draft).map(<[_]>::to_vec);
+        assert_eq!(written, Err(hub::home::Error::Large));
+        test.clock.sleep(SETTLE).await;
+        let failed = env::files::Error::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        let next = poll_once(complete.next()).map(Result::err);
+        assert_eq!(next, Poll::Ready(Some(failed)));
+    });
+}
+
+#[test]
+fn opens_a_reader_at_the_first_poll() {
+    run(19, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let names = [name("value")];
+        let opening = test.hub.reader(&names, Mode::Complete);
+        write(&mut writer, &[test.now()], &[1]);
+        let mut complete = opening.await.expect("opens");
+        test.clock.sleep(SETTLE).await;
+        assert!(poll_once(complete.next()).is_pending());
+    });
 }
