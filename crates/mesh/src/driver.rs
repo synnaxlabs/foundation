@@ -4267,6 +4267,8 @@ mod tests {
     /// An append that the check cuts before an entry with a claim of a node whose
     /// join is in the same run.
     mod cut {
+        use transport::stream::Incoming;
+
         use super::*;
         use crate::common::proven_at;
 
@@ -4477,61 +4479,67 @@ mod tests {
             assert_eq!(entries, expected);
         }
 
-        /// Sends each message for node 2 as one datagram, and records its body.
-        async fn send_recorded(
+        /// Serves each stream that node 1 opens to `transport` as `accept` does, and
+        /// records the body of each message before the mesh takes it.
+        async fn accept_recorded(
             mesh: Mesh,
-            mut sender: udp::Sender,
+            transport: Rc<Transport>,
+            tasks: Tasks,
             bodies: Arc<Mutex<Vec<Body>>>,
         ) -> ! {
             loop {
-                let message = mesh.outgoing(key(2)).await.unwrap();
-                bodies.lock().unwrap().push(message.body.clone());
-                let contents = Message::Raft(message).encode();
-                let transmit = Transmit {
-                    destination: address(2),
-                    source: None,
-                    ecn: None,
-                    contents: &contents,
-                    segment: None,
-                };
-                poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+                let session = transport.accept().await.unwrap();
+                let (mesh, streams) = (mesh.clone(), tasks.clone());
+                let bodies = Arc::clone(&bodies);
+                tasks.spawn(async move {
+                    while let Ok(incoming) = session.accept().await {
+                        let (mesh, bodies) = (mesh.clone(), Arc::clone(&bodies));
+                        streams.spawn(async move {
+                            let Incoming { mut receiver, .. } = incoming;
+                            let Ok(Some(header)) = receiver.recv().await else {
+                                return;
+                            };
+                            let protocol = wire::header::decode(&header).unwrap();
+                            assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                            while let Ok(Some(bytes)) = receiver.recv().await {
+                                let Some(Message::Raft(message)) =
+                                    Message::decode(&bytes)
+                                else {
+                                    panic!("node 1 sent what is not a raft message");
+                                };
+                                bodies.lock().unwrap().push(message.body.clone());
+                                assert_eq!(mesh.receive(public(1), message), Ok(()));
+                            }
+                        });
+                    }
+                });
             }
         }
 
-        /// Node `id` of a pair over UDP. Node 2 first takes the history from leader
-        /// 3, in two appends. Node 1 records the body of each message it sends.
+        /// Node `id` of a pair. Node 2 first takes the history from leader 3, in two
+        /// appends, and records the body of each message node 1 sends it.
         async fn peer(
             node: sim::node::Node,
             tasks: Tasks,
             id: u8,
             bodies: Arc<Mutex<Vec<Body>>>,
         ) -> ! {
-            let mesh = open(&node, &tasks, id, &IDS, &IDS).await.unwrap();
-            if id == 2 {
-                let mut first = history();
-                let second = first.split_off(3);
-                let head = append(2, Position::default(), first, 3);
-                assert_eq!(mesh.receive(public(3), head), Ok(()));
-                mesh.outgoing(key(3)).await.unwrap();
-                let tail = append(2, at(4, 3), second, 9);
-                assert_eq!(mesh.receive(public(3), tail), Ok(()));
-                mesh.outgoing(key(3)).await.unwrap();
-            }
-            let config = udp::Config {
-                local: address(id),
-                send_buffer_bytes: 1 << 20,
-                recv_buffer_bytes: 1 << 20,
+            let config = Config {
+                members: IDS.map(create_voter).into(),
+                ..config_at(&node, &tasks, id, PORT, &IDS, &IDS)
             };
-            let (sender, receiver) = node.net().udp(&config).unwrap();
-            let sending = mesh.clone();
-            tasks.spawn(async move {
-                if id == 1 {
-                    send_recorded(sending, sender, bodies).await;
-                } else {
-                    send(sending, sender, 1).await;
-                }
-            });
-            receive(mesh, receiver).await
+            let transport = Rc::clone(&config.transport);
+            let mesh = Mesh::open(config).await.unwrap();
+            if id == 1 {
+                accept(mesh, transport, tasks).await;
+            }
+            let mut first = history();
+            let second = first.split_off(3);
+            let head = append(2, Position::default(), first, 3);
+            assert_eq!(mesh.receive(public(3), head), Ok(()));
+            let tail = append(2, at(4, 3), second, 9);
+            assert_eq!(mesh.receive(public(3), tail), Ok(()));
+            accept_recorded(mesh, transport, tasks, bodies).await
         }
 
         // Node 2 holds the history and leads term 7 with the vote of node 1, which
@@ -4539,10 +4547,7 @@ mod tests {
         // proposal, node 1 holds the whole log of node 2 after the next heartbeat.
         #[test]
         fn a_follower_that_cut_a_run_holds_the_whole_log_after_the_next_heartbeat() {
-            let mut sim = Sim::new(sim::Config {
-                link: wide(link::Config::default()),
-                ..sim::Config::default()
-            });
+            let mut sim = Sim::new(sim::Config::default());
             let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
             let bodies = Arc::new(Mutex::new(Vec::new()));
             for (node, id) in nodes.iter().zip([1, 2]) {
