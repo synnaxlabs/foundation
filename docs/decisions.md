@@ -516,6 +516,12 @@ How to read this record:
   takes the blocks of its entries (#795). It does not check `Limit::Block`, which
   depends on the pool. An entry has no part, one, or two; `append` takes them owned
   and drops them when it fails (#582).
+  `Layout::fit(len, body_max)` gives the largest ring whose file holds at most `len`
+  bytes, or `Small { len, min }` in file bytes, so a caller never learns the area
+  unit. Its `body_max` bounds panic, from the one check that `Layout::new` uses, and
+  `body_max` comes from a constant of `node`, never a config value; if it ever does,
+  the panic becomes an error first. Decided by the architect on #1166:
+  https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -1187,22 +1193,24 @@ How to read this record:
   budget is the peer's `window_bytes`. A value over what the node can count counts as
   the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
-  `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
-  transport parameters cannot take this node's whole hello at once (no one-way stream,
-  or a stream or connection window under the hello) also breaks it, with the reason `a
-  peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
-  `Connected` before it, and an accept gives the caller no event. Before the handshake
-  is confirmed, QUIC gives the peer no reason, only APPLICATION_ERROR. A Foundation node
-  always has room: `streams_max` is at least 1, and `window_bytes` is at least
-  `message_bytes_max`, which is at least 1472. A compile-time assertion holds 1472 at or
-  above the hello limit, so only a foreign peer gets this. Lost: send the hello later
-  when credit comes, because `open` then needs a second gate and a state that only a
-  foreign peer reaches. `Endpoint::write` gives `Error::TooLarge` for a message over the
-  peer's limit; a caller that forwards a writer's frame gives the writer `Large`, and
-  the writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by
-  the coordinator on PR #407. The budgets: proposed by `network` in #228. The room
-  order: approved by the advisor on #611. The hello: proposed by `network` in #55;
-  settled by the advisor and the coordinator under the person's delegation (#55).
+  `message_bytes_max` below 1472 (architect, #1198:
+  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it, or
+  resets. A peer whose QUIC transport parameters cannot take this node's whole hello at
+  once (no one-way stream, or a stream or connection window under the hello) also breaks
+  it, with the reason `a peer with no room for the hello`. A dial that breaks so gets
+  `Error::Broken` with no `Connected` before it, and an accept gives the caller no
+  event. Before the handshake is confirmed, QUIC gives the peer no reason, only
+  APPLICATION_ERROR. A Foundation node always has room: `streams_max` is at least 1, and
+  `window_bytes` is at least `message_bytes_max`, which is at least 1472. A compile-time
+  assertion holds 1472 at or above the hello limit, so only a foreign peer gets this.
+  Lost: send the hello later when credit comes, because `open` then needs a second gate
+  and a state that only a foreign peer reaches. `Endpoint::write` gives
+  `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
+  writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
+  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
+  budgets: proposed by `network` in #228. The room order: approved by the advisor on
+  #611. The hello: proposed by `network` in #55; settled by the advisor and the
+  coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
@@ -1271,6 +1279,15 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
   connected attempt: proposed by `box2.builder-5`, decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
+- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` future that drops before
+  it completes resets the stream with `Code(0)`. After that, each `send`, `try_send`,
+  and `finish` on the sender gives `Error::Reset { code: Code(0) }`, and the
+  `Error::Reset` doc names both causes: the peer, or a dropped `send` future. A dropped
+  future is a normal cancel in async code, such as a timeout in a select, so it must not
+  panic; in both cases the caller opens a new stream. Rejected: a panic, as after
+  `finish` (a timeout the caller handles would become a crash). Proposed by
+  `box2.builder-5`, decided by the architect, #68
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1640,6 +1657,38 @@ How to read this record:
   voters record membership, and the join is logged on the changes channel. Files name
   nodes only where they matter (voters, placement). Ephemeral nodes are removed after a
   set time offline. Tickets are secrets.
+- **MEMBER RECORD (#242)** The region's record of a node is a `mesh::Member`: a
+  `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
+  node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
+  byte form), the join ticket's signature over the first card, an ephemeral expiry, and
+  the key of each status channel (X27) by its name relative to the node's name
+  (`clock.offset`, never the full name); `card.name` is the one copy of the node's name.
+  The joining node gives its own release's names; the voters assign the keys at join
+  (X27). A status name keeps its meaning and data type in every release, and a change
+  takes a new name, so `hub` resolves a status channel from the record alone. The byte
+  form (#336) writes the status entries in name order. A list in the order of a table in
+  `node` lost, because `hub` cannot read that table and a new release would change what
+  a stored position means. Cost: about 40 bytes of names per member (architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
+  card's byte form is the name behind a length byte, the public key (32 bytes), the seal
+  key (32 bytes), a count of addresses (8 bytes), each address, and the version (8
+  bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the relay's
+  public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in network
+  order), and the port (2 bytes). An IPv6 address has no flow info and no scope, because
+  each means something only on the node that sets it. Every number but the IP is little
+  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
+  configuration is the one source) and no lease. The seal key is inside the signed card
+  (S8). A join is one `Join` change. Every node that applies it checks the card, and the
+  admission against the ticket's public key, scope, uses, and expiry at the change's
+  mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a
+  join answers with the founding voters and their cards, and the node opens with them as
+  `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
+  cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
+  and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
+  rotation that only the node signs lets a stolen key lock the node out. Lost: a record
+  that only the admitting voter checks (a voter that lies admits any key, against BQ12).
+  Decided by the architect, #242
+  (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
@@ -1768,12 +1817,25 @@ How to read this record:
   time is up. A reused connection does no lookup. Lost: Happy Eyeballs (RFC 8305), which
   needs more code and streams; a separate error variant for a failed lookup, which a
   caller handles as a failed connect; no limit for each address, where one that drops
-  the SYN uses the whole timeout. Decided by `connector` in the plan on #341
+  the SYN uses the whole timeout. Proposed by `connector` in the plan on #341
   (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051) and in
-  the review of #1135 on 2026-10-07
+  the review of #1135
   (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
-  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713). The key
+  text after the #1111 link, the dial rule, and the `Error::Connect` doc: approved by
+  `laptop.architect-2` on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6032674524).
+  A refused URI gives one error for each cause: `Scheme`, `UserInfo`, `Host`, and
+  `Port`, checked in that order, so no error holds text from a URI with user info.
+  Text after `]` is part of the host up to a `:`, so `http://[fd00::2]8086/` gives
+  `Host` (https://github.com/synnaxlabs/foundation/issues/1179#issuecomment-6032542190).
+  A `[` in a host that is not in brackets gives `Host`. A built URI with an empty path
+  sends `/`. Lost: one `Uri` variant that holds the URI with its user info removed,
+  because the message must name the cause; and a `Uri` whose `Display` drops the user
+  info, because `Debug` and the field still hold the password. Decided by
+  `laptop.architect-2` on #1159
+  (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -2478,14 +2540,21 @@ How to read this record:
   by `ops` in #410; approved by the coordinator on #806.
 - **SHARD BUFFERS (2026-10-07)** Each shard opens its write-ahead ring in directory
   `shard-<i>` of the node's data directory and keeps it until the node stops.
-  `node::Config::files` makes the files of the data directory with no core; each
-  shard calls it once on its own thread, because `Files` is `Rc`. `node` alone names
-  `shard-<i>`. `node::Config::entropy` gives the shards randomness. A ring that does
-  not open stops the node, and `join` gives `Error::Buffer` with the core, after
-  `Start` and `Memory` and before `Panicked`. A data directory made for another shard
-  count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
-  is the long-term path (#1077). Running the stored count on another core count lost:
-  it bends C2. Decided by the architect on #1062:
+  `node::Config::files` is a maker with no core that `node` calls on the start
+  thread, in order of core, for each shard that gets its memory, just before its
+  start; the shard runs the function it gives on its own thread, because `Files` is
+  `Rc`, and a shard that does not start drops it unrun. A caller on the real OS makes
+  each shard's disk with `os::files` before the start and joins its I/O thread after
+  `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files` only
+  with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
+  randomness. A ring that does not open stops the node, and `join` gives
+  `Error::Buffer` with the core, after `Start` and `Memory` and before `Panicked`. A
+  data directory made for another shard count, more or fewer, is refused before any
+  buffer opens (#1076); a reshard at start is the long-term path (#1077). Running the
+  stored count on another core count lost: it bends C2. Decided by the architect on
+  #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
   count is an empty directory `shards-<n>` in the data directory, made and synced
   before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the
@@ -2699,7 +2768,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, name, public key, seal key, version, ephemeral expiry }` in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |

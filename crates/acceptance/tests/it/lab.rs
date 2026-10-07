@@ -112,7 +112,10 @@ impl Lab {
             memory: Box::new(|len| Ok(block::Heap::new(len))),
             files: {
                 let host = host.clone();
-                Arc::new(move || host.files())
+                Box::new(move || {
+                    let host = host.clone();
+                    Box::new(move || host.files())
+                })
             },
             entropy: host.entropy(),
         });

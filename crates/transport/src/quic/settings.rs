@@ -21,7 +21,7 @@ use types::time::Span;
 
 use super::{cid, hello};
 use crate::tls::{Epoch, Tls};
-use crate::{Config, PAYLOAD_IPV4};
+use crate::{Config, MESSAGE_BYTES_MIN, PAYLOAD_IPV4};
 
 const QUIC_V1: u32 = 1;
 
@@ -54,7 +54,7 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    PAYLOAD_IPV4 as usize >= hello::BYTES_MAX,
+    MESSAGE_BYTES_MIN >= hello::BYTES_MAX,
     "a stream window of at least message_bytes_max must take the peer's whole hello"
 );
 

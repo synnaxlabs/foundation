@@ -255,6 +255,30 @@ fn sends_the_path_and_host_and_reads_a_length_body() {
 }
 
 #[test]
+fn sends_a_slash_when_the_built_uri_has_an_empty_path() {
+    for (path, target) in [("", "/"), ("?db=a", "/?db=a")] {
+        let mut network = Network::new(16);
+        let seen =
+            network.serve(reply("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"));
+        let host = network.remote();
+        let uri = http::Uri::builder()
+            .scheme("http")
+            .authority(host.to_string())
+            .path_and_query(path)
+            .build()
+            .expect("a valid URI");
+        let request = Request::get(uri)
+            .body(Bytes::new())
+            .expect("a valid request");
+        network.send(request).expect("the server answers");
+        assert_eq!(
+            text(&seen.lock().expect("no panic under the lock")),
+            format!("GET {target} HTTP/1.1\r\nhost: {host}\r\n\r\n"),
+        );
+    }
+}
+
+#[test]
 fn sends_a_body_with_its_length() {
     let mut network = Network::new(2);
     let seen = network.serve(reply("HTTP/1.1 204 No Content\r\n\r\n"));
@@ -338,6 +362,10 @@ fn refuses_chunks_that_together_pass_the_cap() {
         matches!(error, Error::TooLarge { max: BODY_MAX }),
         "{error:?}"
     );
+    assert_eq!(
+        error.to_string(),
+        "the response body is larger than 64 bytes"
+    );
 }
 
 /// Answers with `response`, then reads until the client ends the stream, and gives
@@ -380,6 +408,7 @@ fn closes_the_stream_after_a_timeout() {
     network.serve(reply_then_read(b"", &end));
     let error = network.send(get(&network.url("/"))).expect_err("no answer");
     assert!(matches!(error, Error::TimedOut), "{error:?}");
+    assert_eq!(error.to_string(), "the exchange timed out");
     let end = end.lock().expect("no panic under the lock").take();
     assert_eq!(end.as_deref(), Some("Ok(0)"));
 }
@@ -480,38 +509,94 @@ fn gives_the_connect_error_when_nothing_listens() {
     );
 }
 
+/// The error of a send to `uri`.
+fn refused(uri: &str) -> Error {
+    Network::new(10).send(get(uri)).expect_err("a refused URI")
+}
+
 #[test]
-fn refuses_a_uri_it_cannot_reach() {
-    let mut network = Network::new(10);
+fn refuses_a_scheme_other_than_http() {
+    for uri in ["https://10.0.0.2/", "/write", "https://admin:secret@[]:0/"] {
+        let error = refused(uri);
+        assert!(matches!(error, Error::Scheme), "{uri}: {error:?}");
+        assert_eq!(error.to_string(), "the scheme of the URI is not http");
+    }
+}
+
+#[test]
+fn refuses_user_info_and_keeps_none_of_it() {
     for uri in [
-        "https://10.0.0.2/",
-        "/write",
-        "http://admin:secret@10.0.0.2:8086/",
-        "http://:8086/",
-        "http://10.0.0.2:65536/",
-        "http://influx:99999999/",
-        "http://influx:+80/",
-        "http://influx:0/",
-        "http://[]/",
-        "http://[influx]/",
-        "http://[fd00::2]x/",
-        "http://[fd00::2]8086/",
-        "http://[fd00::2]:80x/",
+        "http://admin:hunter2@10.0.0.2:8086/",
+        "http://admin:hunter2@[influx]:99999/",
     ] {
-        let error = network.send(get(uri)).expect_err("not reachable");
-        assert!(
-            matches!(&error, Error::Uri { uri: u } if u == uri),
-            "{uri}: {error:?}"
-        );
+        let error = refused(uri);
+        assert!(matches!(error, Error::UserInfo), "{uri}: {error:?}");
+        let message = error.to_string();
         assert_eq!(
-            error.to_string(),
-            format!(
-                "{uri} is not an http URI with a valid host and port, and no user info"
-            )
+            message,
+            "the URI holds user info; give a credential through a secret"
+        );
+        let shown = format!("{message} {error:?}");
+        assert!(
+            !shown.contains("admin") && !shown.contains("hunter2"),
+            "{shown}"
         );
     }
 }
 
+#[test]
+fn refuses_a_host_that_is_not_valid() {
+    for (uri, host) in [
+        ("http://:8086/", ""),
+        ("http://[]/", "[]"),
+        ("http://[influx]/", "[influx]"),
+        ("http://[influx]:99999/", "[influx]"),
+        ("http://[fd00::2]x/", "[fd00::2]x"),
+        ("http://[fd00::2]8086/", "[fd00::2]8086"),
+        ("http://[fd00::2]x:80/", "[fd00::2]x"),
+        ("http://a[::1]/", "a[::1]"),
+        ("http://a[::1]:80/", "a[::1]"),
+        ("http://a:8[0]/", "a:8[0]"),
+    ] {
+        let error = refused(uri);
+        assert!(
+            matches!(&error, Error::Host { host: h } if h == host),
+            "{uri}: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("the URI has no valid host: \"{host}\"")
+        );
+    }
+}
+
+#[test]
+fn refuses_a_port_that_is_not_a_u16() {
+    for (authority, port) in [
+        ("10.0.0.2:99999", "99999"),
+        ("10.0.0.2:65536", "65536"),
+        ("10.0.0.2:8086x", "8086x"),
+        ("10.0.0.2:-1", "-1"),
+        ("influx:99999999", "99999999"),
+        ("influx:+80", "+80"),
+        ("influx:0", "0"),
+        ("[fd00::2]:80x", "80x"),
+        ("[::]:80x", "80x"),
+    ] {
+        let error = refused(&format!("http://{authority}/"));
+        assert!(
+            matches!(&error, Error::Port { port: p } if p == port),
+            "{authority}: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("the port \"{port}\" of the URI is not a number from 1 to 65535")
+        );
+    }
+}
+
+// A stream that is not vectored sends the same bytes, so `Client::send` cannot show
+// it, and this test builds the private `Stream`.
 #[test]
 fn stream_is_vectored_and_writes_a_whole_plain_write() {
     const HEAD: &[u8] = b"GET / HTTP/1.1\r\nhost: a\r\n\r\n";
