@@ -173,7 +173,7 @@ fn statement(key: node::Key, card: &Card) -> Vec<u8> {
     bytes
 }
 
-// A kind byte, then the socket; a relay puts its node key before the socket.
+// A kind byte, then the socket; a relay puts its public key before the socket.
 fn put_address(address: Address, out: &mut Vec<u8>) {
     match address {
         Address::Udp(at) => {
@@ -461,6 +461,7 @@ mod tests {
             public_key: public(1),
             seal_key: SealKey::new([9; 32]).unwrap(),
             addresses: vec![
+                Address::Udp("5.6.7.8:1".parse().unwrap()),
                 Address::Tcp("1.2.3.4:258".parse().unwrap()),
                 Address::Relay {
                     node: public(2),
@@ -475,9 +476,10 @@ mod tests {
         expected.extend(b"a.b");
         expected.extend(public(1).to_bytes());
         expected.extend([9; 32]);
-        expected.extend(2u64.to_le_bytes());
-        expected.extend([TCP, 4, 1, 2, 3, 4, 2, 1]);
-        expected.push(RELAY);
+        expected.extend(3u64.to_le_bytes());
+        expected.extend([0, 4, 5, 6, 7, 8, 1, 0]);
+        expected.extend([1, 4, 1, 2, 3, 4, 2, 1]);
+        expected.push(2);
         expected.extend(public(2).to_bytes());
         expected.push(6);
         expected.extend(1u128.to_be_bytes());
