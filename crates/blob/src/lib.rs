@@ -367,11 +367,18 @@ impl<'a> Flight<'a> {
         let len =
             u64::try_from(chunk.len()).expect("invariant: a length fits in 64 bits");
         let mode = Mode::Create { len };
-        let file = match store.files.open(&path, mode).await {
+        let opened = match store.files.open(&path, mode).await {
             // A file of another length at the name is not the chunk.
             Err(files::Error::Length { .. }) => {
                 self.remove(&path).await?;
-                // A removed file keeps its room until the directory syncs.
+                store.files.open(&path, mode).await
+            }
+            opened => opened,
+        };
+        let file = match opened {
+            // A removed file keeps its room until the directory syncs, and a remove
+            // can end with no sync: a dropped put, a failed sync, or a crash.
+            Err(files::Error::Full { .. }) => {
                 store.files.sync_dir(&store.dir).await?;
                 store.files.open(&path, mode).await?
             }
@@ -768,6 +775,74 @@ mod tests {
                 let (_, other) = chunk(7, 40 << 10);
                 node.files().create_dir(Path::new(DIR)).await.unwrap();
                 create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        // The sync after the remove fails once. The put after it must store the
+        // chunk: the disk has room once the directory syncs.
+        #[test]
+        fn after_a_failed_sync_on_a_near_full_disk_stores_it() {
+            let (mut sim, node) = create_node(0, 64 << 10);
+            let (digest, block) = chunk(7, 30 << 10);
+            sim.run_on(&node, move |node, _| async move {
+                let (_, other) = chunk(7, 40 << 10);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                node.fail_file(Path::new(DIR), Operation::SyncDir);
+                let error = store.put(digest, &block).await.unwrap_err();
+                assert_eq!(error, io(Path::new(DIR), Operation::SyncDir));
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        // The first put drops with its remove in flight. The next put must store
+        // the chunk on a nearly full disk, although no sync followed the remove.
+        #[test]
+        fn after_a_put_dropped_in_its_remove_on_a_near_full_disk_stores_it() {
+            for seed in 0..64 {
+                let (mut sim, node) = create_node(seed, 64 << 10);
+                let (digest, block) = chunk(7, 30 << 10);
+                sim.run_on(&node, move |node, _| async move {
+                    let (_, other) = chunk(7, 40 << 10);
+                    node.files().create_dir(Path::new(DIR)).await.unwrap();
+                    create_file(&node, &path(digest), &other).await;
+                    let store = open(&node).await.unwrap();
+                    {
+                        let mut first = pin!(store.put(digest, &block));
+                        assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                        assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                    }
+                    assert_eq!(store.put(digest, &block).await, Ok(()), "seed {seed}");
+                })
+                .unwrap();
+            }
+        }
+
+        // A process crash after the remove and before any sync. The remove is made
+        // by hand, as a put leaves it. The next open and put must store the chunk.
+        #[test]
+        fn after_a_process_crash_after_the_remove_stores_it() {
+            let (mut sim, node) = create_node(0, 64 << 10);
+            let (digest, block) = chunk(7, 30 << 10);
+            sim.run_on(&node, move |node, _| async move {
+                let (_, other) = chunk(7, 40 << 10);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                node.files().remove(&path(digest)).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Process);
+            sim.run_on(&node, move |node, _| async move {
                 let store = open(&node).await.unwrap();
                 store.put(digest, &block).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
