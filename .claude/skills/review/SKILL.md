@@ -118,16 +118,18 @@ Hot path: <none, or each function>
 Each of the `Reviewers:`, `Range:`, and `Findings:` lines holds its value alone:
 `Findings: 2`, never `Findings: 2, each fixed in <sha>`. The check fails on the second.
 `Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
-skips `breaker` adds the line
-``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
-range of the last round: each `.rs` line it adds or removes, trimmed, must be empty or
-start with `//`, and it must change no `Cargo.toml` or `Cargo.lock` line. A moved file
-counts as each of its lines removed and added. The check reads the range against the
-tree that `git merge-tree` makes of its start and the newest base commit that its end
-holds, so the base's code does not count. A conflict in that tree in a `.rs`,
-`Cargo.toml`, or `Cargo.lock` file counts as a code change, and so does an end that
-holds more than one newest base commit. A head that is the range end plus clean merges
-of the base needs no new round. A red-team PR labeled `oracle` also needs the director's
+skips `breaker` adds this line:
+
+```
+Breaker: skipped, the check counts no code change in the range
+```
+
+When the last round has that line, the check fails if its range changes code: a `.rs`
+line that, trimmed, is not empty and does not start with `//`, or a `Cargo.toml` or
+`Cargo.lock` line. The base's code does not count, but a conflict in a code file that
+`git merge-tree` finds does. REVIEW CHECK in `docs/decisions.md` states each case, and
+the check names the one it finds. A head that is the range end plus clean merges of the
+base needs no new round. A red-team PR labeled `oracle` also needs the director's
 verdict with the line ``Director: approved at `<sha>` `` at the head.
 
 ## Second round
