@@ -228,15 +228,9 @@ pub(crate) fn proven_at(
     ready.messages.remove(0)
 }
 
-// The votes of 1, 2 and 3 for `leader` in `term`, each signed but the leader's own.
-fn votes(term: Term, leader: u8) -> Proof {
-    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
-    votes_of(term, leader, &[1, 2, 3])
-}
-
 // The vote of each of `voted` for `leader` in `term`, each signed but the leader's
 // own.
-fn votes_of(term: Term, leader: u8, voted: &[u8]) -> Proof {
+fn votes(term: Term, leader: u8, voted: &[u8]) -> Proof {
     let vote = |&voter: &u8| {
         let signed =
             (voter != leader).then(|| grant_in(term, voter, Grant::Vote, leader));
@@ -256,7 +250,7 @@ fn votes_of(term: Term, leader: u8, voted: &[u8]) -> Proof {
 ///
 /// When `leader` is not 1, 2 or 3, as [`proven`].
 pub(crate) fn change(leader: u8, at: Position, voters: Voters) -> Entry {
-    votes(at.term, leader);
+    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
     change_voted(leader, at, voters, &[1, 2, 3])
 }
 
@@ -272,7 +266,7 @@ pub(crate) fn change_voted(
         at,
         data: Data::Voters(Change {
             voters,
-            votes: votes_of(at.term, leader, voted),
+            votes: votes(at.term, leader, voted),
             signature: None,
         }),
     };
