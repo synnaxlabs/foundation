@@ -24,7 +24,9 @@ Check:
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
   code catch or skip an error to hide a defect?
 - Tests: does each test fail if the behavior breaks? Name a change to the code that no
-  test would catch.
+  test would catch. Does a test read a private field, or compare the `Debug` string of
+  the type under test, with no written reason? Name the public call that shows the same
+  behavior.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?

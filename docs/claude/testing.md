@@ -62,6 +62,9 @@ again once to prove that the failure replays (r16 59).
 - **Test through the production path.** A component that passes its unit tests but
   fails when composed in `node` is broken. Production code never checks `cfg(test)`
   (r16 47).
+- **Assert through the public calls of the type.** A read of a private field, or a
+  compare of the `Debug` string of the type under test, checks private state: a new
+  field breaks the test while the behavior stays. Use one only with a written reason.
 - **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
   second test feature (r16 57).
 - **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
