@@ -25,7 +25,10 @@ impl Gap {
     /// An empty gap of one path, with `connector`, `index`, and `path` (`live` or
     /// `backfill`) as its tags.
     #[must_use]
-    #[expect(clippy::missing_panics_doc, reason = "a name is a valid tag value")]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "a name or a path is a valid tag value"
+    )]
     pub fn new(connector: &Name, index: &Name, path: Path) -> Self {
         let path = match path {
             Path::Live => "live",
@@ -38,7 +41,7 @@ impl Gap {
         ];
         Self {
             measurement: Measurement::new(MEASUREMENT, &tags, &["count"])
-                .expect("invariant: a name is a valid tag value"),
+                .expect("invariant: a name or a path is a valid tag value"),
             seqs: None,
         }
     }

@@ -1,15 +1,11 @@
 use super::*;
 
 fn gap() -> Gap {
-    named("influx", "edge.time")
+    named("influx", "edge.time", Path::Live)
 }
 
-fn named(connector: &str, index: &str) -> Gap {
-    Gap::new(
-        &connector.parse().unwrap(),
-        &index.parse().unwrap(),
-        Path::Live,
-    )
+fn named(connector: &str, index: &str, path: Path) -> Gap {
+    Gap::new(&connector.parse().unwrap(), &index.parse().unwrap(), path)
 }
 
 fn written(gap: &mut Gap, seq: u64, stamp: i64) -> String {
@@ -40,11 +36,7 @@ fn writes_one_line_at_the_stamp_after_the_gap() {
 
 #[test]
 fn tags_a_backfill_gap_with_its_path() {
-    let mut gap = Gap::new(
-        &"influx".parse().unwrap(),
-        &"edge.time".parse().unwrap(),
-        Path::Backfill,
-    );
+    let mut gap = named("influx", "edge.time", Path::Backfill);
     gap.add(10..15);
     assert_eq!(
         written(&mut gap, 15, 1_000),
@@ -105,7 +97,7 @@ fn counts_each_seq_up_to_the_next_sample() {
 
 #[test]
 fn writes_each_name_character_as_is() {
-    let mut gap = named("my-influx_1", "@edge.time-a_b");
+    let mut gap = named("my-influx_1", "@edge.time-a_b", Path::Live);
     gap.add(0..1);
     assert_eq!(
         written(&mut gap, 1, 7),
