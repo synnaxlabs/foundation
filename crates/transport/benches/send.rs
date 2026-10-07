@@ -24,9 +24,12 @@
 //! waiting`, whose send must wait in each round. Each poll has a timing cost, so
 //! compare the two lines with their polls per send.
 //!
-//! The `parts` lines time, in alternating rounds on one stream, a `send` of one block
-//! and a `send_parts` of the same bytes as ranges of a larger block. Their allocations
-//! differ only by the carrier's copies of ranges of up to 1452 bytes.
+//! The `parts` lines time, in rounds that take turns on one stream, a `send` of one
+//! block, a `send_parts` of the same bytes as ranges of a larger block, and a copy of
+//! those ranges into a new block, then a `send` of it. A `send_parts` allocates as a
+//! `send`, plus one allocation for each copied stretch of ranges over 1452 bytes and
+//! for each growth of the segment queue of noq-proto, which it drops after each
+//! acknowledgement.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
@@ -403,18 +406,28 @@ async fn measure_parts(
 ) -> Vec<Measured> {
     let parts = shape.parts();
     let bytes = shape.ranges * shape.len;
-    let mut nanos = [Vec::with_capacity(ROUNDS), Vec::with_capacity(ROUNDS)];
-    let mut allocations = [0; 2];
+    let mut nanos = [(); 3].map(|()| Vec::with_capacity(ROUNDS));
+    let mut allocations = [0; 3];
     for round in 0..WARMUP + ROUNDS {
         for (at, nanos) in nanos.iter_mut().enumerate() {
             clock.sleep(PAUSE).await;
-            let (span, counted) = if at == 0 {
-                let blocks = (0..PARTS_SENDS).map(|_| filled(pool, bytes)).collect();
-                ALLOCATOR.count(|| poll_sends(slice::from_mut(sender), blocks))
-            } else {
-                let block = shape.ranges * shape.stride;
-                let blocks = (0..PARTS_SENDS).map(|_| filled(pool, block)).collect();
-                ALLOCATOR.count(|| poll_parts(sender, blocks, &parts))
+            let block = shape.ranges * shape.stride;
+            let (span, counted) = match at {
+                0 => {
+                    let blocks =
+                        (0..PARTS_SENDS).map(|_| filled(pool, bytes)).collect();
+                    ALLOCATOR.count(|| poll_sends(slice::from_mut(sender), blocks))
+                }
+                1 => {
+                    let blocks =
+                        (0..PARTS_SENDS).map(|_| filled(pool, block)).collect();
+                    ALLOCATOR.count(|| poll_parts(sender, blocks, &parts))
+                }
+                _ => {
+                    let blocks =
+                        (0..PARTS_SENDS).map(|_| filled(pool, block)).collect();
+                    ALLOCATOR.count(|| poll_copies(sender, pool, blocks, &parts, bytes))
+                }
             };
             if round >= WARMUP {
                 nanos.push(per(span) / per(PARTS_SENDS));
@@ -423,7 +436,7 @@ async fn measure_parts(
         }
     }
     let sends = u64::try_from(ROUNDS * PARTS_SENDS).expect("fits");
-    let names = ["send", "send_parts"];
+    let names = ["send", "send_parts", "copy, then send"];
     let lines = names.into_iter().zip(nanos).zip(allocations);
     lines
         .map(|((call, mut nanos), allocations)| {
@@ -466,6 +479,33 @@ fn poll_parts(sender: &mut Sender, blocks: Vec<Block>, parts: &[Part]) -> u64 {
 ///
 /// When a send waits or fails.
 #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
+/// Copies `parts` of each block into a new block of `bytes` from `pool`, and polls a
+/// send of it once.
+fn poll_copies(
+    sender: &mut Sender,
+    pool: &Pool,
+    blocks: Vec<Block>,
+    parts: &[Part],
+    bytes: usize,
+) -> u64 {
+    let mut cx = Context::from_waker(Waker::noop());
+    let start = Instant::now();
+    for block in blocks {
+        let mut copy = pool.alloc(bytes).expect("the pool has room");
+        let mut at = 0;
+        for part in parts {
+            copy[at..at + part.range.len()].copy_from_slice(&block[part.range.clone()]);
+            at += part.range.len();
+        }
+        drop(block);
+        match pin!(sender.send(copy.freeze())).poll(&mut cx) {
+            Poll::Ready(sent) => sent.expect("the send goes"),
+            Poll::Pending => panic!("a send waited on its first poll: raise PAUSE"),
+        }
+    }
+    nanos(Instant::now().duration_since(start))
+}
+
 fn poll_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
     let mut cx = Context::from_waker(Waker::noop());
     let mut blocks = blocks.into_iter();

@@ -1299,6 +1299,75 @@ mod tests {
     }
 
     #[test]
+    fn a_message_of_long_and_short_runs_larger_than_the_window_arrives_whole() {
+        let body: Vec<u8> =
+            (0..25_200u32).map(|index| index.to_le_bytes()[0]).collect();
+        // In each 2100 bytes, a run of 2000 bytes, then two short runs and zeros. The
+        // second message ends in a long run.
+        let mut parts: Vec<Part> = (0..12)
+            .flat_map(|index| {
+                let at = index * 2100;
+                [
+                    Part {
+                        range: at..at + 2000,
+                        zeros: 0,
+                    },
+                    Part {
+                        range: at + 2010..at + 2018,
+                        zeros: 5,
+                    },
+                    Part {
+                        range: at + 2030..at + 2090,
+                        zeros: 0,
+                    },
+                ]
+            })
+            .collect();
+        let tail = parts.len() - 2;
+        for ended in [false, true] {
+            if ended {
+                parts.truncate(tail);
+            }
+            let sent: Vec<u8> = parts
+                .iter()
+                .flat_map(|part| {
+                    let zeros = vec![0; part.zeros.into()];
+                    [&body[part.range.clone()], &zeros].concat()
+                })
+                .collect();
+            // The stream header leaves the window short of the message.
+            let len = NonZeroUsize::new(sent.len()).expect("not zero");
+            let narrow = move |config| Config {
+                message_bytes_max: len,
+                window_bytes: len.get(),
+                ..config
+            };
+            let (body, parts) = (body.clone(), parts.clone());
+            let (mut sim, ..) = testing::sessions(
+                0,
+                narrow,
+                move |side| async move {
+                    let opened = side.session.open_sender(Class::Complete).await;
+                    let mut sender = opened.expect("a stream");
+                    let block = side.block(&body);
+                    sender.send_parts(block, &parts).await.expect("sent");
+                    sender.finish().expect("finished");
+                    let closed = Error::PeerClosed { code: Code(0) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+                move |side| async move {
+                    let mut receiver =
+                        side.session.accept().await.expect("a stream").receiver;
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                    assert_eq!(bytes(receiver.recv().await), Ok(None));
+                    side.session.close(Code(0));
+                },
+            );
+            assert_eq!(sim.run(), Ok(()));
+        }
+    }
+
+    #[test]
     fn a_message_of_parts_is_too_large_by_the_sum_of_its_parts() {
         let small = |config| Config {
             message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),

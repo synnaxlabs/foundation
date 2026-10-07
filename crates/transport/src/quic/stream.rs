@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::task::Poll;
 
 use block::{Block, Unique};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use noq_proto::{
     ClosedStream, Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId,
     VarInt, WriteError,
@@ -373,61 +373,161 @@ impl Half {
 /// The zeros of every [`Part`].
 const ZEROS: &[u8; 255] = &[0; 255];
 
-/// The bytes of a message in hand that the stream has not taken: a chunk of its block
-/// for each run of adjacent ranges, and a chunk of [`ZEROS`] for each run of zeros.
+/// The longest chunk that noq-proto copies into its own buffer. It keeps a longer
+/// chunk until the ACK.
+const COPIED_MAX: usize = 1452;
+
+/// The bytes of a message in hand that the stream has not taken: a slice of its block
+/// for each run of adjacent ranges over [`COPIED_MAX`] bytes, and a stretch for the
+/// shorter runs and zeros between them. A stretch over [`COPIED_MAX`] bytes is copied
+/// once into a slice of its own, which noq-proto keeps; a write copies a shorter one.
 #[derive(Debug, Default)]
 struct Chunks {
-    /// From `next` on. Its capacity stays, so a message allocates no list.
-    list: Vec<Bytes>,
-    /// The first chunk that the stream has not taken all of.
+    /// The block, while a stretch needs it.
+    block: Bytes,
+    /// The slices of the long runs.
+    slices: Vec<Bytes>,
+    /// The short runs and zeros of every stretch that is not a slice.
+    parts: Vec<Part>,
+    /// From `next` on, in message order. The lists keep their capacity, so a message
+    /// allocates none.
+    pieces: Vec<Piece>,
+    /// The first piece that the stream has not taken all of.
     next: usize,
     /// The bytes from `next` on.
     len: usize,
 }
 
+#[derive(Debug)]
+enum Piece {
+    /// The slices in this range of `Chunks::slices` that the stream has not taken.
+    Slices(Range<usize>),
+    /// The bytes of the parts in this range of `Chunks::parts`, `len` in all and at
+    /// most [`COPIED_MAX`] once loaded, of which the stream took `taken`.
+    Stretch {
+        parts: Range<usize>,
+        len: usize,
+        taken: usize,
+    },
+}
+
 impl Chunks {
     /// Takes `parts` of `block`. Holds nothing before.
     fn load(&mut self, block: Block, parts: &[Part]) {
-        let last = parts.iter().rposition(|part| !part.range.is_empty());
-        let mut whole = Bytes::from_owner(Body(block));
-        // The open run of adjacent ranges, and the index of its last part.
-        let mut run: Option<(Range<usize>, usize)> = None;
-        let mut flush = |run: &mut Option<(Range<usize>, usize)>, list: &mut Vec<_>| {
-            let Some((Range { start, end }, index)) = run.take() else {
-                return;
-            };
-            if Some(index) == last {
-                // The block's own handle, so a message of one run changes no
-                // reference count.
-                let mut chunk = mem::take(&mut whole);
-                chunk.truncate(end);
-                chunk.advance(start);
-                list.push(chunk);
-            } else {
-                list.push(whole.slice(start..end));
-            }
-        };
-        for (index, part) in parts.iter().enumerate() {
-            let Range { start, end } = part.range.clone();
-            if start < end {
+        self.block = Bytes::from_owner(Body(block));
+        // The last long run, which takes the block's own handle when no stretch
+        // follows, so a message of one run changes no reference count.
+        let mut long = None;
+        let mut run: Option<Range<usize>> = None;
+        for part in parts {
+            let range = part.range.clone();
+            if !range.is_empty() {
                 match &mut run {
-                    Some((open, at)) if open.end == start => {
-                        (open.end, *at) = (end, index);
-                    }
+                    Some(open) if open.end == range.start => open.end = range.end,
                     _ => {
-                        flush(&mut run, &mut self.list);
-                        run = Some((start..end, index));
+                        if let Some(done) = run.replace(range) {
+                            self.push_run(done, &mut long);
+                        }
                     }
                 }
             }
             if part.zeros > 0 {
-                flush(&mut run, &mut self.list);
-                let zeros = &ZEROS[..usize::from(part.zeros)];
-                self.list.push(Bytes::from_static(zeros));
+                if let Some(done) = run.take() {
+                    self.push_run(done, &mut long);
+                }
+                self.push_stretch(0..0, part.zeros, &mut long);
             }
         }
-        flush(&mut run, &mut self.list);
-        self.len = self.list.iter().map(Bytes::len).sum();
+        if let Some(done) = run {
+            self.push_run(done, &mut long);
+        }
+        self.seal();
+        if let Some(Range { start, end }) = long {
+            let slice = if !self.parts.is_empty() {
+                self.block.slice(start..end)
+            } else {
+                let mut block = mem::take(&mut self.block);
+                block.truncate(end);
+                block.advance(start);
+                block
+            };
+            self.push_slice(slice);
+        }
+        if self.parts.is_empty() {
+            self.block = Bytes::new();
+        }
+    }
+
+    /// Adds the run `range` of the block, after the pieces before it.
+    fn push_run(&mut self, range: Range<usize>, long: &mut Option<Range<usize>>) {
+        if range.len() > COPIED_MAX {
+            if let Some(before) = long.replace(range) {
+                self.push_slice(self.block.slice(before));
+            }
+        } else {
+            self.push_stretch(range, 0, long);
+        }
+    }
+
+    fn push_slice(&mut self, slice: Bytes) {
+        self.seal();
+        self.len += slice.len();
+        self.slices.push(slice);
+        let end = self.slices.len();
+        match self.pieces.last_mut() {
+            Some(Piece::Slices(slices)) if slices.end + 1 == end => slices.end = end,
+            _ => self.pieces.push(Piece::Slices(end - 1..end)),
+        }
+    }
+
+    /// Adds `range` of the block and `zeros` to the open stretch, or to a new one.
+    fn push_stretch(
+        &mut self,
+        range: Range<usize>,
+        zeros: u8,
+        long: &mut Option<Range<usize>>,
+    ) {
+        if let Some(before) = long.take() {
+            self.push_slice(self.block.slice(before));
+        }
+        let bytes = range.len() + usize::from(zeros);
+        self.len += bytes;
+        self.parts.push(Part { range, zeros });
+        let end = self.parts.len();
+        match self.pieces.last_mut() {
+            Some(Piece::Stretch { parts, len, .. }) if parts.end + 1 == end => {
+                parts.end = end;
+                *len += bytes;
+            }
+            _ => self.pieces.push(Piece::Stretch {
+                parts: end - 1..end,
+                len: bytes,
+                taken: 0,
+            }),
+        }
+    }
+
+    /// Copies the last stretch into a slice of its own when it is over [`COPIED_MAX`]
+    /// bytes. A later piece closes the stretch first.
+    fn seal(&mut self) {
+        let Some(&Piece::Stretch { ref parts, len, .. }) = self.pieces.last() else {
+            return;
+        };
+        if len <= COPIED_MAX {
+            return;
+        }
+        let mut copy = BytesMut::with_capacity(len);
+        for Part { range, zeros } in self.parts.drain(parts.clone()) {
+            copy.extend_from_slice(&self.block[range]);
+            copy.extend_from_slice(&ZEROS[..usize::from(zeros)]);
+        }
+        self.pieces.pop();
+        self.slices.push(copy.freeze());
+        let end = self.slices.len();
+        match self.pieces.last_mut() {
+            Some(Piece::Slices(slices)) => slices.end = end,
+            _ => self.pieces.push(Piece::Slices(end - 1..end)),
+        }
     }
 
     fn len(&self) -> usize {
@@ -438,17 +538,55 @@ impl Chunks {
         self.len == 0
     }
 
-    /// Writes chunks to `send` until it takes no more or all went.
+    /// Writes the next piece to `send`, as far as it takes it. A stretch of more
+    /// than one source is copied first, so it goes in one write.
     ///
     /// # Errors
     ///
     /// The error of a write that took nothing.
     fn write(&mut self, send: &mut SendStream<'_>) -> Result<(), WriteError> {
-        let mut rest = &mut self.list[self.next..];
-        let before = rest.len();
-        let written = send.write_chunks(&mut rest);
-        self.next += before - rest.len();
-        self.len -= written?;
+        let mut copy = [0; COPIED_MAX];
+        let piece = &mut self.pieces[self.next];
+        let (written, done) = match piece {
+            Piece::Slices(slices) => {
+                let mut rest = &mut self.slices[slices.clone()];
+                let before = rest.len();
+                let written = send.write_chunks(&mut rest);
+                slices.start += before - rest.len();
+                (written?, slices.start == slices.end)
+            }
+            Piece::Stretch { parts, len, taken } => {
+                let bytes: &[u8] = match &self.parts[parts.clone()] {
+                    [Part { range, zeros: 0 }] => {
+                        &self.block[range.start + *taken..range.end]
+                    }
+                    [Part { range, zeros }] if range.is_empty() => {
+                        &ZEROS[*taken..usize::from(*zeros)]
+                    }
+                    stretch => {
+                        let (mut skip, mut at) = (*taken, 0);
+                        for Part { range, zeros } in stretch {
+                            let zeros = &ZEROS[..usize::from(*zeros)];
+                            for source in [&self.block[range.clone()], zeros] {
+                                let from = skip.min(source.len());
+                                skip -= from;
+                                let source = &source[from..];
+                                copy[at..at + source.len()].copy_from_slice(source);
+                                at += source.len();
+                            }
+                        }
+                        &copy[..at]
+                    }
+                };
+                let written = send.write(bytes)?;
+                *taken += written;
+                (written, *taken == *len)
+            }
+        };
+        self.len -= written;
+        if done {
+            self.next += 1;
+        }
         if self.len == 0 {
             self.clear();
         }
@@ -457,7 +595,10 @@ impl Chunks {
 
     /// Drops what it holds.
     fn clear(&mut self) {
-        self.list.clear();
+        self.block = Bytes::new();
+        self.slices.clear();
+        self.parts.clear();
+        self.pieces.clear();
         (self.next, self.len) = (0, 0);
     }
 }
@@ -845,7 +986,8 @@ impl Sending {
         }
         if self.turns.allows(half, order) {
             let left = half.left();
-            let written = half.write(&mut inner.send_stream(half.key.id));
+            let send = &mut inner.send_stream(half.key.id);
+            let written = half.write(send);
             let paired = self.paired();
             self.share
                 .took(half.claim.class, left - half.left(), paired);
@@ -4198,23 +4340,125 @@ mod tests {
         }
     }
 
+    /// Each slice that `chunks` holds, and the bytes of each stretch.
+    fn pieces(chunks: &Chunks) -> Vec<(&'static str, Vec<u8>)> {
+        let mut pieces = Vec::new();
+        for piece in &chunks.pieces {
+            match piece {
+                Piece::Slices(slices) => {
+                    for slice in &chunks.slices[slices.clone()] {
+                        pieces.push(("slice", slice.to_vec()));
+                    }
+                }
+                Piece::Stretch { parts, .. } => {
+                    let stretch = chunks.parts[parts.clone()].iter().flat_map(|part| {
+                        let zeros = &ZEROS[..usize::from(part.zeros)];
+                        [&chunks.block[part.range.clone()], zeros].concat()
+                    });
+                    pieces.push(("stretch", stretch.collect()));
+                }
+            }
+        }
+        pieces
+    }
+
     #[test]
-    fn a_message_of_parts_gives_one_chunk_for_each_run_of_adjacent_ranges() {
+    fn a_message_of_parts_slices_each_long_run_and_joins_the_rest_in_stretches() {
         testing::run(1, |shard| {
+            let body: Vec<u8> = (0..6000u32).map(|at| at.to_le_bytes()[0]).collect();
             let part = |range: Range<usize>, zeros| Part { range, zeros };
             let parts = [
-                part(0..3, 0),
+                part(0..1000, 0),
                 part(9..9, 0),
-                part(3..5, 0),
-                part(5..7, 2),
-                part(7..8, 0),
-                part(9..10, 0),
+                part(1000..2000, 0),
+                part(2100..2108, 2),
+                part(2200..2210, 0),
+                part(2300..2300 + COPIED_MAX, 0),
+                part(2300 + COPIED_MAX..3753, 0),
+                part(3800..3801, 0),
+                part(3900..3900 + COPIED_MAX + 1, 0),
+                part(0..0, 3),
             ];
             let mut chunks = Chunks::default();
-            chunks.load(shard.block(b"0123456789"), &parts);
-            let list: Vec<&[u8]> = chunks.list.iter().map(|chunk| &chunk[..]).collect();
-            assert_eq!(list, [&b"0123456"[..], &[0, 0], b"7", b"9"]);
-            assert_eq!(chunks.len(), 11);
+            chunks.load(shard.block(&body), &parts);
+            let stretch = [&body[2100..2108], &[0; 2], &body[2200..2210]].concat();
+            let sent = [
+                ("slice", body[..2000].to_vec()),
+                ("stretch", stretch),
+                ("slice", body[2300..3753].to_vec()),
+                ("stretch", body[3800..3801].to_vec()),
+                ("slice", body[3900..3900 + COPIED_MAX + 1].to_vec()),
+                ("stretch", vec![0; 3]),
+            ];
+            assert_eq!(pieces(&chunks), sent);
+            let len = sent.iter().map(|(_, bytes)| bytes.len()).sum();
+            assert_eq!(chunks.len(), len);
+        });
+    }
+
+    #[test]
+    fn a_stretch_over_copied_max_becomes_a_slice_of_its_own() {
+        testing::run(1, |shard| {
+            let body: Vec<u8> = (0..6000u32).map(|at| at.to_le_bytes()[0]).collect();
+            let runs = |from: usize| {
+                (0..100).map(move |index| Part {
+                    range: from + 16 * index..from + 16 * index + 8,
+                    zeros: 0,
+                })
+            };
+            let zeros = [0, 1, 2].map(|_| Part {
+                range: 0..0,
+                zeros: 255,
+            });
+            let parts: Vec<Part> = runs(0)
+                .chain(zeros.clone())
+                .chain([Part {
+                    range: 2000..3500,
+                    zeros: 0,
+                }])
+                .chain(runs(4000))
+                .chain(zeros)
+                .collect();
+            let mut chunks = Chunks::default();
+            chunks.load(shard.block(&body), &parts);
+            let copy = |from: usize| {
+                let mut copy: Vec<u8> = runs(from)
+                    .flat_map(|part| body[part.range].to_vec())
+                    .collect();
+                copy.extend([0; 765]);
+                copy
+            };
+            let sent = [
+                ("slice", copy(0)),
+                ("slice", body[2000..3500].to_vec()),
+                ("slice", copy(4000)),
+            ];
+            assert_eq!(pieces(&chunks), sent);
+            assert_eq!(chunks.len(), 2 * 1565 + 1500);
+            assert!(chunks.parts.is_empty());
+            assert!(chunks.block.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_message_of_one_long_run_holds_only_its_slice() {
+        testing::run(1, |shard| {
+            let body = vec![7; 2 * COPIED_MAX];
+            let mut chunks = Chunks::default();
+            let range = 1..COPIED_MAX + 2;
+            chunks.load(shard.block(&body), &[Part { range, zeros: 0 }]);
+            let slice = ("slice", vec![7; COPIED_MAX + 1]);
+            assert_eq!(pieces(&chunks), [slice]);
+            assert!(chunks.block.is_empty());
+            chunks.clear();
+            chunks.load(
+                shard.block(&body),
+                &[Part {
+                    range: 0..COPIED_MAX,
+                    zeros: 0,
+                }],
+            );
+            assert_eq!(pieces(&chunks), [("stretch", vec![7; COPIED_MAX])]);
         });
     }
 
