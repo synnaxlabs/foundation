@@ -100,7 +100,7 @@ impl fmt::Debug for Ticket {
 /// The region's record of a ticket. Its key is `public_key`.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the `Join` change of #336 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -114,7 +114,7 @@ pub(crate) struct Record {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the `Join` change of #336 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 impl Record {
     /// The record of a new ticket with `public_key` and `options`.
@@ -171,7 +171,7 @@ impl Record {
 /// Why a ticket does not admit a node.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the `Join` change of #336 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
@@ -246,30 +246,12 @@ fn statement(card: &card::Signed) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use transport::Address;
-    use types::node::SealKey;
 
     use super::*;
-    use crate::card::Card;
-    use crate::common::{key, private, public};
+    use crate::common::{key, private, public, signed, ticket, voter};
 
     const EXPIRY: Stamp = Stamp::from_nanos(1_000);
     const BEFORE_EXPIRY: Stamp = Stamp::from_nanos(999);
-
-    fn voter() -> Voter {
-        Voter {
-            key: key(1),
-            public_key: public(1),
-            addresses: card::addresses::Addresses::new(vec![Address::Udp(
-                "10.0.0.1:4000".parse().unwrap(),
-            )])
-            .unwrap(),
-        }
-    }
-
-    fn ticket(id: u8) -> Ticket {
-        Ticket::new(private(id), "plant".parse().unwrap(), vec![voter()])
-    }
 
     fn options(prefix: &str, reusable: bool) -> Options {
         Options {
@@ -282,17 +264,6 @@ mod tests {
 
     fn record(id: u8, reusable: bool) -> Record {
         Record::new(ticket(id).public_key(), options("plant.edge", reusable))
-    }
-
-    fn signed(id: u8, name: &str) -> card::Signed {
-        let card = Card {
-            name: name.parse().unwrap(),
-            public_key: public(id),
-            seal_key: SealKey::new([9; 32]).unwrap(),
-            addresses: card::addresses::Addresses::new(Vec::new()).unwrap(),
-            version: 1,
-        };
-        card::Signed::sign(key(id), card, &private(id))
     }
 
     #[test]

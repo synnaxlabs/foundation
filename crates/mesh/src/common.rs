@@ -6,12 +6,14 @@ use std::rc::Rc;
 
 use block::Pool;
 use raft::{Answer, Body, Grant, Message, Proof, Ready, Signature, Term};
+use transport::Address;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
 use crate::card::{self, Card};
 use crate::ed25519;
 use crate::grant::Signer;
 use crate::member::Member;
+use crate::ticket::{Ticket, Voter};
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);
@@ -32,17 +34,37 @@ pub(crate) fn public(id: u8) -> PublicKey {
     ed25519::public(&ed25519::pair(&private(id)))
 }
 
-/// The record of node `id`, with a card that the node signed.
-pub(crate) fn member(id: u8) -> Member {
+/// The card of node `id` with `name`, which the node signed.
+pub(crate) fn signed(id: u8, name: &str) -> card::Signed {
     let card = Card {
-        name: format!("plant.node{id}").parse().unwrap(),
+        name: name.parse().unwrap(),
         public_key: public(id),
         seal_key: SealKey::new([9; 32]).unwrap(),
         addresses: card::addresses::Addresses::new(Vec::new()).unwrap(),
         version: 1,
     };
+    card::Signed::sign(key(id), card, &private(id))
+}
+
+/// Voter 1 at `10.0.0.1:4000`.
+pub(crate) fn voter() -> Voter {
+    let address = Address::Udp("10.0.0.1:4000".parse().unwrap());
+    Voter {
+        key: key(1),
+        public_key: public(1),
+        addresses: card::addresses::Addresses::new(vec![address]).unwrap(),
+    }
+}
+
+/// The ticket of region `plant` with the private key of node `id`.
+pub(crate) fn ticket(id: u8) -> Ticket {
+    Ticket::new(private(id), "plant".parse().unwrap(), vec![voter()])
+}
+
+/// The record of node `id`, with a card that the node signed.
+pub(crate) fn member(id: u8) -> Member {
     Member {
-        card: card::Signed::sign(key(id), card, &private(id)),
+        card: signed(id, &format!("plant.node{id}")),
         admission: [0; 64],
         ephemeral: None,
         status: BTreeMap::new(),

@@ -8,8 +8,7 @@ use types::node::PublicKey;
 use types::time::Span;
 
 use crate::bytes::{
-    ABSENT, PRESENT, put_channel, put_count, put_name, take, take_channel, take_name,
-    take_present, take_rising,
+    put_optional_span, put_status, take, take_optional_span, take_status,
 };
 use crate::card;
 
@@ -45,18 +44,8 @@ impl Member {
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         self.card.encode(out);
         out.extend(self.admission);
-        match self.ephemeral {
-            None => out.push(ABSENT),
-            Some(span) => {
-                out.push(PRESENT);
-                out.extend(span.nanos().to_le_bytes());
-            }
-        }
-        put_count(self.status.len(), out);
-        for (name, &key) in &self.status {
-            put_name(name, out);
-            put_channel(key, out);
-        }
+        put_optional_span(self.ephemeral, out);
+        put_status(&self.status, out);
     }
 
     /// Takes one record from the start of `bytes`. `None` when the bytes do not start
@@ -69,16 +58,8 @@ impl Member {
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let card = card::Signed::decode(bytes)?;
         let admission = take(bytes)?;
-        let ephemeral = if take_present(bytes)? {
-            Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?)))
-        } else {
-            None
-        };
-        let mut status = BTreeMap::new();
-        take_rising(bytes, take_name, |name, bytes| {
-            status.insert(name, take_channel(bytes)?);
-            Some(())
-        })?;
+        let ephemeral = take_optional_span(bytes)?;
+        let status = take_status(bytes)?;
         Some(Self {
             card,
             admission,
@@ -93,6 +74,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::bytes::{put_count, put_name};
     use crate::common::{key, member};
 
     fn status() -> impl Strategy<Value = BTreeMap<Name, channel::Key>> {
