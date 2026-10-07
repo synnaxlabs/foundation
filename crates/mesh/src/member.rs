@@ -17,8 +17,8 @@ pub struct Member {
     pub admission: [u8; 64],
     /// For an ephemeral node, the time offline after which the region removes it.
     pub expiry: Option<Span>,
-    /// The key of each status channel of the node, by its name under `card.name`
-    /// (`clock.offset`). A status name keeps its meaning and data type in every
-    /// release.
+    /// The node's status channel keys, by name under the node's name: `clock.offset`
+    /// is `<card.name>.clock.offset` (X27). A status name keeps its meaning and data
+    /// type in every release.
     pub status: BTreeMap<Name, channel::Key>,
 }

@@ -1644,11 +1644,14 @@ How to read this record:
   `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
   node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
   byte form), the join ticket's signature over the first card, an ephemeral expiry, and
-  the key of each status channel (X27) by its name under the node's name
-  (`clock.offset`). A status name keeps its meaning and data type in every release, so
-  `hub` resolves a status channel from the record alone; a list in the order of a table
-  in `node` lost, because `hub` cannot read that table and a new release would change
-  what a stored position means (architect, #242:
+  the key of each status channel (X27) by its name relative to the node's name
+  (`clock.offset`, never the full name). The joining node gives its own release's names;
+  the voters assign the keys at join (X27). A status name keeps its meaning and data
+  type in every release, and a change takes a new name, so `hub` resolves a status
+  channel from the record alone. The byte form (#336) writes the status entries in name
+  order. A list in the order of a table in `node` lost, because `hub` cannot read that
+  table and a new release would change what a stored position means. Cost: about 40
+  bytes of names per member (architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
   card's byte form is the name behind a length byte, the public key (32 bytes), the seal
   key (32 bytes), a count of addresses (8 bytes), each address, and the version (8
