@@ -1363,8 +1363,10 @@ How to read this record:
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
-  first message. A stream that ends or resets before its class byte drops: the peer
-  never accepts it, and resets the reply half of a two-way stream with code 0. Each
+  first message. The peer queues a stream for accept at the first byte of its first
+  message. A stream that ends or resets before that byte drops: the peer never accepts
+  it, and resets the reply half of a two-way stream with code 0 (amended:
+  https://github.com/synnaxlabs/foundation/pull/1380#issuecomment-6038160446). Each
   message is a QUIC varint length, then that many bytes, at most the receiver's
   `message_bytes_max`. A node accepts the waiting streams highest class first. Each
   stream sends at the QUIC priority of its class, `Command` first, and streams of one
@@ -1544,10 +1546,13 @@ How to read this record:
   connected attempt: proposed by `box2.builder-5`, decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
 - **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` or `send_parts` future
-  that drops after the stream took its message, and before it completes, resets the
-  stream with `Code(0)`. One that drops before the stream took its message, such as
-  before its first poll or while it waits behind an earlier message, sends nothing and
-  changes nothing. After a reset, each `send`, `try_send`, `send_parts`,
+  that drops after the stream sent a byte of its message (its header counts), and
+  before it completes, resets the stream with `Code(0)`. One that drops before that
+  sends nothing and changes nothing, and the stream stays open. That includes a drop
+  before its first poll, while it waits behind an earlier message, while it waits for
+  its turn, and while it waits for room in the send budget. The core takes the message
+  out and gives back its room in the send budget and its place in the turn, as a
+  completed write does. After a reset, each `send`, `try_send`, `send_parts`,
   `try_send_parts`, and `finish` on the sender gives `Error::Reset { code: Code(0) }`
   after the checks below, and the `Error::Reset` doc names both causes: the peer, or a
   dropped `send` future. A dropped future is a normal cancel in async code, such as a
@@ -1557,11 +1562,14 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313). Amended
   by the architect
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035156093): reset
-  only when bytes of the message may have gone. `send`, `try_send`, `send_parts`, and
-  `try_send_parts` check in this order: the range panic (`*_parts`), the panic after
-  `finish`, `Error::TooLarge`, then the state errors (`Reset` after a dropped send
-  future, `Stopped`, or the error that ended the session). The limit is fixed for the
-  session, so a size defect shows in every state of the stream
+  only when bytes of the message may have gone. Amended again
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035820204): the
+  rule names the fact, a byte went, and not the proxy, the stream took it. `send`,
+  `try_send`, `send_parts`, and `try_send_parts` check in this order: the range panic
+  (`*_parts`), the panic after `finish`, `Error::TooLarge`, then the state errors
+  (`Reset` after a dropped send future, `Stopped`, or the error that ended the
+  session). The limit is fixed for the session, so a size defect shows in every state
+  of the stream
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035220831).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
