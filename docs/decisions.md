@@ -249,9 +249,13 @@ How to read this record:
   its store time, so a reader that is behind gets a gap. Most specific wins as a whole
   policy (X25), equal specificity is a plan error (S12), and a data channel takes its
   index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", and a
-  size cap per index.
+  size cap per index. In `config`, `select` and `keep` are both required. `keep` reads
+  with `document::read::span` (`document.bad-span`), where a negative span reads, and
+  `config` refuses it with `config.negative-span` at the `keep` value. The code names
+  the defect, so a later span bound (a reader `hold`, S10) uses it too.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on

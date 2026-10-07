@@ -3,6 +3,7 @@
 
 mod node_settings;
 mod placement;
+mod retention;
 
 use std::collections::{BTreeMap, btree_map};
 
@@ -25,9 +26,10 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, by keyword, and its check.
-const KINDS: [(&str, Check); 2] = [
+const KINDS: [(&str, Check); 3] = [
     ("node_settings", node_settings::check),
     ("placement", placement::check),
+    ("retention", retention::check),
 ];
 
 /// A checked definition and the label that names it.
@@ -490,7 +492,7 @@ mod tests {
                 "config.unknown-block",
                 at(0, 0),
                 "`nodes` is not a kind of block",
-                "Use `node_settings` or `placement`, or remove the block",
+                "Use `node_settings`, `placement`, or `retention`, or remove the block",
             )])
         );
     }
@@ -1211,6 +1213,121 @@ mod tests {
                     at(0, 14),
                     "`node` is not an attribute of the `placement` block",
                     "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                )])
+            );
+        }
+    }
+
+    mod retentions {
+        use spec::retention::Policy;
+        use types::time;
+
+        use super::*;
+
+        /// A `retention` block in file 0 at offset 0, labeled `edge`.
+        fn retention(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(
+                0,
+                0,
+                "retention",
+                &["edge"],
+                attributes,
+            )])]
+        }
+
+        /// The one entry of a retention labeled `edge` that selects `edge.**`.
+        fn kept(keep: time::Span) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(selector(&["edge.**"]), keep).unwrap();
+            let entry = Entry {
+                definition: Definition::Retention(policy),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@retention"), entry)])
+        }
+
+        #[test]
+        fn reads_a_retention() {
+            let three_days = time::Span::from_nanos(3 * time::Span::DAY.nanos());
+            for (text, keep) in [("3d", three_days), ("0s", time::Span::ZERO)] {
+                let documents =
+                    retention(&[("select", string("edge.**")), ("keep", string(text))]);
+                assert_eq!(check(&documents), Ok(kept(keep)), "{text:?}");
+            }
+        }
+
+        #[test]
+        fn refuses_a_retention_without_select_or_keep() {
+            let select = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `retention` block has no `select`",
+                "Add a `select` attribute with the indexes that it caps, such as \
+                 \"site_a.*\"",
+            );
+            let keep = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `retention` block has no `keep`",
+                "Add a `keep` attribute with a span such as \"3d\"",
+            );
+            let cases = [
+                (vec![("keep", string("3d"))], vec![select.clone()]),
+                (vec![("select", string("edge.**"))], vec![keep.clone()]),
+                (vec![], vec![select, keep]),
+            ];
+            for (attributes, diagnostics) in cases {
+                assert_eq!(
+                    check(&retention(&attributes)),
+                    Err(diagnostics),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_negative_keep_at_its_value() {
+            let documents =
+                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.negative-span",
+                    at(0, 13),
+                    "a retention keeps -1s, which is below zero",
+                    "Write a keep time of zero or more",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_keep_that_is_not_a_span() {
+            let documents =
+                retention(&[("select", string("edge.**")), ("keep", string("3 days"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.bad-span",
+                    at(0, 13),
+                    "cannot read the span \"3 days\": a span is not a number and a unit",
+                    "Write a span such as \"250us\", \"1.5s\", or \"3d\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_that_a_retention_does_not_have() {
+            let documents = retention(&[
+                ("select", string("edge.**")),
+                ("keep", string("3d")),
+                ("hold", string("1d")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 14),
+                    "`hold` is not an attribute of the `retention` block",
+                    "Use `select` or `keep`, or remove it",
                 )])
             );
         }
