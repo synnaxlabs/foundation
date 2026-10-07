@@ -241,7 +241,6 @@ impl Body {
         matches!(self, Self::Heartbeat { .. } | Self::Append { .. })
     }
 
-    /// What this body grants, with its signature: `None` unless it grants.
     // The entries an append carries; none for another body.
     pub(crate) fn entries(&self) -> &[Entry] {
         match self {
@@ -257,6 +256,7 @@ impl Body {
         }
     }
 
+    /// What this body grants, with its signature: `None` unless it grants.
     pub(crate) fn granted(&self) -> Option<(Grant, Option<Signature>)> {
         match *self {
             Self::PreVoteReply {

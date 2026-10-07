@@ -98,6 +98,49 @@ fn an_append_claims_each_vote_then_the_change_of_each_change_it_carries() {
 }
 
 #[test]
+fn a_message_claims_its_proof_then_its_changes_then_its_grant() {
+    let proof = Proof {
+        grant: Grant::Vote,
+        candidate: key(1),
+        voters: [(key(1), Some(signature(1))), (key(3), Some(signature(3)))].into(),
+    };
+    let kept = change(&|voter| Some(signature(voter)));
+    let append = Body::Append {
+        prev: Position::default(),
+        entries: vec![kept],
+        commit: 0,
+    };
+    let message = message(6, append, Some(proof));
+    let claims: Vec<_> = message.claims().collect();
+    let voters = Voters {
+        incoming: [key(1), key(2)].into(),
+        outgoing: [key(1), key(2), key(3)].into(),
+    };
+    let grant = |voter, term, candidate| Claim::Grant {
+        voter: key(voter),
+        grant: Grant::Vote,
+        term: Term(term),
+        candidate: key(candidate),
+    };
+    let change = Claim::Change {
+        leader: key(2),
+        at: Position {
+            term: Term(5),
+            index: 3,
+        },
+        voters: &voters,
+    };
+    let want = [
+        (grant(1, 6, 1), Some(signature(1))),
+        (grant(3, 6, 1), Some(signature(3))),
+        (grant(1, 5, 2), Some(signature(1))),
+        (grant(2, 5, 2), Some(signature(2))),
+        (change, Some(signature(0))),
+    ];
+    assert_eq!(claims, want);
+}
+
+#[test]
 fn a_pre_vote_grant_claims_a_pre_vote_to_the_receiver() {
     let body = Body::PreVoteReply {
         answer: Answer::Granted(None),

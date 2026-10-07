@@ -64,12 +64,12 @@ impl Signer {
 ///
 /// # Errors
 ///
-/// [`Error`] names the first voter that fails, in the order of
+/// [`Error`] names the signer of the first claim that fails, in the order of
 /// [`Message::claims`].
 ///
 /// # Panics
 ///
-/// When a grant has no signature. A decoded message gives each grant one.
+/// When a claim has no signature. A decoded message gives each claim one.
 pub(crate) fn check(
     message: &Message,
     members: &BTreeMap<node::Key, PublicKey>,

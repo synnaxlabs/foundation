@@ -151,13 +151,13 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
     ///   voter of this node's configuration.
-    /// - [`Error::Grant`] when a grant in the message does not hold.
+    /// - [`Error::Grant`] when a claim in the message does not hold.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
     ///
-    /// When a grant in `message` has no signature. A decoded message gives each
-    /// grant one.
+    /// When a claim in `message` has no signature. A decoded message gives each
+    /// claim one.
     pub(crate) fn receive(
         &self,
         peer: PublicKey,
