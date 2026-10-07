@@ -1464,8 +1464,8 @@ How to read this record:
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. Nothing
   bounds the proposals and the messages that the group takes in that time, and a record
-  that the pool can never hold waits with no end (#1091). A `TooLarge` record stops the
-  group (the `Refused` wait decided by the architect:
+  that the pool can never hold waits with no end (#1091). A pool whose budget holds no
+  block (`TooLarge`) stops the group (the `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with

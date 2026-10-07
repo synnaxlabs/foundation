@@ -421,7 +421,7 @@ async fn run(
         });
         let Some(mut ready) = next.await else { return };
         signer.sign(&mut ready);
-        // The pool may give the blocks later, so the same write runs again at each tick.
+        // The pool may give the blocks later, so the write runs again at each tick.
         let written = loop {
             match log.write(ready.hard.clone(), &ready.entries).await {
                 Err(log::Error::Pool(
@@ -1209,7 +1209,6 @@ mod tests {
             };
             let mesh = Mesh::open(config).await.unwrap();
             switch.refuse();
-            let _held = fill(&pool);
             let refused = block::Error::Refused { requested: 1 };
             assert_eq!(pool.alloc(1).err(), Some(refused));
             let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
