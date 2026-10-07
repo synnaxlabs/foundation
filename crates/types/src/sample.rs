@@ -3,37 +3,59 @@
 use std::fmt;
 use std::str::FromStr;
 
-/// A fixed-width sample type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Scalar {
+/// Defines [`Scalar`], its text, and `SCALARS` from one list, so no scalar can miss its
+/// text or its place in `SCALARS`.
+macro_rules! scalars {
+    ($($(#[$doc:meta])* $variant:ident = $name:literal,)*) => {
+        /// A fixed-width sample type.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Scalar {
+            $($(#[$doc])* $variant,)*
+        }
+
+        impl Scalar {
+            /// The name of the scalar in the text of a [`Type`].
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)*
+                }
+            }
+        }
+
+        /// Each scalar, in the order of its declaration.
+        const SCALARS: &[Scalar] = &[$(Scalar::$variant,)*];
+    };
+}
+
+scalars! {
     /// One byte: 0 or 1.
-    Bool,
+    Bool = "bool",
     /// Signed 8-bit integer.
-    I8,
+    I8 = "i8",
     /// Signed 16-bit integer.
-    I16,
+    I16 = "i16",
     /// Signed 32-bit integer.
-    I32,
+    I32 = "i32",
     /// Signed 64-bit integer.
-    I64,
+    I64 = "i64",
     /// Unsigned 8-bit integer.
-    U8,
+    U8 = "u8",
     /// Unsigned 16-bit integer.
-    U16,
+    U16 = "u16",
     /// Unsigned 32-bit integer.
-    U32,
+    U32 = "u32",
     /// Unsigned 64-bit integer.
-    U64,
+    U64 = "u64",
     /// 32-bit float.
-    F32,
+    F32 = "f32",
     /// 64-bit float.
-    F64,
+    F64 = "f64",
     /// A [`crate::time::Stamp`].
-    Stamp,
+    Stamp = "timestamp",
     /// A [`crate::time::Span`].
-    Span,
+    Span = "duration",
     /// A 128-bit UUID.
-    Uuid,
+    Uuid = "uuid",
 }
 
 impl Scalar {
@@ -49,48 +71,11 @@ impl Scalar {
         }
     }
 
-    /// The name of the scalar in the text of a [`Type`].
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Bool => "bool",
-            Self::I8 => "i8",
-            Self::I16 => "i16",
-            Self::I32 => "i32",
-            Self::I64 => "i64",
-            Self::U8 => "u8",
-            Self::U16 => "u16",
-            Self::U32 => "u32",
-            Self::U64 => "u64",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
-            Self::Stamp => "timestamp",
-            Self::Span => "duration",
-            Self::Uuid => "uuid",
-        }
-    }
-
     /// The scalar that `text` names.
     fn named(text: &str) -> Option<Self> {
-        SCALARS.into_iter().find(|scalar| scalar.name() == text)
+        SCALARS.iter().copied().find(|scalar| scalar.name() == text)
     }
 }
-
-const SCALARS: [Scalar; 14] = [
-    Scalar::Bool,
-    Scalar::I8,
-    Scalar::I16,
-    Scalar::I32,
-    Scalar::I64,
-    Scalar::U8,
-    Scalar::U16,
-    Scalar::U32,
-    Scalar::U64,
-    Scalar::F32,
-    Scalar::F64,
-    Scalar::Stamp,
-    Scalar::Span,
-    Scalar::Uuid,
-];
 
 /// The byte layout of one channel's samples.
 ///
@@ -202,7 +187,7 @@ fn count(text: &str) -> Result<u32, Error> {
     if !digits || (text.len() > 1 && text.starts_with('0')) {
         return Err(Error::Count);
     }
-    text.parse().map_err(|_too_large| Error::Count)
+    text.parse().map_err(|_not_a_u32| Error::Count)
 }
 
 /// Why a text is not a sample type. `Display` gives the message: a lower-case clause
@@ -275,16 +260,8 @@ mod tests {
     use crate::common::assert_stated;
     use proptest::prelude::*;
 
-    #[test]
-    fn holds_each_scalar_in_order() {
-        for (index, scalar) in SCALARS.into_iter().enumerate() {
-            assert_eq!(scalar as usize, index, "{scalar:?}");
-        }
-        assert_eq!(Scalar::Uuid as usize + 1, SCALARS.len());
-    }
-
     fn types() -> impl Strategy<Value = Type> {
-        let scalar = prop::sample::select(SCALARS.as_slice());
+        let scalar = prop::sample::select(SCALARS);
         prop_oneof![
             scalar.clone().prop_map(Type::Scalar),
             (scalar.clone(), any::<u32>())
@@ -329,8 +306,9 @@ mod tests {
             assert_eq!(text.parse(), Ok(sample), "{text}");
         }
         let names: Vec<_> = SCALARS
-            .map(|scalar| Type::Scalar(scalar).to_string())
-            .into();
+            .iter()
+            .map(|&scalar| Type::Scalar(scalar).to_string())
+            .collect();
         let expected = [
             "bool",
             "i8",
