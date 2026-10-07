@@ -4,8 +4,9 @@
 # message, an HTTP error, or no network, it exits 1, prints the body, if any, and
 # prints the error on stderr; with no login, it exits 4. After the answers run out,
 # it fails with "out of answers". `gh api rate_limit` gives the count in
-# `$STUB/left.<n>` after call <n>, else in `$STUB/left`, else 1. With `GH_DEBUG`
-# set, it also logs each request on stderr. A stub `sleep` returns at once, and
+# `$STUB/left.<n>` after call <n>, else in `$STUB/left`, else 1. As gh does, it
+# logs each request on stderr for a true `GH_DEBUG`, or, when that is not set, for a
+# true `DEBUG`. A stub `sleep` returns at once, and
 # stops the script on its fifth call; when `$STUB/slow` exists, it sleeps. Needs
 # `jq`. Exit 1 on a failure.
 set -u
@@ -16,7 +17,12 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin" "$tmp/live"
 cat > "$tmp/bin/gh" <<'STUB'
 #!/bin/sh
-[ -z "${GH_DEBUG-}" ] || echo "* Request to https://api.github.com/graphql" >&2
+case ${GH_DEBUG-unset} in
+  unset) case ${DEBUG-} in 1 | true | yes | api) log=1 ;; *) log= ;; esac ;;
+  "" | 0 | false | no) log= ;;
+  *) log=1 ;;
+esac
+[ -z "$log" ] || echo "* Request to https://api.github.com/graphql" >&2
 n=$(cat "$STUB/calls")
 [ "$2" != rate_limit ] ||
   { cat "$STUB/left.$n" 2>/dev/null || cat "$STUB/left" 2>/dev/null || echo 1; exit 0; }
@@ -89,16 +95,22 @@ answers() {
 
 # run <name> <exit> <output> <polls> <answer>...: wait.sh gets the answers in order,
 # and must stop after <polls> of them with <exit> and <output>. `$left` sets the
-# rate limit, `$spent` the call after which it is 0, and `$debug` sets GH_DEBUG.
+# rate limit, `$spent` the call after which it is 0, and `$gh_debug` and `$debug`
+# set GH_DEBUG and DEBUG, which are else unset.
 run() {
   name=$1 code=$2 out=$3 polls=$4
   shift 4
   answers "$@"
   [ -z "${left-}" ] || echo "$left" > "$tmp/left"
   [ -z "${spent-}" ] || echo 0 > "$tmp/left.$spent"
-  got=$(GH_DEBUG=${debug-} STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" 7)
+  got=$(
+    unset GH_DEBUG DEBUG
+    [ -z "${gh_debug-}" ] || export GH_DEBUG="$gh_debug"
+    [ -z "${debug-}" ] || export DEBUG="$debug"
+    STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" 7
+  )
   check "$name" $? "$got" "$(cat "$tmp/calls")" "$code" "$out" "$polls"
-  unset left spent debug
+  unset left spent gh_debug debug
 }
 
 # check <name> <exit> <output> <polls> <expected exit> <output> <polls>
@@ -221,7 +233,9 @@ left=1 run "rate limit error with calls left" 1 \
 gh: API rate limit exceeded." 3 "$e" "$e" "$e"
 spent=3 run "a spent rate limit keeps the failures" 1 \
   "$stop error connecting to api.github.com" 4 offline offline "$e" offline
-debug=1 run "GH_DEBUG" 0 "#7 merged" 1 "$merged"
+gh_debug=1 run "GH_DEBUG" 0 "#7 merged" 1 "$merged"
+debug=1 run "DEBUG" 0 "#7 merged" 1 "$merged"
+gh_debug=0 debug=1 run "GH_DEBUG=0 with DEBUG" 0 "#7 merged" 1 "$merged"
 answers "$(pr OPEN)"
 touch "$tmp/slow"
 # The shell reports a job that a signal ended on stderr.
