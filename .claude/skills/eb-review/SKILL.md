@@ -78,7 +78,7 @@ Nobody waits for a person's decision here. The line is how far the change reache
 - **A change to another crate's public surface.** Follow "Interface changes" in
   `docs/coordination.md`.
 - **A change to a locked decision, a contract, or an oracle.** Message
-  `laptop.architect`, who takes it to the person.
+  the crate's architect (`docs/factory.md`), who takes it to the person.
 
 A plan is cheap to change: revise it directly, shape included, and post the revised
 plan on the issue.
