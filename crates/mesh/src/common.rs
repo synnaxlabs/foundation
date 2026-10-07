@@ -143,17 +143,49 @@ pub(crate) fn signature(voter: u8, grant: Grant, candidate: u8) -> Signature {
 /// When `leader` is not 1, 2 or 3: a proof holds its candidate as a voter.
 pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
     assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
-    let vote = |voter| {
-        let signed = (voter != leader).then(|| signature(voter, Grant::Vote, leader));
+    proven_at(
+        leader,
+        to,
+        TERM,
+        &[1, 2, 3].map(|voter| (voter, voter)),
+        body,
+    )
+}
+
+/// `body` from `leader` to `to` in `term`, signed, with the leader's vote from each
+/// `(voter, signer)`, which the private key of `signer` signs. The leader's own vote
+/// carries no signature.
+pub(crate) fn proven_at(
+    leader: u8,
+    to: u8,
+    term: Term,
+    votes: &[(u8, u8)],
+    body: Body,
+) -> Message {
+    let vote = |&(voter, signer): &(u8, u8)| {
+        let signed = (voter != leader).then(|| {
+            let body = reply_body(Grant::Vote, Answer::Granted(None));
+            let mut ready = Ready {
+                messages: vec![Message {
+                    term,
+                    ..message(voter, leader, body)
+                }],
+                ..Ready::default()
+            };
+            Signer::new(key(voter), &private(signer)).sign(&mut ready);
+            let (_, signature) = ready.messages[0].claims().next().unwrap();
+            signature.unwrap()
+        });
         (key(voter), signed)
     };
     let proof = Proof {
         grant: Grant::Vote,
         candidate: key(leader),
-        voters: [1, 2, 3].map(vote).into(),
+        voters: votes.iter().map(vote).collect(),
     };
     let mut ready = Ready {
         messages: vec![Message {
+            term,
             proof: Some(proof),
             ..message(leader, to, body)
         }],

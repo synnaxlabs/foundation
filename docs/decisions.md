@@ -1761,8 +1761,15 @@ How to read this record:
   endian), and the candidate (16 bytes, little endian). The voter in the bytes keeps
   two members that share a key from sharing a signature. Grants name no region; a
   second region adds the region key under `foundation/grant/2`. The driver (#471)
-  checks each claim of a message against the public keys of the members before each
-  `step`. The format version stays 1: no log has shipped. A later record replaces the
+  checks each claim of a message before each `step` against the key of its signer: the
+  key of a member in the applied state, else the key that each join of that node in the
+  log as written and not applied names, when all of them name one key. A later record
+  that replaces a join removes its key. Two joins that name two keys give none until the
+  apply decides: a voter stamps a join with no check, so the first can be forged
+  (decided by `laptop.director`, 2026-10-07T12:48:00Z and 2026-10-07T13:10:50Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423 and
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429). The
+  format version stays 1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
   In a file with no record, it makes that file again, larger, so each file but the last
@@ -1847,14 +1854,28 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
-  configuration refuses a leader that is not a voter of that configuration, when a
-  change that the node does not hold made that leader a voter. The node does not get the
-  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
-  configuration takes no request. Only a voter that an operator wiped is such a node
-  (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242, 2026-10-07T04:20:40Z:
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
+  (`Error::NotVoter`), and each claim of a signer with a key at the node holds
+  (`Error::Grant`). So a node with a configuration refuses a leader that is not a voter
+  of that configuration, when a change that the node does not hold made that leader a
+  voter. The node does not get the log from that leader (a known defect, #1096, that
+  #1107 fixes). A node with no configuration takes no request. Only a voter that an
+  operator wiped is such a node (#881), because a node that joins opens with the
+  founding voters from its join answer (decided by the architect, #242,
+  2026-10-07T04:20:40Z:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). `mesh`
+  removes each claim of a signer with no key at the node before `step`: that signer is
+  a voter of no configuration there. A hard proof that lost such a claim can be no
+  quorum at a node with a newer configuration, which then learns the term from the
+  leader. `propose_voters` refuses a set with a node that is not a member in the
+  applied state of this node (`Error::NotMember`, the first such key), so each log
+  that holds the `Voters` entry holds the join of each of its voters before it, and the
+  join applies the same on each node (decided by `laptop.director`,
+  2026-10-07T12:48:00Z and 2026-10-07T13:10:50Z, with the error of `laptop.architect`,
+  2026-10-07T12:48:43Z and 2026-10-07T13:08:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423,
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429,
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038247134, and
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038611630).
   `propose` returns the position of its entry only after the write that holds the entry
   ends: a lone voter leads before its term is on disk, and after a power cut the same
   position can hold another change. A second call that waits for the write lost: no

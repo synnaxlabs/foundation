@@ -51,9 +51,9 @@ impl Signer {
     }
 }
 
-/// Checks each signature that `message` carries against the public keys of the
-/// region's members. `public_key` gives the key of a member, and `None` for a node
-/// that is not one.
+/// Removes from the proof of `message` each voter that `public_key` gives no key,
+/// then checks each signature that `message` still carries. A voter with no key at
+/// this node is a voter of no configuration here, so its claim proves nothing.
 ///
 /// # Errors
 ///
@@ -62,14 +62,20 @@ impl Signer {
 ///
 /// # Panics
 ///
-/// When a grant has no signature. A decoded message gives each grant one.
+/// - When a grant has no signature. A decoded message gives each grant one.
+/// - When `message` grants a reply and `public_key` gives its sender no key: the
+///   caller checks the sender first.
 pub(crate) fn check(
-    message: &Message,
+    message: &mut Message,
     public_key: impl Fn(node::Key) -> Option<PublicKey>,
 ) -> Result<(), Error> {
+    if let Some(proof) = &mut message.proof {
+        proof.voters.retain(|&voter, _| public_key(voter).is_some());
+    }
     for (claim, signature) in message.claims() {
         let voter = claim.voter;
-        let public = public_key(voter).ok_or(Error::NotMember { voter })?;
+        let public =
+            public_key(voter).expect("invariant: the caller checks the sender first");
         let Signature(bytes) =
             signature.expect("invariant: decode gives each grant a signature");
         if !ed25519::holds(public, &statement(&claim), &bytes) {
@@ -82,11 +88,6 @@ pub(crate) fn check(
 /// Why [`check`] refused a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
-    /// The voter is not a member of the region.
-    NotMember {
-        /// The voter.
-        voter: node::Key,
-    },
     /// The voter's grant has no signature that holds under its public key.
     Forged {
         /// The voter.
@@ -97,9 +98,6 @@ pub(crate) enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotMember { voter } => {
-                write!(f, "voter {voter} is not a member of the region")
-            }
             Self::Forged { voter } => write!(f, "the grant of voter {voter} is forged"),
         }
     }
@@ -171,7 +169,10 @@ mod tests {
     #[test]
     fn a_signed_grant_passes() {
         for grant in [Grant::PreVote, Grant::Vote] {
-            assert_eq!(check(&granted(2, grant, 1), members(&[1, 2, 3])), Ok(()));
+            assert_eq!(
+                check(&mut granted(2, grant, 1), members(&[1, 2, 3])),
+                Ok(())
+            );
         }
     }
 
@@ -183,23 +184,23 @@ mod tests {
             let body = Body::Heartbeat {
                 commit: u64::from(leader),
             };
-            let message = common::proven(leader, to, body.clone());
+            let mut message = common::proven(leader, to, body.clone());
             assert_eq!((message.from, message.to), (key(leader), key(to)));
             assert_eq!(message.body, body);
-            assert_eq!(check(&message, &members), Ok(()), "leader {leader}");
+            assert_eq!(check(&mut message, &members), Ok(()), "leader {leader}");
         }
     }
 
     #[test]
     fn a_refusal_carries_no_signature() {
-        let refused = message(2, 1, reply_body(Grant::Vote, Answer::Refused));
+        let mut refused = message(2, 1, reply_body(Grant::Vote, Answer::Refused));
         let mut ready = Ready {
             messages: vec![refused.clone()],
             ..Ready::default()
         };
         signer(2).sign(&mut ready);
         assert_eq!(ready.messages, std::slice::from_ref(&refused));
-        assert_eq!(check(&refused, members(&[1, 2])), Ok(()));
+        assert_eq!(check(&mut refused, members(&[1, 2])), Ok(()));
     }
 
     #[test]
@@ -242,16 +243,22 @@ mod tests {
     }
 
     #[test]
-    fn check_refuses_a_voter_that_is_not_a_member() {
-        let unknown = Error::NotMember { voter: key(3) };
-        let refused = Err(unknown);
-        assert_eq!(check(&proven(), members(&[1, 2])), refused);
-        assert_eq!(
-            unknown.to_string(),
-            format!("voter {} is not a member of the region", key(3))
-        );
-        let reply = granted(3, Grant::Vote, 1);
-        assert_eq!(check(&reply, members(&[1, 2])), refused);
+    fn check_removes_a_voter_with_no_key_from_the_proof() {
+        for signature in [Some(signature(3, Grant::Vote, 1)), Some(Signature([7; 64]))]
+        {
+            let mut message = proven();
+            *voter(&mut message, 3) = signature;
+            assert_eq!(check(&mut message, members(&[1, 2])), Ok(()));
+            let mut expected = proven();
+            expected.proof.as_mut().unwrap().voters.remove(&key(3));
+            assert_eq!(message, expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: the caller checks the sender first")]
+    fn check_panics_on_a_grant_whose_sender_has_no_key() {
+        check(&mut granted(3, Grant::Vote, 1), members(&[1, 2])).unwrap();
     }
 
     #[test]
@@ -259,7 +266,7 @@ mod tests {
         let mut message = proven();
         voter(&mut message, 2).as_mut().unwrap().0[63] ^= 1;
         let forged = Error::Forged { voter: key(2) };
-        assert_eq!(check(&message, members(&[1, 2, 3])), Err(forged));
+        assert_eq!(check(&mut message, members(&[1, 2, 3])), Err(forged));
         assert_eq!(
             forged.to_string(),
             format!("the grant of voter {} is forged", key(2))
@@ -271,7 +278,7 @@ mod tests {
     fn check_panics_on_an_unsigned_entry() {
         let mut message = proven();
         *voter(&mut message, 3) = None;
-        check(&message, members(&[1, 2, 3])).unwrap();
+        check(&mut message, members(&[1, 2, 3])).unwrap();
     }
 
     #[test]
@@ -287,15 +294,16 @@ mod tests {
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::Forged { voter: key(3) });
-        assert_eq!(check(&message, members), refused);
+        assert_eq!(check(&mut message, members), refused);
     }
 
     #[test]
     fn check_names_the_first_voter_that_fails() {
         let mut message = proven();
+        *voter(&mut message, 2) = Some(signature(3, Grant::Vote, 1));
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
-        let refused = Err(Error::NotMember { voter: key(2) });
-        assert_eq!(check(&message, members(&[1, 3])), refused);
+        let refused = Err(Error::Forged { voter: key(2) });
+        assert_eq!(check(&mut message, members(&[1, 2, 3])), refused);
     }
 
     #[test]
@@ -304,13 +312,13 @@ mod tests {
         let forged = Err(Error::Forged { voter: key(1) });
         let mut later = proven();
         later.term = Term(TERM.0 + 1);
-        assert_eq!(check(&later, &members), forged);
+        assert_eq!(check(&mut later, &members), forged);
         let mut other = proven();
         other.proof.as_mut().unwrap().candidate = key(4);
-        assert_eq!(check(&other, &members), forged);
+        assert_eq!(check(&mut other, &members), forged);
         let mut pre_vote = proven();
         pre_vote.proof.as_mut().unwrap().grant = Grant::PreVote;
-        assert_eq!(check(&pre_vote, &members), forged);
+        assert_eq!(check(&mut pre_vote, &members), forged);
     }
 
     #[test]
@@ -319,14 +327,14 @@ mod tests {
         let forged = Err(Error::Forged { voter: key(2) });
         let mut later = granted(2, Grant::Vote, 1);
         later.term = Term(TERM.0 + 1);
-        assert_eq!(check(&later, &members), forged);
+        assert_eq!(check(&mut later, &members), forged);
         let mut other = granted(2, Grant::Vote, 1);
         other.to = key(3);
-        assert_eq!(check(&other, &members), forged);
+        assert_eq!(check(&mut other, &members), forged);
         let mut pre_vote = granted(2, Grant::Vote, 1);
         let answer = Answer::Granted(Some(signature(2, Grant::Vote, 1)));
         pre_vote.body = reply_body(Grant::PreVote, answer);
-        assert_eq!(check(&pre_vote, &members), forged);
+        assert_eq!(check(&mut pre_vote, &members), forged);
     }
 
     #[test]
@@ -334,7 +342,7 @@ mod tests {
         let mut moved = granted(2, Grant::Vote, 1);
         moved.from = key(3);
         let refused = Err(Error::Forged { voter: key(3) });
-        assert_eq!(check(&moved, members(&[1, 2, 3])), refused);
+        assert_eq!(check(&mut moved, members(&[1, 2, 3])), refused);
     }
 
     // Three voters that sign each `Ready`, send its byte form, and check each
@@ -406,12 +414,16 @@ mod tests {
         }
 
         fn deliver(&mut self, bytes: &[u8]) {
-            let Some(crate::message::Message::Raft(message)) =
+            let Some(crate::message::Message::Raft(mut message)) =
                 crate::message::Message::decode(bytes)
             else {
                 panic!("{bytes:?} is not a raft message");
             };
-            assert_eq!(check(&message, members(&[1, 2, 3])), Ok(()), "{message:?}");
+            assert_eq!(
+                check(&mut message, members(&[1, 2, 3])),
+                Ok(()),
+                "{message:?}"
+            );
             let (node, _) = self
                 .nodes
                 .iter_mut()
