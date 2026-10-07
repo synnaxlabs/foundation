@@ -51,8 +51,8 @@ pub(crate) enum Protocol {
     Ni,
 }
 
-/// What a reader received on one channel, folded as it arrives, so an hour at full
-/// rate needs no memory per sample.
+/// What a reader received on one channel, folded as it arrives, so a long run at
+/// full rate needs no memory per sample.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Received {
     pub samples: u64,

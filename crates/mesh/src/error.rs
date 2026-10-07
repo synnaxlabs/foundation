@@ -4,7 +4,7 @@ use raft::Position;
 use types::node::{self, PublicKey};
 
 use crate::region::{Unfit, Unknown};
-use crate::{grant, log, status};
+use crate::{claim, log, status};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,8 +30,8 @@ pub(crate) enum Error {
         /// The key that the peer proved.
         peer: PublicKey,
     },
-    /// A message carries a grant or a change that does not hold.
-    Grant(grant::Error),
+    /// A message carries a claim that does not hold.
+    Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
     /// The region cannot hold a member record of the config.
@@ -70,7 +70,7 @@ impl fmt::Display for Error {
                 "the peer with the public key {peer} forwarded a change, but no voter \
                  holds that key"
             ),
-            Self::Grant(error) => error.fmt(f),
+            Self::Claim(error) => error.fmt(f),
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
@@ -105,9 +105,9 @@ impl From<raft::Error> for Error {
     }
 }
 
-impl From<grant::Error> for Error {
-    fn from(error: grant::Error) -> Self {
-        Self::Grant(error)
+impl From<claim::Error> for Error {
+    fn from(error: claim::Error) -> Self {
+        Self::Claim(error)
     }
 }
 

@@ -191,6 +191,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "types_sample"
+path = "fuzz_targets/types_sample.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "wire_clock"
 path = "fuzz_targets/wire_clock.rs"
 test = false

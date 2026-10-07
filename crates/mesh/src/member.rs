@@ -23,7 +23,7 @@ pub struct Member {
 }
 
 impl Member {
-    /// The key that the node's peer proves and that signs the node's grants.
+    /// The key that the node's peer proves and that signs the node's claims.
     pub(crate) const fn public_key(&self) -> PublicKey {
         self.card.card().public_key
     }
