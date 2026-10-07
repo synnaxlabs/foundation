@@ -2007,9 +2007,13 @@ How to read this record:
 - **A1 (current part)** One home per index orders samples, keeps the buffer, and runs
   the gate. Reads may come from a copy. Supersedes: A1 channel home field, A1 standby in
   the mesh file.
-- **S12 (placement part) + B7** Placement is a policy: `placement { select, standby,
-  copies }`. With no placement, an index's home is the node of the connector that writes
-  it (precedence in X22).
+- **S12 (placement part) + B7** Placement is a policy: `placement { select, home,
+  standby, copies }`. Each node field is optional, but a placement names at least one
+  node, and no node has two roles. When no placement selects the index, or the winning
+  placement names no home, an index's home is the node of the connector that writes it
+  (precedence in X22). Amended: the `home` field restores the recorded intent
+  ("placement decides home", r8 Q8), which the bootstrap list left out (architect,
+  #1150, https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
@@ -3220,7 +3224,7 @@ Storage classes used in the table:
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
 | Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
 | Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
-| Placement policy | Spec; selects connectors and indexes: `{ select, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
+| Placement policy | Spec; selects connectors and indexes: `{ select, home, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
 | Compression policy | Spec; selects indexes; `mode` auto, raw, or max. The actual codec is a 1-byte tag per vector in the encoded bytes | Files | `codec` at the encoder (the home, or the writer's `hub`) | `spec`, `codec` |
 | Reduction policy | Spec; selects data channels; deadband checked against the channel's unit | Files | Connector library component through `hub.spec()` | `spec`, `connector` |
@@ -3558,9 +3562,14 @@ covers a connector and every index under its name. B7 gives indexes a default ho
 the connector's node. A placement selecting the same connector could name another node.
 Resolution: the connector's `node` is its required primary node (it is
 attached to a device, and `discover` writes it). A placement that selects a connector
-may add `standby` and `copies` but may not move its primary; `plan` fails if it tries.
+may add `standby` and `copies`, and may name only the connector's `node` as `home`;
+`plan` fails otherwise.
 An index's home, in order: a placement that selects the index, then the node of the
-connector that writes it (B7), then a plan error. Basis: BQ10, B7, C5 SHAPE.
+connector that writes it (B7), then a plan error. The placement resolves as a whole
+policy (X25): when the winning placement names no home, a less specific one does not
+give it (architect, #1150,
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+Basis: BQ10, B7, C5 SHAPE.
 
 **X23. The `index` edge stated twice.**
 Conflict: S5 puts `index` on the data channel, and BQ9 re-indexes "by changing `index`
