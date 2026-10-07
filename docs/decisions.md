@@ -1794,8 +1794,13 @@ How to read this record:
   #1485 (architect,
   https://github.com/synnaxlabs/foundation/issues/1485#issuecomment-6042768573,
   2026-10-07T17:05:00Z). A link is attested by its leader's signature and the votes
-  of its term alone, so a voter that led a term can forge a link to a configuration
-  it never wrote; the proof that a quorum holds the entry is #882. The chain
+  of its term alone, so a voter that led a term can sign a configuration entry it
+  never wrote, and prove any term with it: `raft` trusts its voters until #882,
+  which gives a link the signed acks of a quorum, and `prove` counts them. The test
+  `a_voter_that_led_a_term_can_forge_a_link_to_itself_and_prove_any_term` pins the
+  gap (architect,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423,
+  2026-10-07T17:22:17Z). The chain
   excludes a leader that a change the node missed made a voter (#1096). The log
   keeps the indexes of its configuration entries, so a chain costs their number, not
   the log's: the ruling deferred the index until a measured scan on a large log

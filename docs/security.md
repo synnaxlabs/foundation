@@ -150,8 +150,11 @@ state on `main`.
   configuration the node holds, or of one that a chain of signed configuration
   entries proves (#750, #881). A link carries only its leader's signature and the
   votes of its term, so a voter that led a term at or above the node's committed one
-  can forge a link to a configuration of itself alone, and then prove `u64::MAX`
-  with its own grant. The proof that a quorum holds the entry is #882. `mesh`
+  can sign a configuration entry it never wrote, to a configuration of itself alone,
+  put it in a chain, prove any term with its own grant, and so stop the group for
+  good. `raft` trusts its voters until #882, which gives a link the signed acks of
+  a quorum; `crates/raft/tests/it/hostile.rs` pins the gap (architect,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
   voter that lies can still break safety, because a false `AppendReply` counts as held,
