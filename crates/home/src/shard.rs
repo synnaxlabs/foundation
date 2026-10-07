@@ -473,8 +473,9 @@ impl Shard {
         Commit(self.buffer.committed())
     }
 
-    /// The first seq on `path` of the index at `slot` that is not on disk. A writer's
-    /// range is stored when this is at least its `seq + count`.
+    /// The first seq on `path` of the index at `slot` that is not on disk. An applied
+    /// range is stored when this is at least its `seq + count`. A lost range is never
+    /// stored.
     ///
     /// # Panics
     ///
@@ -2275,19 +2276,10 @@ mod tests {
 
     #[test]
     fn panics_at_the_open_of_a_writer_of_an_index_it_does_not_carry() {
-        let (mut sim, _handle) = start(12, |test| async move {
-            let mut shard = test.shard(AREA).await;
+        check_not_carried(12, |shard| {
             let opened = shard.open_writer(writer("a", 1, &not_carried()));
             opened.expect("synced");
         });
-        assert_eq!(
-            sim.run(),
-            Err(sim::Error::Panicked {
-                thread: DIR.into(),
-                message: "the shard does not carry the index at Slot(3)".into(),
-                seed: 12,
-            })
-        );
     }
 
     #[test]
@@ -2494,22 +2486,19 @@ mod tests {
             run(98, |test| async move {
                 let buffer = test.buffer(AREA, BODY_MAX, 4).await;
                 let (clock, mesh) = clock::Clock::new(test.clock.clone());
-                let mut shard = Shard::new(Config {
-                    shard: 0,
-                    buffer,
-                    clock: mesh.clone(),
-                    limits: LIMITS,
-                });
+                let mut shard = Test::with(0, buffer, mesh.clone());
                 shard.carry(Slot::new(0));
                 shard.carry(Slot::new(2));
                 let complete = complete(&mut shard, Slot::new(0));
                 let latest = latest(&mut shard, Slot::new(0));
+                let set = two_indexes();
+                let unsynced = shard.open_writer(writer("a", 1, &set));
+                assert_eq!(unsynced, Err(writer::Error::Unsynced));
                 let wall = test.node.wall();
                 test.tasks.spawn(async move { clock.run(wall).await });
                 while mesh.now().mesh.is_none() {
                     test.clock.sleep(Span::from_nanos(1)).await;
                 }
-                let set = two_indexes();
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 assert_eq!(woken(&mut shard), [latest]);
@@ -2982,50 +2971,31 @@ mod tests {
 
         #[test]
         fn panics_at_the_take_of_a_reader_of_an_index_it_does_not_carry() {
-            let (mut sim, _handle) = start(79, |test| async move {
-                let mut shard = test.shard(AREA).await;
-                let reader = latest(&mut shard, Slot::new(2));
+            check_not_carried(79, |shard| {
+                let reader = latest(shard, Slot::new(2));
                 let other = reader::Key {
                     slot: Slot::new(3),
                     ..reader
                 };
                 drop(shard.take(other));
             });
-            assert_eq!(
-                sim.run(),
-                Err(sim::Error::Panicked {
-                    thread: DIR.into(),
-                    message: "the shard does not carry the index at Slot(3)".into(),
-                    seed: 79,
-                })
-            );
         }
 
         #[test]
         fn panics_at_the_close_of_a_reader_of_an_index_it_does_not_carry() {
-            let (mut sim, _handle) = start(80, |test| async move {
-                let mut shard = test.shard(AREA).await;
-                let reader = latest(&mut shard, Slot::new(2));
+            check_not_carried(80, |shard| {
+                let reader = latest(shard, Slot::new(2));
                 let other = reader::Key {
                     slot: Slot::new(3),
                     ..reader
                 };
                 shard.close_reader(other);
             });
-            assert_eq!(
-                sim.run(),
-                Err(sim::Error::Panicked {
-                    thread: DIR.into(),
-                    message: "the shard does not carry the index at Slot(3)".into(),
-                    seed: 80,
-                })
-            );
         }
 
         #[test]
         fn panics_at_the_grant_to_a_reader_of_an_index_it_does_not_carry() {
-            let (mut sim, _handle) = start(86, |test| async move {
-                let mut shard = test.shard(AREA).await;
+            check_not_carried(86, |shard| {
                 let reader = shard.open_complete(Slot::new(2), CREDIT);
                 let other = reader::complete::Key {
                     slot: Slot::new(3),
@@ -3033,14 +3003,6 @@ mod tests {
                 };
                 shard.grant(other, CREDIT + 1);
             });
-            assert_eq!(
-                sim.run(),
-                Err(sim::Error::Panicked {
-                    thread: DIR.into(),
-                    message: "the shard does not carry the index at Slot(3)".into(),
-                    seed: 86,
-                })
-            );
         }
     }
 
