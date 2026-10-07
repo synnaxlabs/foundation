@@ -741,8 +741,10 @@ pub(super) mod tests {
         drained(readers);
     }
 
-    /// Makes each call on the closed session `key`, and asserts that it changes
-    /// nothing. It drops the records made before the calls.
+    /// Makes each call on the closed session `key`. Asserts that the calls make no
+    /// record and do not change the floor, the deadline, or whether a frame is
+    /// pending. It drops the records made before the calls. The caller checks its
+    /// open sessions after it.
     pub(super) fn dropped(readers: &mut Readers, key: Key) {
         drained(readers);
         let before = (readers.floor(), readers.deadline(), readers.pending());
@@ -1005,9 +1007,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(2)), 0).key;
             readers.close_named(key, at(1));
-            drained(&mut readers);
             dropped(&mut readers, key.into());
-            assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.floor(), Some(live(2)));
             assert_eq!(readers.deadline(), Some(at(11)));
         }
@@ -1019,9 +1019,7 @@ pub(super) mod tests {
             let old = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
             let new = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
             readers.queue(&frames.frame(1), 0..1);
-            drained(&mut readers);
             dropped(&mut readers, old.into());
-            assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.release(1), [new]);
             assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
             assert_eq!(readers.ack(new, live(1)), Ok(()));
@@ -1035,9 +1033,7 @@ pub(super) mod tests {
             let name = "a".parse().expect("valid name");
             let new = readers.open_named_latest(name, at(1)).key;
             assert_eq!(readers.put(frames.frame(1)), [new]);
-            drained(&mut readers);
             dropped(&mut readers, old.into());
-            assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
         }
 
@@ -2204,11 +2200,12 @@ pub(super) mod tests {
             }
         }
 
-        /// Checks [`dropped`] on each key that `model` opened and then closed.
+        /// Checks [`dropped`] on each key that `model` gave that is no longer open.
         fn dropped_closed(readers: &mut Readers, model: &Model) {
             for key in model
                 .given
-                .difference(&model.open.keys().copied().collect())
+                .iter()
+                .filter(|key| !model.open.contains_key(key))
             {
                 dropped(readers, (*key).into());
             }
@@ -2290,6 +2287,8 @@ pub(super) mod tests {
                 records.extend(readers.records());
                 dropped_closed(&mut readers, &model);
             }
+            assert_eq!(readers.floor(), model.floor());
+            assert_eq!(readers.deadline(), model.deadline());
             if flushed {
                 readers.flush();
                 records.extend(readers.records());
@@ -2589,11 +2588,11 @@ pub(super) mod tests {
                         assert_eq!(taken, model.take(key));
                     }
                 }
+                dropped_closed(&mut readers, &model.readers);
                 assert_eq!(readers.pending(), model.pending());
                 for (&key, got) in &model.open {
                     assert_eq!(readers.behind(key), got.behind, "session {key:?}");
                 }
-                dropped_closed(&mut readers, &model.readers);
             }
         }
 

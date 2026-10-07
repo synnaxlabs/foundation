@@ -610,6 +610,11 @@ mod tests {
                     }
                 }
             }
+            for (&key, mailbox) in &model.mailboxes {
+                assert_eq!(taken(&mut readers, key), *mailbox);
+            }
+            let open: Vec<Key> = model.mailboxes.keys().copied().collect();
+            assert_eq!(put(&mut readers, frames.frame(n + 1)), open);
         }
 
         proptest! {
