@@ -26,6 +26,7 @@ use crate::applied::Applied;
 use crate::bytes::block;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Signer};
+use crate::ed25519;
 use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
@@ -85,8 +86,7 @@ pub struct Config {
     /// full, or that the system refuses memory for, waits: the group takes, sends, and
     /// applies nothing until that write ends. A message that finds no block drops.
     pub pool: Rc<Pool>,
-    /// The transport of this shard, built with `private_key`: each peer checks the key
-    /// that it proves against the card of this node, and [`Mesh::open`] does not. The
+    /// The transport of this shard. It proves the public half of `private_key`. The
     /// mesh dials each other member on it.
     pub transport: Rc<Transport>,
 }
@@ -138,7 +138,19 @@ impl Mesh {
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
+    ///
+    /// # Panics
+    ///
+    /// When `config.transport` proves a key that is not the public half of
+    /// `config.private_key`.
     pub async fn open(config: Config) -> Result<Self, Error> {
+        let own = ed25519::public(&ed25519::pair(&config.private_key));
+        let proved = config.transport.public_key();
+        assert!(
+            proved == own,
+            "invariant: the transport of a mesh proves the public half of its private \
+             key: it proves {proved}, not {own}"
+        );
         let (transport, tasks) = (Rc::clone(&config.transport), config.tasks.clone());
         let mesh = Self::start(config).await?;
         let senders = Senders {
@@ -3438,10 +3450,10 @@ mod tests {
     fn open_refuses_a_private_key_that_is_not_the_key_of_the_member() {
         solo(|node, tasks| async move {
             let config = Config {
-                private_key: private(2),
-                ..config(&node, &tasks, 1, &IDS, &[])
+                key: key(1),
+                ..config(&node, &tasks, 2, &IDS, &[])
             };
-            assert_eq!(Mesh::start(config).await.err(), Some(Error::WrongKey));
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
             let text = "the private key of this node is not the key of its member";
             assert_eq!(Error::WrongKey.to_string(), text);
