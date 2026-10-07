@@ -286,6 +286,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
+| `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | `window_bytes >= message_bytes_max >= 1472`; its encoding decodes to itself |
 | `wire_hub` | `wire::hub::Open::decode`, `Credit::decode`, `Reply::decode`, `keys::decode`, `ends::decode`, `Open::encode`, `Credit::encode`, `Reply::encode`, `keys::encode`, `ends::encode` | Encodes to the same bytes; each valid message made from the input decodes to itself |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |

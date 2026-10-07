@@ -10,28 +10,30 @@ use crate::varint::{self, Varint};
 /// The most bytes a hello takes.
 pub(super) const BYTES_MAX: usize = 256;
 
-const WINDOW: u64 = 0;
-const MESSAGE: u64 = 1;
+// An id below 64 is a varint of one byte, the id itself.
+const WINDOW: u8 = 0;
+const MESSAGE: u8 = 1;
 
 /// The limits of the node that sends the hello.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Hello {
+pub struct Hello {
     /// Its `window_bytes`: the most bytes of started messages it takes in.
-    pub(super) window_bytes: usize,
+    pub window_bytes: usize,
     /// Its `message_bytes_max`: the largest message it takes.
-    pub(super) message_bytes_max: usize,
+    pub message_bytes_max: usize,
 }
 
 impl Hello {
     /// The bytes of the hello. A value over 2^62 − 1 is sent as 2^62 − 1.
-    pub(super) fn encode(&self) -> Vec<u8> {
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
         let pairs = [
             (WINDOW, self.window_bytes),
             (MESSAGE, self.message_bytes_max),
         ];
         let mut bytes = Vec::with_capacity(4 * varint::BYTES_MAX);
         for (id, value) in pairs {
-            bytes.extend_from_slice(&Varint::new(id).expect("an id is a varint"));
+            bytes.push(id);
             bytes.extend_from_slice(&Varint::new(value).unwrap_or(Varint::MAX));
         }
         bytes
@@ -42,10 +44,10 @@ impl Hello {
     ///
     /// # Errors
     ///
-    /// The fault when the hello is over [`BYTES_MAX`], ends inside a pair, has an id
+    /// The fault when the hello is over 256 bytes, ends inside a pair, has an id
     /// at or below the one before it, misses id 0 or 1, has a `message_bytes_max`
     /// below 1472, or has a `window_bytes` below its `message_bytes_max`.
-    pub(super) fn decode(mut bytes: &[u8]) -> Result<Self, Fault> {
+    pub fn decode(mut bytes: &[u8]) -> Result<Self, Fault> {
         if bytes.len() > BYTES_MAX {
             return Err(Fault(format!("a hello over {BYTES_MAX} bytes")));
         }
@@ -61,9 +63,9 @@ impl Hello {
             }
             last = Some(id);
             let value = usize::try_from(value).unwrap_or(usize::MAX);
-            match id {
-                WINDOW => window = Some(value),
-                MESSAGE => message = Some(value),
+            match u8::try_from(id) {
+                Ok(WINDOW) => window = Some(value),
+                Ok(MESSAGE) => message = Some(value),
                 _ => {}
             }
         }

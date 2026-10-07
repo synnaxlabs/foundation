@@ -4,7 +4,11 @@ mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
-mod hello;
+#[cfg_attr(
+    not(feature = "fuzzing"),
+    expect(unreachable_pub, reason = "only the fuzzing feature exports it")
+)]
+pub(crate) mod hello;
 #[cfg(test)]
 mod pair;
 mod settings;
