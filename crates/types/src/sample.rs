@@ -92,6 +92,21 @@ const SCALARS: [Scalar; 14] = [
     Scalar::Uuid,
 ];
 
+const _: () = {
+    let mut index = 0;
+    while index < SCALARS.len() {
+        assert!(
+            SCALARS[index] as usize == index,
+            "SCALARS holds each scalar in order"
+        );
+        index += 1;
+    }
+    assert!(
+        Scalar::Uuid as usize + 1 == SCALARS.len(),
+        "SCALARS ends at the last"
+    );
+};
+
 /// The byte layout of one channel's samples.
 ///
 /// Enums and flags use an integer layout, and quality uses `U32`; their meaning is in
@@ -166,19 +181,19 @@ impl FromStr for Type {
             .strip_prefix("list<")
             .and_then(|rest| rest.strip_suffix('>'))
         {
-            let (element, max) = list.split_once(", ").ok_or(Error::Syntax)?;
+            let (name, max) = list.split_once(", ").ok_or(Error::Syntax)?;
             return Ok(Self::List {
-                element: Scalar::named(element).ok_or(Error::Element)?,
+                element: element(name)?,
                 max: count(max)?,
             });
         }
         if let Some(array) = text.strip_suffix(']') {
-            let (element, len) = array.split_once('[').ok_or(Error::Syntax)?;
+            let (name, len) = array.split_once('[').ok_or(Error::Syntax)?;
             if len.contains("][") {
                 return Err(Error::Lengths);
             }
             return Ok(Self::Array {
-                element: Scalar::named(element).ok_or(Error::Element)?,
+                element: element(name)?,
                 len: count(len)?,
             });
         }
@@ -186,9 +201,18 @@ impl FromStr for Type {
     }
 }
 
+/// The scalar that `text` names as the element of an array or a list. A space is a
+/// fault of syntax, not of the element.
+fn element(text: &str) -> Result<Scalar, Error> {
+    if text.contains(char::is_whitespace) {
+        return Err(Error::Syntax);
+    }
+    Scalar::named(text).ok_or(Error::Element)
+}
+
 /// The count that `text` writes in ASCII digits with no leading zero.
 fn count(text: &str) -> Result<u32, Error> {
-    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let digits = text.bytes().all(|byte| byte.is_ascii_digit());
     if !digits || (text.len() > 1 && text.starts_with('0')) {
         return Err(Error::Count);
     }
@@ -241,8 +265,16 @@ impl fmt::Display for Error {
                  bytes"
             }
             Self::Element => {
-                "expected a scalar element: bool, i8, i16, i32, i64, u8, u16, u32, \
-                 u64, f32, f64, stamp, span, or uuid"
+                f.write_str("expected a scalar element: ")?;
+                for (index, scalar) in SCALARS.iter().enumerate() {
+                    let gap = match index {
+                        0 => "",
+                        _ if index + 1 == SCALARS.len() => ", or ",
+                        _ => ", ",
+                    };
+                    write!(f, "{gap}{}", scalar.name())?;
+                }
+                return Ok(());
             }
             Self::Count => "expected a count of 0 to 4294967295, with no leading zero",
             Self::Lengths => "expected one array length",
@@ -321,7 +353,9 @@ mod tests {
             ("float", Error::Syntax),
             (" f64", Error::Syntax),
             ("f32[3", Error::Syntax),
-            ("f32 [3]", Error::Element),
+            ("f32 [3]", Error::Syntax),
+            (" f32[3]", Error::Syntax),
+            ("list<u8 , 16>", Error::Syntax),
             ("list<u8,16>", Error::Syntax),
             ("list<u8, 16> ", Error::Syntax),
             ("String", Error::Syntax),
