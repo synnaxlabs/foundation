@@ -311,6 +311,21 @@ fn a_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
 }
 
 #[test]
+fn a_path_ending_in_a_dot_segment_names_no_file() {
+    run(|files, _| async move {
+        drop(create(&files, "a", 4 * KIB).await);
+        for path in ["a/.", "a/"] {
+            let opened = files.open(Path::new(path), Mode::Read).await.map(drop);
+            assert_eq!(opened, Err(io(path, Operation::Open, 20)));
+            let removed = files.remove(Path::new(path)).await;
+            assert_eq!(removed, Err(io(path, Operation::Remove, 20)));
+        }
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a")]);
+    });
+}
+
+#[test]
 fn a_rename_onto_a_file_that_is_there_gives_exists_and_changes_nothing() {
     run(|files, _| async move {
         let pool = pool();

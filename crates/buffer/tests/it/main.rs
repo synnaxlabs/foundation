@@ -405,14 +405,16 @@ where
     handle.join().expect("the shard ended");
 }
 
+/// The result of a call to the memory driver, which ends at once.
+fn ready<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("a memory call ends at once"),
+    }
+}
+
 #[test]
 fn a_memory_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
-    fn ready<T>(future: impl Future<Output = T>) -> T {
-        match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("a memory call ends at once"),
-        }
-    }
     let files = Memory::default().files();
     let create = Mode::Create { len: 4_096 };
     drop(ready(files.open(FilePath::new("b"), create)).unwrap());
@@ -424,6 +426,41 @@ fn a_memory_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
     ready(file.rename(FilePath::new("./c"))).unwrap();
     let reopened = ready(files.open(FilePath::new("c"), Mode::Read)).unwrap();
     assert_eq!(reopened.len(), 4_096);
+}
+
+#[test]
+fn a_memory_path_spelled_with_a_dot_names_the_same_file_in_each_call() {
+    let memory = Memory::default();
+    let files = memory.files();
+    let create = Mode::Create { len: 4_096 };
+    let mut file = ready(files.open(FilePath::new("./a"), create)).unwrap();
+    drop(ready(files.open(FilePath::new("a"), create)).unwrap());
+    assert_eq!(memory.bytes("./a").len(), 4_096);
+    ready(file.rename(FilePath::new("b"))).unwrap();
+    ready(files.remove(FilePath::new("./b"))).unwrap();
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, Vec::<PathBuf>::new());
+}
+
+#[test]
+fn a_memory_path_ending_in_a_dot_segment_names_no_file() {
+    let files = Memory::default().files();
+    drop(ready(files.open(FilePath::new("a"), Mode::Create { len: 1 })).unwrap());
+    let io = |path: &str, operation| FileError::Io {
+        path: path.into(),
+        operation,
+        code: 20,
+    };
+    for path in ["a/.", "a/"] {
+        let opened = ready(files.open(FilePath::new(path), Mode::Read)).map(drop);
+        assert_eq!(opened, Err(io(path, Operation::Open)));
+        let removed = ready(files.remove(FilePath::new(path)));
+        assert_eq!(removed, Err(io(path, Operation::Remove)));
+    }
+    assert_eq!(
+        ready(files.list(FilePath::new(""))).unwrap(),
+        [PathBuf::from("a")]
+    );
 }
 
 #[test]

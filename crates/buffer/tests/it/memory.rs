@@ -79,7 +79,7 @@ impl Memory {
 
     fn file(&self, path: &str) -> Bytes {
         lock(&self.files)
-            .get(Path::new(path))
+            .get(&key(Path::new(path)))
             .cloned()
             .unwrap_or_else(|| panic!("no file at {path}"))
     }
@@ -91,6 +91,20 @@ fn key(path: &Path) -> PathBuf {
     path.components()
         .filter(|part| *part != Component::CurDir)
         .collect()
+}
+
+/// The error of a file call on `path` when it ends in `/` or `/.`, which names
+/// only a directory, as on a disk (`ENOTDIR`).
+fn not_a_file(path: &Path, operation: Operation) -> Result<(), Error> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.ends_with(b"/") || bytes.ends_with(b"/.") {
+        return Err(Error::Io {
+            path: path.into(),
+            operation,
+            code: 20,
+        });
+    }
+    Ok(())
 }
 
 fn to_u64(len: usize) -> u64 {
@@ -109,24 +123,25 @@ impl Driver for Memory {
     ) -> Request<'a, Box<dyn Descriptor>> {
         let mut files = lock(&self.files);
         let found = files.get(&key(path)).cloned();
-        let result = match (found, mode) {
-            (Some(bytes), Mode::Create { len })
-                if to_u64(lock(&bytes).len()) != len =>
-            {
-                Err(Error::Length {
-                    path: path.into(),
-                    expected: len,
-                    found: to_u64(lock(&bytes).len()),
-                })
-            }
-            (Some(bytes), _) => Ok(bytes),
-            (None, Mode::Create { len }) => {
-                let bytes = Arc::new(Mutex::new(vec![0; to_usize(len)]));
-                files.insert(key(path), Arc::clone(&bytes));
-                Ok(bytes)
-            }
-            (None, _) => Err(Error::NotFound { path: path.into() }),
-        };
+        let result =
+            not_a_file(path, Operation::Open).and_then(|()| match (found, mode) {
+                (Some(bytes), Mode::Create { len })
+                    if to_u64(lock(&bytes).len()) != len =>
+                {
+                    Err(Error::Length {
+                        path: path.into(),
+                        expected: len,
+                        found: to_u64(lock(&bytes).len()),
+                    })
+                }
+                (Some(bytes), _) => Ok(bytes),
+                (None, Mode::Create { len }) => {
+                    let bytes = Arc::new(Mutex::new(vec![0; to_usize(len)]));
+                    files.insert(key(path), Arc::clone(&bytes));
+                    Ok(bytes)
+                }
+                (None, _) => Err(Error::NotFound { path: path.into() }),
+            });
         let result = result.map(|bytes| {
             self.opens.fetch_add(1, Relaxed);
             let open: Box<dyn Descriptor> = Box::new(Open {
@@ -154,8 +169,11 @@ impl Driver for Memory {
     }
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
-        lock(&self.files).remove(&key(path));
-        Box::pin(async { Ok(()) })
+        let result = not_a_file(path, Operation::Remove);
+        if result.is_ok() {
+            lock(&self.files).remove(&key(path));
+        }
+        Box::pin(async { result })
     }
 
     fn sync_dir<'a>(&'a self, _: &'a Path) -> Request<'a, ()> {
