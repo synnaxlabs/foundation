@@ -1,5 +1,5 @@
-//! Keys, signed messages, and a pool for tests. Node `id` has the private key
-//! `[id; 32]`, and each message is in term 5.
+//! Test helpers that the modules of `mesh` reuse: keys, signed messages, and a pool.
+//! Node `id` has the private key `[id; 32]`.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -10,6 +10,9 @@ use raft::{Answer, Body, Grant, Message, Proof, Ready, Signature, Term};
 use types::node::{self, PrivateKey, PublicKey};
 
 use crate::grant::Signer;
+
+/// The term of each message.
+pub(crate) const TERM: Term = Term(5);
 
 pub(crate) fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
@@ -43,7 +46,7 @@ pub(crate) fn message(from: u8, to: u8, body: Body, proof: Option<Proof>) -> Mes
     Message {
         from: key(from),
         to: key(to),
-        term: Term(5),
+        term: TERM,
         body,
         proof,
     }
@@ -73,7 +76,12 @@ pub(crate) fn signature(voter: u8, grant: Grant, candidate: u8) -> Signature {
 }
 
 /// `body` from `leader` to `to`, with the leader's votes from 1, 2 and 3, signed.
+///
+/// # Panics
+///
+/// When `leader` is not 1, 2 or 3: a proof holds its candidate as a voter.
 pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
+    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
     let vote = |voter| {
         let signed = (voter != leader).then(|| signature(voter, Grant::Vote, leader));
         (key(voter), signed)

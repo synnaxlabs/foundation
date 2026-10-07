@@ -639,7 +639,7 @@ mod tests {
 
     use super::*;
     use crate::bytes::{PRESENT, VOTE};
-    use crate::testing::pool;
+    use crate::common::pool;
 
     const DIR: &str = "mesh";
 

@@ -128,13 +128,14 @@ mod tests {
 
     use super::*;
     use crate::bytes::put_optional_proof;
-    use crate::testing::{
-        self, granted, key, members, message, public, reply_body, signature, signer,
+    use crate::common::{
+        self, TERM, granted, key, members, message, public, reply_body, signature,
+        signer,
     };
 
     // A heartbeat of node 1 in term 5 with its votes from 1, 2 and 3, signed.
     fn proven() -> Message {
-        testing::proven(1, 2, Body::Heartbeat { commit: 0 })
+        common::proven(1, 2, Body::Heartbeat { commit: 0 })
     }
 
     fn voter(message: &mut Message, id: u8) -> &mut Option<Signature> {
@@ -192,7 +193,7 @@ mod tests {
         let mut proof = proven().proof.unwrap();
         proof.voters.insert(key(1), None);
         let hard = Hard {
-            term: Term(5),
+            term: TERM,
             proof: Some(proof),
             ..Hard::default()
         };
