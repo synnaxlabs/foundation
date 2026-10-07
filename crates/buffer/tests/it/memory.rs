@@ -103,7 +103,7 @@ fn slashed(path: &Path) -> bool {
 
 /// Whether `path` is the data directory itself by a `.` segment, as `.` or `./`
 /// is: a disk gives `EISDIR` on each file call. The empty path is not one: a disk
-/// finds no file at it.
+/// finds no file at it, a create too.
 fn directory(path: &Path) -> bool {
     !path.as_os_str().is_empty() && key(path).as_os_str().is_empty()
 }
@@ -133,6 +133,9 @@ impl Driver for Memory {
         let mut files = lock(&self.files);
         let found = files.get(&key(path)).cloned();
         let result = match (found, mode) {
+            _ if path.as_os_str().is_empty() => {
+                Err(Error::NotFound { path: path.into() })
+            }
             _ if directory(path) => Err(io(path, Operation::Open, 21)),
             (_, Mode::Create { .. }) if slashed(path) => {
                 Err(io(path, Operation::Open, 21))
