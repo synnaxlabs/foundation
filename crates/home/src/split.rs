@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 
 use types::channel;
-use types::frame::key_set::KeySet;
+use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Draft, Form};
 use types::sample::{Scalar, Type};
 
@@ -417,16 +417,30 @@ fn series(draft: &mut Draft, entry: usize) -> &[u8] {
         .expect("invariant: a checked series is in the frame")
 }
 
+/// The scalar of a series of `data_type`, or `None` for a type the home does not
+/// write.
+const fn written(data_type: Type) -> Option<Scalar> {
+    match data_type {
+        Type::Scalar(scalar) => Some(scalar),
+        Type::Array { .. } | Type::List { .. } | Type::String | Type::Bytes => None,
+    }
+}
+
+/// The first entry of `set` with a type the home does not write, if it has one.
+pub(crate) fn unwritten(set: &KeySet) -> Option<&key_set::Entry> {
+    set.entries()
+        .iter()
+        .find(|entry| written(entry.data_type).is_none())
+}
+
 /// The scalar of a series of `data_type`.
 ///
 /// # Panics
 ///
-/// If the home does not write a series of `data_type`.
+/// If the home does not write a series of `data_type`: [`unwritten`] gives its entry.
 fn scalar(data_type: Type) -> Scalar {
-    match data_type {
-        Type::Scalar(scalar) => scalar,
-        other => panic!("home does not write a series of {other:?} yet"),
-    }
+    written(data_type)
+        .unwrap_or_else(|| panic!("home does not write a series of {data_type:?} yet"))
 }
 
 /// Encodes `values`, `count` samples of `scalar`, onto the end of `bytes`, and returns
@@ -480,7 +494,7 @@ mod tests {
     use types::frame::{Form, Frame, Path, Range};
 
     use super::*;
-    use crate::common::{interner, key, pool};
+    use crate::common::{SCALARS, interner, key, pool};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -1301,15 +1315,14 @@ mod tests {
                 drop(split.frame(&pool, 1));
             }
 
-            #[test]
-            #[should_panic(expected = "home does not write a series of String yet")]
-            fn on_a_series_of_a_type_the_home_does_not_write() {
+            /// Splits a frame of one stamp at `count` and a `String` series after it.
+            fn split_a_string_series(count: u32) {
                 let set = interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::String)],
                 }]);
                 let samples = Samples {
-                    count: 1,
+                    count,
                     series: BTreeMap::from([
                         (0, 5_u64.to_le_bytes().to_vec()),
                         (1, b"text".to_vec()),
@@ -1319,6 +1332,64 @@ mod tests {
                 let pool = pool(1 << 16);
 
                 Scratch::default().split(&set, draft(&pool, &set, Form::Raw, &write));
+            }
+
+            #[test]
+            #[should_panic(expected = "home does not write a series of String yet")]
+            fn on_a_series_of_a_type_the_home_does_not_write() {
+                split_a_string_series(1);
+            }
+
+            #[test]
+            #[should_panic(expected = "home does not write a series of String yet")]
+            fn on_a_series_of_such_a_type_after_an_index_that_does_not_fit() {
+                split_a_string_series(2);
+            }
+        }
+    }
+
+    mod unwritten {
+        use super::*;
+
+        #[test]
+        fn gives_none_for_a_key_set_of_scalars() {
+            assert_eq!(unwritten(&two_groups()), None);
+        }
+
+        #[test]
+        fn gives_none_for_a_series_of_each_scalar() {
+            for scalar in SCALARS {
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[(key(Slot::new(2)), Type::Scalar(scalar))],
+                }]);
+
+                assert_eq!(unwritten(&set), None, "{scalar:?}");
+            }
+        }
+
+        #[test]
+        fn gives_the_first_entry_of_each_type_that_is_not_a_scalar() {
+            let element = Scalar::F32;
+            let types = [
+                Type::Array { element, len: 3 },
+                Type::List { element, max: 3 },
+                Type::String,
+                Type::Bytes,
+            ];
+            for data_type in types {
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[
+                        (key(Slot::new(2)), Type::Scalar(Scalar::U8)),
+                        (key(Slot::new(4)), data_type),
+                        (key(Slot::new(5)), Type::Bytes),
+                    ],
+                }]);
+
+                let entry = unwritten(&set).expect("an entry");
+
+                assert_eq!((entry.slot, entry.data_type), (Slot::new(4), data_type));
             }
         }
     }
@@ -1364,23 +1435,6 @@ mod tests {
             }
         }
     }
-
-    const SCALARS: [Scalar; 14] = [
-        Scalar::Bool,
-        Scalar::I8,
-        Scalar::I16,
-        Scalar::I32,
-        Scalar::I64,
-        Scalar::U8,
-        Scalar::U16,
-        Scalar::U32,
-        Scalar::U64,
-        Scalar::F32,
-        Scalar::F64,
-        Scalar::Stamp,
-        Scalar::Span,
-        Scalar::Uuid,
-    ];
 
     /// The values of one series: `count` samples of `width` bytes from `state`, with
     /// runs so that more than one codec applies.
