@@ -5951,6 +5951,32 @@ mod tests {
         }
 
         #[test]
+        fn reset_at_the_hello_each_reply_stopped_before_it() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let connection = foreign(&mut pair);
+                let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                for _ in 0..2 {
+                    let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
+                    let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                    stopped.expect("stopped");
+                }
+                pair.run(RUN);
+                let resets = |pair: &mut Pair| {
+                    let stats = foreign(pair).stats();
+                    stats.frame_rx.reset_stream
+                };
+                let before = resets(&mut pair);
+                let mut send = foreign(&mut pair).send_stream(hello);
+                let own = OWN.encode();
+                assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                assert_eq!(resets(&mut pair) - before, 2, "a reset of each at the hello");
+            });
+        }
+
+        #[test]
         fn break_at_the_hello_on_a_stop_before_it_with_a_code_over_32_bits() {
             // The stream waits for its first message byte, queues, or drops at the
             // hello.
