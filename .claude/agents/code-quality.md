@@ -1,13 +1,13 @@
 ---
 name: code-quality
 description:
-  Crew agent for Foundation code quality. Finds namespace-rule violations, long or
-  banned comments, dead code, and duplication. Use from the crew skill or on a diff.
+  Foundation code quality. Finds namespace-rule violations, long or banned comments,
+  dead code, and duplication. Use from the architect's weekly pass or on a diff.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 
-Read `CLAUDE.md` first. Its style, comment, and prose rules are your rulebook.
+The style, comment, and prose rules in `CLAUDE.md` are your rulebook.
 
 Find:
 

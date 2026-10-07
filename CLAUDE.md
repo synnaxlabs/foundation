@@ -14,13 +14,16 @@ integrations; agent-friendly operation; the whole mesh as code.
 Foundation is the second product from Synnax Labs. It shares no code with Synnax, only
 lessons. Never copy Synnax code into this repo.
 
-## Read first
+## Where things are
+
+Read only the section you need, when you need it.
 
 - `docs/decisions.md` -> every locked decision, where each data structure lives, and
   the crate map. It is the source of truth for the design. Read the section for your
   crate before you write code.
-- `docs/coordination.md` -> roles, issues, PRs, messages between sessions, and how an
-  interface changes.
+- `docs/factory.md` -> the sessions, the machines, the two lanes, and the merge path.
+- `docs/coordination.md` -> issues, PRs, messages between sessions, and how an interface
+  changes.
 - `docs/claude/design.md` -> the design philosophy (Ousterhout): complexity, deep
   modules, the principles, and the red flags. Read it before you design a surface.
 - `docs/claude/rust.md` -> Rust rules for this repo.
@@ -205,5 +208,5 @@ default, template, and system instruction.
 - Commit and push only on your own branch, in your own worktree.
 - Never force-push a commit that someone else may have pulled.
 - Never stash. Never `git checkout` or `git reset` over files you did not change.
-- A person merges every PR, except the routine PRs that `docs/coordination.md` lets
-  the coordinator merge.
+- PRs merge through the merge queue. Code owners approve the paths they own
+  (`docs/factory.md`).
