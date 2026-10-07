@@ -12,7 +12,7 @@ use std::mem;
 use std::task::Poll;
 
 use block::{Block, Unique};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use crate::Error;
 use crate::varint::{self, Varint};
@@ -51,27 +51,25 @@ enum State {
     Body { len: usize, have: usize },
 }
 
-/// The bytes of a message that has no block yet, as the source gave them, or in one
-/// copy when the source gave more than [`chunks_max`] chunks.
+/// The bytes of a message that has no block yet. A chunk of the source can keep its
+/// whole receive buffer alive, so a chunk lives only inside the read that took it.
 #[derive(Debug, Default)]
 struct Held {
-    /// Its capacity stays for the next message.
+    /// The bytes held across reads, in one allocation of the message's length.
+    buffer: Vec<u8>,
+    /// The chunks that this read took, after `buffer`. Its capacity stays.
     chunks: Vec<Bytes>,
-    copy: Option<BytesMut>,
 }
+
+/// The most chunks that one read holds. Past it, the read copies them into the
+/// buffer, so a peer that sends tiny frames cannot grow the list.
+const CHUNKS_MAX: usize = 64;
 
 const START: State = State::Prefix {
     bytes: [0; varint::BYTES_MAX],
     have: 0,
     len: 1,
 };
-
-/// The most chunks that a message of `len` bytes holds before its bytes go into one
-/// copy. Each chunk can keep a whole received batch in memory, and a peer that
-/// sends a message in tiny frames must not make it keep one per byte.
-fn chunks_max(len: usize) -> usize {
-    8_usize.saturating_add(len / 512)
-}
 
 impl Reader {
     /// A reader that refuses a message over `bytes_max` bytes.
@@ -115,7 +113,9 @@ impl Reader {
     /// `Pending` when it has none now, or `None` when the stream has ended. The
     /// reader never asks for a byte past the current message, so later messages
     /// stay with the source. It holds the bytes of a message until the message is
-    /// whole, and copies them once, into the block.
+    /// whole. A read that ends before the message has its block copies the bytes it
+    /// took into one buffer of the message's length; the read that takes the block
+    /// copies the buffer, then the bytes it took, into it.
     ///
     /// Returns the message, `Pending` when `admit` or `take` refuses or the source
     /// has no more bytes now, or `None` when the stream ended between two messages.
@@ -178,7 +178,10 @@ impl Reader {
                 }
                 State::Body { len, have } if *have < *len => {
                     let error = match next(&mut source, len.saturating_sub(*have)) {
-                        Ok(Poll::Pending) => return Ok(Poll::Pending),
+                        Ok(Poll::Pending) => {
+                            self.held.keep(*len);
+                            return Ok(Poll::Pending);
+                        }
                         Ok(Poll::Ready(Some(chunk))) => {
                             *have = have.saturating_add(chunk.len());
                             self.held.push(*len, chunk);
@@ -193,6 +196,7 @@ impl Reader {
                 }
                 State::Body { len, .. } => {
                     let Some(mut block) = take(*len) else {
+                        self.held.keep(*len);
                         return Ok(Poll::Pending);
                     };
                     self.held.drain_into(&mut block);
@@ -207,26 +211,31 @@ impl Reader {
 impl Held {
     /// Holds `chunk`, the next bytes of a message of `len` bytes.
     fn push(&mut self, len: usize, chunk: Bytes) {
-        if let Some(copy) = &mut self.copy {
-            copy.extend_from_slice(&chunk);
-        } else if self.chunks.len() < chunks_max(len) {
-            self.chunks.push(chunk);
-        } else {
-            let mut copy = BytesMut::with_capacity(len);
-            for held in self.chunks.drain(..) {
-                copy.extend_from_slice(&held);
-            }
-            copy.extend_from_slice(&chunk);
-            self.copy = Some(copy);
+        if self.chunks.len() == CHUNKS_MAX {
+            self.keep(len);
+        }
+        self.chunks.push(chunk);
+    }
+
+    /// Copies the chunks into the buffer of a message of `len` bytes, and drops them.
+    fn keep(&mut self, len: usize) {
+        if self.chunks.is_empty() {
+            return;
+        }
+        if self.buffer.capacity() == 0 {
+            self.buffer = Vec::with_capacity(len);
+        }
+        for chunk in self.chunks.drain(..) {
+            self.buffer.extend_from_slice(&chunk);
         }
     }
 
     /// Copies the held bytes into `block`, which holds exactly that many, and drops
     /// them.
     fn drain_into(&mut self, block: &mut [u8]) {
-        let mut rest = block;
-        let copy = self.copy.iter().map(AsRef::as_ref);
-        for chunk in copy.chain(self.chunks.iter().map(AsRef::as_ref)) {
+        let (buffered, mut rest) = block.split_at_mut(self.buffer.len());
+        buffered.copy_from_slice(&self.buffer);
+        for chunk in &self.chunks {
             let (bytes, after) = mem::take(&mut rest).split_at_mut(chunk.len());
             bytes.copy_from_slice(chunk);
             rest = after;
@@ -235,8 +244,8 @@ impl Held {
     }
 
     fn clear(&mut self) {
+        self.buffer = Vec::new();
         self.chunks.clear();
-        self.copy = None;
     }
 }
 
@@ -536,7 +545,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            assert_eq!(reader.held.chunks.len(), 1);
+            assert_eq!(reader.held.buffer, vec![9; 8]);
             let read = reader
                 .read(
                     |_| true,
@@ -554,6 +563,7 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
+            assert_eq!(reader.held.buffer.capacity(), 0);
             assert!(reader.held.chunks.is_empty());
             assert!(matches!(reader.state, State::Prefix { have: 0, .. }));
         }
@@ -607,38 +617,85 @@ mod tests {
             );
         }
 
-        #[test]
-        fn holds_chunks_up_to_the_limit_then_copies_them() {
-            let pool = pool(1 << 16);
-            let message: Vec<u8> = (0..=255).cycle().take(1_024).collect();
-            let stream = encode(slice::from_ref(&message));
-            let (start, rest) = stream.split_at(2 + 10);
-            let mut source = Source::new(start.to_vec(), 1);
-            source.open = true;
-            let mut reader = Reader::new(1_024);
-            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            assert_eq!(reader.held.chunks.len(), chunks_max(1_024));
-            assert_eq!(chunks_max(1_024), 10);
-            assert!(reader.held.copy.is_none());
-            let (next, rest) = rest.split_at(1);
-            source.bytes.extend(next);
-            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            assert!(reader.held.chunks.is_empty());
-            let Some(copy) = &reader.held.copy else {
-                panic!("the reader copies at the 11th chunk: {:?}", reader.held);
+        /// One read of `reader` that takes `batch[*at..end]` one byte per chunk,
+        /// each a view into `batch`, then is pending.
+        fn read_views(
+            reader: &mut Reader,
+            pool: &Pool,
+            batch: &Bytes,
+            at: &mut usize,
+            end: usize,
+        ) -> Result<Poll<Option<Vec<u8>>>, Error> {
+            let source = |_| {
+                if *at == end {
+                    return Ok(Poll::Pending);
+                }
+                *at += 1;
+                Ok(Poll::Ready(Some(batch.slice(*at - 1..*at))))
             };
-            assert_eq!(copy[..], message[..11]);
-            source.bytes.extend(rest);
-            source.split = 100;
-            source.open = false;
-            assert_eq!(read_all(&mut reader, &pool, &mut source), Ok(vec![message]));
-            assert!(matches!(reader.state, State::Prefix { have: 0, .. }));
+            let read = reader.read(|_| true, |len| pool.alloc(len).ok(), source)?;
+            Ok(read.map(|block| block.map(|block| block.to_vec())))
         }
 
         #[test]
-        fn chunks_max_grows_by_one_each_512_bytes() {
-            let max = [0, 511, 512, 1_023, 1_024, 70_000].map(chunks_max);
-            assert_eq!(max, [8, 8, 9, 9, 10, 144]);
+        fn a_read_that_ends_before_the_block_keeps_no_chunk_but_one_buffer() {
+            let pool = pool(1 << 16);
+            let message: Vec<u8> = (0..=255).cycle().take(1_024).collect();
+            let batch = Bytes::from(encode(slice::from_ref(&message)));
+            let (mut reader, mut at) = (Reader::new(1_024), 0);
+            let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 10);
+            assert_eq!(read, Ok(Poll::Pending));
+            assert!(batch.is_unique());
+            assert!(reader.held.chunks.is_empty());
+            assert_eq!(reader.held.buffer, message[..10]);
+            assert_eq!(reader.held.buffer.capacity(), 1_024);
+            let buffer = reader.held.buffer.as_ptr();
+            let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 11);
+            assert_eq!(read, Ok(Poll::Pending));
+            assert!(batch.is_unique());
+            assert_eq!(reader.held.buffer, message[..11]);
+            assert_eq!(reader.held.buffer.as_ptr(), buffer);
+            let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
+            assert_eq!(read, Ok(Poll::Ready(Some(message))));
+            assert!(batch.is_unique());
+            assert_eq!(reader.held.buffer.capacity(), 0);
+        }
+
+        #[test]
+        fn a_whole_message_with_no_block_keeps_no_chunk_but_one_buffer() {
+            let pool = pool(block::footprint(1_024));
+            let message: Vec<u8> = (0..=255).cycle().take(1_024).collect();
+            let batch = Bytes::from(encode(slice::from_ref(&message)));
+            let (mut reader, mut at) = (Reader::new(1_024), 0);
+            let held = pool.alloc(1_024).expect("a block");
+            let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
+            assert_eq!(read, Ok(Poll::Pending));
+            assert!(batch.is_unique());
+            assert!(reader.held.chunks.is_empty());
+            assert_eq!(reader.held.buffer, message);
+            drop(held);
+            let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
+            assert_eq!(read, Ok(Poll::Ready(Some(message))));
+            assert_eq!(reader.held.buffer.capacity(), 0);
+        }
+
+        #[test]
+        fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
+            let mut held = Held::default();
+            for byte in 0..CHUNKS_MAX {
+                held.push(100, Bytes::from(vec![u8::try_from(byte).expect("a byte")]));
+            }
+            assert_eq!(held.chunks.len(), CHUNKS_MAX);
+            assert!(held.buffer.is_empty());
+            held.push(100, Bytes::from_static(&[64]));
+            assert_eq!(held.chunks.len(), 1);
+            assert_eq!(held.buffer, (0..64).collect::<Vec<u8>>());
+            assert_eq!(held.buffer.capacity(), 100);
+            let mut block = [0; 65];
+            held.drain_into(&mut block);
+            assert_eq!(block.to_vec(), (0..65).collect::<Vec<u8>>());
+            assert!(held.chunks.is_empty());
+            assert_eq!(held.buffer.capacity(), 0);
         }
 
         #[test]
