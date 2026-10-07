@@ -320,10 +320,10 @@ mod tests {
         sim.link(&client, &slow, link);
         sim.link(&slow, &client, link);
         let ends = Arc::new(Mutex::new(Vec::new()));
-        for (name, node) in [("slow", &slow), ("fast", &fast)] {
+        for node in [&slow, &fast] {
             let ends = Arc::clone(&ends);
-            testing::carrier(node, SERVER, move |carrier, node| async move {
-                let mut accept = pin!(carrier.accept());
+            testing::transport(node, SERVER, move |transport, node| async move {
+                let mut accept = pin!(transport.accept());
                 let mut sleep = pin!(node.clock().sleep(spans(IDLE, 3)));
                 let accepted = poll_fn(|cx| match accept.as_mut().poll(cx) {
                     Poll::Ready(accepted) => Poll::Ready(accepted.ok()),
@@ -331,29 +331,32 @@ mod tests {
                 });
                 if let Some(session) = accepted.await {
                     let end = session.closed().await;
-                    ends.lock().expect("a lock").push((name, end));
+                    ends.lock().expect("a lock").push(end);
                 }
             });
         }
         let addresses = [Address::Udp(address(&slow)), Address::Udp(address(&fast))];
-        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+        testing::transport(&client, CLIENT, move |transport, node| async move {
             let clock = node.clock();
-            let mut dial =
-                pin!(super::dial(&carrier, &clock, public(&SERVER), &addresses));
-            for wait in [0, 260] {
-                clock.sleep(spans(Span::MILLISECOND, wait)).await;
-                let polled = poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx))).await;
+            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+            let after_stagger = super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
+            for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
+                clock.sleep(wait).await;
+                let polled = poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx))).await;
                 assert!(polled.is_pending());
             }
+            // Longer than the handshake on the slow link, so both attempts connect
+            // before the next poll.
             clock.sleep(spans(Span::MILLISECOND, 500)).await;
-            let session = dial.await.expect("a session");
+            let session = dialed.await.expect("a session");
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         assert_eq!(sim.run(), Ok(()));
-        let ends = ends.lock().expect("a lock").clone();
+        let mut ends = ends.lock().expect("a lock").clone();
+        ends.sort_by_key(|end| format!("{end:?}"));
         let peer = |code| Error::PeerClosed { code: Code(code) };
-        assert_eq!(ends, [("fast", peer(0)), ("slow", peer(5))]);
+        assert_eq!(ends, [peer(0), peer(5)]);
     }
 
     #[test]
