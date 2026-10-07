@@ -65,4 +65,5 @@ pub mod status;
 pub mod testing;
 pub mod ticket;
 
+pub use driver::{Mesh, Watch};
 pub use member::Member;

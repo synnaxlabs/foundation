@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::future::poll_fn;
 use std::mem;
 use std::pin::Pin;
@@ -77,10 +78,16 @@ pub(crate) struct Config {
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
 /// open of the same directory gives [`Error::Log`].
 #[derive(Clone)]
-pub(crate) struct Mesh {
+pub struct Mesh {
     group: Rc<RefCell<Group>>,
     time: clock::Reader,
     entropy: Entropy,
+}
+
+impl fmt::Debug for Mesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Mesh").finish_non_exhaustive()
+    }
 }
 
 impl Mesh {
@@ -154,7 +161,8 @@ impl Mesh {
     }
 
     /// A watch of the home of `index`.
-    pub(crate) fn watch(&self, index: channel::Key) -> Watch {
+    #[must_use]
+    pub fn watch(&self, index: channel::Key) -> Watch {
         let mut group = self.group.borrow_mut();
         let slot = group.slot();
         Watch {
@@ -170,7 +178,8 @@ impl Mesh {
     /// The member with `key` in this node's view of the region, or `None` when the
     /// region has no such member. It answers also after the group stops, from the view
     /// at the stop.
-    pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
+    #[must_use]
+    pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
     }
 
@@ -359,7 +368,7 @@ impl Mesh {
 }
 
 /// A watch of the home of one index.
-pub(crate) struct Watch {
+pub struct Watch {
     group: Weak<RefCell<Group>>,
     // The cause of the group's stop, which this watch gives after the group drops.
     stopped: Rc<OnceCell<Stopped>>,
@@ -370,6 +379,14 @@ pub(crate) struct Watch {
     given: Option<node::Key>,
     // Whether `next` returned before.
     called: bool,
+}
+
+impl fmt::Debug for Watch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Watch")
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Watch {
@@ -1360,6 +1377,16 @@ mod tests {
             let cause = Unknown::Kind { kind: 9 };
             let stopped = Error::Stopped(Stopped::Change { at: bad, cause });
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+        });
+    }
+
+    #[test]
+    fn the_debug_text_of_a_mesh_and_of_a_watch_holds_only_the_index() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            assert_eq!(format!("{mesh:?}"), "Mesh { .. }");
+            let watch = mesh.watch(INDEX);
+            assert_eq!(format!("{watch:?}"), "Watch { index: Key(7), .. }");
         });
     }
 
