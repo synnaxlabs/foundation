@@ -1207,6 +1207,58 @@ fn a_file_moved_aside_to_a_taken_name_counts() {
 }
 
 #[test]
+fn a_start_file_moved_aside_by_a_base_directory_counts() {
+    let (repo, _) = Repo::with_pr("merge-dirfile-start");
+    let end = repo.commit("x.rs", "fn pr() {}\n");
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "rm x.rs"]);
+    std::fs::create_dir(repo.dir.join("x.rs")).unwrap();
+    repo.advance_main("x.rs/a.txt", "base\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some(
+            "has a conflict in `x.rs` between its start and the base".to_string()
+        ))
+    );
+}
+
+#[test]
+fn a_merge_that_moves_the_pr_file_aside_counts() {
+    let (repo, from) = Repo::with_pr("merge-dirfile-chain");
+    repo.commit("x.rs", "fn pr() {}\n");
+    repo.git(&["switch", "--quiet", "main"]);
+    std::fs::create_dir(repo.dir.join("x.rs")).unwrap();
+    let main = repo.commit("x.rs/a.txt", "base\n");
+    repo.git(&["update-ref", "refs/remotes/origin/main", &main]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    let merge = repo
+        .command()
+        .args(["merge", "--no-edit", "origin/main"])
+        .output()
+        .unwrap();
+    assert_eq!(merge.status.code(), Some(1), "{merge:?}");
+    for entry in std::fs::read_dir(&repo.dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("x.rs~")
+        {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "--no-edit"]);
+    let merge = repo.head();
+    assert_eq!(
+        repo.code_change(&from, &merge),
+        Ok(Some(format!("resolves a conflict in `x.rs` in `{merge}`")))
+    );
+}
+
+#[test]
 fn the_base_merged_through_a_side_branch_does_not_count() {
     let (repo, from) = Repo::with_pr("merge-side");
     repo.advance_main("y.rs", "fn y() {}\n");
