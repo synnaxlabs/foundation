@@ -3648,6 +3648,18 @@ mod tests {
     }
 
     #[test]
+    fn give_the_end_of_the_connection_ahead_of_a_reset_no_read_took() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut receiver = reset(&mut pair, VarInt::from_u32(7));
+            let (now, server) = (pair.now(), key(&pair.server));
+            pair.server.endpoint.close(now, server, Code(9));
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Err(Error::Closed { code: Code(9) }));
+        });
+    }
+
+    #[test]
     fn reset_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
