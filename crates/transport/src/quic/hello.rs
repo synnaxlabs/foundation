@@ -274,15 +274,18 @@ mod tests {
     fn unknown() -> impl Strategy<Value = u64> {
         prop_oneof![
             4 => 2_u64..64,
+            1 => 64_u64..1 << 14,
             1 => Just(1 << 14),
             1 => Just(1 << 30),
             1 => Just(VarInt::MAX.into_inner()),
         ]
     }
 
-    /// Up to 31 pairs in one of four shapes: any ids in any order; ids that rise,
-    /// with up to two pairs of any ids after them; ids 0 and 1, then unknown ids that
-    /// rise; or ids 0 and 1, then pairs of 8-byte ids to near 256 bytes.
+    /// Pairs in one of five shapes: up to 31 of any ids in any order; up to 24 ids
+    /// that rise, with up to two pairs of any ids after them; ids 0 and 1, then up to
+    /// 24 unknown ids that rise; ids 0 and 1, then pairs of 8-byte ids to near 256
+    /// bytes; or ids 0 and 1, then 1-byte and 2-byte ids that rise to near 256 bytes,
+    /// with up to one pair of any id after them.
     fn pairs() -> impl Strategy<Value = Vec<(u64, u64)>> {
         let id = || prop_oneof![0_u64..4, unknown()];
         let any = prop::collection::vec((id(), value()), 0..32);
@@ -315,7 +318,19 @@ mod tests {
                 pairs.extend(ids.zip(values));
                 pairs
             });
-        prop_oneof![any, rising, limits, long]
+        let many = (
+            value(),
+            value(),
+            60_u64..=110,
+            prop::collection::vec((id(), value()), 0..=1),
+        )
+            .prop_map(|(window, message, last, more)| {
+                let mut pairs = vec![(0, window), (1, message)];
+                pairs.extend((2..=last).map(|id| (id, id % 64)));
+                pairs.extend(more);
+                pairs
+            });
+        prop_oneof![any, rising, limits, long, many]
     }
 
     proptest! {
@@ -407,6 +422,18 @@ mod tests {
         assert_eq!(
             Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (1 << 40, 0), (2, 0)])),
             fault("a hello with id 2 after id 1099511627776")
+        );
+    }
+
+    #[test]
+    fn decode_reads_the_most_pairs_that_fit() {
+        let mut pairs = vec![(0, 2_000), (1, 1_500)];
+        pairs.extend((2..=104).map(|id| (id, 0)));
+        pairs.push((0, 64));
+        assert_eq!(encode(&pairs).len(), BYTES_MAX);
+        assert_eq!(
+            Hello::decode(&encode(&pairs)),
+            fault("a hello with id 0 after id 104")
         );
     }
 
