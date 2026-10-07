@@ -405,8 +405,9 @@ impl Session {
         )
     }
 
-    /// Writes `message` when it is `Some`, and takes it, else writes the rest that
-    /// `sender` holds. Ready once the stream took all of it, or with the error.
+    /// Writes `message` when it is `Some`, and takes it. Ready once the stream holds
+    /// no message: it took all of `message`, or with `None`, all of the one before.
+    /// Ready with the error.
     ///
     /// # Errors
     ///
@@ -414,21 +415,15 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::write`] does
-    /// while the session is live.
+    /// After a [`Session::finish`] that gave `Ok`.
     pub(crate) fn poll_write(
         &self,
         cx: &mut Context<'_>,
-        sender: &mut Sender,
+        sender: &Sender,
         message: &mut Option<Block>,
     ) -> Poll<Result<(), Error>> {
         self.with(|endpoint, clock, slot, _| {
-            sender.check_unfinished();
-            let written = match message.take() {
-                Some(message) => endpoint.write(clock.now(), sender, message),
-                None => endpoint.flush(clock.now(), sender),
-            };
-            match written {
+            match endpoint.write(clock.now(), sender, message) {
                 Ok(Poll::Pending) => {
                     if let Some(error) = &slot.end {
                         return Poll::Ready(Err(error.clone()));
@@ -450,8 +445,7 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::finish`] does
-    /// while the session is live.
+    /// After a [`Session::finish`] that gave `Ok`.
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
         self.with(|endpoint, clock, slot, _| {
             sender.check_unfinished();

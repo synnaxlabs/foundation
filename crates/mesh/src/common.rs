@@ -4,12 +4,12 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::Pool;
 use raft::{Answer, Body, Grant, Message, Proof, Ready, Signature, Term};
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
 use crate::card::{self, Card};
+use crate::ed25519;
 use crate::grant::Signer;
 use crate::member::Member;
 
@@ -29,8 +29,7 @@ pub(crate) fn signer(id: u8) -> Signer {
 }
 
 pub(crate) fn public(id: u8) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private(id).0).unwrap();
-    PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
+    ed25519::public(&ed25519::pair(&private(id)))
 }
 
 /// The record of node `id`, with a card that the node signed.
@@ -50,7 +49,7 @@ pub(crate) fn member(id: u8) -> Member {
     }
 }
 
-pub(crate) fn members(ids: &[u8]) -> Vec<Member> {
+pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
     ids.iter().map(|&id| member(id)).collect()
 }
 

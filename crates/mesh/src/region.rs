@@ -5,7 +5,7 @@ use std::fmt;
 
 use types::{channel, node};
 
-use crate::bytes::put_key;
+use crate::bytes::{put_channel, put_key, take_channel, take_key};
 use crate::member::Member;
 
 /// The region state that this node holds: its members, and the homes that it applied.
@@ -77,7 +77,7 @@ impl Change {
         match self {
             Self::Home { index, home } => {
                 out.push(HOME);
-                out.extend(index.as_u128().to_le_bytes());
+                put_channel(index, out);
                 put_key(home, out);
             }
         }
@@ -91,16 +91,15 @@ impl Change {
     /// when the bytes are not the length of their kind.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
         let length = || Malformed::Length { found: bytes.len() };
-        let (&kind, rest) = bytes.split_first().ok_or_else(length)?;
+        let (&kind, mut rest) = bytes.split_first().ok_or_else(length)?;
         if kind != HOME {
             return Err(Malformed::Kind { kind });
         }
-        let (&index, rest) = rest.split_first_chunk().ok_or_else(length)?;
-        let home = <[u8; 16]>::try_from(rest).map_err(|_wrong_length| length())?;
-        Ok(Self::Home {
-            index: channel::Key::from_u128(u128::from_le_bytes(index)),
-            home: node::Key::from_u128(u128::from_le_bytes(home)),
-        })
+        let index = take_channel(&mut rest).ok_or_else(length)?;
+        let home = take_key(&mut rest)
+            .filter(|_| rest.is_empty())
+            .ok_or_else(length)?;
+        Ok(Self::Home { index, home })
     }
 }
 
