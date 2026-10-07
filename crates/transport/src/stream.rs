@@ -2,6 +2,7 @@
 
 use std::future::poll_fn;
 use std::rc::Rc;
+use std::task::Poll;
 
 use block::Block;
 
@@ -71,8 +72,8 @@ impl Sender {
     ///
     /// [`Error::TooLarge`] when `message` is over the peer's
     /// [`Config::message_bytes_max`](crate::Config::message_bytes_max),
-    /// [`Error::Stopped`] when the peer stopped reading, or the error that ended the
-    /// session.
+    /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
+    /// `Code(0)` after a `send` future dropped, or the error that ended the session.
     ///
     /// # Panics
     ///
@@ -94,7 +95,7 @@ impl Sender {
         let mut message = Some(message);
         let sent = poll_fn(|cx| {
             let Some(stream) = sending.stream else {
-                return std::task::Poll::Ready(Err(CANCELLED));
+                return Poll::Ready(Err(CANCELLED));
             };
             sending.session.poll_write(cx, stream, &mut message)
         })
@@ -115,8 +116,8 @@ impl Sender {
     ///
     /// # Errors
     ///
-    /// As [`send`](Self::send): [`Error::TooLarge`], [`Error::Stopped`], or the error
-    /// that ended the session.
+    /// As [`send`](Self::send): [`Error::TooLarge`], [`Error::Stopped`],
+    /// [`Error::Reset`], or the error that ended the session.
     ///
     /// # Panics
     ///
@@ -143,8 +144,8 @@ impl Sender {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped reading, or the error that ended the
-    /// session.
+    /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
+    /// `Code(0)` after a `send` future dropped, or the error that ended the session.
     ///
     /// ```
     /// use transport::{Error, stream::Sender};
