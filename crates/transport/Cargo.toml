@@ -24,6 +24,10 @@ counting = { path = "../counting" }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
+[[test]]
+name = "held"
+harness = false
+
 [[bench]]
 name = "send"
 harness = false

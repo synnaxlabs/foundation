@@ -2046,6 +2046,7 @@ mod tests {
             let receivers = wait(&mut pair);
             assert_eq!(receivers.len(), 16);
             assert_eq!(shard.committed(), before);
+            // Private: a prefix outside the pool shows in no public count.
             for receiver in &receivers {
                 assert_eq!(receiver.reader.held(), (None, 0));
             }
@@ -2085,6 +2086,7 @@ mod tests {
                     assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
                     let len = usize::from(LEN);
                     let held = (Some((usize::from(have), len)), 0);
+                    // Private: the copy outside the pool shows in no public count.
                     assert_eq!(receiver.reader.held(), held);
                 }
                 assert!(kept.iter().all(Bytes::is_unique));
@@ -2098,8 +2100,9 @@ mod tests {
         });
     }
 
-    /// Four streams in turn each send a whole message of [`MESSAGE_MAX`] bytes that
-    /// finds no block, then reset. The receive budget holds three such messages.
+    /// Two streams each hold a message of 1,000 bytes that finds no block, then the
+    /// client closes. The read that gives the close drops its message, and so does a
+    /// read after the connection is gone.
     #[test]
     fn a_message_that_waits_for_a_block_is_dropped_when_the_connection_ends() {
         testing::run(1, |shard| {
@@ -2116,6 +2119,8 @@ mod tests {
             for receiver in &mut receivers {
                 let read = pair.server.endpoint.read(now, receiver, |_, _| None);
                 assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+                // Private: the copy outside the pool shows in no public count.
+                // tests/held.rs counts the heap that a read frees.
                 assert_eq!(receiver.reader.held(), (Some((1_000, 1_000)), 0));
             }
             let (now, client) = (pair.now(), key(&pair.client));
@@ -2134,6 +2139,8 @@ mod tests {
         });
     }
 
+    /// Four streams in turn each send a whole message of [`MESSAGE_MAX`] bytes that
+    /// finds no block, then reset. The receive budget holds three such messages.
     #[test]
     fn reset_messages_that_wait_for_a_block_hold_no_bytes_past_the_budget() {
         testing::run(1, |shard| {
@@ -2167,6 +2174,7 @@ mod tests {
                 assert_eq!(read.map(|_| ()), Err(Error::Reset { code: Code(5) }));
                 receivers.push(receiver);
             }
+            // Private: the copies outside the pool show in no public count.
             let held: usize = receivers
                 .iter()
                 .filter_map(|receiver| receiver.reader.held().0)
