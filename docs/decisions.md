@@ -2474,8 +2474,8 @@ How to read this record:
   first public call that changes the region (#471), and `Error::NoVote` is public with
   it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
   https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
-  Supersedes, for `set_home`, the sentence that the calls that change the region stay
-  private. That sentence is the line "Private still" of the plan
+  The line "Private still" of the plan names `set_home` (4c-2) as the first call that
+  changes the region
   (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
   the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The

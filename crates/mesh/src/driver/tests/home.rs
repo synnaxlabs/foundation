@@ -710,25 +710,21 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
     let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
     let reset = transport::Error::Reset { code: Code(0) };
     let cases = [
-        ("no leader", Refusal::Answer(follower(None)), Some(Ok(()))),
-        (
-            "a leader",
-            Refusal::Answer(follower(Some(key(3)))),
-            Some(Ok(())),
-        ),
+        ("no leader", Refusal::Answer(follower(None)), Ok(())),
+        ("a leader", Refusal::Answer(follower(Some(key(3)))), Ok(())),
         (
             "a `raft` message",
             Refusal::Answer(Message::Raft(beat).encode()),
-            Some(Ok(())),
+            Ok(()),
         ),
         (
             "a proposal",
             Refusal::Answer(Message::Propose { change: home(1) }.encode()),
-            Some(Ok(())),
+            Ok(()),
         ),
-        ("no message", Refusal::Answer(vec![0xff]), Some(Ok(()))),
-        ("an end", Refusal::End, Some(Err(reset))),
-        ("a reset", Refusal::Reset, None),
+        ("no message", Refusal::Answer(vec![0xff]), Ok(())),
+        ("an end", Refusal::End, Err(reset.clone())),
+        ("a reset", Refusal::Reset, Err(reset)),
     ];
     for (case, refusal, ended) in cases {
         let call = |_, mesh| set(mesh);
@@ -744,12 +740,16 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
             }
             let start = clock.now();
             let end = match refusal {
-                Refusal::Answer(_) | Refusal::End => Some(refused.end().await),
+                Refusal::Answer(_) | Refusal::End => refused.end().await,
                 Refusal::Reset => {
-                    let Asked { receiver, sender } = refused;
+                    let Asked {
+                        mut receiver,
+                        sender,
+                    } = refused;
                     sender.reset(Code(16));
+                    let end = receiver.recv().await.map(drop);
                     receiver.stop(Code(16));
-                    None
+                    end
                 }
             };
             let (second, mut asked) = leader.proposal().await;
@@ -761,7 +761,7 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
         });
         assert_eq!(set, (Ok(()), Some(key(1))), "{case}");
         // Node 1 ends its stream after each answer, also one that refuses, and resets
-        // it when the leader ends with no answer.
+        // it when the leader ends or resets with no answer.
         assert_eq!(end, ended, "{case}");
         assert_eq!(changes, [home(1), home(1)], "{case}");
         let ms = gap.nanos() / Span::MILLISECOND.nanos();
