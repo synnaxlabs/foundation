@@ -38,7 +38,8 @@ pub(crate) enum Error {
     Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
-    /// This node has no mesh time at or after the Unix epoch, so it stamps no join.
+    /// This node has no mesh time that can stamp a join: none yet, one with an unknown
+    /// error, or one whose later edge is before the Unix epoch.
     Unsynced,
     /// A join request names more than 64 status channels.
     Status(status::Many),
@@ -73,8 +74,8 @@ impl fmt::Display for Error {
                 f.write_str("the private key of this node is not the key of its member")
             }
             Self::Unsynced => f.write_str(
-                "this node has no mesh time at or after the Unix epoch, so it stamps \
-                 no join",
+                "this node has no mesh time with a known error at or after the Unix \
+                 epoch, so it stamps no join",
             ),
             Self::Status(many) => many.fmt(f),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),

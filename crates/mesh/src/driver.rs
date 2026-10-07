@@ -299,13 +299,18 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// - [`Error::Unsynced`] when this node has no mesh time, or when the later edge
-    ///   is before the Unix epoch, where a UUIDv7 key has no time.
+    /// - [`Error::Unsynced`] when this node has no mesh time, when its error is
+    ///   unknown, or when the later edge is before the Unix epoch, where a UUIDv7
+    ///   key has no time.
     /// - [`Error::Status`] when `request` names more than 64 status channels.
     pub(crate) fn stamp(&self, request: Request) -> Result<Change, Error> {
-        let mesh = self.time.now().mesh.ok_or(Error::Unsynced)?;
-        let at = mesh.latest;
-        if at < Stamp::EPOCH {
+        let measurement = match self.time.status() {
+            clock::Status::Synced(measurement)
+            | clock::Status::Holdover(measurement, _) => measurement,
+            clock::Status::Unsynced(_) => return Err(Error::Unsynced),
+        };
+        let at = measurement.interval().latest;
+        if !measurement.known() || at < Stamp::EPOCH {
             return Err(Error::Unsynced);
         }
         let key = |name| {
@@ -2485,14 +2490,19 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_no_mesh_time_at_or_after_the_epoch_stamps_no_join() {
-        for synced_before in [false, true] {
+    fn a_node_with_no_mesh_time_of_known_error_at_or_after_the_epoch_stamps_no_join() {
+        for case in ["unsynced", "before the epoch", "unknown error"] {
             solo(move |node, tasks| async move {
-                let time = if synced_before {
-                    node.step_wall(Span::from_nanos(-2 * NOW.nanos()));
-                    synced(&node)
-                } else {
-                    clock::Clock::new(node.clock()).1
+                let time = match case {
+                    "unsynced" => clock::Clock::new(node.clock()).1,
+                    "before the epoch" => {
+                        node.step_wall(Span::from_nanos(-2 * NOW.nanos()));
+                        synced(&node)
+                    }
+                    _ => {
+                        node.set_wall_error(None);
+                        synced(&node)
+                    }
                 };
                 let config = Config {
                     time,
@@ -2500,11 +2510,11 @@ mod tests {
                 };
                 let mesh = Mesh::open(config).await.unwrap();
                 let stamped = mesh.stamp(request(4, 8, &[]));
-                assert_eq!(stamped, Err(Error::Unsynced), "{synced_before}");
+                assert_eq!(stamped, Err(Error::Unsynced), "{case}");
             });
         }
-        let text = "this node has no mesh time at or after the Unix epoch, so it \
-                    stamps no join";
+        let text = "this node has no mesh time with a known error at or after the Unix \
+                    epoch, so it stamps no join";
         assert_eq!(Error::Unsynced.to_string(), text);
     }
 

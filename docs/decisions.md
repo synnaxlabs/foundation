@@ -1996,11 +1996,16 @@ How to read this record:
   one `Join` change. Every node that applies it checks the card, and the admission
   against the ticket's public key, scope, uses, and expiry at the change's mesh time
   (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a join
-  stamps the `Join` with the later edge of its mesh time interval, so clock error never
-  admits an expired ticket, and every node checks the expiry against the same stamp at
-  every replay. A voter with no mesh time at or after the Unix epoch stamps no join
-  (`Error::Unsynced`). That voter makes each status key (UUIDv7, X27) from the stamp and
-  its entropy, and the byte form refuses a name twice. Decided by `laptop.architect`
+  stamps the `Join` with the later edge of its mesh time interval, so the error of the
+  voter clock never admits a request that comes at or after the expiry. Every node
+  checks the expiry against the stamp, not against the time of the commit, so a join
+  that commits after the expiry still admits its node, and every node checks the same
+  stamp at every replay. A voter with no mesh time with a known error at or after the
+  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
+  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. That voter
+  makes each status key (UUIDv7, X27) from the stamp and its entropy, and the byte form
+  refuses a name twice. Decided by `laptop.architect`
   (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The voter
   that admits a join answers with the founding voters and their cards, and the node
