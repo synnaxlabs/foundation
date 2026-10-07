@@ -2021,10 +2021,15 @@ fn an_open_with_another_layout_at_once_with_one_that_closes_gets_length() {
 
 /// Three opens at once of a directory with no ring, on a disk of `disk` bytes. The
 /// sync of the root fails for the open that makes the ring, so its ring has no
-/// checkpoint. Returns what each open gave.
-fn three_opens_and_a_failed_sync(disk: u64) -> [Option<Result<(), Error>>; 3] {
-    let (mut sim, node) = node_with_disk(44_546, disk);
-    let results = [204_253, 77_015, 33_749].map(|gap| {
+/// checkpoint. An open that passes commits one entry. Returns what each open gave,
+/// and the tail that an open after a kill recovers.
+fn three_opens_and_a_failed_sync(
+    seed: u64,
+    disk: u64,
+) -> ([Result<(), Error>; 3], Tail) {
+    let (mut sim, node) = node_with_disk(seed, disk);
+    node.fail_file(FilePath::new(""), Operation::SyncDir);
+    let results = [200_000, 75_000, 35_000].map(|gap| {
         let result = Arc::new(Mutex::new(None));
         let (own, shared) = (node.clone(), Arc::clone(&result));
         drop(on_node(
@@ -2032,31 +2037,52 @@ fn three_opens_and_a_failed_sync(disk: u64) -> [Option<Result<(), Error>>; 3] {
             &format!("open-{gap}"),
             move |tasks| async move {
                 own.clock().sleep(Span::from_nanos(gap)).await;
-                let config = Config {
-                    commit: Span::from_nanos(1),
-                    ..node_config(&own, tasks, DIR)
-                };
-                let opened = Buffer::open(config, &mut Slots::new()).await.map(drop);
-                *shared.lock().expect("no panic") = Some(opened);
+                let mut slots = Slots::new();
+                let gave = async {
+                    let config = node_config(&own, tasks, DIR);
+                    let buffer = Buffer::open(config, &mut slots).await?;
+                    let slot = slots.assign(key(1));
+                    let parts = Parts::default();
+                    buffer
+                        .append([entry(1, slot, Path::Live, 0, 3, Some(30), parts)])
+                        .expect("queues");
+                    buffer.committed().await.map_err(Error::Files)
+                }
+                .await;
+                *shared.lock().expect("no panic") = Some(gave);
             },
         ));
         result
     });
-    sim.run_for(Span::from_nanos(136_143))
-        .expect("the run goes on");
-    node.fail_file(FilePath::new(""), Operation::SyncDir);
     sim.run_for(commits(4)).expect("the run goes on");
-    results.map(|result| result.lock().expect("no panic").take())
+    let results = results.map(|result| result.lock().expect("no panic").take());
+    sim.crash(&node, sim::Crash::Process);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens again");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    (
+        results.map(|result| result.expect("each open ends")),
+        recovered.expect("the last open ends"),
+    )
 }
 
 /// A limit of opens at once. The first open removes the ring with no checkpoint that
 /// the third left. The second found no ring before, and its create runs before the
 /// directory sync of the first, while the removed ring keeps its room. So it gets
-/// `Full` on a disk with room for one ring and a half, and `Ok` on one with room
-/// for two. The run hangs on the delay of each file call.
+/// `Full` on a disk with room for one ring and a half, where another open gets `Busy`
+/// on one with room for two. The commit of the open that passes stays.
+///
+/// The run hangs on the delay of each file call. After a change that moves those
+/// delays, the second open can get another result, and this test fails: a search of
+/// the first 20,000 values of `seed` then finds such runs again.
 #[test]
 fn an_open_at_once_with_a_remove_of_another_open_can_get_full() {
     let len = AREA_START + AREA;
+    let kept = tail(3, Some(30));
     let failed = Error::Files(FileError::Io {
         path: PathBuf::new(),
         operation: Operation::SyncDir,
@@ -2065,13 +2091,10 @@ fn an_open_at_once_with_a_remove_of_another_open_can_get_full() {
     let full = Error::Files(FileError::Full {
         path: PathBuf::from(RING),
     });
-    let tight = three_opens_and_a_failed_sync(len + len / 2);
-    assert_eq!(
-        tight,
-        [Some(Ok(())), Some(Err(full)), Some(Err(failed.clone()))]
-    );
-    let wide = three_opens_and_a_failed_sync(2 * len);
-    assert_eq!(wide, [Some(Err(busy())), Some(Ok(())), Some(Err(failed))]);
+    let tight = three_opens_and_a_failed_sync(218, len + len / 2);
+    assert_eq!(tight, ([Ok(()), Err(full), Err(failed.clone())], kept));
+    let wide = three_opens_and_a_failed_sync(218, 2 * len);
+    assert_eq!(wide, ([Err(busy()), Ok(()), Err(failed)], kept));
 }
 
 /// A failed read of the header blocks fails the open with its error and leaves the
