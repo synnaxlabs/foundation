@@ -19,9 +19,19 @@ mod bytes;
 mod common;
 #[cfg_attr(
     not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
+mod driver;
+#[cfg_attr(
+    not(test),
     expect(dead_code, reason = "the driver of #471 is the first user")
 )]
 mod entry;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
+mod error;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the driver of #471 is the first user")
