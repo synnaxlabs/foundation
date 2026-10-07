@@ -2013,8 +2013,8 @@ mod hub {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
     }
 
-    /// `keep` returns only once the ring under a hub that wrote has closed, so a write
-    /// open of it right after gives no `Busy`. This pins the order in `keep`;
+    /// `keep` returns only once the ring under a hub with a writer has closed, so a
+    /// write open of it right after gives no `Busy`. This pins the order in `keep`;
     /// `hub` tests its own drop of a commit.
     #[test]
     fn keep_returns_once_the_ring_under_a_hub_has_closed() {
@@ -2038,8 +2038,7 @@ mod hub {
                 });
                 define(&hub, 1, "time", STAMP, 1);
                 define(&hub, 2, "value", I64, 1);
-                let mut writer = writer(&hub, &monotonic, &["value"]).await;
-                write(&mut writer, WALL, 7);
+                let writer = writer(&hub, &monotonic, &["value"]).await;
                 drop(guard);
                 drop((writer, hub));
             };
