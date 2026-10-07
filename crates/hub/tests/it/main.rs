@@ -28,6 +28,8 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
+mod serve;
+
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
@@ -167,21 +169,21 @@ impl Test {
 
     /// How many blocks the pool gives, largest first, until it has no room.
     fn free(&self) -> usize {
-        self.fill().len()
+        fill(&self.pool).len()
     }
+}
 
-    /// Every block the pool gives, largest first, until it has no room.
-    fn fill(&self) -> Vec<Unique> {
-        let mut blocks = Vec::new();
-        let mut len = self.pool.largest();
-        while len > 0 {
-            while let Ok(block) = self.pool.alloc(len) {
-                blocks.push(block);
-            }
-            len -= len.div_ceil(16);
+/// Every block `pool` gives, largest first, until it has no room.
+fn fill(pool: &Pool) -> Vec<Unique> {
+    let mut blocks = Vec::new();
+    let mut len = pool.largest();
+    while len > 0 {
+        while let Ok(block) = pool.alloc(len) {
+            blocks.push(block);
         }
-        blocks
+        len -= len.div_ceil(16);
     }
+    blocks
 }
 
 /// Spawns on `tasks`, and counts each poll in `polls` and each task that completes in
@@ -1161,7 +1163,7 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff() {
 fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
     run(18, |test| async move {
         let mut complete = test.reader(&["value"], Mode::Complete).await;
-        let blocks = test.fill();
+        let blocks = fill(&test.pool);
         // The handoff finds no block, so it waits for the next write.
         let mut writer = test.writer("a", &["value"]).await;
         drop(blocks);

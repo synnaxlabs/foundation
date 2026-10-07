@@ -914,6 +914,12 @@ How to read this record:
   which a clone or a live session defeats. Decided by `laptop.architect`
   (2026-10-07T18:07:55Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
+  The future of `Hub::serve` holds a hub clone and a session, so it keeps the hub's
+  state and the commit task alive. `node` keeps each such future where `keep` drops it,
+  after the guard and before it awaits the commit, and never runs one with
+  `tasks.spawn`, which gives no way to drop it. Decided by the architect
+  (2026-10-07T21:34:19Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1416,11 +1422,27 @@ How to read this record:
   `Behind` and `Credit` in a latest session are not valid (lost: accept them in either
   mode, which lets a remote latest reader give `Ended::Behind`; the architect,
   2026-10-07T21:34:58Z,
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047310321). Stop
-  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
-  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
-  decode, comes from the wrong side, or breaks a rule above), which every protocol may
-  use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047310321). A
+  latest open needs a stream of class `Latest`, and a complete open a stream of class
+  `Complete`, since the class sets the priority of each frame that the home sends back;
+  the home's `hub` checks it at the `Open` and stops the session with `MALFORMED`.
+  Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
+  is not the home of the index), 18 `FAILED` (the home's buffer failed), 19 `BUSY` (the
+  home's pool had no block for a reply; a later open can succeed), and 2
+  `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
+  or breaks a rule above), which every protocol may use. A reset drops the frames in
+  flight, which is correct for `FAILED`, since the session cannot go on (lost: a
+  `Reply::Failed` that keeps them, a second end message to fuzz). A reply block holds at
+  most `min(bytes_max, Pool::largest)` bytes, so the pool can always hold each one, and
+  an ends run of a peer with a large `message_bytes_max` takes more messages. The home
+  ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait needs
+  a clock in `hub` and a wait queue for each session, and the end frees the frames the
+  session pins (`mesh` ends its stream in the same case). The class rule and code 18
+  were decided by the architect (2026-10-07T21:34:19Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
+  and the block size by the architect (2026-10-07T21:47:56Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084).
+  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
   foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
   a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
   because the home knows its index and a second copy needs a check; the whole

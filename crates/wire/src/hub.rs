@@ -46,6 +46,10 @@ const BEHIND: u8 = 3;
 pub const UNKNOWN: u32 = 16;
 /// Stop code: the node is not the home of the open's index.
 pub const NOT_HOME: u32 = 17;
+/// Stop code: the home's buffer failed.
+pub const FAILED: u32 = 18;
+/// Stop code: the home had no memory for a reply. A later open can succeed.
+pub const BUSY: u32 = 19;
 
 /// The first message from the reader's node, which opens the session. The run of its
 /// [`keys`] follows.
