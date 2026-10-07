@@ -28,6 +28,10 @@ When the PR changes a public surface or a crate's dependencies, also send its li
 a change to what a public item accepts, returns, or states in its doc, and any change
 from a surface or text that the architect approved.
 
+When a new PR replaces one under review, close the old one first (`gh pr close <old>
+--comment "Replaced by #<new>"`), and link its round comments in the new round 1
+comment.
+
 The breaker makes its own worktree. Never give it another path: its permission check
 refuses every command outside that worktree. Remove the worktree when the breaker
 returns (`git worktree remove --force <path>`).
@@ -36,17 +40,21 @@ returns (`git worktree remove --force <path>`).
 
 1. Check each finding against the code yourself. Drop the ones you cannot confirm, and
    say so.
-2. Post one PR comment for each round, also a round that finds nothing. It starts with
-   the rating and summary from the `reviewer`'s report, as given (Rating). Then its
-   reviewers, its range (`<from>..<head sha>`), and the confirmed findings, most severe
-   first: file and line, what goes wrong, and the fix.
+2. Post one PR comment for each round, also a round that finds nothing, after each of
+   its reviewers returns. It starts with the rating and summary from the `reviewer`'s
+   report, as given (Rating). Then its reviewers, its range (`<from>..<head sha>`), and
+   the confirmed findings, most severe first: file and line, what goes wrong, and the
+   fix.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
    the answer, also when the code is already on `main`. A deferral in a risk crate
    (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
    `transport`) needs the explicit OK of `laptop.architect`: link its comment. A fix or
    an answer that makes such a public surface change, or decides what a ruling means,
    needs the architect's approval too: link its comment. So does a fix that reverses
-   a finding of the architect.
+   a finding of the architect, and an answer that decides what a rule in `CLAUDE.md` or
+   `docs/claude/` means. A refusal that names a trigger for later work is a deferral:
+   file its issue with the trigger, or write the trigger in the decisions entry that
+   the ruling cites.
 
 ## Rating
 
@@ -77,6 +85,7 @@ nothing checked again. So when round 1 led to fix commits:
 ## Done
 
 Review is done when the last round comment ends at the PR head, finds nothing, and
-names each reviewer that the table requires, each deferral in a risk crate links its
-OK, each public surface change links the architect's approval, and each issue that the
-review or the architect promised exists. Only then does the author run `gh pr ready`.
+names each reviewer that the table requires, each earlier round comment names each
+reviewer its round requires, each deferral in a risk crate links its OK, each public
+surface change links the architect's approval, and each issue that the review or the
+architect promised exists. Only then does the author run `gh pr ready`.
