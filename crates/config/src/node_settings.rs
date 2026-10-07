@@ -8,21 +8,23 @@ use crate::Found;
 const ZERO_SIZE: Code = Code::new("config.zero-size");
 const KEYS: [&str; 3] = ["select", "disk", "pool"];
 
-/// Checks a `node_settings` block and adds its policy to the entries. An unknown
-/// attribute stops the budget check, because it may be a budget under a wrong key.
-pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
-    let key = found.key(block);
+/// Checks a `node_settings` block and gives its policy. An unknown attribute stops the
+/// budget check, because it may be a budget under a wrong key.
+pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
     let select = found.select(block, "nodes that it sets");
     let disk = found.attribute(block, "disk", read::size);
     let pool = found.attribute(block, "pool", read::size);
     let (Ok(()), Ok(select), Ok(disk), Ok(pool)) = (unknown, select, disk, pool) else {
-        return;
+        return None;
     };
     match Policy::new(select, disk, pool) {
-        Ok(policy) => found.add(key, Definition::NodeSettings(policy)),
-        Err(error) => refuse(found, block, error),
+        Ok(policy) => Some(Definition::NodeSettings(policy)),
+        Err(error) => {
+            refuse(found, block, error);
+            None
+        }
     }
 }
 
