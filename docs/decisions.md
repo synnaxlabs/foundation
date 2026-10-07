@@ -2498,7 +2498,12 @@ How to read this record:
   A lookup that would end past the end of the clock never answers. The match in any
   case and with a final dot was confirmed by the architect on #1018, in place of its
   earlier exact match
-  (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649).
+  (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649). Amended
+  (2026-10-07, #1255): a receive of a failed UDP socket first gives the datagrams queued
+  before the fault, then `EIO`. A broken socket still holds its receive queue, so the
+  queue stays readable. A pulled serial adapter takes its buffer with it, so
+  `Node::fail_serial` loses its unread bytes. Decided by `laptop.architect-2`, #1255
+  (https://github.com/synnaxlabs/foundation/issues/1255#issuecomment-6033324472).
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
