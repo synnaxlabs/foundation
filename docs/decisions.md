@@ -1498,11 +1498,17 @@ How to read this record:
   class, because four handshakes and four congestion controllers compete on one path
   (#55). Settled by the advisor and the coordinator under the person's delegation
   (#789). A node resets a stream with the stop's code when the stop arrives, and frees
-  the stream's room in the send budget and its turn (#1308). A peer breaks the protocol
-  when it sends another class byte, ends a stream inside a message, sends a message over
-  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
-  the connection with application code 2^32 and the reason as text, and the caller gets
-  `Error::Broken`.
+  the stream's room in the send budget and its turn (#1308). A stop that arrives after
+  the peer acknowledged all the data of a finished stream, or this side's reset of the
+  stream, has no effect, and the node does not check its code, because the carrier has
+  freed the stream. Decided by architect-2 (#1445, 2026-10-07 17:48 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1445#issuecomment-6043565271.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1445#issuecomment-6042123544. A peer
+  breaks the protocol when it sends another class byte, ends a stream inside a message,
+  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
+  The node then closes the connection with application code 2^32 and the reason as
+  text, and the caller gets `Error::Broken`.
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
@@ -2324,6 +2330,39 @@ How to read this record:
   to the code that encodes definitions. A chunk's address is a `types::digest::Digest`,
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
+- **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
+  node's disk through `env::files`. A put returns only after the chunk is durable. A put
+  of a digest that a put stored since the open makes no file call. A get gives bytes
+  only when they hash to the digest; a chunk that fails the check (a write torn by a
+  crash, a bad sector) reads as absent, so the caller fetches it again as for any absent
+  chunk, and the store counts each one in a crate-private count: an `interface` issue
+  makes it public, with a noun for a name, when the first caller (the node's status of
+  its disk) needs it. `env::files` has no rename, so a torn chunk must read as absent,
+  never as a short chunk. A get or a put holds at most one chunk in memory. `put`
+  borrows its chunk (`&Block`). A put whose future is dropped stores nothing that a get
+  gives unchecked: the next get of the digest reads and checks the file, and the next
+  put writes it again. Layout: one flat directory, one file per chunk named by the 64
+  hex digits of its digest, with the chunk's bytes and nothing else, so the bytes are
+  their own check and the layout needs no header, no check field, and no rename. A pack
+  file with an index lost: it needs record headers, a scan of every byte at open, and
+  compaction for removal. Removal of chunks that no kept root reaches is a follow-up.
+  Decided by `laptop.architect` (2026-10-07T17:23:56Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The open
+  lists the directory and trusts no name: a get of a listed digest reads and checks its
+  bytes, and a put of one writes it again, because a process crash leaves whole bytes in
+  the cache that no sync covers, and a put that trusted a read of them would return
+  before they are durable. A put refuses a chunk longer than the largest block of the
+  pool before any file call. Decided by the builder (#1515,
+  https://github.com/synnaxlabs/foundation/pull/1515) and `laptop.architect`
+  (2026-10-07T17:47:50Z):
+  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043557708. Supersedes
+  the read on the first put of a listed digest in the plan
+  (https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6042962010) and the
+  sentence of item 1 of the ruling, "the next put or get of the digest reads the file
+  first". Every open makes the directory and syncs its parent, because an earlier open
+  can have stopped between the two. A put removes a file of another length at its name
+  and writes the chunk. Decided in review round 1 of #1515 (2026-10-07T17:56:25Z):
+  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043700902.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -3628,18 +3667,26 @@ How to read this record:
   before it ends, as any other call. The rename can still end after the drop, and
   then the file is at `to`. `os` checks that the old path still names the file by
   device and inode, with no follow of a link, then renames with `RENAME_NOREPLACE`;
-  the I/O thread of a shard runs its calls in order, and each shard writes only its
-  own directory, so nothing changes the path between the check and the rename. Lost:
-  `Files::rename(from, to)` on paths, which cannot tell the file of the
-  handle from a new file at its path; a link then an unlink, which leaves two names at
-  a crash; a replacing rename or a `replace: bool`, which no caller wants and which
-  hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
-  &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
-  one call that takes a name in place of a path in the data directory (#1449, decided
-  by `laptop.architect-2`, 2026-10-07 14:55 UTC:
+  the I/O thread of a shard runs its calls in order, one shard writes each name
+  (SHARD BUFFERS), and one node uses a data directory (DATA DIRECTORY LOCK), so
+  nothing in Foundation changes the path between the check and the rename. Lost:
+  `Files::rename(from, to)` on paths, which cannot tell the file of the handle from a
+  new file at its path; a link then an unlink, which leaves two names at a crash; a
+  replacing rename or a `replace: bool`, which no caller wants and which hides a
+  defect that `Exists` reports; and a bare-name `rename(&mut self, name: &OsStr)`: an
+  `OsStr` can hold a `/`, so it needs the same check, and it would be the one call
+  that takes a name in place of a path in the data directory (#1449, decided by
+  `laptop.architect-2`, 2026-10-07 14:55 UTC:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   panic list and the bare-name reason, 2026-10-07 17:35 UTC:
-  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214). Also
+  lost: a rename that also syncs its directory: it would be the one directory change
+  that is durable when it ends, several changes could no longer share one
+  `sync_dir`, and a failed directory sync would be a third result, a rename that took
+  effect and is not durable (#1503, decided by `laptop.architect-2`, 2026-10-07
+  19:11 UTC: https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044972392;
+  the race sentence, 2026-10-07 19:12 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
@@ -3815,7 +3862,12 @@ How to read this record:
   not started does not start; `join` gives `Start` or `Memory`, else `Shards` or
   `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
   architect on #1062 (#1174):
-  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. One
+  shard writes each name in the data directory: shard `i` writes `shard-<i>` and each
+  name in it, and shard 0 also writes `lock` and `shards-<n>`. A change that gives a
+  name a second writer first changes the check of FILE RENAME, which relies on this
+  (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory.
   Before the claim reads a name, shard 0 opens the file `lock` in the data directory
   to write (`Mode::Create { len: 0 }`), and drops it after each shard of the node has
