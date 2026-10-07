@@ -2579,9 +2579,14 @@ How to read this record:
   checks the expiry against the stamp, not against the time of the commit, so a join
   that commits after the expiry still admits its node, and every node checks the same
   stamp at every replay. A voter with no mesh time with a known error at or after the
-  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
-  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
-  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
+  Unix epoch stamps no join: a guess at the expiry is the case that the later edge
+  stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. Until the
+  join answer of #336 calls it, the stamp is crate-private: it takes the mesh time as
+  an argument and gives its own two refusals, so `mesh::Config` has no mesh time and
+  `mesh::Error` has no case for a join that no voter stamps. Decided by
+  `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563. So a
   region whose voters all have an unknown clock error admits no node by ticket, and the
   operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
   Windows node with a peer of known error. Decided by `laptop.director`

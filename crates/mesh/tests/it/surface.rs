@@ -117,7 +117,6 @@ fn create_config_on(
         voters: [KEY].into(),
         files: node.files(),
         clock: node.clock(),
-        time: clock::Clock::new(node.clock()).1,
         entropy: node.entropy(),
         tasks: tasks.clone(),
         transport: Rc::new(transport),
