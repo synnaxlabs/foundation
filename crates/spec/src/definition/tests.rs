@@ -954,6 +954,15 @@ fn refuses_a_data_channel_that_cannot_exist() {
             channel::Error::Empty { data_type: f64s(0) },
         ),
         (
+            vec![1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, b'V'],
+            channel::Error::Empty {
+                data_type: DataType::Sample(sample::Type::Array {
+                    element: Scalar::Bool,
+                    len: 0,
+                }),
+            },
+        ),
+        (
             vec![2, 10, 0, 0, 0, 0, 0],
             channel::Error::Empty {
                 data_type: DataType::Sample(sample::Type::List {
@@ -1184,7 +1193,10 @@ proptest! {
         data_type in 0_u8..7,
         scalar in 0_u8..15,
         count in prop_oneof![Just(0_u32), Just(1), any::<u32>()],
-        unit in prop::collection::vec(any::<u8>(), 0..36),
+        unit in prop_oneof![
+            "[!-~]{1,32}".prop_map(String::into_bytes),
+            prop::collection::vec(any::<u8>(), 0..36),
+        ],
     ) {
         let mut bytes = vec![VERSION, CHANNEL];
         bytes.extend_from_slice(&5_u128.to_le_bytes());
