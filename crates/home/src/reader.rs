@@ -50,7 +50,8 @@ pub(crate) struct Set {
     /// The place of each index whose readers may be
     /// [pending](delivery::Readers::pending), each once.
     listed: Vec<usize>,
-    /// Each reader to wake, with a frame to take. A key can repeat.
+    /// Each reader to wake: one with a frame to take, or a complete reader that missed
+    /// a frame with none waiting. A key can repeat.
     keys: Vec<Key>,
     /// The commits the buffer had ended at the last [`Set::woken`].
     commits: u64,
@@ -246,7 +247,7 @@ mod tests {
     use types::frame::{self, Draft, Form};
 
     use super::*;
-    use crate::common::{key, pool};
+    use crate::common::{create_pool, key};
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -261,7 +262,7 @@ mod tests {
                 data: &[],
             };
             Self {
-                pool: pool(4096),
+                pool: create_pool(4096),
                 set: Interner::new().intern(&[index]),
             }
         }

@@ -6,22 +6,22 @@
 use spec::access::{Action, Actions, Policy};
 use types::authority::Authority;
 use types::hash::Set;
-use types::name::Name;
+use types::name::{Name, Prefix};
 
 /// The access rules of a mesh: its access policies and its connectors. Owners build
 /// one from the spec they read and ask it for each decision.
 #[derive(Clone, Debug)]
 pub struct Rules {
-    policies: Vec<(Option<Name>, Policy)>,
+    policies: Vec<(Prefix, Policy)>,
     connectors: Set<Name>,
 }
 
 impl Rules {
-    /// Builds the rules. Each policy comes with the region whose spec tree holds it;
-    /// `None` is the root region. `connectors` are the names of the connector
-    /// definitions.
+    /// Builds the rules. Each policy comes with the prefix of the region whose spec
+    /// tree holds it; [`Prefix::ROOT`] is the root region. `connectors` are the names
+    /// of the connector definitions.
     pub fn new(
-        policies: impl IntoIterator<Item = (Option<Name>, Policy)>,
+        policies: impl IntoIterator<Item = (Prefix, Policy)>,
         connectors: impl IntoIterator<Item = Name>,
     ) -> Self {
         Self {
@@ -48,7 +48,7 @@ impl Rules {
             grant = grant.add(write, Some(Authority::ABSOLUTE));
         }
         for (region, policy) in &self.policies {
-            let reached = region.as_ref().is_none_or(|r| name.starts_with(r))
+            let reached = region.contains(name)
                 && policy.subjects().matches(subject).is_some()
                 && policy.select().matches(name).is_some();
             if reached {

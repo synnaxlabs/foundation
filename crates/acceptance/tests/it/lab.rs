@@ -108,13 +108,17 @@ impl Lab {
             shards: host.shards(),
             clock: host.clock(),
             wall: host.wall(),
-            budget: 1 << 20,
+            budget: types::byte::Size::MEBIBYTE,
             memory: Box::new(|len| Ok(block::Heap::new(len))),
             files: {
                 let host = host.clone();
-                Arc::new(move || host.files())
+                Box::new(move || {
+                    let host = host.clone();
+                    Box::new(move || host.files())
+                })
             },
             entropy: host.entropy(),
+            disk: types::byte::Size::GIBIBYTE,
         });
         self.members.push(Member {
             name: name.into(),
@@ -126,13 +130,13 @@ impl Lab {
 
     /// Sets the disk budget of `node` to `bytes`.
     pub(crate) fn limit(&mut self, _node: Node, _bytes: u64) {
-        todo!("waits on #342")
+        todo!("waits on #337")
     }
 
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
     /// second, as `buffer` stores it.
     pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
-        todo!("waits on #342")
+        todo!("waits on #1256")
     }
 
     /// Makes `nodes` the members of one mesh, without a ticket.

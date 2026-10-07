@@ -23,7 +23,7 @@ use hub::{Channel, Hub};
 use types::authority::Authority;
 use types::channel::{self, Slot};
 use types::frame::key_set::Interner;
-use types::frame::{Form, Label, Path, Range};
+use types::frame::{self, Form, Label, Path, Range, View};
 use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
@@ -527,10 +527,10 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
         let (mut bytes, mut spent, mut first) = (0, 0, 0);
         for n in 0..400 {
             write_wide(&mut writer, now, n);
-            bytes += taker.next().await.expect("a frame").view.charge();
+            bytes += charge(&taker.next().await.expect("a frame").view);
             // The call that takes the second frame grants credit for the first.
             if n < 2 {
-                let charge = lagger.next().await.expect("a frame").view.charge();
+                let charge = charge(&lagger.next().await.expect("a frame").view);
                 if n == 0 {
                     first = charge;
                 }
@@ -608,20 +608,20 @@ fn keeps_a_complete_reader_that_called_next_before_a_commit_under_a_window() {
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
         write_samples(&mut writer, now, 80_000);
-        let first = reader.next().await.expect("a frame").view.charge();
+        let first = charge(&reader.next().await.expect("a frame").view);
         assert!(first < WINDOW, "{first} bytes are under the window");
         let a = {
             let next = reader.next();
             write_samples(&mut writer, now + 80_000, 50_000);
             write_samples(&mut writer, now + 130_000, 1);
             test.clock.sleep(SETTLE).await;
-            next.await.expect("a frame").view.charge()
+            charge(&next.await.expect("a frame").view)
         };
         assert!(
             a + 4096 < WINDOW,
             "{a} bytes and one sample are under the window"
         );
-        let b = reader.next().await.map(|received| received.view.charge());
+        let b = reader.next().await.map(|received| charge(&received.view));
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }
@@ -635,15 +635,15 @@ fn keeps_a_complete_reader_that_takes_a_commit_of_more_than_a_window() {
         write_samples(&mut writer, now, 80_000);
         write_samples(&mut writer, now + 80_000, 80_000);
         test.clock.sleep(SETTLE).await;
-        let first = reader.next().await.expect("a frame").view.charge();
-        let second = reader.next().await.expect("a frame").view.charge();
+        let first = charge(&reader.next().await.expect("a frame").view);
+        let second = charge(&reader.next().await.expect("a frame").view);
         assert!(
             first + second > WINDOW,
             "{first} + {second} bytes pass a window"
         );
         write_samples(&mut writer, now + 160_000, 1);
         test.clock.sleep(SETTLE).await;
-        let third = reader.next().await.map(|received| received.view.charge());
+        let third = reader.next().await.map(|received| charge(&received.view));
         assert_eq!(third.map(|third| third < 4096), Ok(true));
     });
 }
@@ -854,12 +854,21 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
 #[derive(Default)]
 struct Flag(AtomicBool);
 
+/// What a frame of one group with only the series of `view` charges, as a reader
+/// that holds each series of the frame spends ([`frame::charge`]).
+fn charge(view: &View<'_>) -> u64 {
+    let lens = view.iter().map(|(_, series)| ((), series.len()));
+    let (count, end) =
+        frame::ends(lens).fold((0, 0), |(count, _), ((), end)| (count + 1, end));
+    frame::charge(count, end)
+}
+
 /// Takes each frame of `reader` until it ends: their charges, and how it ended.
 async fn take_all(reader: &mut Reader) -> (Vec<u64>, Ended) {
     let mut charges = Vec::new();
     loop {
         match reader.next().await {
-            Ok(received) => charges.push(received.view.charge()),
+            Ok(received) => charges.push(charge(&received.view)),
             Err(ended) => return (charges, ended),
         }
     }
@@ -888,7 +897,7 @@ fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_its_next_call() 
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
             write_samples(&mut writer, now, PAST_WINDOW);
-            let charge = reader.next().await.expect("a frame").view.charge();
+            let charge = charge(&reader.next().await.expect("a frame").view);
             assert!(charge > WINDOW, "{charge} bytes spend the window");
             // The reader holds the frame, so the window has no room for the next.
             write_samples(&mut writer, now + PAST_WINDOW, 1);
@@ -1090,7 +1099,7 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
         write_samples(&mut writer, now, 80_000);
-        let first = reader.next().await.expect("a frame").view.charge();
+        let first = charge(&reader.next().await.expect("a frame").view);
         assert!(first < WINDOW, "{first} bytes are under the window");
         let a = {
             let mut next = pin!(reader.next());
@@ -1098,13 +1107,13 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
             write_samples(&mut writer, now + 80_000, 50_000);
             write_samples(&mut writer, now + 130_000, 1);
             test.clock.sleep(SETTLE).await;
-            next.await.expect("a frame").view.charge()
+            charge(&next.await.expect("a frame").view)
         };
         assert!(
             a + 4096 < WINDOW,
             "{a} bytes and one sample are under the window"
         );
-        let b = reader.next().await.map(|received| received.view.charge());
+        let b = reader.next().await.map(|received| charge(&received.view));
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }

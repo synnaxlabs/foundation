@@ -1,3 +1,7 @@
+# Build with all features on, as CI's test step does, so code behind a feature such as
+# `sim` is mutated and tested.
+all_features = true
+
 # Mutants that no test can catch, each with the reason.
 exclude_re = [
   # Benchmarks ship in no binary; the run itself checks them.
@@ -7,14 +11,21 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # Calls the GitHub API. The review workflow runs it on each PR: a round with findings
+  # shows that it fails.
+  'xtask/src/review\.rs:.*(replace run ->| in run$)',
+  # Calls the GitHub API. The review workflow runs it on each PR: with no PR record,
+  # the status is `error`.
+  'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes these lines.
-  'crates/transport/src/(datagram|stream)\.rs:',
-  'crates/transport/src/session\.rs:.*Session::(open|accept|datagrams)',
+  'crates/transport/src/datagram\.rs:',
+  'crates/transport/src/stream\.rs:.*Receiver::recv_into\b',
+  'crates/transport/src/session\.rs:.*Session::datagrams\b',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.
   'crates/transport/src/tls\.rs:.*root_hint_subjects.*Vec::leak',
   # The boundary draw is a 64-bit hash against a multiple of 2^64. Equality needs a

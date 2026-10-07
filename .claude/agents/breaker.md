@@ -31,4 +31,6 @@ crate, in your worktree, and run it. Never switch to a branch.
   in one line each.
 
 Put the test code in your reply. Never report a finding without a test that you ran and
-saw fail. Never commit or push.
+saw fail. A test that passes on the PR and fails only when you change the PR's code (a
+mutant) is not a finding: list it with the cases you tried. Test gaps belong to the
+`reviewer`. Never commit or push.

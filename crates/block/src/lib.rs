@@ -97,16 +97,17 @@ const fn class_footprint(index: usize) -> usize {
 /// Bytes that a block with a payload of `len` bytes takes from its pool: the header
 /// plus the payload of the smallest size class that holds `len`. Payloads step by
 /// 64 bytes up to 256, then by a quarter of the lower power of two, so the payload
-/// is at most 64 bytes or a quarter of `len` above it.
-///
-/// # Panics
-///
-/// If `len` passes the largest payload, 2 GiB.
+/// is at most 64 bytes or a quarter of `len` above it. Gives `usize::MAX` when `len`
+/// passes the largest payload, 2 GiB: no pool holds such a block, so every budget
+/// refuses it.
 #[must_use]
 pub const fn footprint(len: usize) -> usize {
     let index = class_of(len);
-    assert!(index < CLASSES_MAX, "no size class holds that many bytes");
-    class_footprint(index)
+    if index < CLASSES_MAX {
+        class_footprint(index)
+    } else {
+        usize::MAX
+    }
 }
 
 /// The start of a pool's memory. Any thread that drops a block reaches it.
@@ -235,6 +236,17 @@ impl Pool {
             purges: Cell::new(0),
             classes: (0..classes(budget)).map(|_| Class::default()).collect(),
         }
+    }
+
+    /// Creates a pool on [`Heap`] memory with the settings of `config`.
+    ///
+    /// # Panics
+    ///
+    /// If [`Config::reservation`] panics, or the heap cannot allocate that many bytes.
+    #[must_use]
+    pub fn heap(config: Config) -> Self {
+        let heap = Heap::new(config.reservation());
+        Self::new(config, heap)
     }
 
     /// The most bytes one block can hold.
@@ -976,7 +988,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_pointer_width = "64")]
         fn stops_at_a_payload_of_two_gibibytes() {
             assert_eq!(class_payload(CLASSES_MAX - 1), 1 << 31);
             assert_eq!(class_of(1 << 31), CLASSES_MAX - 1);
@@ -1048,15 +1059,14 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "no size class holds that many bytes")]
-        fn panics_above_the_largest_payload() {
-            assert_eq!(footprint((1 << 31) + 1), 0);
+        fn is_the_largest_class_at_the_largest_payload() {
+            assert_eq!(footprint(1 << 31), HEADER + (1 << 31));
         }
 
         #[test]
-        #[should_panic(expected = "no size class holds that many bytes")]
-        fn panics_at_the_largest_length() {
-            assert_eq!(footprint(usize::MAX), 0);
+        fn saturates_above_the_largest_payload() {
+            assert_eq!(footprint((1 << 31) + 1), usize::MAX);
+            assert_eq!(footprint(usize::MAX), usize::MAX);
         }
 
         proptest! {
@@ -1138,6 +1148,43 @@ mod tests {
         #[should_panic(expected = "heap memory of 9223372036854775743 bytes is too")]
         fn panics_when_the_padded_layout_fits_but_cannot_be_allocated() {
             drop(Heap::new(isize::MAX as usize - ALIGN));
+        }
+
+        mod pool {
+            use super::*;
+
+            #[test]
+            fn gives_its_largest_block_and_stops_at_the_budget() {
+                let pool = Pool::heap(Config { budget: 256 });
+                assert_eq!(pool.largest(), 192);
+                let mut block = pool.alloc(192).expect("the budget has room");
+                block.fill(1);
+                assert_eq!(pool.committed(), 256);
+                let error = pool.alloc(1).expect_err("the budget is full");
+                assert_eq!(error, exhausted(1, 0));
+            }
+
+            #[test]
+            fn holds_no_block_with_no_budget() {
+                let pool = Pool::heap(Config { budget: 0 });
+                assert_eq!(pool.largest(), 0);
+                let error = pool.alloc(0).expect_err("no block fits");
+                assert_eq!(error, too_large(0, 0));
+            }
+
+            #[test]
+            #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
+            fn panics_when_the_reservation_does_not_fit_in_a_usize() {
+                drop(Pool::heap(Config { budget: usize::MAX }));
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "heap memory of 13835058055282163776 bytes is too large"
+            )]
+            fn panics_when_the_heap_cannot_hold_the_reservation() {
+                drop(Pool::heap(Config { budget: 1 << 57 }));
+            }
         }
     }
 
@@ -1992,7 +2039,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_pointer_width = "64")]
         #[should_panic(expected = "cannot skip 4294967296 bytes of a block of 5 bytes")]
         fn panics_past_a_u32() {
             let pool = create_pool(256);

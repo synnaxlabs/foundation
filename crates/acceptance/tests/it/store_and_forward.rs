@@ -34,7 +34,7 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
 }
 
 #[test]
-#[ignore = "waits on #342"]
+#[ignore = "waits on #336, #337, #340, #341, #451, and #1256"]
 fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
     let (stored, written) = check(HOUR);
     assert_eq!(stored.samples, WRITTEN, "count");
@@ -44,7 +44,7 @@ fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
 }
 
 #[test]
-#[ignore = "waits on #342"]
+#[ignore = "waits on #336, #337, #340, #341, #451, and #1256"]
 fn a_budget_for_half_the_hour_delivers_one_gap_of_the_trimmed_samples() {
     let (stored, written) = check(HOUR / 2);
     let [Gap { after: 0, count }] = stored.gaps[..] else {

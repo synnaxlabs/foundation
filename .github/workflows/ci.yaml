@@ -106,6 +106,12 @@ jobs:
         run: cargo xtask oracles
       - name: Test
         run: cargo test --workspace --all-features
+      # Root tests mount a filesystem. Only this runner, which is discarded after the
+      # job, runs them.
+      - name: Root tests
+        run: |
+          cargo clippy -p os --all-features --test root -- -D warnings
+          cargo test -p os --all-features --test root
 
   features:
     needs: changes

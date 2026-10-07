@@ -15,6 +15,7 @@
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod bytes;
+pub mod card;
 #[cfg(test)]
 mod common;
 #[cfg_attr(
@@ -22,6 +23,7 @@ mod common;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod driver;
+mod ed25519;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
@@ -42,6 +44,7 @@ mod grant;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod log;
+mod member;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
@@ -52,3 +55,9 @@ mod message;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod region;
+pub mod status;
+#[cfg(any(test, feature = "sim"))]
+pub mod testing;
+pub mod ticket;
+
+pub use member::Member;

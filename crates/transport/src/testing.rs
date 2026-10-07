@@ -1,11 +1,14 @@
-//! A sim shard for a [`Config`], and runs of two nodes with a carrier or transport
-//! on each.
+//! A sim shard for a [`Config`], and runs of two nodes with a carrier, a transport,
+//! or a session on each.
 
+use std::future::poll_fn;
 use std::net::{IpAddr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::pin::{Pin, pin};
 use std::rc::Rc;
+use std::task::Poll;
 
-use block::{Block, Heap, Pool};
+use block::{Block, Heap, Pool, Unique};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::net::Net;
@@ -15,14 +18,20 @@ use sim::node::Node;
 use types::node::PrivateKey;
 use types::time::Span;
 
-use crate::{Config, Port, Transport, port, quic};
+use crate::{Address, Config, Port, Session, Transport, port, quic};
 
 /// The most streams of each kind a peer may open, in [`Shard::config`].
 pub(crate) const STREAMS_MAX: u32 = 16;
+/// The largest message of each side, in [`Shard::config`].
+pub(crate) const MESSAGE_BYTES_MAX: usize = 1 << 16;
 
 /// The UDP port of [`address`].
 pub(crate) const PORT: u16 = 4433;
 
+/// The key of the client node of [`sessions`].
+pub(crate) const CLIENT: PrivateKey = PrivateKey([1; 32]);
+/// The key of the server node of [`sessions`].
+pub(crate) const SERVER: PrivateKey = PrivateKey([2; 32]);
 /// The idle timeout of the configs that [`shard`] gives.
 pub(crate) const IDLE: Span = Span::SECOND;
 
@@ -73,7 +82,7 @@ impl Shard {
     pub(crate) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
         Config {
             private_key,
-            message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+            message_bytes_max: NonZeroUsize::new(MESSAGE_BYTES_MAX).expect("not zero"),
             window_bytes: 1 << 20,
             streams_max: NonZeroU32::new(STREAMS_MAX).expect("not zero"),
             idle,
@@ -86,15 +95,25 @@ impl Shard {
 
     /// A block from [`Shard::pool`] that holds `bytes`.
     pub(crate) fn block(&self, bytes: &[u8]) -> Block {
-        let mut block = self.pool.alloc(bytes.len()).expect("room");
-        block.copy_from_slice(bytes);
-        block.freeze()
+        block(&self.pool, bytes)
     }
 
     /// The bytes of [`Shard::pool`] that blocks hold or keep for the next alloc.
     pub(crate) fn committed(&self) -> usize {
         self.pool.committed()
     }
+}
+
+/// A block of `len` bytes from `pool`, or `None` when it has no room.
+pub(crate) fn alloc(pool: &Pool, len: usize) -> Option<Unique> {
+    pool.alloc(len).ok()
+}
+
+/// A block from `pool` that holds `bytes`.
+pub(crate) fn block(pool: &Pool, bytes: &[u8]) -> Block {
+    let mut block = pool.alloc(bytes.len()).expect("room");
+    block.copy_from_slice(bytes);
+    block.freeze()
 }
 
 /// `n` times `span`.
@@ -183,4 +202,109 @@ pub(crate) fn run<T: Send + 'static>(
         test(&Shard::new(&node, tasks))
     })
     .expect("the test passes")
+}
+
+/// One end of the session of [`sessions`].
+pub(crate) struct Side {
+    pub(crate) session: Session,
+    pub(crate) node: Node,
+    pub(crate) pool: Rc<Pool>,
+    pub(crate) transport: Transport,
+}
+
+impl Side {
+    /// A block from the side's pool that holds `bytes`.
+    pub(crate) fn block(&self, bytes: &[u8]) -> Block {
+        block(&self.pool, bytes)
+    }
+}
+
+/// A run from `value` with a client node and a server node. The client's transport
+/// for [`CLIENT`] dials the server's for [`SERVER`], whose config `tune` gives from
+/// the default, and each side runs its function on its end of the session. A side
+/// that drops its session at the end sends the close.
+pub(crate) fn sessions<C, S>(
+    value: u64,
+    tune: impl FnOnce(Config) -> Config + Send + 'static,
+    client: impl FnOnce(Side) -> C + Send + 'static,
+    server: impl FnOnce(Side) -> S + Send + 'static,
+) -> (Sim, Node, Node)
+where
+    C: Future<Output = ()> + 'static,
+    S: Future<Output = ()> + 'static,
+{
+    let (sim, client_node, server_node) = nodes(value);
+    let at = address(&server_node);
+    shard(&server_node, SERVER, move |config, node| async move {
+        let config = tune(config);
+        let pool = Rc::clone(&config.pool);
+        let part = part(&node.net(), address(&node));
+        let transport = Transport::new(config, part).expect("a transport");
+        let session = transport.accept().await.expect("a session");
+        let clock = node.clock();
+        server(Side {
+            session,
+            node,
+            pool,
+            transport,
+        })
+        .await;
+        // A shard that ends drops its tasks, so give the close time to go out.
+        clock.sleep(Span::MILLISECOND).await;
+    });
+    shard(&client_node, CLIENT, move |config, node| async move {
+        let pool = Rc::clone(&config.pool);
+        let part = part(&node.net(), address(&node));
+        let transport = Transport::new(config, part).expect("a transport");
+        let addresses = [Address::Udp(at)];
+        let dialed = transport
+            .dial(crate::tls::public(&SERVER), &addresses)
+            .await;
+        let session = dialed.expect("a session");
+        let clock = node.clock();
+        client(Side {
+            session,
+            node,
+            pool,
+            transport,
+        })
+        .await;
+        // A shard that ends drops its tasks, so give the close time to go out.
+        clock.sleep(Span::MILLISECOND).await;
+    });
+    (sim, client_node, server_node)
+}
+
+/// Polls `future` once, and gives its output when it is ready.
+pub(crate) async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Option<F::Output> {
+    poll_fn(|cx| Poll::Ready(ready(future.as_mut().poll(cx)))).await
+}
+
+/// Waits for both futures, and gives both outputs.
+pub(crate) async fn join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (pin!(a), pin!(b));
+    let (mut left, mut right) = (None, None);
+    poll_fn(|cx| {
+        if left.is_none() {
+            left = ready(a.as_mut().poll(cx));
+        }
+        if right.is_none() {
+            right = ready(b.as_mut().poll(cx));
+        }
+        match (left.take(), right.take()) {
+            (Some(l), Some(r)) => Poll::Ready((l, r)),
+            (l, r) => {
+                (left, right) = (l, r);
+                Poll::Pending
+            }
+        }
+    })
+    .await
+}
+
+fn ready<T>(poll: Poll<T>) -> Option<T> {
+    match poll {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
 }

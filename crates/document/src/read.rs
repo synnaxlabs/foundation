@@ -3,8 +3,8 @@
 
 use std::slice;
 
-use types::byte;
 use types::name::{Error, Name, Selector};
+use types::{byte, time};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
@@ -13,6 +13,7 @@ use crate::{Label, Span};
 const BAD_SIZE: Code = Code::new("document.bad-size");
 const BAD_NAME: Code = Code::new("document.bad-name");
 const BAD_SELECTOR: Code = Code::new("document.bad-selector");
+const BAD_SPAN: Code = Code::new("document.bad-span");
 
 /// Reads a byte size from a string that [`byte::Size`] reads, such as `"200GiB"` or
 /// `"1.5GiB"`.
@@ -41,7 +42,8 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
 
 /// The fix for `text`, which `byte::Size` refuses with `error`. It is `Write` and the
 /// text with no whitespace and the unit that `text` likely means, when that text reads,
-/// so `"200 GB"` gets `Write "200GiB"`. Otherwise it is the fix for `error`.
+/// so `"200 GB"` gets `Write "200GiB"`. Otherwise it is the fix for `error`, with
+/// each size quoted as the file writes it.
 fn size_fix(text: &str, error: byte::Error) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
     // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it has no likely text.
@@ -65,7 +67,85 @@ fn size_fix(text: &str, error: byte::Error) -> String {
             return format!("Write \"{likely}\"");
         }
     }
-    error.fix()
+    match error {
+        byte::Error::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
+        byte::Error::Range { largest } => format!("Use at most \"{largest}\""),
+        byte::Error::Unit { .. } | byte::Error::Fraction => error.fix(),
+    }
+}
+
+/// Reads a span from a string that [`time::Span`] reads, such as `"3d"` or `"1.5s"`.
+///
+/// # Errors
+///
+/// A `document.bad-span` diagnostic at the value's span when the value is not a
+/// string, or when `time::Span` refuses its text.
+pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
+    let bad = |message: String, fix: String| {
+        Diagnostic::new(BAD_SPAN, value.span, message, fix)
+    };
+    let Kind::String(text) = &value.kind else {
+        return Err(bad(
+            format!("a span is a string, not {}", noun(&value.kind)),
+            "Write a string such as \"3d\"".into(),
+        ));
+    };
+    text.parse::<time::Span>().map_err(|error| {
+        bad(
+            format!("cannot read the span {text:?}: {error}"),
+            span_fix(error),
+        )
+    })
+}
+
+/// The fix for `error`, with each span quoted as the file writes it.
+fn span_fix(error: time::Error) -> String {
+    match error {
+        time::Error::Span => {
+            "Write a span such as \"250us\", \"1.5s\", or \"3d\"".into()
+        }
+        time::Error::Long => "Use a span from \"-106751d\" to \"106751d\"".into(),
+        time::Error::Fraction
+        | time::Error::Stamp
+        | time::Error::Date
+        | time::Error::Era
+        | time::Error::Range
+        | time::Error::Reversed
+        | time::Error::Zero
+        | time::Error::Period => error.fix().into(),
+    }
+}
+
+/// Reads a value as a name: a string such as `"site_a.node_1"`, or a reference.
+///
+/// # Errors
+///
+/// A `document.bad-name` diagnostic at the value when it is not a string or a
+/// reference, or when [`Name`] refuses its text, with the message and the fix of
+/// its [`Error`].
+pub fn name(value: &Value) -> Result<Name, Diagnostic> {
+    match &value.kind {
+        Kind::String(text) => text
+            .parse()
+            .map_err(|error| diagnose(BAD_NAME, value.span, &error)),
+        Kind::Reference(name) => Ok(name.clone()),
+        kind => Err(Diagnostic::new(
+            BAD_NAME,
+            value.span,
+            format!("a name is a string or a reference, not {}", noun(kind)),
+            "Write a name such as \"site_a.node_1\"".into(),
+        )),
+    }
+}
+
+/// Reads one name or a list of names, each as [`name`] reads it, such as
+/// `["n_1", "n_2"]`. Keeps their order and repeats.
+///
+/// # Errors
+///
+/// The diagnostic of [`name`] for the first item that it refuses.
+pub fn names(value: &Value) -> Result<Vec<Name>, Diagnostic> {
+    items(value).iter().map(name).collect()
 }
 
 /// Reads a block label as a name, such as `"site_a.cell_1"`.
@@ -74,7 +154,7 @@ fn size_fix(text: &str, error: byte::Error) -> String {
 ///
 /// A `document.bad-name` diagnostic at the label when [`Name`] refuses its text, with
 /// the message and the fix of its [`Error`].
-pub fn name(label: &Label) -> Result<Name, Diagnostic> {
+pub fn label(label: &Label) -> Result<Name, Diagnostic> {
     label
         .text
         .parse()
@@ -91,7 +171,7 @@ pub fn name(label: &Label) -> Result<Name, Diagnostic> {
 /// refuses, with the message and the fix of its [`Error`]; or at the value when no
 /// pattern includes names, with those of [`Error::NoInclude`].
 pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
-    let patterns = patterns(value);
+    let patterns = items(value);
     let mut texts = Vec::with_capacity(patterns.len());
     for pattern in patterns {
         let text: &str = match &pattern.kind {
@@ -118,9 +198,9 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
     Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
 }
 
-/// The patterns of a selector value, at the positions that [`Selector`] gives: the
-/// items of a list, or the value itself.
-fn patterns(value: &Value) -> &[Value] {
+/// The items of a value that holds one item or a list: the items of a list, or the
+/// value itself.
+fn items(value: &Value) -> &[Value] {
     match &value.kind {
         Kind::List(items) => items,
         _ => slice::from_ref(value),
@@ -152,7 +232,7 @@ mod tests {
     use crate::{Map, Position, Source, Span};
     use proptest::prelude::*;
 
-    const SYNTAX: &str = "Write a size such as 200GiB or 1.5GiB";
+    const SYNTAX: &str = "Write a size such as \"200GiB\" or \"1.5GiB\"";
     const UNIT: &str = "Use a unit such as `MiB` or `GiB`, with exact case";
     const FRACTION: &str = "Round the size to whole bytes";
     const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in that \
@@ -308,13 +388,13 @@ mod tests {
                 "16777216TiB",
                 "cannot read the byte size \"16777216TiB\": expected a size of at most \
                  16777215TiB",
-                "Use at most 16777215TiB",
+                "Use at most \"16777215TiB\"",
             ),
             (
                 "18446744073709551616B",
                 "cannot read the byte size \"18446744073709551616B\": expected a size \
                  of at most 18446744073709551615B",
-                "Use at most 18446744073709551615B",
+                "Use at most \"18446744073709551615B\"",
             ),
         ]);
     }
@@ -333,29 +413,52 @@ mod tests {
         assert_eq!(size(&value).unwrap_err().span, None);
     }
 
-    mod names {
+    /// A span that starts at `offset`, so each item in a list has its own.
+    fn at(offset: u32) -> Option<Span> {
+        let at = |offset| Position {
+            offset,
+            line: 0,
+            column: offset,
+        };
+        Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
+    }
+
+    /// A list of the items, each at its index.
+    fn list(items: Vec<Kind>) -> Value {
+        let items = (0..)
+            .zip(items)
+            .map(|(i, kind)| Value { kind, span: at(i) });
+        value(Kind::List(items.collect()))
+    }
+
+    fn text(text: &str) -> Kind {
+        Kind::String(text.into())
+    }
+
+    /// A `document.bad-name` diagnostic.
+    fn bad_name(span: Option<Span>, message: &str, fix: &str) -> Diagnostic {
+        Diagnostic::new(
+            Code::new("document.bad-name"),
+            span,
+            message.into(),
+            fix.into(),
+        )
+    }
+
+    mod labels {
         use super::*;
 
-        fn label(text: &str) -> Label {
+        fn labeled(text: &str) -> Label {
             Label {
                 text: text.into(),
                 span: Some(span()),
             }
         }
 
-        fn refused(message: &str, fix: &str) -> Result<Name, Diagnostic> {
-            Err(Diagnostic::new(
-                Code::new("document.bad-name"),
-                Some(span()),
-                message.into(),
-                fix.into(),
-            ))
-        }
-
         #[test]
         fn reads_a_label() {
             assert_eq!(
-                name(&label("site_a.cell_1")),
+                label(&labeled("site_a.cell_1")),
                 Ok("site_a.cell_1".parse().unwrap())
             );
         }
@@ -387,17 +490,21 @@ mod tests {
                     "Use fewer or shorter segments",
                 ),
             ] {
-                assert_eq!(name(&label(text)), refused(message, fix), "{text:?}");
+                assert_eq!(
+                    label(&labeled(text)),
+                    Err(bad_name(Some(span()), message, fix)),
+                    "{text:?}"
+                );
             }
         }
 
         #[test]
         fn puts_no_span_on_a_label_with_none() {
-            let label = Label {
+            let unspanned = Label {
                 text: "site a".into(),
                 span: None,
             };
-            assert_eq!(name(&label).unwrap_err().span, None);
+            assert_eq!(label(&unspanned).unwrap_err().span, None);
         }
 
         proptest! {
@@ -405,7 +512,9 @@ mod tests {
             fn reads_as_name_does(
                 text in prop_oneof![any::<String>(), "[a-z_.* @-]{0,8}"],
             ) {
-                match (name(&label(&text)), text.parse::<Name>()) {
+                let read = label(&labeled(&text));
+                prop_assert_eq!(name(&string(&text)), read.clone());
+                match (read, text.parse::<Name>()) {
                     (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
                     (Err(diagnostic), Err(error)) => prop_assert_eq!(
                         diagnostic,
@@ -424,30 +533,91 @@ mod tests {
         }
     }
 
-    mod selectors {
+    mod names {
         use super::*;
 
-        /// A span that starts at `offset`, so each pattern in a list has its own.
-        fn at(offset: u32) -> Option<Span> {
-            let at = |offset| Position {
-                offset,
-                line: 0,
-                column: offset,
+        const FIX: &str = "Write a name such as \"site_a.node_1\"";
+
+        fn parsed(text: &str) -> Name {
+            text.parse().unwrap()
+        }
+
+        #[test]
+        fn reads_a_string_or_a_reference() {
+            assert_eq!(name(&string("site_a.node_1")), Ok(parsed("site_a.node_1")));
+            let reference = Kind::Reference(parsed("site_a.node_1"));
+            assert_eq!(name(&value(reference)), Ok(parsed("site_a.node_1")));
+        }
+
+        #[test]
+        fn refuses_a_value_that_is_not_a_string_or_a_reference() {
+            let call = Call {
+                function: "node".into(),
+                function_span: None,
+                arguments: Vec::new(),
             };
-            Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
+            for (kind, noun) in [
+                (Kind::Integer(7), "an integer"),
+                (Kind::Float(Float::new(1.5).unwrap()), "a float"),
+                (Kind::Bool(true), "a bool"),
+                (Kind::List(Vec::new()), "a list"),
+                (Kind::Map(Map::default()), "a map"),
+                (Kind::Call(call), "a call"),
+            ] {
+                let message = format!("a name is a string or a reference, not {noun}");
+                assert_eq!(
+                    name(&value(kind)),
+                    Err(bad_name(Some(span()), &message, FIX)),
+                    "{noun}"
+                );
+            }
         }
 
-        /// A list of the patterns, each at its index.
-        fn list(patterns: Vec<Kind>) -> Value {
-            let items = (0..)
-                .zip(patterns)
-                .map(|(i, kind)| Value { kind, span: at(i) });
-            value(Kind::List(items.collect()))
+        #[test]
+        fn refuses_a_string_that_name_refuses_at_the_value() {
+            assert_eq!(
+                name(&string("site a")),
+                Err(bad_name(
+                    Some(span()),
+                    "a segment is not valid: \"site a\" in \"site a\"",
+                    SEGMENT
+                ))
+            );
         }
 
-        fn text(text: &str) -> Kind {
-            Kind::String(text.into())
+        #[test]
+        fn reads_one_name_or_a_list_in_order_with_repeats() {
+            assert_eq!(names(&string("n_1")), Ok(vec![parsed("n_1")]));
+            assert_eq!(names(&list(Vec::new())), Ok(Vec::new()));
+            assert_eq!(
+                names(&list(vec![
+                    text("n_2"),
+                    Kind::Reference(parsed("n_1")),
+                    text("n_2"),
+                ])),
+                Ok(vec![parsed("n_2"), parsed("n_1"), parsed("n_2")])
+            );
         }
+
+        #[test]
+        fn refuses_the_first_item_that_name_refuses_at_the_item() {
+            assert_eq!(
+                names(&list(vec![
+                    text("n_1"),
+                    Kind::List(vec![string("n_2")]),
+                    text("site a"),
+                ])),
+                Err(bad_name(
+                    at(1),
+                    "a name is a string or a reference, not a list",
+                    FIX
+                ))
+            );
+        }
+    }
+
+    mod selectors {
+        use super::*;
 
         fn reference(name: &str) -> Kind {
             Kind::Reference(name.parse().unwrap())
@@ -637,6 +807,84 @@ mod tests {
         }
     }
 
+    fn refused_span(message: &str, fix: &str) -> Result<time::Span, Diagnostic> {
+        Err(Diagnostic::new(
+            Code::new("document.bad-span"),
+            Some(span()),
+            message.into(),
+            fix.into(),
+        ))
+    }
+
+    #[test]
+    fn reads_a_span() {
+        for (text, read) in [
+            ("3d", time::Span::DAY.nanos() * 3),
+            ("1.5s", 1_500_000_000),
+            ("0s", 0),
+            ("-2h", -time::Span::HOUR.nanos() * 2),
+        ] {
+            assert_eq!(
+                super::span(&string(text)),
+                Ok(time::Span::from_nanos(read)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_span_that_is_not_a_string() {
+        for (kind, name) in [
+            (Kind::Integer(3), "an integer"),
+            (Kind::Reference("d".parse().unwrap()), "a reference"),
+            (Kind::List(Vec::new()), "a list"),
+        ] {
+            assert_eq!(
+                super::span(&value(kind)),
+                refused_span(
+                    &format!("a span is a string, not {name}"),
+                    "Write a string such as \"3d\"",
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_span_that_time_refuses() {
+        for (text, problem, fix) in [
+            (
+                "3 days",
+                "a span is not a number and a unit",
+                "Write a span such as \"250us\", \"1.5s\", or \"3d\"",
+            ),
+            (
+                "0.5ns",
+                "a span is not a whole number of nanoseconds",
+                "Use fewer fraction digits or a smaller unit",
+            ),
+            (
+                "106752d",
+                "a span does not fit in 64-bit nanoseconds",
+                "Use a span from \"-106751d\" to \"106751d\"",
+            ),
+        ] {
+            assert_eq!(
+                super::span(&string(text)),
+                refused_span(&format!("cannot read the span {text:?}: {problem}"), fix),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A text that is often close to a span.
+    fn near_span() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            "-?[0-9]{0,21}[.]?[0-9]{0,20} ?(ns|us|ms|s|m|h|d|x|)",
+        ]
+    }
+
     /// A text that is often close to a byte size.
     fn near() -> impl Strategy<Value = String> {
         prop_oneof![
@@ -673,8 +921,40 @@ mod tests {
                     if let Some(likely) = likely {
                         prop_assert!(size(&string(likely)).is_ok(), "{:?}", text);
                     } else {
-                        prop_assert_eq!(diagnostic.fix, error.fix(), "{:?}", text);
+                        // The fix is the error's, with each size quoted.
+                        prop_assert_eq!(
+                            diagnostic.fix.replace('"', ""),
+                            error.fix(),
+                            "{:?}",
+                            text
+                        );
                     }
+                }
+                (read, parsed) => {
+                    prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
+                }
+            }
+        }
+
+        #[test]
+        fn reads_the_text_of_each_span(nanos in any::<i64>()) {
+            let written = time::Span::from_nanos(nanos);
+            prop_assert_eq!(super::span(&string(&written.to_string())), Ok(written));
+        }
+
+        #[test]
+        fn reads_as_time_span_does(text in near_span()) {
+            match (super::span(&string(&text)), text.parse::<time::Span>()) {
+                (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                (Err(diagnostic), Err(error)) => {
+                    prop_assert_eq!(diagnostic.code, Code::new("document.bad-span"));
+                    prop_assert_eq!(diagnostic.span, Some(span()));
+                    prop_assert_eq!(
+                        diagnostic.message,
+                        format!("cannot read the span {text:?}: {error}")
+                    );
+                    // The fix is the error's, with each span quoted.
+                    prop_assert_eq!(diagnostic.fix.replace('"', ""), error.fix());
                 }
                 (read, parsed) => {
                     prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);

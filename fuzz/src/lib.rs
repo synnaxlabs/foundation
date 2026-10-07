@@ -2,6 +2,8 @@
 
 use types::sample::Scalar;
 
+pub mod hub;
+
 // Append only: the first byte of each input in `oracles/fuzz/codec_series` and
 // `oracles/fuzz/codec_encoder` is an index into this table.
 const SCALARS: [Scalar; 14] = [

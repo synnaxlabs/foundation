@@ -229,10 +229,7 @@ mod tests {
         fn names_a_missing_field() {
             let mut t = target("/w/oracles/raft/election.rs", true);
             t["test"] = Value::Null;
-            assert_eq!(
-                check(&[t]).unwrap_err(),
-                "cargo JSON has no boolean field `test`"
-            );
+            assert_eq!(check(&[t]).unwrap_err(), "JSON has no boolean field `test`");
         }
     }
 

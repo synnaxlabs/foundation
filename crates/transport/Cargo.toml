@@ -15,8 +15,14 @@ rustls = { workspace = true }
 types = { path = "../types" }
 
 [dev-dependencies]
+block = { path = "../block", features = ["sim"] }
+counting = { path = "../counting" }
 proptest = { workspace = true }
 sim = { path = "../sim" }
+
+[[bench]]
+name = "send"
+harness = false
 
 [lints]
 workspace = true
