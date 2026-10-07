@@ -1859,9 +1859,10 @@ How to read this record:
 - **MEMBER RECORD (#242)** The region's record of a node is a `mesh::Member`: a
   `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
   node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
-  byte form), the join ticket's signature over the first card, an ephemeral expiry, and
-  the key of each status channel (X27) by its name relative to the node's name
-  (`clock.offset`, never the full name); `card.name` is the one copy of the node's name.
+  byte form), the join ticket's signature over the first card, `ephemeral` (for an
+  ephemeral node, the time offline after which the region removes it), and the key of
+  each status channel (X27) by its name relative to the node's name (`clock.offset`,
+  never the full name); `card.name` is the one copy of the node's name.
   The joining node gives its own release's names; the voters assign the keys at join
   (X27). A status name keeps its meaning and data type in every release, and a change
   takes a new name, so `hub` resolves a status channel from the record alone. The byte
@@ -1894,7 +1895,10 @@ How to read this record:
   A `card::Signed` holds the `node::Key` that its signature covers (`Signed::key`): the
   key cannot come from the public key, which can rotate, so the signed card is its one
   place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
-  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). Decided
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). The
+  field is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
+  (`Stamp`) with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302). Decided
   by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
@@ -3119,7 +3123,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; removal of an ephemeral node after its time offline | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |

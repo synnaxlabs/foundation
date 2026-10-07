@@ -45,7 +45,7 @@ pub(crate) fn member(id: u8) -> Member {
     Member {
         card: card::Signed::sign(key(id), card, &private(id)),
         admission: [0; 64],
-        expiry: None,
+        ephemeral: None,
         status: BTreeMap::new(),
     }
 }

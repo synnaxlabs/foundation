@@ -17,7 +17,7 @@ pub struct Member {
     /// The join ticket's signature over the node's first card.
     pub admission: [u8; 64],
     /// For an ephemeral node, the time offline after which the region removes it.
-    pub expiry: Option<Span>,
+    pub ephemeral: Option<Span>,
     /// The node's status channel keys, by name under the node's name: `clock.offset`
     /// is `<card.name>.clock.offset` (X27). A status name keeps its meaning and data
     /// type in every release; a change takes a new name.
