@@ -146,6 +146,10 @@ Only the red-team sessions rent machines, within the test budget (`docs/decision
 - **A message is not a record.** Write the decision into the issue, the PR, or the docs
   first, then send the link.
 - Do not send a message to check if a session is alive.
+- **A stuck session tells the coordinator at once.** When a permission check refuses
+  a call, or work waits on the person, send `coordinator` the refused command, the
+  reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
+  person. Never try to get around a refusal.
 - **A question for the person** states the problem, the fix, its cost, and a
   recommendation. For each option, it says whether it is a patch or the long-term
   path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
