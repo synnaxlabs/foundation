@@ -47,9 +47,9 @@ Check:
   ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
-- Fuzz: for each decoder of outside input that the PR adds (bytes from a peer, a file,
-  or a user), does "Fuzz targets" in `docs/security.md` name its target, or name it
-  under "No target yet" with an open issue? If not, it is a finding.
+- Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a
+  peer, a file, or a user), does "Fuzz targets" in `docs/security.md` name its target,
+  or name it under "No target yet" with an open issue? If not, it is a finding.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?
 
 Start the report with the rating and the summary of code quality that "Rating" in
