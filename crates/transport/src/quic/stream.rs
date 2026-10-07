@@ -5982,9 +5982,10 @@ mod tests {
 
         #[test]
         fn break_at_the_hello_on_a_stop_before_it_with_a_code_over_32_bits() {
-            // The stream waits for its first message byte, queues, or drops at the
-            // hello.
-            let streams: [(&[u8], bool); 4] = [
+            // The stream has no byte, waits for its first message byte, queues, or
+            // drops at the hello.
+            let streams: [(&[u8], bool); 5] = [
+                (&[], false),
                 (&[1], false),
                 (&[1, 1, b'b'], true),
                 (&[1], true),
@@ -6007,6 +6008,41 @@ mod tests {
                     assert_refused(&mut pair, "a stop code over 32 bits: 4294967296");
                 });
             }
+        }
+
+        #[test]
+        fn reset_at_the_hello_a_reply_stopped_before_it_with_no_byte() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let connection = foreign(&mut pair);
+                let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                // Only the stop opens the stream on the server.
+                let id = raw(connection, Dir::Bi, &[], false);
+                let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                pair.run(RUN);
+                let resets = |pair: &mut Pair| {
+                    let stats = foreign(pair).stats();
+                    stats.frame_rx.reset_stream
+                };
+                let before = resets(&mut pair);
+                let mut send = foreign(&mut pair).send_stream(hello);
+                let own = OWN.encode();
+                assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                assert_eq!(resets(&mut pair) - before, 1, "a reset at the hello");
+                let mut send = foreign(&mut pair).send_stream(id);
+                assert_eq!(send.write(&[1, 1, b'b']), Ok(3));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                let incoming = accept(&mut pair.server);
+                let reply = incoming.sender.expect("a two-way stream");
+                let (now, message) = (pair.now(), shard.block(b"b"));
+                let written =
+                    pair.server.endpoint.write(now, &reply, &mut Some(message));
+                assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+            });
         }
 
         #[test]
