@@ -6,7 +6,8 @@ use crate::Position;
 
 /// A complete session on one index. Keys are unique within one
 /// [`Readers`](crate::Readers). Use a key only with the `Readers` that gave it:
-/// another one, such as a restored one, cannot tell it from its own keys.
+/// another one, such as a restored one, takes the key as its own when it gave the
+/// same number, and panics when it did not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(pub(super) u64);
 

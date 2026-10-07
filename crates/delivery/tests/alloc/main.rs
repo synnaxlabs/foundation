@@ -1,7 +1,8 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
-//! make none once each session got a frame. This binary has no test harness: the count
-//! covers each thread, and a harness allocates on its own thread at any time.
+//! make none once each session got a frame. An ack makes none, and no call on a closed
+//! key of either mode makes one. This binary has no test harness: the count covers each
+//! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -136,6 +137,11 @@ fn complete(frame: &impl Fn() -> Frame) {
         readers.close(closed.into(), Stamp::from_nanos(0));
     });
     assert_eq!(allocations, 0, "an ack or a call on a closed key allocated");
+    assert_eq!(
+        readers.floor(),
+        Some(position),
+        "each ack reached its session"
+    );
 }
 
 /// Takes each session's frames, then queues and releases two frames from `seq`.

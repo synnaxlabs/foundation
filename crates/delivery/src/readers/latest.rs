@@ -9,9 +9,9 @@ use types::time::Stamp;
 use super::{Readers, never_open};
 
 /// A latest session on one index. Keys are unique within one [`Readers`]. Use a key
-/// only with the `Readers` that gave it: another one, such as a restored one, cannot
-/// tell it from its own keys. A latest key does not compile where only a complete
-/// session fits:
+/// only with the `Readers` that gave it: another one, such as a restored one, takes
+/// the key as its own when it gave the same number, and panics when it did not. A
+/// latest key does not compile where only a complete session fits:
 ///
 /// ```compile_fail,E0308
 /// let mut readers = delivery::Readers::new(0);
