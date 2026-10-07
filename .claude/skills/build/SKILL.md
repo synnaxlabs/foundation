@@ -61,8 +61,8 @@ or a line range.
 
     ```sh
     git fetch -q origin main &&
-      s=$(git show origin/main:.claude/skills/build/wait.sh) &&
-      sh -c "$s" wait.sh <n>
+      s=$(git show origin/main:.claude/skills/build/wait.sh) || exit 3
+    sh -c "$s" wait.sh <n>
     ```
 
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
@@ -75,7 +75,7 @@ or a line range.
       on what changed, `gh pr merge <n> --auto`, and wait again.
       "cannot be read" is three failed `gh` calls in a row: fix what gh printed (a
       login, a wrong PR number), or wait again once the network is back.
-    - Any other exit: the script did not run. Fix what git or the script printed.
+    - Exit 3: git could not get the script. Fix what git printed, and run it again.
 
 ## Local gate
 
