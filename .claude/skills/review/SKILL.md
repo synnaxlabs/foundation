@@ -40,9 +40,10 @@ When a new PR replaces one under review, close the old one first (`gh pr close <
 --comment "Replaced by #<new>"`), and link its round comments in the new round 1
 comment.
 
-The breaker makes its own worktree. Never give it another path: its permission check
-refuses every command outside that worktree. Remove the worktree when the breaker
-returns (`git worktree remove --force <path>`).
+The `reviewer`, `architecture`, and `breaker` agents each make their own worktree, so
+no two share a copy. Never give one another path: its permission check refuses every
+command outside that worktree. Remove each worktree when its agent returns
+(`git worktree remove --force <path>`).
 
 ## Findings
 

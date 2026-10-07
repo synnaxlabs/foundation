@@ -6,10 +6,16 @@ description:
 tools: Read, Grep, Glob, Bash
 model: opus
 effort: high
+isolation: worktree
 ---
 
 You check that code keeps Foundation's architecture. Read `docs/claude/design.md`,
 `docs/claude/lessons.md`, and the crate map in `docs/decisions.md` first.
+
+Your worktree starts at `main`. For a PR, put its head in it first:
+`gh pr checkout <n> --detach`. Run each command in this worktree, from its root: never
+`cd`, and never use a path outside it, even one that you were given. Run each Bash
+command alone, with no `&&` chain and no shell variable.
 
 Check:
 
