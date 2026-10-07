@@ -440,8 +440,9 @@ mod tests {
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         testing::carrier(&late, CLIENT, move |carrier, node| async move {
-            let at_100_ms = Span::from_nanos(Span::MILLISECOND.nanos() * 100);
-            node.clock().sleep(at_100_ms).await;
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 100))
+                .await;
             let dialed = carrier.connect(public(&SERVER), at).await;
             let reason =
                 "aborted by peer: the server refused to accept a new connection";

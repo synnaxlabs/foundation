@@ -25,9 +25,8 @@ use crate::{Code, Config, Error, PAYLOAD_IPV4, Peer, port};
 const BATCHES: usize = 8;
 
 /// One shard's QUIC endpoint on a UDP socket. A task on the shard moves its
-/// datagrams and runs its timers until the socket breaks, or until the carrier and
-/// every [`Session`] dropped and it sent their closes. It stays on the thread that
-/// made it.
+/// datagrams and runs its timers until the socket breaks, or until the carrier
+/// dropped and each connection drained. It stays on the thread that made it.
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
@@ -306,9 +305,6 @@ impl Drop for Session {
         let slot = slot.expect("invariant: a session keeps its slot until it drops");
         if slot.end.is_none() {
             state.close(self.key, Code(0));
-        } else {
-            // The task may now hold the last reference, and must poll to end.
-            state.wake();
         }
     }
 }
@@ -364,8 +360,8 @@ impl Task {
         while let Some(event) = state.endpoint.poll() {
             state.dispatch(event);
         }
-        // Only the task holds the state: the carrier and each session dropped.
-        if Rc::strong_count(&self.state) == 1
+        // Once the carrier dropped, no connection starts again.
+        if state.accepted.is_none()
             && state.endpoint.drained()
             && self.socket.held.is_none()
         {
@@ -512,7 +508,7 @@ mod tests {
 
     use super::{BATCHES, Carrier, Socket, register};
     use crate::quic::Endpoint;
-    use crate::testing::{self, IDLE, PORT, address, nodes, shard};
+    use crate::testing::{self, IDLE, PORT, address, nodes, shard, spans};
     use crate::tls::public;
     use crate::{Code, Error, Peer};
 
@@ -525,10 +521,6 @@ mod tests {
             send_buffer_bytes: 1 << 20,
             recv_buffer_bytes: 1 << 20,
         })
-    }
-
-    fn spans(span: Span, n: i64) -> Span {
-        Span::from_nanos(span.nanos() * n)
     }
 
     /// Runs a dial from `value` that the client closes with code 5, and gives the
@@ -744,35 +736,6 @@ mod tests {
         });
         testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
-            let dialed = carrier.connect(public(&SERVER), at).await;
-            let reason =
-                "aborted by peer: the server refused to accept a new connection";
-            let reason = String::from(reason);
-            assert_eq!(dialed.err(), Some(Error::Broken { reason }));
-        });
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    #[test]
-    fn a_dial_after_the_carrier_drops_is_refused_while_a_session_lives() {
-        let (mut sim, client, server) = nodes(0);
-        let late = sim.node(sim::node::Config::default());
-        let at = address(&server);
-        testing::carrier(&server, SERVER, |carrier, _| async move {
-            let session = carrier.accept().await.expect("a session");
-            drop(carrier);
-            let closed = Error::PeerClosed { code: Code(5) };
-            assert_eq!(session.closed().await, closed);
-        });
-        testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
-            let session = dialed.expect("a session");
-            node.clock().sleep(spans(IDLE, 3)).await;
-            session.close(Code(5));
-            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
-        });
-        testing::carrier(&late, CLIENT, move |carrier, node| async move {
-            node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
             let dialed = carrier.connect(public(&SERVER), at).await;
             let reason =
                 "aborted by peer: the server refused to accept a new connection";
