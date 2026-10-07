@@ -124,7 +124,9 @@ check() {
         echo "ok $name"
     else
         echo "FAIL $name"
-        sed 's/^/  /' "$T/out" "$T/calls" 2>/dev/null
+        for file in "$T/out" "$T/calls"; do
+            [[ ! -e $file ]] || sed 's/^/  /' "$file"
+        done
         failures=$((failures + 1))
     fi
 }
@@ -215,7 +217,8 @@ check "a failed run posts the report up to it and exits 1" eval '
 
 BIG=1 run '[]' "${args[@]}"
 check "each run of a long output posts its end" eval '
-    [[ $status == 0 && $(posted 1047 | grep -c "^table") == 4 ]]'
+    [[ $status == 0 && $(posted 1047 | grep -c "^table") == 4 ]] &&
+    has "$(posted 1047)" "(only the last 15000 bytes"'
 
 FAIL_REPORT=1 run '[]' "${args[@]}"
 check "a report that does not post is printed, and the run exits 1" eval '
@@ -241,8 +244,10 @@ export T
 echo '[]' >"$T/comments.json"
 SLOW=1 FAIL_GROUP=1 PATH="$bin:$PATH" bash "$script" "${args[@]}" >"$T/out" 2>&1 &
 pid=$!
-until grep -qs delete-security-group "$T/calls"; do /bin/sleep 0.2; done
-kill -TERM "$pid"
+until grep -qs delete-security-group "$T/calls" || ! kill -0 "$pid" 2>/dev/null; do
+    /bin/sleep 0.2
+done
+kill -0 "$pid" 2>/dev/null && kill -TERM "$pid"
 status=0
 wait "$pid" || status=$?
 check "a signal during the cleanup does not stop it" eval '

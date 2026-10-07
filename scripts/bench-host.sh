@@ -298,7 +298,12 @@ for run in 1 2 3 4; do
             "</summary>"
         echo
         echo '```'
-        tail -c 15000 "$out"
+        if (($(wc -c <"$out") > 15000)); then
+            echo "(only the last 15000 bytes of the output)"
+            tail -c 15000 "$out" | sed 1d
+        else
+            cat "$out"
+        fi
         echo '```'
         echo
         echo "</details>"
