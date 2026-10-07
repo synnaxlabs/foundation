@@ -479,8 +479,7 @@ async fn compete(
         let (complete, latest) = (of(Class::Complete), of(Class::Latest));
         assert!(
             complete >= 2 * latest,
-            "{} times {complete} Complete and {latest} Latest sends: the share does not \
-             see two classes",
+            "{} times {complete} Complete and {latest} Latest sends: one class",
             scenario.name,
         );
     }
