@@ -21,7 +21,7 @@ impl Measurement {
     ///
     /// - [`Error::Empty`] for an empty name, key, or tag value.
     /// - [`Error::Character`] for one with a backslash, a newline, or a carriage
-    ///   return.
+    ///   return, or a name that starts with a tab or NUL.
     /// - [`Error::Reserved`] for a name or key that starts with `_`, or a key
     ///   `time`.
     /// - [`Error::Comment`] for a name that starts with `#`.
@@ -34,6 +34,13 @@ impl Measurement {
         fields: &[&str],
     ) -> Result<Self, Error> {
         unreserved(name)?;
+        // InfluxDB skips a tab or NUL at the start of a line, and no escape keeps it.
+        if let Some(character @ ('\t' | '\0')) = name.chars().next() {
+            return Err(Error::Character {
+                name: name.into(),
+                character,
+            });
+        }
         if name.starts_with('#') {
             return Err(Error::Comment(name.into()));
         }

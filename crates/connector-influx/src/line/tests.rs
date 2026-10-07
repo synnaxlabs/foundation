@@ -54,6 +54,8 @@ fn value(text: &str) -> Value {
 /// Parses one line of line protocol, as InfluxDB reads it.
 fn parse(line: &str) -> Parsed {
     let line = line.strip_suffix('\n').expect("a line ends with a newline");
+    let line = line.trim_start_matches([' ', '\t', '\0']);
+    assert!(!line.starts_with('#'), "InfluxDB drops a comment: {line:?}");
     let [head, fields, time] = split(line, ' ')[..] else {
         panic!("not three parts: {line:?}");
     };
@@ -208,6 +210,30 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
             },
             "the name \"f\\r\" holds '\\r', which line protocol cannot carry",
         ),
+        (
+            Measurement::new("\t#m", &[], &["f"]),
+            Error::Character {
+                name: "\t#m".into(),
+                character: '\t',
+            },
+            "the name \"\\t#m\" holds '\\t', which line protocol cannot carry",
+        ),
+        (
+            Measurement::new("\0#m", &[], &["f"]),
+            Error::Character {
+                name: "\0#m".into(),
+                character: '\0',
+            },
+            "the name \"\\0#m\" holds '\\0', which line protocol cannot carry",
+        ),
+        (
+            Measurement::new("\tm", &[], &["f"]),
+            Error::Character {
+                name: "\tm".into(),
+                character: '\t',
+            },
+            "the name \"\\tm\" holds '\\t', which line protocol cannot carry",
+        ),
     ]);
 }
 
@@ -294,6 +320,7 @@ fn field_value() -> impl Strategy<Value = Value> {
 proptest! {
     #[test]
     fn each_line_parses_back(
+        lead in proptest::option::of(proptest::sample::select(vec!['\t', '\0'])),
         measurement in name(),
         keys in proptest::collection::btree_map(
             name(),
@@ -316,7 +343,13 @@ proptest! {
         prop_assume!(!fields.is_empty());
         let borrowed: Vec<(&str, &str)> =
             tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let line = Measurement::new(&measurement, &borrowed, &keys_of_fields).unwrap();
+        let measurement: String = lead.into_iter().chain(measurement.chars()).collect();
+        let line = Measurement::new(&measurement, &borrowed, &keys_of_fields);
+        if let Some(character) = measurement.chars().next().filter(|c| matches!(c, '\t' | '\0')) {
+            prop_assert_eq!(line, Err(Error::Character { name: measurement, character }));
+            return Ok(());
+        }
+        let line = line.unwrap();
         let values: Vec<Option<Value>> = fields.iter().map(|&(_, v)| Some(v)).collect();
         let mut out = Vec::new();
         line.line(&mut out, &values, Stamp::from_nanos(time));
