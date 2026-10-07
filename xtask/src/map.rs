@@ -252,10 +252,12 @@ pub(crate) fn find(name: &str) -> Option<&'static Crate> {
 
 /// Reports whether the crate named `user` may take `dep` as a dependency of `kind`, as
 /// `cargo metadata` names it: `None` for a normal one, `Some("dev")` for a
-/// dev-dependency. A dev-dependency may also be test-only or a test edge of `user`.
+/// dev-dependency. A dev-dependency may also be test-only, a test edge of `user`, or
+/// `user` itself.
 pub(crate) fn allowed(user: &str, dep: &str, kind: Option<&str>) -> bool {
-    let test_only = TEST_ONLY.contains(&dep) || TEST_EDGES.contains(&(user, dep));
-    find(user).is_some_and(|c| c.allows(dep)) || (kind == Some("dev") && test_only)
+    let dev =
+        TEST_ONLY.contains(&dep) || TEST_EDGES.contains(&(user, dep)) || dep == user;
+    find(user).is_some_and(|c| c.allows(dep)) || (kind == Some("dev") && dev)
 }
 
 impl Crate {
@@ -328,6 +330,12 @@ mod tests {
                 "{name} -> {dep} {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn allows_a_crate_on_itself_only_as_a_dev_dependency() {
+        assert!(allowed("home", "home", Some("dev")));
+        assert!(!allowed("home", "home", None));
     }
 
     #[test]

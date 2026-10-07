@@ -21,6 +21,8 @@ types = { path = "../types" }
 
 [dev-dependencies]
 divan = { workspace = true }
+# Turns on `bench`, since the bench host runs no features.
+home = { path = ".", features = ["bench"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
@@ -28,7 +30,6 @@ sim = { path = "../sim" }
 name = "stored"
 harness = false
 test = true
-required-features = ["bench"]
 
 [lints]
 workspace = true
