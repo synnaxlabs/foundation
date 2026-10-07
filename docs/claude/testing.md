@@ -78,7 +78,7 @@ again once to prove that the failure replays (r16 59).
   diagnosed, then fix the code. A fix of a test that fails only sometimes is a bug fix
   too: a regression test that the PR commits makes the cause happen on each run. A
   failure that a session makes only outside the committed tests, such as in the
-  breaker's worktree, does not count.
+  breaker's worktree, does not count as its regression test.
 - **Test what the change is for.** When a change exists to remove work (a clock read, a
   copy, an allocation, a round trip), a test counts that work and fails when the change
   is reverted.
