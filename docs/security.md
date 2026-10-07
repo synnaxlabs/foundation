@@ -157,8 +157,8 @@ state on `main`.
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
   `raft` counts the keys of a proof, and `mesh::claim` checks each signature
-  against the voter's public key. Until the driver (#471) runs that check before
-  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
+  against the voter's public key. `Mesh::receive` runs that check before `step`. The
+  streams of #471 do not call it yet. `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
   and refuses a leader it cannot prove. It rejoins at the next election whose grants
   are a quorum of what it holds. When a second node fails before that, the group
