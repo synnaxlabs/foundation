@@ -585,7 +585,7 @@ fn does_not_wake_the_commit_task_for_the_writes_during_a_commit() {
 }
 
 /// A commit task that waits for a commit when the hub and its sessions drop ends at
-/// once, and so drops the commit, which holds the ring open.
+/// its next poll. The commit it waited for dropped with the state.
 #[test]
 fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
     run(23, |test| async move {
@@ -1108,7 +1108,7 @@ fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_its_next_call() 
 #[test]
 fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window() {
     for seed in 0..32 {
-        run(seed, move |test| async move {
+        run(seed, |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
@@ -1138,7 +1138,7 @@ fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window()
 #[test]
 fn ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame() {
     for seed in 0..32 {
-        run(seed, move |test| async move {
+        run(seed, |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();

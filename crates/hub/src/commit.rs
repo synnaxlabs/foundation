@@ -8,7 +8,8 @@ use std::pin::Pin;
 use std::rc::Weak;
 use std::task::{Poll, Waker};
 
-/// How the sessions tell the commit task that a commit is due.
+/// The commit task's part of the state: whether a commit is due, the commit it waits
+/// for, and its waker.
 #[derive(Debug, Default)]
 pub(crate) struct Signal {
     /// Whether a home call may have appended since the task last waited for a commit.

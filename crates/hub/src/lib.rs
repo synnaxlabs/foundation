@@ -72,7 +72,9 @@ struct State {
 impl Hub {
     /// A hub over `config.home` that knows no channel yet. Spawns a task on
     /// `config.tasks` that ends when the home's buffer fails, or once the hub and each
-    /// of its sessions have dropped.
+    /// of its sessions have dropped. Once the hub and each of its sessions drop, it
+    /// holds no part of the home, so a commit of the home taken before `new` resolves
+    /// only after the ring has closed.
     #[must_use]
     pub fn new(config: Config) -> Self {
         let Config {
