@@ -117,7 +117,9 @@ conformance suites, and fuzz inputs. Committed proptest failure files
 (`proptest-regressions/` in each crate) are oracles too (r16 58). People own them.
 Agents add to them freely and never weaken them. Weakening means a removed test or
 assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
-or proptest failure file.
+or proptest failure file. A change to the bytes of a fuzz input deletes the old input:
+keep the old file and add the new bytes as a new file. A move that keeps the bytes is
+not a deletion.
 
 An oracle test target is a `[[test]]` target whose root is under `oracles/`.
 `cargo xtask oracles` fails when no oracle test target compiles a `.rs` file under
