@@ -390,8 +390,10 @@ impl Shard {
         &mut self,
         slot: Slot,
     ) -> Result<delivery::latest::Key, Error> {
-        let (_, mesh) = self.now().ok_or(Error::Unsynced)?;
-        Ok(self.readers.open_latest(self.place(slot), mesh))
+        if self.now().is_none() {
+            return Err(Error::Unsynced);
+        }
+        Ok(self.readers.open_latest(self.place(slot)))
     }
 
     /// Raises the credit of the complete reader `session` on the index at `slot` to
@@ -428,8 +430,7 @@ impl Shard {
     ///
     /// If the reader is not open.
     pub(crate) fn close_reader(&mut self, slot: Slot, session: delivery::Key) {
-        let (_, mesh) = self.time();
-        self.readers.close(self.place(slot), session, mesh);
+        self.readers.close(self.place(slot), session);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot

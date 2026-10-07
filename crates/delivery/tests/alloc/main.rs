@@ -10,7 +10,6 @@ use delivery::{Position, Reader, Readers, Start, complete, latest};
 use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
-use types::time::Stamp;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -41,8 +40,7 @@ fn main() {
 
 fn latest(frame: &impl Fn() -> Frame) {
     let mut readers = Readers::new(0);
-    let open =
-        |readers: &mut Readers| readers.open_latest(None, Stamp::from_nanos(0)).key;
+    let open = |readers: &mut Readers| readers.open_latest().key;
     let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers)).collect();
     assert_eq!(
         readers.put(frame()).len(),
@@ -72,10 +70,10 @@ fn latest(frame: &impl Fn() -> Frame) {
     );
 
     let closed = keys[0];
-    readers.close(closed.into(), Stamp::from_nanos(0));
+    readers.close(closed.into());
     let ((), allocations) = ALLOCATOR.count(|| {
         assert!(readers.take(closed.into()).is_none(), "a closed key takes");
-        readers.close(closed.into(), Stamp::from_nanos(0));
+        readers.close(closed.into());
     });
     assert_eq!(allocations, 0, "a call on a closed latest key allocated");
 }
@@ -126,7 +124,7 @@ fn complete(frame: &impl Fn() -> Frame) {
         backfill: None,
     };
     let closed = keys.pop().expect("a session is open");
-    readers.close(closed.into(), Stamp::from_nanos(0));
+    readers.close(closed.into());
     let ((), allocations) = ALLOCATOR.count(|| {
         for &key in &keys {
             assert_eq!(readers.ack(key, position), Ok(()), "the ack moves forward");
@@ -134,7 +132,7 @@ fn complete(frame: &impl Fn() -> Frame) {
         readers.grant(closed, u64::MAX);
         assert_eq!(readers.ack(closed, position), Ok(()), "a closed key acks");
         assert!(readers.take(closed.into()).is_none(), "a closed key takes");
-        readers.close(closed.into(), Stamp::from_nanos(0));
+        readers.close(closed.into());
     });
     assert_eq!(allocations, 0, "an ack or a call on a closed key allocated");
     assert_eq!(

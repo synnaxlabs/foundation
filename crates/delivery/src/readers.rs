@@ -356,25 +356,65 @@ impl Readers {
         }
     }
 
-    /// Ends the session at `now`, in either mode. A waiting frame does not go out. The
-    /// last complete session drops the queued frames. A close of a closed session
-    /// changes nothing: a close can arrive after a takeover.
+    /// Ends a session that holds nothing after it closes: an unnamed one in either
+    /// mode, or a named latest one. A waiting frame does not go out. The last complete
+    /// session drops the queued frames. A close of a closed session changes nothing: a
+    /// close can arrive after a takeover.
     ///
     /// # Panics
     ///
-    /// If this `Readers` never gave `key`.
-    pub fn close(&mut self, key: Key, now: Stamp) {
+    /// If this `Readers` never gave `key`, or the session is open and is a named
+    /// complete session.
+    pub fn close(&mut self, key: Key) {
         match key {
             Key::Complete(key) => {
                 if let Some(i) = self.find(key) {
-                    self.close_complete(i, now);
+                    let session = self.end(i);
+                    assert!(
+                        session.name().is_none(),
+                        "complete session {key} is named: `close_named` ends it"
+                    );
                 }
             }
             Key::Latest(key) => self.close_latest(key),
         }
     }
 
+    /// Ends a named complete session at `now`. The reader holds its position until
+    /// `hold` after `now`. Else as [`Readers::close`].
+    ///
+    /// # Panics
+    ///
+    /// If this `Readers` never gave `key`, or the session is open and is unnamed.
+    pub fn close_named(&mut self, key: complete::Key, now: Stamp) {
+        if let Some(i) = self.find(key) {
+            self.close_complete(i, now);
+        }
+    }
+
+    /// Ends the named complete session at `i` at `now`. Its reader holds from `now`.
     fn close_complete(&mut self, i: usize, now: Stamp) {
+        let session = self.end(i);
+        let Reader::Named { name, hold } = session.reader else {
+            panic!(
+                "complete session {} is unnamed: `close` ends it",
+                session.key
+            );
+        };
+        let closed = Closed {
+            name,
+            hold,
+            position: session.position,
+            at: now,
+        };
+        self.records.push(closed.record());
+        if now < closed.end() {
+            self.closed.push(closed);
+        }
+    }
+
+    /// Removes the complete session at `i`. The last one drops the queued frames.
+    fn end(&mut self, i: usize) -> Session {
         let session = self.remove(i);
         if self.complete.is_empty()
             && let Some((_, seq)) = self.queue.back()
@@ -382,18 +422,7 @@ impl Readers {
             self.released = seq.end;
             self.queue.clear();
         }
-        if let Reader::Named { name, hold } = session.reader {
-            let closed = Closed {
-                name,
-                hold,
-                position: session.position,
-                at: now,
-            };
-            self.records.push(closed.record());
-            if now < closed.end() {
-                self.closed.push(closed);
-            }
-        }
+        session
     }
 
     /// Forgets each named reader whose hold ended at or before `now`.
@@ -450,7 +479,7 @@ impl Readers {
     }
 
     /// Closes the named reader's open session in either mode at `now`. Returns it.
-    fn close_named(&mut self, name: &Name, now: Stamp) -> Option<Key> {
+    fn close_reader(&mut self, name: &Name, now: Stamp) -> Option<Key> {
         let Some(i) = self.named(name) else {
             return self.remove_latest(name).map(Key::from);
         };
@@ -688,7 +717,7 @@ pub(super) mod tests {
     /// Opens `name` at `position`, closes it at `closed`, and drops the records.
     fn left(readers: &mut Readers, name: &str, position: Position, closed: i64) {
         let key = readers.open(named(name, 10), Start::At(position), 0).key;
-        readers.close(key.into(), at(closed));
+        readers.close_named(key, at(closed));
         drained(readers);
     }
 
@@ -701,7 +730,10 @@ pub(super) mod tests {
             assert_eq!(readers.ack(key, live(0)), Ok(()));
         }
         assert!(readers.take(key).is_none());
-        readers.close(key, at(i64::MAX));
+        readers.close(key);
+        if let Key::Complete(key) = key {
+            readers.close_named(key, at(i64::MAX));
+        }
         assert_eq!(format!("{readers:?}"), before);
     }
 
@@ -729,7 +761,7 @@ pub(super) mod tests {
         fn gives_each_session_its_own_key() {
             let mut readers = Readers::new(0);
             let first = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
-            readers.close(first.into(), at(0));
+            readers.close(first.into());
             let second = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
             assert_ne!(first, second);
         }
@@ -930,7 +962,7 @@ pub(super) mod tests {
         #[test]
         fn to_a_closed_session_changes_nothing() {
             let (mut readers, key) = opened(live(4));
-            readers.close(key.into(), at(1));
+            readers.close_named(key, at(1));
             drained(&mut readers);
             assert_eq!(readers.ack(key, live(9)), Ok(()));
             assert_eq!(readers.ack(key, live(2)), Ok(()));
@@ -956,7 +988,7 @@ pub(super) mod tests {
         fn after_a_close_keeps_the_hold_of_the_first_close() {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(2)), 0).key;
-            readers.close(key.into(), at(1));
+            readers.close_named(key, at(1));
             drained(&mut readers);
             dropped(&mut readers, key.into());
             assert_eq!(drained(&mut readers), []);
@@ -985,7 +1017,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let old = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
             let name = "a".parse().expect("valid name");
-            let new = readers.open_latest(Some(name), at(1)).key;
+            let new = readers.open_named_latest(name, at(1)).key;
             assert_eq!(readers.put(frames.frame(1)), [new]);
             drained(&mut readers);
             dropped(&mut readers, old.into());
@@ -1006,7 +1038,35 @@ pub(super) mod tests {
         fn close_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
             let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0);
-            readers.close(complete::Key(1).into(), at(0));
+            readers.close(complete::Key(1).into());
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 1 was never open")]
+        fn close_named_panics_on_a_session_never_open() {
+            let mut readers = Readers::new(0);
+            let _ = readers.open(named("a", 10), Start::At(live(0)), 0);
+            readers.close_named(complete::Key(1), at(0));
+        }
+    }
+
+    mod close {
+        use super::*;
+
+        #[test]
+        #[should_panic(expected = "complete session 0 is named: `close_named` ends it")]
+        fn panics_on_an_open_named_complete_session() {
+            let mut readers = Readers::new(0);
+            let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.close(key.into());
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 0 is unnamed: `close` ends it")]
+        fn named_panics_on_an_open_unnamed_session() {
+            let mut readers = Readers::new(0);
+            let key = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
+            readers.close_named(key, at(0));
         }
     }
 
@@ -1026,7 +1086,7 @@ pub(super) mod tests {
         fn of_an_unnamed_reader_ends_at_the_close() {
             let mut readers = Readers::new(0);
             let key = readers.open(Reader::Unnamed, Start::At(live(3)), 0).key;
-            readers.close(key.into(), at(1));
+            readers.close(key.into());
             assert_eq!(readers.floor(), None);
         }
 
@@ -1035,7 +1095,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
             readers.ack(key, live(4)).expect("forward");
-            readers.close(key.into(), at(5));
+            readers.close_named(key, at(5));
             assert_eq!(readers.deadline(), Some(at(15)));
             readers.advance(at(14));
             assert_eq!(readers.floor(), Some(live(4)));
@@ -1048,7 +1108,7 @@ pub(super) mod tests {
         fn of_zero_ends_at_the_close() {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 0), Start::At(live(0)), 0).key;
-            readers.close(key.into(), at(5));
+            readers.close_named(key, at(5));
             assert_eq!(readers.floor(), None);
         }
 
@@ -1070,7 +1130,7 @@ pub(super) mod tests {
         fn ends_at_the_last_stamp() {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
-            readers.close(key.into(), at(i64::MAX - 1));
+            readers.close_named(key, at(i64::MAX - 1));
             assert_eq!(readers.deadline(), Some(at(i64::MAX)));
         }
 
@@ -1142,7 +1202,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(3)), 0).key;
             readers.ack(key, live(5)).expect("forward");
-            readers.close(key.into(), at(7));
+            readers.close_named(key, at(7));
             assert_eq!(
                 drained(&mut readers),
                 [
@@ -1157,7 +1217,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(3)), 0).key;
             drained(&mut readers);
-            readers.close(key.into(), at(7));
+            readers.close_named(key, at(7));
             assert_eq!(drained(&mut readers), [record("a", live(3), 10, Some(7))]);
         }
 
@@ -1190,7 +1250,7 @@ pub(super) mod tests {
             let key = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
             readers.ack(key, live(2)).expect("forward");
             readers.flush();
-            readers.close(key.into(), at(1));
+            readers.close(key.into());
             assert_eq!(drained(&mut readers), []);
         }
     }
@@ -1364,7 +1424,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(3), 4..4);
             assert!(!readers.pending());
             readers.queue(&frames.frame(4), 4..6);
-            readers.close(key.into(), at(0));
+            readers.close(key.into());
             assert!(!readers.pending());
         }
 
@@ -1609,7 +1669,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let closed = opened(&mut readers, 0, 0);
             let open = opened(&mut readers, 0, 1);
-            readers.close(closed.into(), at(0));
+            readers.close(closed.into());
             readers.grant(closed, 10 * CHARGE);
             readers.queue(&frames.frame(1), 0..1);
             readers.queue(&frames.frame(2), 1..2);
@@ -1634,7 +1694,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let old = readers.open(named("a", 10), Start::At(live(0)), 0).key;
             let name = "a".parse().expect("a valid name");
-            let latest = readers.open_latest(Some(name), at(1));
+            let latest = readers.open_named_latest(name, at(1));
             assert_eq!(latest.replaced, Some(old.into()));
             readers.grant(old, 10 * CHARGE);
             assert_eq!(taken(&mut readers, latest.key), []);
@@ -1693,7 +1753,7 @@ pub(super) mod tests {
         fn keeps_nothing_with_no_complete_session() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
-            let latest = readers.open_latest(None, at(0)).key;
+            let latest = readers.open_latest().key;
             readers.queue(&frames.frame(1), 0..1);
             assert!(frames.spare());
             assert_eq!(
@@ -1709,7 +1769,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
-            readers.close(key.into(), at(0));
+            readers.close(key.into());
             assert!(frames.spare());
         }
 
@@ -1719,7 +1779,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), 0..1);
-            readers.close(key.into(), at(0));
+            readers.close(key.into());
             assert!(frames.spare());
             let later = opened(&mut readers, 0, 10);
             assert_eq!(released(&mut readers, 1), []);
@@ -1732,7 +1792,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
             readers.queue(&frames.frame(1), 0..1);
-            let latest = readers.open_latest(Some("a".parse().expect("name")), at(0));
+            let latest = readers.open_named_latest("a".parse().expect("name"), at(0));
             assert_eq!(latest.replaced, Some(key.into()));
             assert!(frames.spare());
         }
@@ -1810,7 +1870,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
-            readers.close(key.into(), at(0));
+            readers.close(key.into());
             assert_eq!(taken(&mut readers, key), []);
         }
     }
@@ -2012,6 +2072,14 @@ pub(super) mod tests {
             }
         }
 
+        /// Closes the open session `key` at `now` with the call for its kind.
+        fn close(readers: &mut Readers, model: &Model, key: complete::Key, now: i64) {
+            match model.open[&key].0 {
+                Some(_) => readers.close_named(key, at(now)),
+                None => readers.close(key.into()),
+            }
+        }
+
         /// Applies one input to the readers and the model, and checks that they agree.
         fn apply(readers: &mut Readers, model: &mut Model, input: Input, now: i64) {
             match input {
@@ -2056,7 +2124,7 @@ pub(super) mod tests {
                         .keys()
                         .nth(session % model.open.len())
                         .expect("in range");
-                    readers.close(key.into(), at(now));
+                    close(readers, model, key, now);
                     model.close(key, now);
                 }
                 Input::Flush => readers.flush(),
@@ -2086,7 +2154,7 @@ pub(super) mod tests {
             }
             let mut restored = Readers::restore(records, at(now), 0);
             for key in model.open.keys() {
-                readers.close((*key).into(), at(now));
+                close(&mut readers, &model, *key, now);
             }
             for later in [0, 1, 5, 10, 20, 40] {
                 restored.advance(at(now + later));
@@ -2307,7 +2375,7 @@ pub(super) mod tests {
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        readers.close(key.into(), at(0));
+                        readers.close(key.into());
                         model.close(key);
                     }
                     Live::Ack(i, ahead) => {
