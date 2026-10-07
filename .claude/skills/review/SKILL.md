@@ -134,10 +134,6 @@ the check names the one it finds. A head that is the range end plus clean merges
 base needs no new round. A red-team PR labeled `oracle` also needs the director's
 verdict with the line ``Director: approved at `<sha>` `` at the head.
 
-Never edit the `Reviewers:`, `Range:`, `Findings:`, or `Breaker:` line of a posted round
-comment. A reviewer that ran later, or a new count, is a new round comment: the check
-reads only the current text, so an edit hides what ran and when.
-
 ## Second round
 
 In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that
@@ -155,11 +151,12 @@ nothing checked again. So when round 1 led to fix commits:
    with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
-   `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
-   of a round is low and in the PR title or body, its comment gives `Findings: none` and
-   lists them under a line `Text fixes:`. Each item gives the exact new text: an item
-   that asks the author to write text is a finding. The author applies each with the
-   `reviewer`'s words as given, and needs no further round.
+   `<head>..<head>`, so its round runs `reviewer` alone, on the edit, and its comment
+   has the `Breaker:` skip line (Round comment). When each finding of a round is low and
+   in the PR title or body, its comment gives `Findings: none` and lists them under a
+   line `Text fixes:`. Each item gives the exact new text: an item that asks the author
+   to write text is a finding. The author applies each with the `reviewer`'s words as
+   given, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge, whose
