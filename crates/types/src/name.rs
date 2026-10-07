@@ -68,6 +68,50 @@ impl FromStr for Name {
     }
 }
 
+/// The names of a region: one name and each name below it, by whole segments. The
+/// root prefix is empty and contains each name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Prefix(Option<Name>);
+
+impl Prefix {
+    /// The root prefix, which contains each name.
+    pub const ROOT: Self = Self(None);
+
+    /// Whether `name` is this prefix or a name below it, by whole segments, as
+    /// [`Name::starts_with`] reads it. The root contains each name.
+    #[must_use]
+    pub fn contains(&self, name: &Name) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|prefix| name.starts_with(prefix))
+    }
+}
+
+impl From<Name> for Prefix {
+    fn from(name: Name) -> Self {
+        Self(Some(name))
+    }
+}
+
+impl FromStr for Prefix {
+    type Err = Error;
+
+    /// `""` is the root. Other text parses as a [`Name`], with its errors.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(Self::ROOT);
+        }
+        s.parse::<Name>().map(Self::from)
+    }
+}
+
+impl fmt::Display for Prefix {
+    /// The root is `""`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.as_ref().map_or(Ok(()), |name| name.fmt(f))
+    }
+}
+
 /// One pattern over names: `*` matches one segment and `**` matches any number of
 /// segments, including none.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -606,6 +650,63 @@ mod tests {
                 assert!(!name("site_a.pt_1").starts_with(&name("site")));
                 assert!(!name("site_a").starts_with(&name("site_a.pt_1")));
                 assert!(!name("site_a.pt_1").starts_with(&name("pt_1")));
+            }
+        }
+    }
+
+    mod prefix {
+        use super::*;
+
+        fn prefix(s: &str) -> Prefix {
+            s.parse().unwrap()
+        }
+
+        #[test]
+        fn root_contains_each_name() {
+            assert!(Prefix::ROOT.contains(&name("a")));
+            assert!(Prefix::ROOT.contains(&name("a.b")));
+        }
+
+        #[test]
+        fn contains_itself_and_names_below_it_by_whole_segments() {
+            let site = Prefix::from(name("site_a"));
+            assert!(site.contains(&name("site_a")));
+            assert!(site.contains(&name("site_a.pt_1")));
+            assert!(!site.contains(&name("site_ab")));
+            assert!(!site.contains(&name("site")));
+            assert!(!site.contains(&name("b.site_a")));
+        }
+
+        #[test]
+        fn reads_empty_text_as_the_root() {
+            assert_eq!(prefix(""), Prefix::ROOT);
+        }
+
+        #[test]
+        fn reads_other_text_as_a_name() {
+            assert_eq!(prefix("site_a.pt_1"), Prefix::from(name("site_a.pt_1")));
+        }
+
+        #[test]
+        fn refuses_text_that_is_not_a_name_with_its_error() {
+            assert_eq!("a..b".parse::<Prefix>(), Err(segment_error("a..b", "")));
+            assert_eq!("a.*".parse::<Prefix>(), Err(wildcard_error("a.*")));
+        }
+
+        #[test]
+        fn displays_the_text_it_reads() {
+            assert_eq!(Prefix::ROOT.to_string(), "");
+            assert_eq!(prefix("site_a.pt_1").to_string(), "site_a.pt_1");
+        }
+
+        proptest! {
+            #[test]
+            fn contains_a_name_whose_segments_start_with_its_own(
+                p in names(),
+                n in names(),
+            ) {
+                let got = prefix(&p.join(".")).contains(&name(&n.join(".")));
+                prop_assert_eq!(got, n.starts_with(&p));
             }
         }
     }
