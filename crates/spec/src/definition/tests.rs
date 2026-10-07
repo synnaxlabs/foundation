@@ -1129,7 +1129,7 @@ fn channel_strategy() -> impl Strategy<Value = Definition> {
         .prop_map(|(error, control)| channel::Kind::Index { error, control });
     let unit = prop::option::of("[!-~]{1,32}".prop_map(|u| Unit::new(&u).unwrap()));
     let data = (key.clone(), optional, data_type_strategy(), unit).prop_filter_map(
-        "a unit on a type that holds no number",
+        "a data channel that cannot exist",
         |(index, quality, data_type, unit)| {
             let data = Data::new(index, quality, data_type, unit);
             data.ok().map(channel::Kind::Data)
@@ -1170,6 +1170,54 @@ proptest! {
         }
         if let Ok(decoded) = Definition::decode(&bytes) {
             prop_assert_eq!(decoded.encode(), bytes);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+    #[test]
+    fn decodes_only_canonical_channel_bytes(
+        kind in 0_u8..3,
+        flags in prop::collection::vec(0_u8..3, 2),
+        data_type in 0_u8..7,
+        scalar in 0_u8..15,
+        count in prop_oneof![Just(0_u32), Just(1), any::<u32>()],
+        unit in prop::collection::vec(any::<u8>(), 0..36),
+    ) {
+        let mut bytes = vec![VERSION, CHANNEL];
+        bytes.extend_from_slice(&5_u128.to_le_bytes());
+        bytes.push(kind);
+        if kind == 0 {
+            for &flag in &flags {
+                bytes.push(flag);
+                if flag == 1 {
+                    bytes.extend_from_slice(&6_u128.to_le_bytes());
+                }
+            }
+        } else {
+            bytes.extend_from_slice(&9_u128.to_le_bytes());
+            bytes.push(flags[0]);
+            if flags[0] == 1 {
+                bytes.extend_from_slice(&6_u128.to_le_bytes());
+            }
+            bytes.push(data_type);
+            if data_type <= 2 {
+                bytes.push(scalar);
+            }
+            if data_type == 1 || data_type == 2 {
+                bytes.extend_from_slice(&count.to_le_bytes());
+            }
+            bytes.push(flags[1]);
+            if flags[1] == 1 {
+                let len = u64::try_from(unit.len()).unwrap();
+                bytes.extend_from_slice(&len.to_le_bytes());
+                bytes.extend_from_slice(&unit);
+            }
+        }
+        if let Ok(definition) = Definition::decode(&bytes) {
+            prop_assert_eq!(definition.encode(), bytes);
         }
     }
 }

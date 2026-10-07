@@ -47,7 +47,7 @@ impl Data {
     /// # Errors
     ///
     /// [`Error::Empty`] when `data_type` is an array or a list that holds no element,
-    /// and [`Error::Unit`] when `unit` is set and `data_type` holds no number.
+    /// else [`Error::Unit`] when `unit` is set and `data_type` holds no number.
     pub fn new(
         index: channel::Key,
         quality: Option<channel::Key>,
@@ -268,6 +268,14 @@ mod tests {
                 );
             }
         }
+        let bools = DataType::Sample(sample::Type::Array {
+            element: Scalar::Bool,
+            len: 0,
+        });
+        assert_eq!(
+            data(bools.clone(), Some("kPa")),
+            Err(Error::Empty { data_type: bools })
+        );
         for len in [1, u32::MAX] {
             let array = DataType::Sample(sample::Type::Array { element, len });
             data(array, None).unwrap();
