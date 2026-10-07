@@ -1,10 +1,9 @@
 //! What a simulated InfluxDB store holds for one channel, folded back to the seqs and
 //! gaps that the lab wrote.
 
-use std::collections::BTreeMap;
 use std::ops::Range;
 
-use connector_influx::sim::{Field, Store};
+use connector_influx::sim::{Field, Fields, Store};
 use types::time::Stamp;
 
 use super::{Gap, Received, Written};
@@ -88,12 +87,12 @@ impl Reader<'_> {
     }
 
     /// The seq of the point at `stamp` with `fields`.
-    fn seq(&self, stamp: Stamp, fields: &BTreeMap<String, Field>) -> u64 {
+    fn seq(&self, stamp: Stamp, fields: Fields<'_>) -> u64 {
         let seqs = &self.written.seqs;
         let count = seqs.end - seqs.start;
-        let mut values = fields.values();
+        let mut values = fields.iter().map(|(_, value)| value);
         let k = match (values.next(), values.next()) {
-            (Some(&Field::Float(value)), None) => {
+            (Some(Field::Float(value)), None) => {
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
@@ -142,15 +141,15 @@ impl Reader<'_> {
                      has the tags {:?}",
                     line.tags
                 );
-                let count = match line.fields.get("count") {
-                    Some(&Field::Integer(count @ 1..)) if line.fields.len() == 1 => {
-                        count
-                    }
-                    _ => panic!(
+                let mut fields = line.fields.iter();
+                let (Some(("count", Field::Integer(count @ 1..))), None) =
+                    (fields.next(), fields.next())
+                else {
+                    panic!(
                         "the store holds what the lab did not write: a gap line at \
                          {at} has the fields {:?}",
                         line.fields
-                    ),
+                    )
                 };
                 (line.time, count.unsigned_abs())
             })

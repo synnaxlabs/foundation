@@ -2307,8 +2307,34 @@ How to read this record:
   not show that the node owns its public key. The admission does, and `Join` (#336)
   refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
-  https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). Proposed
-  by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
+  https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
+  starts the tasks that send: one for each member, from the first message for it
+  (approved by the architect, 2026-10-07T13:40:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881, which
+  supersedes the start at open in the plan that
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 approved),
+  so a member that is slow holds only its own messages. `mesh` dials and `node` accepts:
+  `node` gives each stream of `wire::Protocol::Mesh` to `serve`. A task dials a session
+  to each member at the addresses of the member's card, as the group holds the card
+  then, and sends each `raft` message as one message of one one-way stream of
+  `Class::Command`, after the stream header (MESH WIRE). `mesh` never closes a session.
+  A message that fails drops, with only the part that failed: the message when the pool
+  has no block for it or when it is too large for the peer (#1361), the stream when the
+  peer stopped it, and the handle of the session on each other error, also when no dial
+  gives a session. The next message then opens a stream, or dials, again. Nothing sends
+  the dropped message again, because `raft` does. A local pool error must not drop a
+  session that other protocols use, and the one session for each pair of nodes is the
+  job of `transport` (#1363) (approved by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
+  message for a node of which the group has no record drops in the same way (approved by
+  the architect, 2026-10-07T17:29:35Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6043221155). The tasks
+  end when the group stops or when each `Mesh` drops, also a task that waits in a dial
+  or in a send. The task of a voter that a change removed, to which `raft` sends no more
+  messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881).
+  Proposed by box1.builder-3, decided by the architect (#471),
+  2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
@@ -2780,6 +2806,30 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033140752,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033409699,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033688614).
+  Memory: each series keeps its points in chunks, one time column and one typed
+  column for each field key, so the STORE AND FORWARD scenario holds about 6e7 points
+  on a CI runner (#1149). `Point::fields` is a `Fields` view of the chunk.
+  `tests/memory.rs` counts the heap bytes with `counting` and asserts at most 32 a
+  point after 1e6 points of the lab's line. Lost: runs of points on a fixed time step,
+  as mesh slew moves each time off any grid (MESH SLEW); and the resident set size
+  (RSS) in place of a byte count, as RSS depends on the allocator and the OS. Decided
+  by the architect (`laptop.architect-2`) on 2026-10-07T14:23:09Z, #1419
+  (https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661).
+  Implementation, not a ruling: a chunk holds at most 4096 points. A column holds only
+  the points that set its key, each as an index and a value. A point past the end of a
+  full chunk goes into the next chunk when it has room, so appends in either time order
+  fill each chunk. A full column grows by an eighth, not by double, and a split frees
+  the spare room of both halves. A point with one float field takes about 19 heap
+  bytes in a long series. Each series also has a fixed cost of about 1.6 KB, so 1000
+  series of 200 points take about 27 bytes a point. Each chunk keeps a column for each
+  key it holds, in a `Vec` sorted by key, so many sparse keys cost more: 255 keys, each
+  set by every 255th point, take about 24 bytes a point, and about 29 when writes split
+  each chunk into two halves near half full, as each half keeps a copy of each column.
+  `tests/memory.rs` bounds 22 a point for one field, for 63 sparse keys, for appends
+  newest first, for writes that split chunks, also with 63 and 65 sparse keys, and for
+  one point of 255 fields among points of one field, and 32 for 255 sparse keys, for
+  257 and 255 sparse keys with writes that split chunks, and for 1000 series of 200
+  points.
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
