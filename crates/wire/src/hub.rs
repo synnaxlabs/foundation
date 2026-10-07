@@ -28,11 +28,13 @@
 mod home;
 mod reader;
 
-use std::{fmt, mem};
+use std::fmt;
 
 pub use home::{FromReader, Home};
 pub use reader::{FromHome, Reader};
 use types::frame::{Path, Range};
+
+use crate::common::{Fields, Writer};
 
 const LATEST: u8 = 1;
 const COMPLETE: u8 = 2;
@@ -97,7 +99,7 @@ impl Open {
     /// [`Error::Channels`] when the open names no channel.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
-        let mut fields = Fields::new(rest, bytes.len());
+        let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
         let mode = match kind {
             LATEST => Mode::Latest,
             COMPLETE => Mode::Complete {
@@ -161,7 +163,7 @@ impl Credit {
         if kind != CREDIT {
             return Err(Error::Kind { kind });
         }
-        let mut fields = Fields::new(rest, bytes.len());
+        let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
         let limit_bytes = u64::from_le_bytes(fields.take()?);
         fields.end()?;
         Ok(Self { limit_bytes })
@@ -229,7 +231,7 @@ impl Reply {
     /// no series.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
-        let mut fields = Fields::new(rest, bytes.len());
+        let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
         match kind {
             OPENED => {
                 fields.end()?;
@@ -265,7 +267,8 @@ pub mod keys {
 
     use types::channel;
 
-    use super::{Error, Writer, run};
+    use super::{Error, run};
+    use crate::common::slots;
 
     /// The bytes of one key.
     pub const LEN: usize = 16;
@@ -276,8 +279,7 @@ pub mod keys {
     ///
     /// When `keys` is empty, or `out` is not 16 bytes for each key.
     pub fn encode(keys: &[channel::Key], out: &mut [u8]) {
-        let out = Writer::run(out, keys.len(), LEN);
-        for (out, key) in out.0.as_chunks_mut::<LEN>().0.iter_mut().zip(keys) {
+        for (out, key) in slots::<LEN>(out, keys.len()).iter_mut().zip(keys) {
             *out = key.as_u128().to_le_bytes();
         }
     }
@@ -508,61 +510,6 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-/// Fills `out` from the front, one field at a time.
-struct Writer<'o>(&'o mut [u8]);
-
-impl<'o> Writer<'o> {
-    fn new(out: &'o mut [u8], len: usize) -> Self {
-        assert!(
-            out.len() == len,
-            "out has {} bytes, and the message has {len}",
-            out.len()
-        );
-        Self(out)
-    }
-
-    /// A writer for one message of a run: `items` of `size` bytes each.
-    fn run(out: &'o mut [u8], items: usize, size: usize) -> Self {
-        assert!(items > 0, "a message of a run holds at least one item");
-        Self::new(out, items.saturating_mul(size))
-    }
-
-    fn put(&mut self, bytes: &[u8]) {
-        let (field, rest) = mem::take(&mut self.0).split_at_mut(bytes.len());
-        field.copy_from_slice(bytes);
-        self.0 = rest;
-    }
-}
-
-/// Reads a message's fields from the front. Each error names the message's length.
-struct Fields<'b> {
-    rest: &'b [u8],
-    len: usize,
-}
-
-impl<'b> Fields<'b> {
-    fn new(rest: &'b [u8], len: usize) -> Self {
-        Self { rest, len }
-    }
-
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], Error> {
-        let (&field, rest) = self
-            .rest
-            .split_first_chunk()
-            .ok_or(Error::Length { len: self.len })?;
-        self.rest = rest;
-        Ok(field)
-    }
-
-    fn end(&self) -> Result<(), Error> {
-        if self.rest.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Length { len: self.len })
-        }
-    }
-}
 
 /// The items that remain in a run of `remain` after a message of `items` items.
 fn rest_of_run(remain: u32, items: usize) -> Result<u32, Error> {
