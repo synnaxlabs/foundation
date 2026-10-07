@@ -654,28 +654,33 @@ mod buffer {
         }
     }
 
-    /// Shard 0 takes the remainder, so only shard 1 is short.
+    /// The budget holds one least ring, so shard 0's part fits and shard 1's does not.
     #[test]
-    fn a_disk_budget_part_that_holds_no_ring_starts_no_shard() {
+    fn a_disk_budget_that_holds_no_ring_on_each_shard_starts_no_shard() {
         let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         let node = Node::start(Config {
-            disk: Size::from_bytes(2 * smallest - 1),
+            disk: Size::from_bytes(smallest),
             ..config(&host, 1 << 20, Box::new(heap))
         });
         assert_eq!(host.shard_starts(), []);
         assert_eq!(sim.run(), Ok(()));
         let e = node.join().unwrap_err();
-        let error = ::buffer::Small {
-            len: smallest - 1,
-            min: smallest,
-        };
-        assert_eq!(e, Error::Disk { core: 1, error });
+        let disk = Size::from_bytes(2_113_536);
+        let min = Size::from_bytes(4_227_072);
+        assert_eq!(
+            e,
+            Error::Disk {
+                disk,
+                cores: 2,
+                min
+            }
+        );
         assert_eq!(
             e.to_string(),
-            "the disk budget gives shard-1 too little: a ring file of 2113535 bytes \
-             holds no ring; it needs at least 2113536 bytes"
+            "the disk budget 2064KiB holds no ring on each of 2 shards; it needs at \
+             least 4128KiB"
         );
     }
 

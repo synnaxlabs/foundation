@@ -106,8 +106,8 @@ impl Node {
     /// directory, or checks the one there, and each shard opens its buffer in
     /// directory `shard-<i>` of its files, and makes it there when it is not there.
     /// The shards open their buffers one after another, in order of core. Returns
-    /// once each shard runs or one has failed to start. When a part of the disk
-    /// budget holds no ring, no shard starts. A failed start, a shard with no memory, a
+    /// once each shard runs or one has failed to start. When the disk budget holds no
+    /// ring on each shard, no shard starts. A failed start, a shard with no memory, a
     /// data directory made for another shard count, or a buffer that does not open
     /// stops the node, and [`Node::join`] returns its error.
     ///
@@ -118,14 +118,24 @@ impl Node {
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let budget =
             u64::try_from(config.budget).expect("invariant: a usize fits a u64");
-        match parts(budget, config.disk, config.shards.cores().get()) {
+        let cores = config.shards.cores().get();
+        match parts(budget, config.disk, cores) {
             Ok(parts) => Self::spawn(config, parts),
-            Err(error) => Self {
-                stop: Stop::default(),
-                shards: Vec::new(),
-                failed: Some(error),
-                interner: handoff::pair().1,
-            },
+            Err(small) => {
+                let count =
+                    u64::try_from(cores).expect("invariant: a core count fits a u64");
+                let error = Error::Disk {
+                    disk: config.disk,
+                    cores,
+                    min: types::byte::Size::from_bytes(small.min * count),
+                };
+                Self {
+                    stop: Stop::default(),
+                    shards: Vec::new(),
+                    failed: Some(error),
+                    interner: handoff::pair().1,
+                }
+            }
         }
     }
 
@@ -221,8 +231,8 @@ impl Node {
     ///
     /// # Errors
     ///
-    /// The first failure: [`Error::Disk`] for a part of the disk budget that holds
-    /// no ring, [`Error::Start`] for a shard that could not start or pin, or
+    /// The first failure: [`Error::Disk`] for a disk budget that holds no ring on
+    /// each shard, [`Error::Start`] for a shard that could not start or pin, or
     /// [`Error::Memory`] for a shard with no memory, else [`Error::Shards`] or
     /// [`Error::Directory`] for a data directory that shard 0 could not claim, else
     /// [`Error::Buffer`] for the first shard by core whose buffer did not open, else
@@ -274,18 +284,18 @@ struct Open {
 }
 
 /// The pool of each shard from its part of `budget`, and the layout of its ring from
-/// its part of `disk`, in order of core.
+/// its part of `disk`, in order of core, else the first part that holds no ring.
 fn parts(
     budget: u64,
     disk: types::byte::Size,
     cores: usize,
-) -> Result<Vec<(block::Config, buffer::Layout)>, Error> {
+) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
     (0..cores)
         .map(|core| {
             let budget = usize::try_from(part(budget, cores, core))
                 .expect("invariant: a part is at most its whole");
-            let layout = buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)
-                .map_err(|error| Error::Disk { core, error })?;
+            let layout =
+                buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
             Ok((block::Config { budget }, layout))
         })
         .collect()
@@ -412,12 +422,15 @@ pub enum Error {
     /// A file call that reads or records the shard count of the data directory
     /// failed.
     Directory(env::files::Error),
-    /// The part of the disk budget of the shard on `core` holds no ring.
+    /// The disk budget is less than `min`, the least budget that holds a ring on each
+    /// of `cores` shards.
     Disk {
-        /// The core of the shard.
-        core: usize,
-        /// The length of the part, and the least length that holds a ring.
-        error: buffer::Small,
+        /// The disk budget that was given.
+        disk: types::byte::Size,
+        /// The count of shards.
+        cores: usize,
+        /// The least disk budget that holds a ring on each shard.
+        min: types::byte::Size,
     },
 }
 
@@ -441,9 +454,11 @@ impl fmt::Display for Error {
                 f,
                 "cannot read or record the shard count of the data directory: {error}"
             ),
-            Self::Disk { core, error } => {
-                write!(f, "the disk budget gives shard-{core} too little: {error}")
-            }
+            Self::Disk { disk, cores, min } => write!(
+                f,
+                "the disk budget {disk} holds no ring on each of {cores} shards; it \
+                 needs at least {min}"
+            ),
         }
     }
 }
