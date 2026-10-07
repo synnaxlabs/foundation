@@ -2562,12 +2562,15 @@ How to read this record:
   sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
   data measurement.
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
-  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
-  `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
-  minus the stored seqs, as maximal runs. Each run is one gap: `after` is the count
-  of stored samples before the run, and the count is the run's length. A gap line
-  whose stamp is not in the write record on the path of its tag, or whose range starts
-  below the first written seq, is a lab failure (panic), not data. The property test
+  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, where
+  `seq(stamp)` is the seq of the data point at its stamp, in the data measurement of
+  the same index (6039993275: stamps slew, so a stamp is not a key into the write
+  record). Seqs rise with time: a point whose seq is not above the seq before it is a
+  lab failure, and the message names both stamps and both seqs. Its gaps are the
+  union of these ranges minus the stored seqs, as maximal runs. Each run is one gap:
+  `after` is the count of stored samples before the run, and the count is the run's
+  length. A gap line with no data point at its stamp, or whose range starts below the
+  first written seq, is a lab failure (panic), not data. The property test
   also asserts no silent loss: each seq from the first written seq to the last stored
   seq is stored or in a gap range. After a lost confirmation, a resend, and a later
   trim, gap lines can overlap, so the sum of `count` in `foundation_gaps` is an upper
@@ -2594,17 +2597,14 @@ How to read this record:
   gap line and a backfill gap line at one stamp as two points, so the sum of `count`
   stays an upper bound on the loss from trims. Data lines get no `path` tag, so a live
   sample and a backfill sample of one index at one stamp are one point, and the later
-  write sets its fields. The earlier sample is a loss that no gap line counts. The fold
-  takes the path of a gap line from its tag, and `seq(stamp)` on that path from the
-  write record. From #1270, the fold, `after`, the first written seq, and the
-  no-silent-loss assertion each run on each path apart. A data point whose stamp the
-  write record holds on both paths of one index is a lab failure (panic), because the
-  lab cannot tell which seq the point holds, so the property test writes no such stamp.
-  From #1270, a separate test reads the points of the simulated InfluxDB and pins the
-  overwrite. Lost: a `path` tag on data lines, which makes two series for each channel
-  and puts the path, which is internal to the node, in each user's data schema.
-  `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
-  data nothing. Decided by `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
+  write sets its fields. The earlier sample is a loss that no gap line counts. Until
+  #1270, the fold reads the live path only, and a gap line of another path is a lab
+  failure. #1270 amends the fold for two paths. From #1270, a separate test reads the
+  points of the simulated InfluxDB and pins the overwrite. Lost: a `path` tag on data
+  lines, which makes two series for each channel and puts the path, which is internal to
+  the node, in each user's data schema. `foundation_gaps` is Foundation's own
+  measurement, so its `path` tag costs the user's data nothing. Decided by
+  `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748; amended
   2026-10-07T08:18:10Z:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167;
@@ -2614,6 +2614,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515 and of
   point 3 of 6033743748, and the loss bound of
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428.
+  Data points in the lab: sample `k` of one `Lab::write`, from 0, has the value
+  `k as f64`, which is exact below 2^53. `Lab::stored` takes a data point's seq from
+  its value: `written.start + k`. It accepts a data point only when its fields are
+  one float that is a whole number `k` in `+0..count`, where `count` is the number
+  of written samples. Until #341 names the field key of a data line, the field may
+  have any key; the #341 PR that names the key changes the check to that key.
+  Decided by the architect (`laptop.architect-2`), #1151, on 2026-10-07T14:07:11Z
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938)
+  and 2026-10-07T14:22:17Z
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039993275).
+  Supersedes the Q2 check of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938, which
+  compared each value with `seq - written.start`.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
