@@ -1020,21 +1020,35 @@ mod tests {
         #[test]
         fn refuses_a_placement_that_names_no_node() {
             let empty = list(50, &[]);
-            for attributes in [
-                vec![("select", string("edge.*"))],
-                vec![("select", string("edge.*")), ("copies", empty)],
-            ] {
+            let cases = [
+                (vec![("select", string("edge.*"))], 0),
+                (vec![("select", string("edge.*")), ("copies", empty)], 13),
+            ];
+            for (attributes, offset) in cases {
                 assert_eq!(
                     check(&placement(&attributes)),
                     Err(vec![refused(
-                        "config.missing-attribute",
-                        at(0, 0),
-                        "the `placement` block has no `home`, `standby`, or `copies`",
-                        "Add a `home`, `standby`, or `copies` attribute",
+                        "config.empty-placement",
+                        at(0, offset),
+                        "the `placement` block names no home, no standby, and no copy",
+                        "Name a `home`, a `standby`, or a node in `copies`",
                     )]),
                     "{attributes:?}"
                 );
             }
+        }
+
+        #[test]
+        fn reads_no_copies_next_to_a_home() {
+            let documents = placement(&[
+                ("select", string("edge.*")),
+                ("home", string("edge")),
+                ("copies", list(50, &[])),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Ok(placed(nodes(Some("edge"), None, &[])))
+            );
         }
 
         /// The `role-overlap` diagnostic for `node` at `span`.
@@ -1086,6 +1100,20 @@ mod tests {
                     "{attributes:?}"
                 );
             }
+        }
+
+        #[test]
+        fn skips_a_later_value_that_does_not_name_the_node() {
+            let attributes = [
+                ("select", string("edge.*")),
+                ("home", string("n_1")),
+                ("standby", string("n_1")),
+                ("copies", list(50, &[string("n_3")])),
+            ];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(overlap("n_1", at(0, 15)))
+            );
         }
 
         #[test]
