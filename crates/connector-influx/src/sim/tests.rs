@@ -621,6 +621,12 @@ proptest! {
             .map(|((time, tags), fields)| (*time, tags.clone(), fields.clone()))
             .collect();
         prop_assert_eq!(read(&store, "m"), expected.clone());
+        for series in store.measurements["m"].series.values() {
+            for (first, chunk) in &series.chunks {
+                prop_assert!((1..=CHUNK).contains(&chunk.times.len()));
+                prop_assert_eq!(*first, chunk.times[0]);
+            }
+        }
         let tagged: Vec<_> = expected
             .into_iter()
             .filter(|(_, tags, _)| tags.get("t").is_some_and(|tag| tag == "a"))
@@ -638,4 +644,67 @@ proptest! {
             .collect();
         prop_assert_eq!(filtered, tagged);
     }
+}
+
+/// The point count of each chunk of the series of `m` with no tags.
+fn chunks(store: &Store) -> Vec<usize> {
+    store.measurements["m"].series[&Tags::new()]
+        .chunks
+        .values()
+        .map(|chunk| chunk.times.len())
+        .collect()
+}
+
+fn lines(times: impl Iterator<Item = usize>) -> String {
+    times.fold(String::new(), |mut text, time| {
+        writeln!(text, "m v={time} {time}").unwrap();
+        text
+    })
+}
+
+#[test]
+fn appends_in_time_order_fill_each_chunk() {
+    let store = stored(&lines(0..=3 * CHUNK));
+    assert_eq!(chunks(&store), [CHUNK, CHUNK, CHUNK, 1]);
+}
+
+#[test]
+fn a_time_inside_a_full_chunk_splits_it() {
+    let mut store = stored(&lines((0..CHUNK).map(|k| 2 * k)));
+    store.write(lines(std::iter::once(5)).as_bytes()).unwrap();
+    assert_eq!(chunks(&store), [CHUNK / 2 + 1, CHUNK / 2]);
+    let times: Vec<i64> = times(&store, "m", &[]);
+    assert!(times.is_sorted() && times.len() == CHUNK + 1, "{times:?}");
+}
+
+#[test]
+fn gets_only_the_fields_that_the_point_sets() {
+    let store = stored("m v=1,s=\"a\" 10\nm w=2i 20\n");
+    let point = store.points("m", &[]).next().unwrap();
+    assert_eq!(point.fields.get("v"), Some(Field::Float(1.0)));
+    assert_eq!(point.fields.get("s"), Some(Field::String("a".into())));
+    assert_eq!(point.fields.get("w"), None, "set by another point only");
+    assert_eq!(point.fields.get("x"), None);
+}
+
+#[test]
+fn fields_are_equal_when_they_set_the_same_keys_to_equal_values() {
+    let store = stored("m v=1 10\nm v=1 20\nm v=2 30\nm v=1,w=1 40\n");
+    let fields: Vec<Fields<'_>> =
+        store.points("m", &[]).map(|point| point.fields).collect();
+    assert_eq!(fields[0], fields[1]);
+    assert_ne!(fields[0], fields[2]);
+    assert_ne!(fields[0], fields[3]);
+    assert_ne!(fields[0], map(&[("v", Field::Float(2.0))]));
+    assert_ne!(fields[0], map(&[("w", Field::Float(1.0))]));
+}
+
+#[test]
+fn prints_fields_as_a_map() {
+    let store = stored("m v=1,i=2i 10\n");
+    let point = store.points("m", &[]).next().unwrap();
+    assert_eq!(
+        format!("{:?}", point.fields),
+        "{\"i\": Integer(2), \"v\": Float(1.0)}"
+    );
 }
