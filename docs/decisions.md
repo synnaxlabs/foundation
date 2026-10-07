@@ -3332,7 +3332,8 @@ How to read this record:
   also holds the count of `Allocator::held`: the bytes in the blocks that it gave out
   and did not free, so a test can bound the memory of a structure. It is one more atomic
   count, so the exception "Allow in test binaries" covers it as it is. Decided by
-  `laptop.architect` on 2026-10-07T14:33:00Z
+  `laptop.architect` on 2026-10-07T14:33:00Z, and corrected to `usize` on
+  2026-10-07T14:48:34Z
   (https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190).
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
