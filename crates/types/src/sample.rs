@@ -63,8 +63,8 @@ impl Scalar {
             Self::U64 => "u64",
             Self::F32 => "f32",
             Self::F64 => "f64",
-            Self::Stamp => "stamp",
-            Self::Span => "span",
+            Self::Stamp => "timestamp",
+            Self::Span => "duration",
             Self::Uuid => "uuid",
         }
     }
@@ -152,10 +152,10 @@ impl FromStr for Type {
     type Err = Error;
 
     /// Reads the text that `Display` writes, and only that text: a scalar (`bool`,
-    /// `i8` to `i64`, `u8` to `u64`, `f32`, `f64`, `stamp`, `span`, or `uuid`), an
-    /// array `<scalar>[<len>]`, a list `list<<scalar>, <max>>`, `string`, or `bytes`.
-    /// Case is exact, a count has no leading zero, and the one space is after the
-    /// comma of a list.
+    /// `i8` to `i64`, `u8` to `u64`, `f32`, `f64`, `timestamp`, `duration`, or `uuid`),
+    /// an array `<scalar>[<len>]`, a list `list<<scalar>, <max>>`, `string`, or
+    /// `bytes`. Case is exact, a count has no leading zero, and the one space is after
+    /// the comma of a list.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
             "string" => return Ok(Self::String),
@@ -236,8 +236,7 @@ impl Error {
             }
             Self::Count => "Write the count in plain digits, such as 16",
             Self::Lengths => {
-                "Write one length, the product of the lengths, such as f32[6] for \
-                 f32[2][3]"
+                "Use one array length: a type of two lengths does not read yet"
             }
         }
     }
@@ -333,8 +332,20 @@ mod tests {
             .map(|scalar| Type::Scalar(scalar).to_string())
             .into();
         let expected = [
-            "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
-            "stamp", "span", "uuid",
+            "bool",
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "f32",
+            "f64",
+            "timestamp",
+            "duration",
+            "uuid",
         ];
         assert_eq!(names, expected);
     }
@@ -350,6 +361,10 @@ mod tests {
             ("f32 [3]", Error::Syntax),
             (" f32[3]", Error::Syntax),
             ("list<u8 , 16>", Error::Syntax),
+            ("stamp", Error::Syntax),
+            ("span", Error::Syntax),
+            ("stamp[3]", Error::Element),
+            ("list<span, 16>", Error::Element),
             ("f32 [2][3]", Error::Syntax),
             ("f32 [03]", Error::Syntax),
             ("list<u8,16>", Error::Syntax),
@@ -394,7 +409,7 @@ mod tests {
             (
                 Error::Element,
                 "expected a scalar element: bool, i8, i16, i32, i64, u8, u16, u32, \
-                 u64, f32, f64, stamp, span, or uuid",
+                 u64, f32, f64, timestamp, duration, or uuid",
                 "Use a scalar as the element, such as f32[3] or list<u8, 16>",
             ),
             (
@@ -405,8 +420,7 @@ mod tests {
             (
                 Error::Lengths,
                 "expected one array length",
-                "Write one length, the product of the lengths, such as f32[6] for \
-                 f32[2][3]",
+                "Use one array length: a type of two lengths does not read yet",
             ),
         ];
         for (error, message, fix) in cases {
