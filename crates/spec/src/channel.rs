@@ -239,7 +239,8 @@ mod tests {
             ]
             .map(DataType::Sample)
             {
-                let data = data(data_type.clone(), None).unwrap();
+                let unit = (element == Scalar::F64).then_some("kPa");
+                let data = data(data_type.clone(), unit).unwrap();
                 assert_eq!(data.data_type(), &data_type);
             }
         }

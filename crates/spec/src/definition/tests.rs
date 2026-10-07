@@ -780,6 +780,22 @@ fn data(data_type: DataType, unit: Option<&str>) -> Definition {
     })
 }
 
+#[test]
+fn round_trips_an_array_or_list_of_each_size_bound() {
+    for element in [Scalar::F64, Scalar::Bool] {
+        let unit = (element == Scalar::F64).then_some("kPa");
+        for size in [0, u32::MAX] {
+            for data_type in [
+                sample::Type::Array { element, len: size },
+                sample::Type::List { element, max: size },
+            ] {
+                let definition = data(DataType::Sample(data_type), unit);
+                assert_eq!(Definition::decode(&definition.encode()), Ok(definition));
+            }
+        }
+    }
+}
+
 fn f64s(len: u32) -> DataType {
     DataType::Sample(sample::Type::Array {
         element: Scalar::F64,
