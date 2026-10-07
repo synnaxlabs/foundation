@@ -62,10 +62,12 @@ returns (`git worktree remove --force <path>`).
    `transport`) needs the explicit OK of the crate's architect: link its comment. A fix
    or an answer that makes such a public surface change, or decides what a ruling means,
    needs the architect's approval too: link its comment. So does a fix that reverses a
-   finding of the architect. A dispute about what a rule in `CLAUDE.md` or
-   `docs/claude/` means goes to `laptop.director`. A refusal that names a trigger for
-   later work is a deferral: file its issue with the trigger, or write the trigger in
-   the decisions entry that the ruling cites.
+   finding of the architect. So does an answer that accepts a regression over 5% (P1).
+   An answer to a run that cannot show the 5% check links the coordinator's rerun. A
+   dispute about what a rule in `CLAUDE.md` or `docs/claude/` means goes to
+   `laptop.director`. A refusal that names a trigger for later work is a deferral: file
+   its issue with the trigger, or write the trigger in the decisions entry that the
+   ruling cites.
 
 ## Rating
 
