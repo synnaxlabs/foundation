@@ -1298,15 +1298,20 @@ How to read this record:
   that holds it. A granted `PreVoteReply` or `VoteReply` carries the voter's signature
   in its `Answer`, and the candidate copies it into its proof. `raft` counts the keys
   and carries the signatures as opaque bytes: it does no crypto. A signature attests
-  a `Claim`: the voter, the grant, the term, and the candidate. `raft` owns the rule
-  that gives each signature its claim: a proof entry claims the proof's grant to its
-  candidate in the term of the message or hard state, and a granted reply claims its
-  grant from the sender to the receiver in the message's term. `raft` gives this
-  node's own entries and grants with no signature (`None`). `Ready::sign` gives each
-  `None` the signature that the caller's closure makes for its claim, before the
-  write and the sends. The caller checks each pair that `Message::claims` gives
-  before `step` and refuses a `None`: `step` keeps each signature as it came, so an
-  unchecked `None` of another voter reaches `Ready::sign`.
+  a `Claim`: a `Grant` (the voter, the grant, the term, and the candidate) or a
+  `Change` (the leader, the position of a configuration entry, and its voters; RAFT
+  VOTERS). `raft` owns the rule that gives each signature its claim: a proof entry
+  claims the proof's grant to its candidate in the term of the message or hard
+  state, a granted reply claims its grant from the sender to the receiver in the
+  message's term, and a configuration entry claims its change from the leader whose
+  votes it holds. `raft` gives this node's own entries, grants, and changes with no
+  signature (`None`). `Ready::sign` gives each `None` the signature that the
+  caller's closure makes for its claim, in the hard proof, in each message, and in
+  each change this node wrote (in `entries`, in `committed`, and in each append),
+  before the write and the sends. The caller checks each pair that
+  `Message::claims` gives before `step` and refuses a `None`: `step` keeps each
+  signature as it came, so an unchecked `None` of another voter reaches
+  `Ready::sign`.
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -1324,7 +1329,10 @@ How to read this record:
   first, the group waits for an operator, who wipes the voter and starts it with no
   configuration (a node with no configuration proves anything). The chain of proofs over
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
-  pins both, and the random runs skip exactly such a voter until #881. The advisor
+  pins both, and the random runs skip exactly such a voter until #881. The first PR of
+  #881 gives each configuration entry the votes and the signature of the leader that
+  wrote it; the chain and its check are the second PR (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579). The advisor
   required a proof on every message and on each refusal, signatures only, and the
   proof in the hard state (#750, 2026-10-05). `mesh` signs and checks the
   signatures (MESH LOG).
@@ -1415,9 +1423,15 @@ How to read this record:
   (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
   a leader keeps its lead through its own removal. A configuration travels in the
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
-  term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
-  its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. A node that joins starts with the founding voters from the answer to
+  term), `Bytes` (a proposal), or `Voters(Change)`. A `Change` is the `voters`, the
+  `votes` of the leader that wrote the entry (its election proof as it held it at
+  the write: a vote that arrives later joins the leader's proof, not an entry it
+  already wrote), and the leader's `signature` of the entry (`None` until
+  `Ready::sign`). A node that missed the change checks the entry with them before it
+  counts a later proof against it: the chain, the second PR of #881 (architect,
+  #881, https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579). A node
+  uses the latest `Voters` entry in its log from the time it writes it;
+  `Start.voters` is the configuration before `Start.entries`. A node that joins starts with the founding voters from the answer to
   its join (decided by the architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). An empty
   `Start.voters` is a voter that an operator wiped. It takes any proof until it holds a
@@ -1492,13 +1506,21 @@ How to read this record:
   bytes) and signature (64 bytes) in rising key order (#750). A `raft` message on the
   wire carries its proof in the same form, after the term and before the body. A
   granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
-  is the byte 0 alone. No form holds an entry with no signature: encode panics on
-  one, because the caller signs before each write and send. `mesh::grant` signs each
-  claim with the node's Ed25519 key over `foundation/grant/1`, the voter (16 bytes,
+  is the byte 0 alone. An entry is its term and index (8 bytes each), then a data
+  byte: empty (0) alone; bytes (1), an 8-byte length, and the bytes; voters (2), the
+  incoming keys, the outgoing keys (each an 8-byte count, then the keys in rising
+  order), the votes in the proof form, and the leader's signature (64 bytes). No
+  form holds a grant or a change with no signature: encode panics on one, because
+  the caller signs before each write and send. `mesh::grant` signs each claim with
+  the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
-  endian), and the candidate (16 bytes, little endian). The voter in the bytes keeps
-  two members that share a key from sharing a signature. Grants name no region; a
-  second region adds the region key under `foundation/grant/2`. The driver (#471)
+  endian), and the candidate (16 bytes, little endian). A change signs
+  `foundation/voters/1`, the leader (16 bytes), the term and the index (8 bytes
+  each), and the incoming and the outgoing keys, each as in the entry (architect,
+  #881, https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579). The
+  signer in the bytes keeps two members that share a key from sharing a signature.
+  Grants name no region; a second region adds the region key under
+  `foundation/grant/2`. The driver (#471)
   checks each claim of a message against the public keys of the members before each
   `step`. The format version stays 1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of its first
