@@ -90,8 +90,8 @@ struct Binding {
     queued: usize,
     /// The waker of the last receive that found the queue empty.
     waker: Option<Waker>,
-    /// From a fault until the socket drops: each receive gives `EIO`, and each
-    /// arrival drops.
+    /// From a fault until the socket drops: each receive gives `EIO` once the queue
+    /// is empty, and each arrival drops.
     failed: bool,
 }
 
@@ -328,8 +328,8 @@ impl<'a> Udp<'a> {
 
     /// Receives batches from socket `key` into `buffers`, one per buffer, or keeps
     /// `waker` when the queue is empty. Returns the count of batches, or `EIO` when
-    /// the socket failed, and a waker for the caller to drop after it releases the
-    /// lock.
+    /// the socket failed and its queue is empty, and a waker for the caller to drop
+    /// after it releases the lock.
     pub(crate) fn recv(
         &mut self,
         key: u64,
@@ -339,7 +339,7 @@ impl<'a> Udp<'a> {
     ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
         let binding = (self.sockets.bindings.get_mut(&key))
             .expect("invariant: a socket lives while its driver does");
-        if binding.failed {
+        if binding.failed && binding.queue.is_empty() {
             return (Poll::Ready(Err(Error::Io { code: EIO })), Some(waker));
         }
         if binding.queue.is_empty() {

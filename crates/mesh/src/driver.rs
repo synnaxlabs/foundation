@@ -21,6 +21,7 @@ use types::time::Span;
 use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
+use crate::member::Member;
 use crate::region::{self, Change};
 
 /// The time of one `raft` tick.
@@ -38,9 +39,10 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// The public key of each member of the region, this node included. A member's
-    /// peer proves the key, and the key signs the member's grants.
-    pub(crate) members: BTreeMap<node::Key, PublicKey>,
+    /// Each member of the region, this node included. A member's peer proves the
+    /// public key of its card, and that key signs the member's grants. Each card must
+    /// be signed for its key here: `open` does not check it (#1259).
+    pub(crate) members: BTreeMap<node::Key, Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
@@ -86,7 +88,9 @@ impl Mesh {
         let signer = Signer::new(config.key, &config.private_key);
         match config.members.get(&config.key) {
             None => return Err(Error::NotMember(config.key)),
-            Some(&public) if !signer.owns(public) => return Err(Error::WrongKey),
+            Some(own) if !signer.owns(own.public_key()) => {
+                return Err(Error::WrongKey);
+            }
             Some(_) => {}
         }
         let mut voters = config.voters.iter();
@@ -110,8 +114,7 @@ impl Mesh {
         };
         let group = Rc::new(RefCell::new(Group {
             raft: Raft::new(fixed, start)?,
-            members: config.members,
-            state: region::State::default(),
+            state: region::State::new(config.members),
             queues: BTreeMap::new(),
             stopped: Rc::default(),
             task: None,
@@ -140,6 +143,13 @@ impl Mesh {
         }
     }
 
+    /// The member with `key` in this node's view of the region, or `None` when the
+    /// region has no such member. It answers also after the group stops, from the view
+    /// at the stop.
+    pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
+        self.group.borrow().state.member(key).cloned()
+    }
+
     /// Gives the group `message`, which `peer` sent.
     ///
     /// # Errors
@@ -166,7 +176,8 @@ impl Mesh {
         let mut group = self.group.borrow_mut();
         group.running()?;
         let from = message.from;
-        if group.members.get(&from) != Some(&peer) {
+        let public_key = |key| group.state.member(key).map(Member::public_key);
+        if public_key(from) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
         let Voters { incoming, outgoing } = group.raft.voters();
@@ -174,7 +185,7 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
-        grant::check(&message, &group.members)?;
+        grant::check(&message, public_key)?;
         group.raft.step(message)?;
         group.wake();
         Ok(())
@@ -277,7 +288,6 @@ impl Drop for Watch {
 
 struct Group {
     raft: Raft,
-    members: BTreeMap<node::Key, PublicKey>,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
@@ -469,6 +479,7 @@ mod tests {
     use sim::{Crash, Sim, link};
 
     use super::*;
+    use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
     use crate::region::Malformed;
@@ -952,6 +963,16 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_grant_of_a_voter_that_is_not_a_member() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                let refused = Error::Grant(grant::Error::NotMember { voter: key(3) });
+                assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
+            });
+        }
+
+        #[test]
         fn checks_the_peer_then_the_voter_then_the_grants() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
@@ -1390,6 +1411,49 @@ mod tests {
             let text = format!("node {} is not a member of the region", key(3));
             assert_eq!(refused.to_string(), text);
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+        });
+    }
+
+    #[test]
+    fn member_gives_the_record_of_a_member_and_none_for_another_node() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            assert_eq!(mesh.member(key(2)), Some(common::member(2)));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1)));
+            assert_eq!(mesh.member(key(9)), None);
+        });
+    }
+
+    #[test]
+    fn member_gives_the_record_after_the_group_stops() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stopped = fail_sync(&node);
+            mesh.propose(home(2)).unwrap();
+            assert_eq!(watch.next().await, Err(stopped));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1)));
+            assert_eq!(mesh.member(key(2)), None);
+        });
+    }
+
+    // `open` does not check that a card is signed for its key in `members` (#1259).
+    #[test]
+    fn open_takes_a_card_that_is_signed_for_another_key() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[1, 2], &[1]);
+            config.members.insert(key(2), common::member(3));
+            let mesh = Mesh::open(config).await.unwrap();
+            let given = mesh.member(key(2)).unwrap();
+            assert_eq!(given, common::member(3));
+            let card = given.card.card().clone();
+            assert_eq!(
+                card::Signed::check(key(2), card, *given.card.signature()).err(),
+                Some(card::Forged { node: key(2) }),
+            );
         });
     }
 
