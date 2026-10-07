@@ -13,7 +13,7 @@ use transport::stream::{Incoming, Part, Receiver, Sender};
 use transport::{Class, Code};
 use types::channel::{self, Slot};
 use types::frame::Frame;
-use types::frame::key_set::{self, KeySet};
+use types::frame::key_set::KeySet;
 use types::hash;
 use wire::header::MALFORMED;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, Reply, UNKNOWN, ends};
@@ -295,14 +295,13 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
 }
 
 /// How a session sends each frame, through its places. It keeps its buffers across
-/// frames, so a frame of a known key set allocates only its blocks.
+/// frames, so a frame allocates only its blocks.
 struct Out {
     /// The slot of each place.
     slots: Box<[Slot]>,
     index: Slot,
-    /// The key set of the last frame, the place of each of its entries, and the
-    /// group of the session's index.
-    set: Option<(key_set::Key, Vec<Option<usize>>, u32)>,
+    /// The place of each entry of the frame's key set.
+    places: Vec<Option<usize>>,
     /// The range of each place's series in the frame's body.
     by_place: Vec<Option<Range<usize>>>,
     series: Vec<Series>,
@@ -315,7 +314,7 @@ impl Out {
             by_place: vec![None; slots.len()],
             slots,
             index,
-            set: None,
+            places: Vec::new(),
             series: Vec::new(),
             parts: Vec::new(),
         }
@@ -330,14 +329,39 @@ impl Out {
         frame: &Frame,
         set: &KeySet,
     ) -> Result<(), Error> {
-        let group = self.place(set);
-        let Some((_, places, _)) = &self.set else {
-            unreachable!("invariant: place sets the key set");
-        };
+        let head = self.lay(frame, set);
+        sender.send(reply(state, Reply::Head(head))?).await?;
+        let largest = state.borrow().home.pool().largest();
+        for run in self.runs(sender.bytes_max().min(largest)) {
+            let mut block = alloc(state, run.len() * ends::LEN)?;
+            ends::encode(
+                run.iter().map(|series| (series.place, series.end)),
+                &mut block,
+            );
+            sender.send(block.freeze()).await?;
+        }
+        let body = frame.body();
+        let mut cut = Cut::default();
+        while cut.next(&self.series, sender.bytes_max(), &mut self.parts) {
+            sender.send_parts(body.clone(), &self.parts).await?;
+        }
+        Ok(())
+    }
+
+    /// Lays out the series of `frame` that the session has a place for, in place
+    /// order, and gives the frame's head.
+    fn lay(&mut self, frame: &Frame, set: &KeySet) -> Head {
+        self.places.clear();
+        self.places.resize(set.entries().len(), None);
+        for (place, &slot) in self.slots.iter().enumerate() {
+            if let Some(entry) = set.find(slot) {
+                self.places[entry] = Some(place);
+            }
+        }
         self.by_place.fill(None);
         let mut start = 0;
         for (entry, end) in frame.ends() {
-            if let Some(place) = places[entry] {
+            if let Some(place) = self.places[entry] {
                 self.by_place[place] = Some(start..end);
             }
             start = end.next_multiple_of(8);
@@ -358,54 +382,22 @@ impl Out {
                 zeros: 0,
             });
         }
-        let head = Head {
+        let index = set
+            .find(self.index)
+            .expect("invariant: a session's frame holds its index");
+        Head {
             path: frame.path(),
             range: frame
-                .range(group)
-                .expect("invariant: a session's frame holds its index"),
+                .range(set.entries()[index].group)
+                .expect("invariant: a frame holds the range of each group"),
             series: u32::try_from(self.series.len())
                 .expect("a count of places is a u32"),
-        };
-        sender.send(reply(state, Reply::Head(head))?).await?;
-        let largest = state.borrow().home.pool().largest();
-        let per = sender.bytes_max().min(largest) / ends::LEN;
-        let mut ends = self.series.iter().map(|series| (series.place, series.end));
-        let mut remain = self.series.len();
-        while remain > 0 {
-            let count = remain.min(per);
-            let mut block = alloc(state, count * ends::LEN)?;
-            ends::encode(ends.by_ref(), &mut block);
-            sender.send(block.freeze()).await?;
-            remain -= count;
         }
-        let body = frame.body();
-        let mut cut = Cut::default();
-        while cut.next(&self.series, sender.bytes_max(), &mut self.parts) {
-            sender.send_parts(body.clone(), &self.parts).await?;
-        }
-        Ok(())
     }
 
-    /// Makes `set` the key set of the last frame, and gives the group of the
-    /// session's index in it.
-    fn place(&mut self, set: &KeySet) -> u32 {
-        match &self.set {
-            Some((key, _, group)) if *key == set.key() => *group,
-            _ => {
-                let mut places = vec![None; set.entries().len()];
-                for (place, &slot) in self.slots.iter().enumerate() {
-                    if let Some(entry) = set.find(slot) {
-                        places[entry] = Some(place);
-                    }
-                }
-                let index = set
-                    .find(self.index)
-                    .expect("invariant: a session's frame holds its index");
-                let group = set.entries()[index].group;
-                self.set = Some((set.key(), places, group));
-                group
-            }
-        }
+    /// The series that [`Self::lay`] gave, in runs whose ends fit `max` bytes.
+    fn runs(&self, max: usize) -> std::slice::Chunks<'_, Series> {
+        self.series.chunks(max / ends::LEN)
     }
 }
 
@@ -461,7 +453,84 @@ impl Cut {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use types::frame::key_set::{Group, Interner};
+    use types::frame::{Draft, Form, Path};
+    use types::sample::{Scalar, Type};
+
     use super::*;
+
+    const I64: Type = Type::Scalar(Scalar::I64);
+
+    fn key(key: u128) -> channel::Key {
+        channel::Key::from_u128(key)
+    }
+
+    /// A frame of `data` on index 1, with `lens` bytes in each series by entry.
+    fn frame(
+        interner: &mut Interner,
+        pool: &block::Pool,
+        data: &[u128],
+        lens: &[usize],
+    ) -> (Frame, Arc<KeySet>) {
+        let data: Vec<_> = data.iter().map(|&k| (key(k), I64)).collect();
+        let set = interner.intern(&[Group {
+            index: key(1),
+            data: &data,
+        }]);
+        let lens: Vec<_> = lens.iter().copied().enumerate().collect();
+        let mut draft = Draft::new(pool, &set, Form::Encoded, &lens).expect("room");
+        draft.set_count(0, 1);
+        draft.set_seq(0, 7);
+        (draft.freeze(Path::Live), set)
+    }
+
+    /// Each series that `out` laid out, as `(place, range, end, zeros)`.
+    fn laid(out: &Out) -> Vec<(u32, Range<usize>, u32, u8)> {
+        out.series
+            .iter()
+            .map(|s| (s.place, s.range.clone(), s.end, s.zeros))
+            .collect()
+    }
+
+    /// The frame's entries are in slot order (3, 1, 2, 5), and the places are 1, 2, 3,
+    /// and 4, which the frame does not hold.
+    #[test]
+    fn lays_out_the_series_of_each_place_in_place_order() {
+        let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
+        let mut interner = Interner::new();
+        let [b, index, a, _, absent] =
+            [3, 1, 2, 5, 4].map(|k| interner.slots().assign(key(k)));
+        let mut out = Out::new([index, a, b, absent].into(), index);
+        let (wide, set) = frame(&mut interner, &pool, &[2, 3, 5], &[3, 8, 5, 8]);
+        let head = out.lay(&wide, &set);
+        assert_eq!(
+            laid(&out),
+            [(0, 8..16, 8, 0), (1, 16..21, 13, 3), (2, 0..3, 19, 0)]
+        );
+        assert_eq!(head.path, Path::Live);
+        assert_eq!(Some(head.range), wide.range(0));
+        assert_eq!(head.series, 3);
+        let (narrow, set) = frame(&mut interner, &pool, &[2], &[8, 5]);
+        let head = out.lay(&narrow, &set);
+        assert_eq!(laid(&out), [(0, 0..8, 8, 0), (1, 8..13, 13, 0)]);
+        assert_eq!(head.series, 2);
+    }
+
+    #[test]
+    fn splits_the_ends_into_runs_that_fit_the_message_limit() {
+        let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
+        let mut interner = Interner::new();
+        let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
+        let mut out = Out::new([index, a, b].into(), index);
+        let (wide, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
+        out.lay(&wide, &set);
+        let runs = |max| out.runs(max).map(<[Series]>::len).collect::<Vec<_>>();
+        assert_eq!(runs(16), [2, 1]);
+        assert_eq!(runs(23), [2, 1]);
+        assert_eq!(runs(24), [3]);
+    }
 
     fn series(ranges: &[(Range<usize>, u8)]) -> Vec<Series> {
         ranges
