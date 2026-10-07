@@ -338,7 +338,9 @@ impl Readers {
     }
 
     /// Whether the complete session missed a live frame, so it gets no later live
-    /// frame. `false` for a closed session.
+    /// frame. `false` for a closed session. A session can miss one at its open, which
+    /// no [`Readers::release`] names: when [`Readers::take`] gives `None`, check this
+    /// before the session waits.
     ///
     /// # Panics
     ///
@@ -357,7 +359,8 @@ impl Readers {
 
     /// Takes the session's next waiting frame, or `None` when it has none or is
     /// closed. A latest session has at most one; a complete session has the frames
-    /// that [`Readers::release`] gave it, in seq order.
+    /// that [`Readers::release`] gave it, in seq order. A complete session with none
+    /// waiting may be [`behind`](Readers::behind).
     ///
     /// # Panics
     ///
