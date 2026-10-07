@@ -1981,7 +1981,12 @@ How to read this record:
   `mesh` holds it in `driver::Config.region` and `region::State`, and checks each name
   against the region with `Prefix::contains`; a ticket's prefix stays a `Name`. Decided
   by `laptop.architect` (2026-10-07T12:47:19Z):
-  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777.
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each
+  field that holds a region's prefix is a `Prefix`: also `ticket::Ticket`'s region (the
+  region that the joining node opens with) and the `region` of `Unfit::Outside` and
+  `Refused::Outside`, so a ticket for the root region exists. Decided by
+  `laptop.architect` (2026-10-07T13:32:35Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6039051758.
 - **r4 reconciliation (SETTLED BY ME)** Definition references (index, quality, error,
   control) stay inside one region. Placement is not a key reference (rules in 1.9).
 - **VOCABULARY + REGION LOCKED** "Region" names the governed part of the tree. Docs say

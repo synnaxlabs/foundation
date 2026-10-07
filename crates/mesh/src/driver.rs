@@ -2236,7 +2236,7 @@ mod tests {
             else {
                 unreachable!()
             };
-            options.prefix = "edge".parse().unwrap();
+            options.prefix = "site_a".parse().unwrap();
             lead(
                 &mesh,
                 &node.clock(),
@@ -2246,7 +2246,7 @@ mod tests {
                 },
             )
             .await;
-            let card = common::signed(4, "edge.node4");
+            let card = common::signed(4, "site_a.pt_1");
             let Change::Join(mut join) = join(4) else {
                 unreachable!()
             };

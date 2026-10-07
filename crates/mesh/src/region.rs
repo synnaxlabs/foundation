@@ -656,8 +656,8 @@ mod tests {
         let mut members = create_members(&[1, 2]);
         members[1].card = signed(2, "factory.node2");
         let mut state = State::new(Prefix::ROOT, members).unwrap();
-        assert_eq!(state.apply(record(8, options("edge", false))), Ok(None));
-        let join = join(8, 3, "edge.a");
+        assert_eq!(state.apply(record(8, options("site_a", false))), Ok(None));
+        let join = join(8, 3, "site_a.pt_1");
         assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(None));
         let names = [1, 2, 3]
             .map(|id| state.member(node(id)).map(|m| m.card.card().name.clone()));
@@ -666,7 +666,7 @@ mod tests {
             [
                 Some(name("plant.node1")),
                 Some(name("factory.node2")),
-                Some(name("edge.a"))
+                Some(name("site_a.pt_1"))
             ]
         );
     }
