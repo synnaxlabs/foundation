@@ -1999,6 +1999,74 @@ mod hub {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
     }
 
+    /// A stop right after a write through the hub, while its group commit runs: once
+    /// `keep` returns, the ring has closed, so a write open of it gives no `Busy`.
+    #[test]
+    fn the_ring_has_closed_once_keep_returns_from_a_hub_that_commits() {
+        use std::sync::OnceLock;
+
+        use types::frame::key_set::Interner;
+
+        use crate::stop::Stop;
+        use crate::{BODY_MAX, Open, directory, handoff};
+
+        for seed in 0..64 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 1);
+            let opened = sim.run_on(&host, move |host, tasks| async move {
+                let (driver, clock) = clock::Clock::new(host.clock());
+                let wall = host.wall();
+                tasks.spawn(async move { driver.run(wall).await });
+                let (give, take) = handoff::pair();
+                give.give(Interner::new());
+                let (give, next) = handoff::pair();
+                let config = block::Config { budget: 1 << 22 };
+                let memory = block::Heap::new(config.reservation());
+                let pool = block::Pool::new(config, memory);
+                let stop = Stop::default();
+                let open = Open {
+                    shard: 0,
+                    take,
+                    give,
+                    monotonic: host.clock(),
+                    clock,
+                    entropy: host.entropy(),
+                    layout: ::buffer::Layout::new(64 << 20, BODY_MAX).expect("a ring"),
+                    failed: Arc::new(OnceLock::new()),
+                    stop: stop.clone(),
+                };
+                let monotonic = host.clock();
+                let spawn = tasks.clone();
+                let hold = async move |home, guard| {
+                    let interner = next.await.expect("the open gives the interner");
+                    let hub = Hub::new(::hub::Config {
+                        home,
+                        interner,
+                        tasks: spawn,
+                    });
+                    define(&hub, 1, "time", STAMP, 1);
+                    define(&hub, 2, "value", I64, 1);
+                    let mut writer = writer(&hub, &monotonic, &["value"]).await;
+                    write(&mut writer, WALL, 7);
+                    // The commit task polls and waits for the group commit, which takes
+                    // up to `COMMIT`.
+                    monotonic.sleep(Span::MICROSECOND).await;
+                    drop(guard);
+                    drop((writer, hub));
+                };
+                let files = host.files();
+                open.keep(host.files(), pool, tasks, stop.guard(), hold)
+                    .await;
+                let ring = directory::shard(0).join("ring");
+                files.open(&ring, env::files::Mode::Write).await.map(drop)
+            });
+            assert_eq!(opened, Ok(Ok(())), "seed {seed}");
+        }
+    }
+
     /// A panic in a task ends shard 0 and fails the node.
     #[test]
     fn a_panic_in_a_task_fails_the_node() {
