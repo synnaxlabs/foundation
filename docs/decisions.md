@@ -1453,10 +1453,11 @@ How to read this record:
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
   (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node refuses a leader
-  that is not a voter of that configuration, and does not get the log from it (a known
-  defect, #1096, that #1107 fixes). A node with no configuration takes no request. Only
-  a voter that an operator wiped is such a node (#881), because a node that joins opens
-  with the founding voters from its join answer (decided by the architect, #242:
+  that a change made a voter, when the node does not hold that change, and does not get
+  the log from it (a known defect, #1096, that #1107 fixes). A node with no
+  configuration takes no request. Only a voter that an operator wiped is such a node
+  (#881), because a node that joins opens with the founding voters from its join answer
+  (decided by the architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
