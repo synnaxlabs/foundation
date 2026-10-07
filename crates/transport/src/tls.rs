@@ -952,19 +952,14 @@ mod tests {
             }
 
             #[test]
-            fn certifies_the_key_that_signs(bytes: [u8; 32]) {
-                let certified = certified(&Tls::new(&PrivateKey(bytes)));
-                let signer = certified
-                    .key
-                    .choose_scheme(&[SignatureScheme::ED25519])
-                    .expect("an Ed25519 signer");
-                let signature = signer.sign(b"message").expect("a signature");
-                let key = key(&certified.cert[0], &[]).expect("a node key");
-                let verifier = UnparsedPublicKey::new(
-                    &aws_lc_rs::signature::ED25519,
-                    key.to_bytes(),
+            fn handshakes_with_any_key(bytes: [u8; 32]) {
+                let (a, b) = (PrivateKey(bytes), PrivateKey([2; 32]));
+                let peers =
+                    handshake(Tls::new(&a).client(public(&b)), Tls::new(&b).server());
+                prop_assert_eq!(
+                    peers,
+                    Ok((Peer::Node(public(&b)), Peer::Node(public(&a))))
                 );
-                prop_assert_eq!(verifier.verify(b"message", &signature), Ok(()));
             }
         }
 
