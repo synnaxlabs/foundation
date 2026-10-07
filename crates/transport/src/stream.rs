@@ -740,6 +740,43 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_before_or_after_finish_gives_the_peer_its_code() {
+        for finished in [false, true] {
+            let (mut sim, ..) = testing::sessions(
+                0,
+                same,
+                move |side| async move {
+                    let opened = side.session.open(Class::Complete).await;
+                    let (mut sender, mut receiver) = opened.expect("a stream");
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(b"b".to_vec())));
+                    // Too large for one flight, so the peer cannot have it all yet.
+                    let message = vec![7; 32 << 10];
+                    sender.send(side.block(&message)).await.expect("sent");
+                    if finished {
+                        sender.finish().expect("finished");
+                    }
+                    sender.reset(Code(16));
+                    let closed = Error::PeerClosed { code: Code(4) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+                move |side| async move {
+                    let mut incoming = side.session.accept().await.expect("a stream");
+                    let read = incoming.receiver.recv().await;
+                    assert_eq!(bytes(read), Ok(Some(b"a".to_vec())));
+                    let reply = incoming.sender.as_mut().expect("a reply half");
+                    reply.send(side.block(b"b")).await.expect("sent");
+                    let error = until_error(&mut incoming.receiver).await;
+                    let reset = Error::Reset { code: Code(16) };
+                    assert_eq!(error, reset, "finished: {finished}");
+                    side.session.close(Code(4));
+                },
+            );
+            assert_eq!(sim.run(), Ok(()));
+        }
+    }
+
+    #[test]
     fn a_dropped_send_resets_the_stream_and_each_later_call_gives_why() {
         let (mut sim, ..) = testing::sessions(
             0,
@@ -763,6 +800,14 @@ mod tests {
                 assert_eq!(sender.send(side.block(b"a")).await, Err(CANCELLED));
                 let tried = sender.try_send(side.block(b"a")).map(|_| ());
                 assert_eq!(tried, Err(CANCELLED));
+                let part = [super::Part {
+                    range: 0..1,
+                    zeros: 0,
+                }];
+                let sent = sender.send_parts(side.block(b"a"), &part).await;
+                assert_eq!(sent, Err(CANCELLED));
+                let tried = sender.try_send_parts(side.block(b"a"), &part);
+                assert_eq!(tried.map(|_| ()), Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
@@ -899,6 +944,8 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // Compares `Debug` output: a log tells the halves of two sessions apart only by
+    // the session key in it.
     #[test]
     fn a_half_shows_its_session_key() {
         let (mut sim, ..) = testing::sessions(
