@@ -2457,11 +2457,12 @@ How to read this record:
 - **SHARD BUFFERS (2026-10-07)** Each shard opens its write-ahead ring in directory
   `shard-<i>` of the node's data directory and keeps it until the node stops.
   `node::Config::files` is a maker with no core that `node` calls on the start
-  thread, once for each shard in order of core; the shard runs the function it gives
-  on its own thread, because `Files` is `Rc`. A caller on the real OS makes each
-  shard's disk with `os::files` before the start and joins its I/O thread after
-  `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files`
-  only with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
+  thread, in order of core, for each shard that gets its memory, just before its
+  start; the shard runs the function it gives on its own thread, because `Files` is
+  `Rc`, and a shard that does not start drops it unrun. A caller on the real OS makes
+  each shard's disk with `os::files` before the start and joins its I/O thread after
+  `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files` only
+  with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
   `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
   randomness. A ring that does not open stops the node, and `join` gives

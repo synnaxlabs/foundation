@@ -42,11 +42,12 @@ pub struct Config<M> {
     /// once for each shard, in order of core.
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
     /// Makes the files of one shard. `node` calls it on the thread that calls
-    /// [`Node::start`], once for each shard in order of core, and runs the function
-    /// it gives on that shard's thread, because a `Files` cannot leave the thread
-    /// that made it. A shard that does not start drops its function unrun. `node`
-    /// records the shard count in directory `shards-<n>` inside the files, and opens
-    /// the buffer of shard `i` in directory `shard-<i>`.
+    /// [`Node::start`], in order of core, once for each shard that gets its memory,
+    /// just before that shard starts. The shard runs the function it gives on its own
+    /// thread, because a `Files` cannot leave the thread that made it; a shard that
+    /// does not start drops it unrun. `node` records the shard count in directory
+    /// `shards-<n>` inside the files, and opens the buffer of shard `i` in directory
+    /// `shard-<i>`.
     pub files: Box<dyn FnMut() -> Box<dyn FnOnce() -> env::files::Files + Send>>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
