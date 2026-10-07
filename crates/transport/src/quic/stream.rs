@@ -3206,6 +3206,23 @@ mod tests {
     }
 
     #[test]
+    fn a_large_write_while_the_sender_holds_part_of_a_message_gives_too_large() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut sender);
+            let now = pair.now();
+            let over = shard.block(&vec![1; MESSAGE_MAX + 1]);
+            let written = pair.client.endpoint.write(now, &mut sender, over);
+            let large = Error::TooLarge {
+                bytes: MESSAGE_MAX + 1,
+                bytes_max: MESSAGE_MAX,
+            };
+            assert_eq!(written, Err(large));
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "a sender holds part of a message")]
     fn a_finish_while_the_sender_holds_part_of_a_message_panics() {
         testing::run(1, |shard| {

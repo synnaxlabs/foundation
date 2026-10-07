@@ -323,7 +323,7 @@ impl Endpoint {
     /// # Panics
     ///
     /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
-    /// message on a live connection.
+    /// message on a live connection and `message` is within the limit.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
