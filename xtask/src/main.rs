@@ -7,7 +7,6 @@ mod cfg;
 mod field;
 mod files;
 mod globals;
-mod history;
 mod map;
 mod miri;
 mod oracles;
@@ -33,7 +32,7 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
-        ["review", pr, head] => review::check(root, pr, head),
+        ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
                 "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \

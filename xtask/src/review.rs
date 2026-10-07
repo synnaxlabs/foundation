@@ -3,11 +3,13 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitCode};
 
 use serde_json::Value;
 
-use crate::{field, history};
+use crate::field;
+
+mod history;
 
 /// The account that posts each round comment and each director verdict. Comments by
 /// other accounts never count.
@@ -17,6 +19,8 @@ const BOT: &str = "synnax-foundation-factory[bot]";
 #[derive(Debug)]
 struct Record {
     branch: String,
+    /// The branch the PR merges into.
+    base: String,
     labels: Vec<String>,
     files: Vec<String>,
     comments: Vec<Comment>,
@@ -37,86 +41,110 @@ struct Round {
     /// comments.
     breakerless: bool,
     end: String,
-    findings: String,
+    findings: u32,
 }
 
-/// Checks that the review of PR `pr` is done at commit `head`: its last round comment
-/// ends at `head` or reaches it through clean merges of `main`, finds nothing, and
-/// names each required reviewer. A red-team PR also needs the director's approval at
-/// `head`. Reads the PR with `gh` and the history of the repository at `root` with
-/// `git`.
-pub(crate) fn check(root: &Path, pr: &str, head: &str) -> Result<(), Vec<String>> {
-    let record = fetch(pr).map_err(|e| vec![e])?;
-    let history = history::History::new(root);
-    let problems = problems(&record, head, &|end| history.reaches(end, head))
-        .map_err(|e| vec![e])?;
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems)
+/// Checks that the review of PR `pr` is done at commit `head`: its last round
+/// comment ends at `head` or reaches it through clean merges of the base, finds
+/// nothing, and names each required reviewer, and, for a red-team PR, the director
+/// approved `head`. Reads the PR with `gh` and the history of the repository at
+/// `root` with `git`, and prints each problem.
+///
+/// Exits 0 when the review is done, 1 when it is not, and 2 when `gh` or `git` fails
+/// or the PR record lacks a field.
+pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
+    let found = fetch(pr).and_then(|record| {
+        let base = format!("origin/{}", record.base);
+        let history = history::History::new(root, &base);
+        problems(&record, head, &|end| history.reaches(end, head))
+    });
+    match found {
+        Ok(problems) if problems.is_empty() => ExitCode::SUCCESS,
+        Ok(problems) => {
+            for problem in problems {
+                eprintln!("error: {problem}\n");
+            }
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 
-/// The problems with the review in `record` at `head`. `reaches` reports whether a
-/// commit (a SHA or its prefix) reaches `head` through clean merges of `main`.
+/// The problems with the review in `record` at `head`: each round must name the
+/// reviewers it requires, and the last round must find nothing and end at `head`.
+/// `reaches` reports whether a commit (a SHA or its prefix) reaches `head` through
+/// clean merges of the base.
 fn problems(
     record: &Record,
     head: &str,
     reaches: &dyn Fn(&str) -> Result<bool, String>,
 ) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
-    let last = record
+    let rounds: Vec<_> = record
         .comments
         .iter()
-        .rev()
         .filter(|c| c.author == BOT)
-        .find_map(|c| round(&c.body));
-    match last {
-        None => problems.push(format!(
+        .filter_map(|c| round(&c.body))
+        .collect();
+    if rounds.is_empty() {
+        problems.push(format!(
             "no review round comment by {BOT}. Run `/review` and post each round in \
              the format of .claude/skills/review/SKILL.md, \"Round comment\"."
-        )),
-        Some(Err(e)) => problems.push(e),
-        Some(Ok(round)) => {
-            if round.findings != "none" {
-                problems.push(format!(
-                    "review round {} has findings ({}). Fix or answer them, then run \
-                     another round.",
-                    round.number, round.findings
-                ));
+        ));
+    }
+    for round in &rounds {
+        let round = match round {
+            Ok(round) => round,
+            Err(e) => {
+                problems.push(e.clone());
+                continue;
             }
-            let missing: Vec<&str> = required(&round, &record.files)
-                .into_iter()
-                .filter(|name| !round.reviewers.contains(*name))
-                .collect();
-            if !missing.is_empty() {
-                problems.push(format!(
-                    "review round {} names no {}, which this round requires.",
-                    round.number,
-                    missing.join(", ")
-                ));
-            }
-            if !reaches(&round.end)? {
-                problems.push(format!(
-                    "review round {} ends at {}, not at the head {head}. A commit \
-                     after the round needs a new round; only a clean merge of `main` \
-                     does not.",
-                    round.number, round.end
-                ));
-            }
+        };
+        let missing: Vec<&str> = required(round, &record.files)
+            .into_iter()
+            .filter(|name| !round.reviewers.contains(*name))
+            .collect();
+        if !missing.is_empty() {
+            problems.push(format!(
+                "review round {} names no {}, which this round requires.",
+                round.number,
+                missing.join(", ")
+            ));
+        }
+    }
+    if let Some(Ok(round)) = rounds.last() {
+        if round.findings > 0 {
+            problems.push(format!(
+                "review round {} has findings ({}). Fix or answer them, then run \
+                 another round.",
+                round.number, round.findings
+            ));
+        }
+        if !reaches(&round.end)? {
+            problems.push(format!(
+                "review round {} ends at {}, not at the head {head}. A commit after \
+                 the round needs a new round; only a clean merge of the base does \
+                 not.",
+                round.number, round.end
+            ));
         }
     }
     if record.branch.starts_with("red-team/")
         && record.labels.iter().any(|l| l == "oracle")
     {
-        problems.extend(approval(record, head, reaches)?);
+        problems.extend(approval(record, head));
     }
     Ok(problems)
 }
 
-/// The reviewers that `round` must name for a PR that changes `files`: on round 1,
-/// each reviewer of the review skill's table; on a later round, `reviewer`, and
-/// `breaker` for a code PR unless the round skipped it.
+/// The reviewers that `round` must name for a PR that changes `files`, by REVIEW
+/// TIERS in `docs/decisions.md`: on round 1, `reviewer`, plus `architecture` and
+/// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR
+/// unless the round skipped it. `performance` depends on what the code does, so no
+/// round requires it here.
 fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
     let code = files.iter().map(Path::new).any(|f| {
         f.extension().is_some_and(|e| e == "rs")
@@ -132,42 +160,40 @@ fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
     }
 }
 
-/// A problem when no director verdict by the bot approves a commit that reaches `head`.
-fn approval(
-    record: &Record,
-    head: &str,
-    reaches: &dyn Fn(&str) -> Result<bool, String>,
-) -> Result<Option<String>, String> {
-    for comment in record.comments.iter().filter(|c| c.author == BOT) {
-        for line in comment.body.lines() {
-            let Some(sha) = line.trim().strip_prefix("Approved at ") else {
-                continue;
-            };
-            if reaches(sha.trim_matches('`'))? {
-                return Ok(None);
-            }
-        }
-    }
-    Ok(Some(format!(
-        "a red-team `oracle` PR needs the director's verdict with the line \
-         \"Approved at `<sha>`\" for the head {head}."
-    )))
+/// A problem when no director verdict by the bot has the line
+/// ``Director: approved at `<sha>` `` for `head`. A later push needs a new approval, so
+/// the SHA must be `head` or a prefix of it of 7 or more digits.
+fn approval(record: &Record, head: &str) -> Option<String> {
+    let approved = record
+        .comments
+        .iter()
+        .filter(|c| c.author == BOT)
+        .flat_map(|c| c.body.lines())
+        .filter_map(|l| l.trim().strip_prefix("Director: approved at "))
+        .map(|sha| sha.trim_matches(['`', '.']))
+        .any(|sha| sha.len() >= 7 && head.starts_with(sha));
+    (!approved).then(|| {
+        format!(
+            "a red-team `oracle` PR needs the director's verdict with the line \
+             \"Director: approved at `<sha>`\" for the head {head}."
+        )
+    })
 }
 
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
+/// The fields are the first block of lines after that line, so the findings text
+/// cannot set them.
 fn round(body: &str) -> Option<Result<Round, String>> {
     let mut lines = body.lines().map(str::trim);
     let number = lines.find_map(|l| l.strip_prefix("## Review round "))?;
-    Some(parse(number, lines))
-}
-
-fn parse<'a>(
-    number: &str,
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<Round, String> {
-    let number: u32 = number
-        .parse()
-        .map_err(|e| format!("`## Review round {number}` has no round number: {e}"))?;
+    let lines = lines
+        .skip_while(|l| l.is_empty())
+        .take_while(|l| !l.is_empty());
+    let Ok(number) = number.parse::<u32>() else {
+        return Some(Err(format!(
+            "`## Review round {number}` has no round number"
+        )));
+    };
     let (mut reviewers, mut range, mut findings) = (None, None, None);
     let mut breakerless = false;
     for line in lines {
@@ -186,31 +212,53 @@ fn parse<'a>(
              format of .claude/skills/review/SKILL.md, \"Round comment\"."
         )
     };
-    let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
-    let (_, end) = range.split_once("..").ok_or_else(|| {
-        format!("review round {number} has the range `{range}`, not `<from>..<head>`")
-    })?;
-    Ok(Round {
-        number,
-        reviewers: reviewers
-            .ok_or_else(|| missing("Reviewers"))?
-            .split(',')
-            .map(|r| r.trim().trim_matches('`').to_string())
-            .collect(),
-        breakerless,
-        end: end.to_string(),
-        findings: findings.ok_or_else(|| missing("Findings"))?.to_string(),
-    })
+    let fields = || {
+        let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
+        let (_, end) = range.split_once("..").ok_or_else(|| {
+            format!(
+                "review round {number} has the range `{range}`, not `<from>..<head>`"
+            )
+        })?;
+        let findings = match findings.ok_or_else(|| missing("Findings"))? {
+            "none" => 0,
+            count => count.parse().map_err(|e| {
+                format!("review round {number} has `Findings: {count}`, not a count or `none`: {e}")
+            })?,
+        };
+        Ok(Round {
+            number,
+            reviewers: reviewers
+                .ok_or_else(|| missing("Reviewers"))?
+                .split(',')
+                .map(|r| r.trim().trim_matches('`').to_string())
+                .collect(),
+            breakerless,
+            end: end.to_string(),
+            findings,
+        })
+    };
+    Some(fields())
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.
 fn fetch(pr: &str) -> Result<Record, String> {
-    let pull = gh(&format!("repos/{{owner}}/{{repo}}/pulls/{pr}"))?;
-    let pull = pull.first().ok_or("gh returned no PR")?;
-    let files = gh(&format!("repos/{{owner}}/{{repo}}/pulls/{pr}/files"))?;
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{pr}");
+    let pull = gh(&path)?;
+    let files = gh(&format!("{path}/files"))?;
     let comments = gh(&format!("repos/{{owner}}/{{repo}}/issues/{pr}/comments"))?;
+    record_of(&pull, &files, &comments).map_err(|e| format!("PR {pr}: {e}"))
+}
+
+/// The record from the `gh api` objects of a PR, its files, and its comments.
+fn record_of(
+    pull: &[Value],
+    files: &[Value],
+    comments: &[Value],
+) -> Result<Record, String> {
+    let pull = pull.first().ok_or("gh returned no PR")?;
     Ok(Record {
         branch: field::text(&pull["head"], "ref")?.to_string(),
+        base: field::text(&pull["base"], "ref")?.to_string(),
         labels: field::list(pull, "labels")?
             .iter()
             .map(|l| field::text(l, "name").map(str::to_string))

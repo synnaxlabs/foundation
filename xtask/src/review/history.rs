@@ -1,35 +1,36 @@
-//! Reads the commit history of a repository with `git`.
+//! Which commits a review round covers, read from the history with `git`.
 
 use std::path::Path;
 use std::process::Command;
 
-/// The branch that a merge of `main` takes its second parent from.
-const MAIN: &str = "origin/main";
-
-/// The history of the git repository at a path.
+/// The history of a git repository, and the branch that PRs in it merge into.
 pub(crate) struct History<'a> {
     root: &'a Path,
+    base: &'a str,
 }
 
 impl<'a> History<'a> {
-    /// The history of the repository at `root`.
-    pub(crate) fn new(root: &'a Path) -> Self {
-        Self { root }
+    /// The history of the repository at `root`, where PRs merge into the ref `base`
+    /// (for example `origin/main`).
+    pub(crate) fn new(root: &'a Path, base: &'a str) -> Self {
+        Self { root, base }
     }
 
     /// Reports whether `end` (a SHA or a prefix of at least 7 digits) is `head`, or
-    /// reaches it through first-parent merges of a commit on `origin/main` that
-    /// resolve no conflict: each merge's tree is the tree that `git merge-tree` makes
-    /// of its parents.
+    /// reaches it through first-parent merges of a commit on the base that resolve no
+    /// conflict: each merge's tree is the tree that `git merge-tree` makes of its
+    /// parents. Text that names no single commit does not reach `head`.
     ///
     /// # Errors
     ///
-    /// A failed `git` command, or an `end` that names no single commit.
+    /// A failed `git` command.
     pub(crate) fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
         if end.len() < 7 || !end.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(format!("`{end}` is not a commit SHA of at least 7 digits"));
+            return Ok(false);
         }
-        let end = self.git(&["rev-parse", "--verify", &format!("{end}^{{commit}}")])?;
+        let Some(end) = self.commit(end)? else {
+            return Ok(false);
+        };
         let mut commit =
             self.git(&["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
         while commit != end {
@@ -37,7 +38,7 @@ impl<'a> History<'a> {
             let [_, first, second] = line.split(' ').collect::<Vec<_>>()[..] else {
                 return Ok(false);
             };
-            if !self.on_main(second)? || !self.clean(&commit, first, second)? {
+            if !self.on_base(second)? || !self.clean(&commit, first, second)? {
                 return Ok(false);
             }
             commit = first.to_string();
@@ -45,17 +46,40 @@ impl<'a> History<'a> {
         Ok(true)
     }
 
-    fn on_main(&self, commit: &str) -> Result<bool, String> {
+    /// The full SHA of the commit that `name` names, or `None` when it names no
+    /// single commit.
+    fn commit(&self, name: &str) -> Result<Option<String>, String> {
+        let output = Command::new("git")
+            .current_dir(self.root)
+            .args([
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{name}^{{commit}}"),
+            ])
+            .output()
+            .map_err(|e| format!("git rev-parse: {e}"))?;
+        match output.status.code() {
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            Some(1) => Ok(None),
+            _ => Err(failure("rev-parse", &output.stderr)),
+        }
+    }
+
+    fn on_base(&self, commit: &str) -> Result<bool, String> {
         let status = Command::new("git")
             .current_dir(self.root)
-            .args(["merge-base", "--is-ancestor", commit, MAIN])
+            .args(["merge-base", "--is-ancestor", commit, self.base])
             .status()
             .map_err(|e| format!("git merge-base: {e}"))?;
         match status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => Err(format!(
-                "git merge-base --is-ancestor {commit} {MAIN}: {status}"
+                "git merge-base --is-ancestor {commit} {}: {status}",
+                self.base
             )),
         }
     }

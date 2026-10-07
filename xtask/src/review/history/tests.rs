@@ -61,7 +61,7 @@ impl Repo {
     }
 
     fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
-        History::new(&self.dir).reaches(end, head)
+        History::new(&self.dir, "origin/main").reaches(end, head)
     }
 }
 
@@ -133,23 +133,20 @@ fn refuses_a_merge_of_a_branch_that_is_not_main() {
 }
 
 #[test]
-fn refuses_an_end_that_is_not_a_sha() {
-    let (repo, end) = Repo::with_pr("short");
-    assert_eq!(
-        repo.reaches("abc12", &end),
-        Err("`abc12` is not a commit SHA of at least 7 digits".to_string())
-    );
-    assert_eq!(
-        repo.reaches("HEAD~1x", &end),
-        Err("`HEAD~1x` is not a commit SHA of at least 7 digits".to_string())
-    );
+fn text_that_names_no_commit_does_not_reach() {
+    let (repo, end) = Repo::with_pr("unknown");
+    assert_eq!(repo.reaches("abc12", &end), Ok(false));
+    assert_eq!(repo.reaches("HEAD~1x", &end), Ok(false));
+    assert_eq!(repo.reaches("deadbeef", &end), Ok(false));
+    assert_eq!(repo.reaches(&end[..6], &end), Ok(false));
+    assert_eq!(repo.reaches(&format!("{end}^{{commit}}"), &end), Ok(false));
 }
 
 #[test]
-fn names_the_git_failure_for_an_unknown_commit() {
-    let (repo, end) = Repo::with_pr("unknown");
+fn names_the_git_failure_for_an_unknown_head() {
+    let (repo, end) = Repo::with_pr("head");
     assert_eq!(
-        repo.reaches("deadbeef", &end),
+        repo.reaches(&end, "deadbeef"),
         Err(
             "git rev-parse --verify deadbeef^{commit}: fatal: Needed a single revision"
                 .to_string()

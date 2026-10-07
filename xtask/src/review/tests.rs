@@ -37,6 +37,7 @@ fn bot(body: &str) -> Comment {
 fn record(comments: Vec<Comment>) -> Record {
     Record {
         branch: "laptop/828-checked-document".to_string(),
+        base: "main".to_string(),
         labels: Vec::new(),
         files: FILES.iter().map(ToString::to_string).collect(),
         comments,
@@ -50,8 +51,10 @@ fn check(record: &Record) -> Vec<String> {
 
 #[test]
 fn passes_the_last_round_of_1089() {
-    let earlier = bot("## Review round 2\n\nReviewers: reviewer\nRange: `a..b`\n\
-                       Findings: 2");
+    let earlier = bot(
+        "## Review round 2\n\nReviewers: reviewer, breaker\nRange: `a..b`\n\
+                       Findings: 2",
+    );
     assert_eq!(
         check(&record(vec![earlier, bot(ROUND)])),
         Vec::<String>::new()
@@ -76,11 +79,12 @@ fn ignores_a_round_by_another_account() {
         author: "someone".to_string(),
         body: ROUND.to_string(),
     };
-    let problems = check(&record(vec![pasted]));
-    assert_eq!(problems.len(), 1);
-    assert!(
-        problems[0].starts_with("no review round comment"),
-        "{problems:?}"
+    assert_eq!(
+        check(&record(vec![pasted])),
+        vec![format!(
+            "no review round comment by {BOT}. Run `/review` and post each round in \
+             the format of .claude/skills/review/SKILL.md, \"Round comment\"."
+        )]
     );
 }
 
@@ -91,7 +95,7 @@ fn fails_a_range_that_ends_before_the_head() {
         check(&record(vec![bot(&round)])),
         vec![format!(
             "review round 3 ends at 82ba5b72, not at the head {HEAD}. A commit after \
-             the round needs a new round; only a clean merge of `main` does not."
+             the round needs a new round; only a clean merge of the base does not."
         )]
     );
 }
@@ -167,9 +171,47 @@ fn needs_only_the_reviewer_for_a_diff_with_no_code() {
 #[test]
 fn takes_the_last_round() {
     let later = ROUND.replace("Findings: none", "Findings: 3");
-    let problems = check(&record(vec![bot(ROUND), bot(&later)]));
-    assert_eq!(problems.len(), 1);
-    assert!(problems[0].contains("has findings (3)"), "{problems:?}");
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&later)])),
+        vec![
+            "review round 3 has findings (3). Fix or answer them, then run another \
+             round."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn each_earlier_round_names_the_reviewers_it_requires() {
+    let first = later("reviewer")
+        .replace("round 3", "round 1")
+        .replace("Findings: none", "Findings: 2");
+    assert_eq!(
+        check(&record(vec![bot(&first), bot(&later("reviewer, breaker"))])),
+        vec![
+            "review round 1 names no architecture, breaker, which this round requires."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn reads_the_fields_only_from_the_block_after_the_heading() {
+    let round = later("reviewer")
+        + "\nBreaker: skipped is not allowed here.\nReviewers: reviewer, breaker";
+    assert_eq!(
+        check(&record(vec![bot(&round)])),
+        vec!["review round 3 names no breaker, which this round requires.".to_string()]
+    );
+    let round = ROUND.replace("Range:", "\nRange:");
+    assert_eq!(
+        check(&record(vec![bot(&round)])),
+        vec![
+            "review round 3 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+                .to_string()
+        ]
+    );
 }
 
 #[test]
@@ -192,28 +234,75 @@ fn names_a_missing_line() {
     );
 }
 
-#[test]
-fn a_red_team_oracle_pr_needs_the_director_approval_at_the_head() {
+fn red(comments: &[&str]) -> Record {
     let mut red = record(vec![bot(ROUND)]);
     red.branch = "red-team/buffer-open-read".to_string();
     red.labels = vec!["oracle".to_string()];
+    red.comments.extend(comments.iter().map(|c| bot(c)));
+    red
+}
+
+#[test]
+fn a_red_team_oracle_pr_needs_the_director_approval_at_the_head() {
     let missing = format!(
         "a red-team `oracle` PR needs the director's verdict with the line \
-         \"Approved at `<sha>`\" for the head {HEAD}."
+         \"Director: approved at `<sha>`\" for the head {HEAD}."
     );
-    assert_eq!(check(&red), vec![missing.clone()]);
-    red.comments
-        .push(bot("Quality: 8/10\nGood.\n\nApproved at `82ba5b72`"));
-    assert_eq!(check(&red), vec![missing]);
-    red.comments
-        .push(bot("Quality: 8/10\nGood.\n\nApproved at `c77c67d7`"));
-    assert_eq!(check(&red), Vec::<String>::new());
+    assert_eq!(check(&red(&[])), vec![missing.clone()]);
+    let earlier = "Quality: 8/10\nGood.\n\nDirector: approved at `82ba5b72`";
+    assert_eq!(check(&red(&[earlier])), vec![missing.clone()]);
+    let architect = "Quality: 8/10\nGood.\n\nApproved at `c77c67d7`";
+    assert_eq!(check(&red(&[architect])), vec![missing.clone()]);
+    let short = "Director: approved at `c77c67`";
+    assert_eq!(check(&red(&[short])), vec![missing]);
+    let head = "Quality: 8/10\nGood.\n\nDirector: approved at `c77c67d7`.";
+    assert_eq!(check(&red(&[earlier, head])), Vec::<String>::new());
+}
+
+#[test]
+fn takes_a_count_of_zero_as_no_findings() {
+    let round = ROUND.replace("Findings: none", "Findings: 0");
+    assert_eq!(check(&record(vec![bot(&round)])), Vec::<String>::new());
+    let round = ROUND.replace("Findings: none", "Findings: few");
+    assert_eq!(
+        check(&record(vec![bot(&round)])),
+        vec![
+            "review round 3 has `Findings: few`, not a count or `none`: invalid digit \
+             found in string"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn names_a_round_with_no_number() {
+    assert_eq!(
+        check(&record(vec![bot("## Review round one\nFindings: none")])),
+        vec!["`## Review round one` has no round number".to_string()]
+    );
+}
+
+#[test]
+fn names_the_pr_field_a_record_lacks() {
+    use serde_json::json;
+    let pull = [json!({ "head": { "ref": "a" }, "base": {}, "labels": [] })];
+    assert_eq!(
+        record_of(&pull, &[], &[]).unwrap_err(),
+        "JSON has no string field `ref`"
+    );
+    let pull =
+        [json!({ "head": { "ref": "a" }, "base": { "ref": "main" }, "labels": [] })];
+    let comment = json!({ "user": { "login": BOT }, "body": ROUND });
+    let read = record_of(&pull, &[json!({ "filename": "a.rs" })], &[comment]).unwrap();
+    assert_eq!((read.branch.as_str(), read.base.as_str()), ("a", "main"));
+    assert_eq!(read.files, ["a.rs"]);
+    assert_eq!(read.comments[0].author, BOT);
 }
 
 #[test]
 fn a_red_team_pr_with_no_oracle_label_needs_no_approval() {
-    let mut red = record(vec![bot(ROUND)]);
-    red.branch = "red-team/buffer-open-read".to_string();
+    let mut red = red(&[]);
+    red.labels.clear();
     assert_eq!(check(&red), Vec::<String>::new());
 }
 

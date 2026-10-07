@@ -86,14 +86,12 @@ Findings: <count, or none>
 <the findings, most severe first>
 ```
 
-A later round that skips `breaker` adds the line
-``Breaker: skipped, the range changes no `.rs` line but comments``. The check passes
-when the last round comment finds `none`, names each reviewer its round requires (round
-1: the table, without `performance`; a later round of a code PR: `reviewer`, and
-`breaker` unless it skipped it), and ends at the PR head. A head that is that end plus
-clean merges of `main` also passes; a merge that resolves a conflict needs a new round.
-A red-team PR labeled `oracle` also needs the director's verdict with the line
-``Approved at `<sha>` `` for the head.
+`Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
+skips `breaker` adds the line
+``Breaker: skipped, the range changes no `.rs` line but comments``. A head that is the
+range end plus clean merges of the base needs no new round. A red-team PR labeled
+`oracle` also needs the director's verdict with the line
+``Director: approved at `<sha>` `` at the head.
 
 ## Second round
 

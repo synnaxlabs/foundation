@@ -67,8 +67,9 @@ person.
 
 Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
 that each new test fails on the code it targets. Post one comment that starts with the
-rating and summary of the last round, as given, then approved at `<sha>` or the
-findings. A later push needs a new approval.
+rating and summary of the last round, as given, then the line
+``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. A
+later push needs a new approval.
 
 ## The bar
 
