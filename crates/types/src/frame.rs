@@ -582,7 +582,7 @@ impl Frame {
 
 /// The charge of a frame of one group whose series bytes ([`Frame::body`]) hold
 /// `series` series in `body_len` bytes: what [`Frame::charge`] gives for that frame.
-/// Gives `u64::MAX` for a frame that no pool holds, which passes every grant.
+/// Gives `u64::MAX` for a frame that no pool holds.
 #[must_use]
 pub fn charge(series: usize, body_len: usize) -> u64 {
     charge_of(body_start(1, series).saturating_add(body_len))
@@ -1910,11 +1910,20 @@ mod tests {
     }
 
     #[test]
-    fn charges_ends_past_the_largest_block_as_the_most_credit() {
+    fn charges_ends_past_the_largest_block_as_the_most_credit_and_drafts_no_block() {
         let set = one_group(&mut interner());
         let ends = [(0, 8), (2, 1 << 32)];
         let layout = Layout::from_ends(&set, &ends).unwrap();
         assert_eq!(super::charge(ends.len(), layout.body_len()), u64::MAX);
+        let pool = pool(1 << 16);
+        let committed = pool.committed();
+        let expected = block::Error::TooLarge {
+            requested: 48 + (1 << 32),
+            largest: pool.largest(),
+        };
+        let error = layout.draft(&pool, Form::Encoded).unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(pool.committed(), committed, "the refusal takes no block");
     }
 
     #[derive(Clone, Debug)]

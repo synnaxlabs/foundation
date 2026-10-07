@@ -612,7 +612,9 @@ How to read this record:
   coordinator (#157). A view has no charge: a remote reader charges the frame it builds
   (FRAME LAYOUT), so `View::charge` and the list of the entries a mask leaves out,
   which only the charge used, are gone (architect, #1068:
-  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827 and
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
+  Supersedes: the list of the entries left out (#755, the gate of PR #873).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -655,6 +657,7 @@ How to read this record:
   `frame::charge(series, body_len)`, one function on each side, so the charges are
   equal by construction; a `Layout::charge` would be a second way. Decided by the
   architect (#1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359 and
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
@@ -2515,11 +2518,16 @@ How to read this record:
   by `memory`.
   Amended (2026-10-07, #1068): `block::footprint(len)` gives `usize::MAX` when `len`
   passes the largest payload, in place of a panic. No pool holds such a block, so
-  every budget refuses it, and `frame::charge` of ends from a hostile peer passes
-  every grant with no rule of its own. Lost: an exported largest payload with a new
-  `Error` variant, a second check of a limit that `block` owns. Decided by the
-  architect, #1068
-  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156).
+  every budget refuses it. `frame::charge` of ends from a hostile peer gives
+  `u64::MAX`, and `Layout::draft` refuses it with
+  `Error::Pool(block::Error::TooLarge { .. })` and takes no block. A reader drafts
+  before it spends, so a spend adds only a charge that a pool holds, and a plain add
+  never overflows. Lost: an exported largest payload with a new `Error` variant, a
+  second check of a limit that `block` owns; a saturating spend, a second guard.
+  Decided by the architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156,
+  corrected in
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
