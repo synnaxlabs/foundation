@@ -348,6 +348,10 @@ mod tests {
             Hello::decode(&encode(&[(0, 1_472), (1, 1_472), (2, 0), (2, 0)])),
             fault("a hello with id 2 after id 2")
         );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (1 << 30, 0), (2, 0)])),
+            fault("a hello with id 2 after id 1073741824")
+        );
     }
 
     #[test]
@@ -389,6 +393,13 @@ mod tests {
         assert_eq!(
             Hello::decode(&encode(&[(0, 1_472), (1, 2_000)])),
             fault("a hello with window_bytes 1472 below message_bytes_max 2000")
+        );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 1 << 33), (1, 1 << 34)])),
+            fault(
+                "a hello with window_bytes 8589934592 below message_bytes_max \
+                 17179869184"
+            )
         );
         let hello = Hello {
             window_bytes: 1_472,
