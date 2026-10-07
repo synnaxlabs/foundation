@@ -1866,10 +1866,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
   checks the wait before each other check of a message or of a forwarded proposal, so
   each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
-  other order lost: the group drops each of them in a wait, and a node that is short of
-  memory then also pays for the signature checks. A
-  write holds one block of the pool at a time (MESH LOG), so no record is too large for
-  a pool that opens, and a write does not wait for a block of its own (decided by the
+  other order lost: it gives the exact refusal, but the group drops each of them in a
+  wait in both orders, and a node that is short of memory then also pays for the
+  signature checks (decided by the architect, 2026-10-07T12:31:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037964937). A write
+  holds one block of the pool at a time (MESH LOG), so no record is too large for a
+  pool that opens, and a write does not wait for a block of its own (decided by the
   architect, 2026-10-07T08:42:04Z:
   https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A free
   block of a size with a block in use keeps its budget (#291), so a write can wait while

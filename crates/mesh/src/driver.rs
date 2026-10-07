@@ -58,7 +58,7 @@ pub(crate) struct Config {
     pub(crate) tasks: Tasks,
     /// Gives the blocks of the log's reads and writes. A write that finds the pool
     /// full, or that the system refuses memory for, waits: the group takes, sends, and
-    /// applies nothing until the pool gives the block.
+    /// applies nothing until that write ends.
     pub(crate) pool: Rc<Pool>,
 }
 
@@ -161,7 +161,7 @@ impl Mesh {
     /// The group does not see a message that fails a check.
     ///
     /// - [`Error::Stopped`] when the group stopped.
-    /// - [`Error::Pool`] from a write of the log that finds no block until that write
+    /// - [`Error::Pool`] from a write of the log that finds no block, until that write
     ///   ends.
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
@@ -204,7 +204,7 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::Pool`] from an earlier write of the log that finds no block until
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block, until
     ///   that write ends.
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead, or when a new leader replaces the entry before a write holds it.
@@ -247,7 +247,7 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::Pool`] from an earlier write of the log that finds no block until
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block, until
     ///   that write ends. The group does not see the change.
     /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
     ///   configuration. The group does not see the change.
@@ -368,7 +368,7 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
-    // Why a write of the log found no block, until that write ends.
+    // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
 }
 
@@ -1423,8 +1423,8 @@ mod tests {
         }
 
         // The change comes while the node writes the term that it now leads, and a
-        // power cut follows. A disk call takes 100 us at most, so the
-        // voter gives the change each 10 us for 500 us before and after each tick.
+        // power cut follows. A disk call takes 100 us at most, so the voter gives the
+        // change each 10 us for 500 us before and after each tick.
         #[test]
         fn a_position_in_an_answer_names_no_other_change_after_a_power_cut() {
             let mut reused = Vec::new();
@@ -1932,6 +1932,35 @@ mod tests {
     }
 
     #[test]
+    fn a_group_that_waits_gives_the_cause_of_its_last_try() {
+        solo(|node, tasks| async move {
+            let budget = block::Config { budget: 4096 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            let held = fill(&pool);
+            let mut waits = pin!(mesh.propose(home(2)));
+            assert!(now(waits.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
+            let refused = started(&mesh, home(3)).await;
+            assert_eq!(refused, Poll::Ready(Err(exhausted(93))));
+            switch.refuse();
+            drop(held);
+            node.clock().sleep(TICK).await;
+            let cause = block::Error::Refused { requested: 93 };
+            let refused = started(&mesh, home(3)).await;
+            assert_eq!(refused, Poll::Ready(Err(Error::Pool(cause))));
+            switch.allow();
+            assert_eq!(waits.await, Ok(after(first, 1)));
+        });
+    }
+
+    #[test]
     fn a_group_that_waits_for_a_block_takes_no_message() {
         solo(|node, tasks| async move {
             let pool = small_pool();
@@ -1958,7 +1987,8 @@ mod tests {
         });
     }
 
-    // The group drops each of them in a wait, so it pays for no check of one.
+    // The group drops each message and each forwarded change in a wait, so it pays
+    // for no check of one.
     #[test]
     fn a_group_that_waits_for_a_block_checks_the_wait_first() {
         solo(|node, tasks| async move {
