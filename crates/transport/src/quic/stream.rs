@@ -6088,6 +6088,35 @@ mod tests {
         }
 
         #[test]
+        fn ignore_a_stop_with_a_code_over_32_bits_after_all_is_acknowledged() {
+            testing::run(1, |shard| {
+                let (mut pair, log) = logged_dial(shard);
+                raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
+                pair.run(RUN);
+                let (now, key) = (pair.now(), key(&pair.server));
+                let sender =
+                    pair.server.endpoint.open_sender(now, key, Class::Complete);
+                let mut sender = sender.expect("a stream");
+                write(&mut pair.server, now, &mut sender, &[shard.block(b"a")]);
+                assert_eq!(pair.server.endpoint.finish(now, &mut sender), Ok(()));
+                let id = sender.key().id;
+                pair.run(RUN);
+                let freed = pair.server.connection().send_stream(id).stopped();
+                assert!(matches!(freed, Err(ClosedStream { .. })), "{freed:?}");
+                let over = VarInt::from_u64(1 << 32).expect("a varint");
+                let stopped = foreign(&mut pair).recv_stream(id).stop(over);
+                stopped.expect("stopped");
+                pair.run(RUN);
+                let stats = pair.server.connection().stats();
+                assert_eq!(stats.frame_rx.stop_sending, 1);
+                assert!(available(&pair.server));
+                let closed = |event: &&Event| matches!(event, Event::Closed { .. });
+                assert!(!events(&pair.server).iter().any(closed));
+                assert!(reset_codes(&pair, &log, id).is_empty());
+            });
+        }
+
+        #[test]
         fn reset_at_the_hello_a_reply_stopped_before_it_that_queues() {
             testing::run(1, |shard| {
                 let mut pair = foreign_dial(shard, |_| {});
