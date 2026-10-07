@@ -334,24 +334,31 @@ fn woken_of_a_reader_that_takes_each_frame() {
     .expect("the run ends");
 }
 
-/// The home's `woken` with one complete reader that falls 8 frames behind, takes
-/// each, then falls 8 frames behind again: no call of the second lag allocates.
+/// The home's `woken` with one complete reader that falls 64 frames behind, takes
+/// each, then falls 64 frames behind again: no call of the second lag allocates.
 fn woken_of_a_reader_that_falls_behind_again() {
+    /// Deep enough that the waiting list of the reader grows more than once.
+    const DEPTH: usize = 64;
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, |node, tasks| async move {
         let mut woken = Woken::new(&node, tasks).await;
-        let mut lags = Vec::new();
+        let (mut lags, mut frame) = (Vec::new(), 0);
         for lag in 0..2 {
             let mut calls = Vec::new();
-            for n in 0..8 {
-                calls.push(woken.commit(lag * 8 + n).await);
+            for _ in 0..DEPTH {
+                calls.push(woken.commit(frame).await);
+                frame += 1;
             }
             let taken = std::iter::from_fn(|| woken.shard.take(woken.reader)).count();
-            assert_eq!(taken, 8, "lag {lag}");
+            assert_eq!(taken, DEPTH, "lag {lag}");
             lags.push(calls);
         }
-        let mut expected = [(0, 0); 8];
+        let grown = lags[0][1..]
+            .iter()
+            .filter(|&&(_, allocations)| allocations > 0);
+        assert!(grown.count() > 1, "the first lag grows the list: {lags:?}");
+        let mut expected = [(0, 0); DEPTH];
         expected[0] = (1, 0);
         assert_eq!(
             lags[1], expected,
