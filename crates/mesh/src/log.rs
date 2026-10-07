@@ -270,8 +270,9 @@ impl Log {
         }
         let record = encode(self.next, hard, entries);
         let len = wide(record.len());
+        // One call writes the parts, so a part need not end at a sector.
         let parts = record
-            .chunks(chunk(&self.pool))
+            .chunks(self.pool.largest().min(CHUNK))
             .map(|chunk| {
                 let mut block = self.pool.alloc(chunk.len())?;
                 block.copy_from_slice(chunk);
@@ -321,8 +322,8 @@ fn narrow(offset: u64) -> usize {
     usize::try_from(offset).expect("invariant: a file offset fits in memory")
 }
 
-// The most bytes in one block: `CHUNK`, or less when the pool has no such block.
-// It is whole sectors, so no two reads and no two writes of an open share a sector.
+// The most bytes in one block of an open: `CHUNK`, or less when the pool has no such
+// block. It is whole sectors, so no two of its reads or of its writes share a sector.
 fn chunk(pool: &Pool) -> usize {
     let largest = pool.largest();
     largest.saturating_sub(largest % SECTOR).min(CHUNK)
@@ -1068,6 +1069,48 @@ mod tests {
         assert_eq!(torn, [], "{TORN}");
     }
 
+    // The torn record starts in one block of the open's write and ends in the next.
+    #[test]
+    fn a_power_cut_keeps_the_zeros_of_an_open_across_two_blocks() {
+        let mut torn = Vec::new();
+        for run in 0..64 {
+            let (mut sim, node) = sim(run);
+            let end = sim
+                .run_on(&node, |node, _| async move {
+                    let (mut log, _) = open(&node).await.unwrap();
+                    log.write(None, &[bytes(1, CHUNK - 700)]).await.unwrap();
+                    let end = wide(start(narrow(log.offset)));
+                    log.write(None, &[bytes(2, 700)]).await.unwrap();
+                    end
+                })
+                .unwrap();
+            if !zeros_after_a_failed_open(&mut sim, &node, end) {
+                torn.push(run);
+            }
+        }
+        assert_eq!(torn, [], "{TORN}");
+    }
+
+    // The torn record ends in the last block of the file.
+    #[test]
+    fn a_power_cut_keeps_the_zeros_of_an_open_to_the_last_block() {
+        let mut torn = Vec::new();
+        for run in 0..64 {
+            let (mut sim, node) = sim(run);
+            sim.run_on(&node, |node, _| async move {
+                let (mut log, _) = open(&node).await.unwrap();
+                log.write(None, &[bytes(1, 15 * CHUNK + 1000)])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+            if !zeros_after_a_failed_open(&mut sim, &node, 0) {
+                torn.push(run);
+            }
+        }
+        assert_eq!(torn, [], "{TORN}");
+    }
+
     #[test]
     fn an_open_gives_the_error_of_a_failed_write() {
         let (mut sim, node) = sim(0);
@@ -1225,6 +1268,33 @@ mod tests {
             assert!(!listed, "budget {budget}: the open made the directory");
             assert_eq!(held, expected, "budget {budget}, a log");
         }
+    }
+
+    // The record is 615 bytes. The largest block of a pool of 704 bytes holds 640, and
+    // the pool has no room for a block of one sector and a block of the rest.
+    #[test]
+    fn writes_a_record_that_one_block_of_the_pool_holds() {
+        let (mut sim, node) = sim(0);
+        let written = sim
+            .run_on(&node, |node, _| async move {
+                let config = block::Config { budget: 704 };
+                let memory = block::Heap::new(config.reservation());
+                let pool = Rc::new(Pool::new(config, memory));
+                let entry = bytes(1, 555);
+                let record = encode(0, None, std::slice::from_ref(&entry)).len();
+                assert_eq!((record, pool.largest()), (615, 640));
+                let files = node.files();
+                let (mut log, _) =
+                    Log::open(files.clone(), DIR.into(), Rc::clone(&pool))
+                        .await
+                        .unwrap();
+                let written = log.write(None, std::slice::from_ref(&entry)).await;
+                drop(log);
+                let (_, stored) = Log::open(files, DIR.into(), pool).await.unwrap();
+                written.map(|()| stored.entries)
+            })
+            .unwrap();
+        assert_eq!(written, Ok(vec![bytes(1, 555)]));
     }
 
     #[test]
