@@ -2892,7 +2892,7 @@ mod tests {
         });
     }
 
-    /// Runs `call` with shard 1 and a key that shard 2 gave for the number of its
+    /// Runs `call` with shard 3 and a key that shard 2 gave for the number of its
     /// second open writer, and gives the panic of the run.
     fn with_a_key_of_another_shard(
         seed: u64,
@@ -2901,7 +2901,7 @@ mod tests {
         let (mut sim, _handle) = start(seed, move |test| async move {
             let set = two_indexes();
             let buffer = test.buffer(AREA, BODY_MAX, 4).await;
-            let mut shard = test.numbered(1, buffer).await;
+            let mut shard = test.numbered(3, buffer).await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
             shard.open_writer(writer("a", 1, &set)).expect("synced");
@@ -2923,7 +2923,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 1 is of shard 2, not shard 1".into(),
+                message: "writer 1 is of shard 2, not shard 3".into(),
                 seed: 73,
             })
         );
@@ -2938,7 +2938,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 1 is of shard 2, not shard 1".into(),
+                message: "writer 1 is of shard 2, not shard 3".into(),
                 seed: 74,
             })
         );
@@ -2955,7 +2955,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 1 is of shard 2, not shard 1".into(),
+                message: "writer 1 is of shard 2, not shard 3".into(),
                 seed: 75,
             })
         );
@@ -3072,24 +3072,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn panics_on_a_write_of_a_series_of_a_type_the_home_does_not_write() {
-        let (mut sim, _handle) = start(87, |test| async move {
+    /// Writes a frame of one stamp at `count` and a `String` series after it, and
+    /// gives the run.
+    fn write_of_a_string_series(seed: u64, count: u32) -> Result<(), sim::Error> {
+        let (mut sim, _handle) = start(seed, move |test| async move {
             let set = interner().intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[(key(Slot::new(3)), Type::String)],
             }]);
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[0])]);
+            let mut write = frame(&test.pool, &set, &[(0, &[10]), (1, &[0])]);
+            write.set_count(0, count);
             drop(shard.write(a, LIVE, write));
         });
+        sim.run()
+    }
+
+    #[test]
+    fn panics_on_a_write_of_a_series_of_a_type_the_home_does_not_write() {
         assert_eq!(
-            sim.run(),
+            write_of_a_string_series(87, 1),
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
                 message: "home does not write a series of String yet".into(),
                 seed: 87,
+            })
+        );
+    }
+
+    #[test]
+    fn panics_on_a_series_of_such_a_type_after_an_index_that_does_not_fit() {
+        assert_eq!(
+            write_of_a_string_series(88, 2),
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "home does not write a series of String yet".into(),
+                seed: 88,
             })
         );
     }
