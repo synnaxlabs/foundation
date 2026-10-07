@@ -10,6 +10,7 @@ mod pair;
 mod settings;
 mod stateless;
 pub(crate) mod stream;
+mod wait;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -18,7 +19,7 @@ use std::rc::Rc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use block::{Block, Pool};
+use block::{Block, Pool, Unique};
 use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
@@ -259,6 +260,14 @@ impl Endpoint {
         self.connections.iter().all(Option::is_none)
     }
 
+    /// Ends each connection after the socket broke, and queues the
+    /// [`Event::Closed`] of each one the caller has, with [`Error::Network`].
+    pub(crate) fn fail(&mut self, error: &env::net::Error) {
+        let connections = self.connections.iter_mut().flatten();
+        let closed = connections.filter_map(|connection| connection.fail(error));
+        self.events.extend(closed);
+    }
+
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
     /// with [`Error::Closed`]. Does nothing when the connection already ended: its
     /// [`Event::Closed`] is queued or was given.
@@ -307,37 +316,44 @@ impl Endpoint {
 
     /// Puts `message` on the stream after the messages before it. `Ready` when the
     /// stream took all of it. Else `sender` holds the rest: call
-    /// [`Endpoint::flush`] after [`Event::Writable`]. `Pending` also when the
-    /// connection ended. The streams that wait for the connection take turns, by
-    /// class with `Complete` ahead of `Latest` while it is owed bytes, then oldest
-    /// first, so a write behind one waits.
+    /// [`Endpoint::flush`] after [`Event::Writable`]. `Pending` with nothing taken
+    /// once the connection drained. The streams that wait for the connection take
+    /// turns, by class with `Complete` ahead of `Latest` while it is owed bytes, then
+    /// oldest first, so a write behind one waits.
     ///
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped the stream. Each later write gives it
     /// too. [`Error::TooLarge`] when `message` is over the peer's largest message.
     /// Nothing of it is sent.
+    /// The error of the connection's [`Event::Closed`] when it ended, until it
+    /// drains.
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after [`Endpoint::finish`].
+    /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
+    /// message on a live connection and `message` is within the limit.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        sender.check();
+        sender.check_unfinished();
         sender.check_size(&message)?;
-        sender.load(message);
-        self.flush(now, sender)
+        let key = sender.key().connection;
+        self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
+            sender.check();
+            sender.load(message);
+            streams.flush(inner, sender, events)
+        })
     }
 
     /// Puts `message` on the stream after the messages before it when the stream
     /// can take it now. Else gives it back with nothing of it sent: when `sender`
     /// still holds part of an earlier message after a flush, when the send budget
     /// has no room for it or a stream that goes ahead of it waits for room or its
-    /// turn, or when the connection ended. The stream does not wait for room
+    /// turn, or once the connection drained. The stream does not wait for room
     /// for a message it gives back. Once taken, `sender` may hold the rest of it:
     /// call [`Endpoint::flush`] after [`Event::Writable`].
     ///
@@ -345,10 +361,12 @@ impl Endpoint {
     ///
     /// [`Error::Stopped`] when the peer stopped the stream. [`Error::TooLarge`] when
     /// `message` is over the peer's largest message. Nothing of it is sent.
+    /// The error of the connection's [`Event::Closed`] when it ended, until it
+    /// drains.
     ///
     /// # Panics
     ///
-    /// After [`Endpoint::finish`].
+    /// After an [`Endpoint::finish`] that gave `Ok`.
     pub(crate) fn try_write(
         &mut self,
         now: Monotonic,
@@ -367,11 +385,13 @@ impl Endpoint {
 
     /// Writes the rest of the message that `sender` holds. `Ready` when it holds
     /// none. `Pending` when the stream takes no more now or waits its turn
-    /// ([`Event::Writable`] follows), or when the connection ended.
+    /// ([`Event::Writable`] follows), or once the connection drained.
     ///
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped the stream.
+    /// The error of the connection's [`Event::Closed`] when it ended, until it
+    /// drains.
     pub(crate) fn flush(
         &mut self,
         now: Monotonic,
@@ -386,49 +406,58 @@ impl Endpoint {
     /// Ends the stream after the messages written to it. They arrive after the
     /// caller drops `sender`. A stream this side opened that ends before its first
     /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
-    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
+    /// [`Error::Reset`] with code 0. Does nothing once the connection drained.
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream.
+    /// [`Error::Stopped`] when the peer stopped the stream. Each later finish gives
+    /// it too. The error of the connection's [`Event::Closed`] when it ended, until
+    /// it drains.
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after [`Endpoint::finish`].
+    /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
+    /// message on a live connection.
     pub(crate) fn finish(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
     ) -> Result<(), Error> {
-        sender.end();
+        sender.check_unfinished();
         let stream = sender.key();
         self.streams(now, stream.connection, (), |streams, inner, _, _| {
-            streams.finish(inner, stream.id)
+            sender.check();
+            streams.finish(inner, stream.id)?;
+            sender.end();
+            Ok(())
         })
     }
 
-    /// The next whole message of `receiver`'s stream, in one block from the pool.
-    /// `Ready(None)` after the last one, and on each call after that. `Pending` when
-    /// no whole message is here yet ([`Event::Readable`] follows), or when the
-    /// connection ended.
+    /// The next whole message of `receiver`'s stream, in the block that
+    /// `take(pool, len)` gives from the endpoint's pool: exactly `len` bytes, or
+    /// `None` when the message may not have one now. `Ready(None)` after the last
+    /// one, and on each call after that. `Pending` when no whole message is here yet
+    /// ([`Event::Readable`] follows), when `take` gives no block (no event follows:
+    /// call again once it may give one), or once the connection drained.
     ///
     /// # Errors
     ///
     /// - [`Error::Reset`] when the peer reset the stream. Each later read gives it
     ///   too.
-    /// - [`Error::Pool`] when the pool has no room for the message now. Call again
-    ///   when it has.
+    /// - The error of the connection's [`Event::Closed`] when it ended, until it
+    ///   drains.
     pub(crate) fn read(
         &mut self,
         now: Monotonic,
         receiver: &mut Receiver,
+        mut take: impl FnMut(&Pool, usize) -> Option<Unique>,
     ) -> Result<Poll<Option<Block>>, Error> {
         if let Some(ended) = receiver.ended() {
             return ended;
         }
         let key = receiver.key().connection;
         self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
-            streams.read(inner, receiver, pool, events)
+            streams.read(inner, receiver, |len| take(pool, len), events)
         })
     }
 
@@ -514,9 +543,10 @@ impl Endpoint {
     }
 
     /// Runs `call` on the streams of `key`'s connection with the pool and the event
-    /// queue, and drives the connection. A fault of the peer's that `call` finds
-    /// closes the connection: the caller gets it from [`Event::Closed`], and this
-    /// gives `ended`, as it does when the connection ended before.
+    /// queue, and drives the connection. Gives the error of the connection's
+    /// [`Event::Closed`] when it ended, and `ended` once it drained. A fault of the
+    /// peer's that `call` finds closes the connection: the caller gets it from
+    /// [`Event::Closed`], and this gives `ended`.
     fn streams<T>(
         &mut self,
         now: Monotonic,
@@ -530,10 +560,12 @@ impl Endpoint {
         ) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let now = self.instant(now);
-        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
-        else {
+        let Some(connection) = find(&mut self.connections, key) else {
             return Ok(ended);
         };
+        if let Some(error) = connection.error() {
+            return Err(error.clone());
+        }
         let Connection { inner, streams, .. } = connection;
         let result = match call(streams, inner, &self.pool, &mut self.events) {
             Err(Error::Broken { reason }) => {
@@ -1259,7 +1291,8 @@ mod tests {
                 let (now, key) = (pair.now(), pair.server.key.expect("a key"));
                 let server = &mut pair.server.endpoint;
                 let mut incoming = server.accept(key).expect("a stream");
-                let read = server.read(now, &mut incoming.receiver).expect("read");
+                let read = server.read(now, &mut incoming.receiver, testing::alloc);
+                let read = read.expect("read");
                 let Poll::Ready(Some(message)) = read else {
                     panic!("no message");
                 };

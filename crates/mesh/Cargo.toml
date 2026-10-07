@@ -10,6 +10,7 @@ aws-lc-rs.workspace = true
 block = { path = "../block" }
 env = { path = "../env" }
 raft = { path = "../raft" }
+transport = { path = "../transport" }
 types = { path = "../types" }
 
 [dev-dependencies]

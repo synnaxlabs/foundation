@@ -104,7 +104,7 @@ Builders never edit another crate's public surface. To change one, or to add a c
 dependency:
 
 1. Open an issue labeled `interface` with the proposed signature and the reason. Send
-   the link to `laptop.architect`.
+   the link to the crate's architect (`docs/factory.md`).
 2. The architect decides. A change inside the locked decisions becomes a small PR from
    the crate's builder. A change to a locked decision, a contract, or an oracle goes to
    the person first, with the architect's recommendation.
