@@ -639,6 +639,7 @@ mod tests {
 
     use super::*;
     use crate::bytes::{PRESENT, VOTE};
+    use crate::common::pool;
 
     const DIR: &str = "mesh";
 
@@ -656,12 +657,6 @@ mod tests {
         });
         let node = sim.node(sim::node::Config::default());
         (sim, node)
-    }
-
-    fn pool() -> Rc<Pool> {
-        let config = block::Config { budget: 4 << 20 };
-        let memory = block::Heap::new(config.reservation());
-        Rc::new(Pool::new(config, memory))
     }
 
     async fn open(node: &sim::node::Node) -> Result<(Log, Stored), Error> {
