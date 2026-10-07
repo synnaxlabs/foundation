@@ -1618,10 +1618,15 @@ How to read this record:
   (the `hyper-util` default), read on the `env` clock, and the next send closes it: the
   client sends no keep-alive, and a firewall or NAT may drop the state of an idle
   stream. Decided by the coordinator with `advisor` on 2026-10-06
-  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). From
-  the review of #1111: a request that fails on a reused connection before its response
-  goes once more on a new connection, when the connection did not write it, or when
-  its method is idempotent and no byte of a response came (RFC 9112, as in Go).
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). A
+  request that fails on a reused connection before its response goes once more on a
+  new connection, when the connection did not write it, or when its method is
+  idempotent and no byte of a response came (RFC 9112, as in Go). The pool key is the
+  origin: scheme, host, and port. Today the client takes only `http` with an IP
+  address, so the socket address is the origin. With TLS or name lookup, the key keeps
+  the host name, because a TLS connection is verified for one name and must never
+  carry a request for another. Decided by the architect on #1111
+  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
