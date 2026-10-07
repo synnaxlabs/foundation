@@ -135,7 +135,10 @@ Agents add to them freely and never weaken them. Weakening means a removed test 
 assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
 or proptest failure file. A change to the bytes of a fuzz input deletes the old input:
 keep the old file and add the new bytes as a new file. A move that keeps the bytes is
-not a deletion.
+not a deletion. Only what `main` held counts: an input that a PR changes before it
+merges was never an oracle, so `git log --first-parent origin/main` lists the states to
+compare (https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500,
+2026-10-07T19:46:25Z).
 
 An oracle test target is a `[[test]]` target whose root is under `oracles/`.
 `cargo xtask oracles` fails when no oracle test target compiles a `.rs` file under
