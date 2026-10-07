@@ -4467,13 +4467,13 @@ Supersedes the one-hour cut of 5.5 and of this entry (#1072). The hour writes 3.
 samples, and its edge buffer alone does not fit in `sim` on a CI runner
 (https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6034058219). The
 simulated InfluxDB store gets a compact form first (#1419). No scheduled run on a
-rented host runs the hour. The person decided at 2026-10-07T14:10:57Z ("Let's do a
-smaller scenario. It can still prove a significant amount of the behavior." and "Copy,
-yes I can agree with that", relayed by `monitor`:
-https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221).
+rented host runs the hour. The person decided ("Let's do a smaller scenario. It can
+still prove a significant amount of the behavior." and "Copy, yes I can agree with
+that"), relayed by `laptop.monitor` at 2026-10-07T14:10:57Z:
+https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221.
 
-5.5 sets no drain rate. Before the two tests lose `#[ignore]`, the drain after the heal
-changes from `OUTAGE` to its own span: two times the sum of the delay before the drain
-starts and the time to send the backlog at the drain rate measured in the lab. Decided
-by `laptop.architect-2` at 2026-10-07T16:31:12Z (#1477:
+5.5 sets no drain rate. Before the two tests lose `#[ignore]`, the lab runs a drain span
+after the heal in place of `OUTAGE`: two times the sum of the delay before the drain
+starts and the time to send `WRITTEN` at the drain rate measured in the lab.
+`laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
