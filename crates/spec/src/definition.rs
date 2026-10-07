@@ -328,8 +328,8 @@ fn channel(out: &mut Vec<u8>, definition: &Channel) {
         }
         channel::Kind::Data(data) => {
             out.push(1);
-            key(out, data.index());
-            optional_key(out, data.quality());
+            key(out, *data.index());
+            optional_key(out, data.quality().copied());
             data_type(out, data.data_type());
             match data.unit() {
                 None => out.push(0),
