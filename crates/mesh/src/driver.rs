@@ -2833,6 +2833,31 @@ mod tests {
             });
         }
 
+        // The first change of the log names 2 and 3 only, so it is not the line for
+        // 4: both joins of 4 are below the change that names 4, and a vote that the
+        // stale key signs does not count.
+        #[test]
+        fn a_change_that_does_not_name_a_node_is_not_its_line() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = changes(&[stale_join()]);
+                data.push(voters(TERM, &[2, 3], &[2, 3]));
+                data.extend(changes(&[join(4)]));
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
+                write(&mesh, data).await;
+                let forged = heartbeat(2, later(), &[(2, 2), (4, 5)]);
+                let unproven = Error::Raft(raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                });
+                assert_eq!(mesh.receive(public(2), forged), Err(unproven));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
         // A later change that names 4 again does not move the line: the joins below
         // the first one decide.
         #[test]
