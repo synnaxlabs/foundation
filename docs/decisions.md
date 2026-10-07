@@ -2442,13 +2442,15 @@ How to read this record:
   6e7 points on a CI runner (#1149). A column holds only the points that set its key,
   each as an index and a value, so a sparse field costs little. A point that goes past
   the end of a full chunk goes into the next chunk when it has room, so appends in
-  either time order fill each chunk. A point with one float field takes about 18 heap
-  bytes, with no dependence on its tags; `tests/memory.rs` counts the heap bytes with
-  `counting` and bounds them at 32 a point, also for sparse fields and for appends
-  newest first. `Point::fields` is a `Fields` view of the
-  chunk. Lost: runs of points on a fixed time step, as mesh slew moves each time off
-  any grid (MESH SLEW); and RSS in place of a byte count, as RSS depends on the
-  allocator and the OS. Decided by the architect (`laptop.architect-2`), #1419
+  either time order fill each chunk. A full column grows by an eighth, not by double,
+  and a split frees the spare room of its first half, so a split chunk wastes little. A
+  point with one float field takes about 19 heap bytes, with no dependence on its tags;
+  `tests/memory.rs` counts the heap bytes with `counting` and bounds them at 32 a point
+  (the test uses 24), also for sparse fields, for appends newest first, and for writes
+  that split chunks. `Point::fields` is a `Fields` view of the chunk. Lost: runs of
+  points on a fixed time step, as mesh slew moves each time off any grid (MESH SLEW);
+  and RSS in place of a byte count, as RSS depends on the allocator and the OS. Decided
+  by the architect (`laptop.architect-2`), #1419
   (https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.

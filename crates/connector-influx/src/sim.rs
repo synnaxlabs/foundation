@@ -295,7 +295,7 @@ impl Chunk {
     }
 
     fn insert(&mut self, at: usize, time: Stamp, fields: BTreeMap<String, Field>) {
-        self.times.insert(at, time);
+        insert(&mut self.times, at, time);
         for column in self.columns.values_mut() {
             column.insert(at);
         }
@@ -395,8 +395,8 @@ impl<T> Typed<T> {
         match self.points.binary_search(&at) {
             Ok(i) => *self.values.get_mut(i).expect("a value for each point") = value,
             Err(i) => {
-                self.points.insert(i, at);
-                self.values.insert(i, value);
+                insert(&mut self.points, i, at);
+                insert(&mut self.values, i, value);
             }
         }
     }
@@ -414,7 +414,9 @@ impl<T> Typed<T> {
             .partition_point(|&point| usize::from(point) < half);
         let half = u16::try_from(half).expect("a chunk holds at most CHUNK points");
         Self {
-            points: split(&mut self.points, from)
+            points: self
+                .points
+                .split_off(from)
                 .into_iter()
                 .map(|point| point.strict_sub(half))
                 .collect(),
@@ -428,6 +430,15 @@ fn split<T>(values: &mut Vec<T>, from: usize) -> Vec<T> {
     let right = values.split_off(from);
     values.shrink_to_fit();
     right
+}
+
+/// Inserts `value` at `at`. A full `Vec` grows by an eighth, not by double, so a
+/// chunk half that a split left full wastes little after one more point.
+fn insert<T>(values: &mut Vec<T>, at: usize, value: T) {
+    if values.len() == values.capacity() {
+        values.reserve_exact(values.len().div_ceil(8).max(1));
+    }
+    values.insert(at, value);
 }
 
 fn time(text: &str, time: Option<i64>) -> Result<Stamp, Error> {

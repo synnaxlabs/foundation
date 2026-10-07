@@ -16,8 +16,8 @@ const POINTS: usize = 200_000;
 const CHUNK: usize = 4096;
 
 /// The most heap bytes a point with one float field may take: 8 of time, 8 of value,
-/// and 2 of index, with room for the chunks.
-const BUDGET: usize = 32;
+/// and 2 of index, with room for the chunks. SIM INFLUX allows 32.
+const BUDGET: usize = 24;
 
 /// The fewest: 8 of time and 8 of value.
 const FLOOR: usize = 16;
@@ -50,6 +50,17 @@ fn main() {
             let time = match k.checked_sub(evens) {
                 None => 2 * k,
                 Some(chunk) => 2 * CHUNK * chunk + CHUNK + 1,
+            };
+            writeln!(line, "m value={k} {time}")
+        },
+    );
+    check(
+        "the even times, then one odd time in each half of each chunk",
+        |k, line| {
+            let evens = POINTS - 2 * (POINTS / (CHUNK + 2));
+            let time = match k.checked_sub(evens) {
+                None => 2 * k,
+                Some(odd) => 2 * CHUNK * (odd / 2) + 1 + (odd % 2) * 6000,
             };
             writeln!(line, "m value={k} {time}")
         },
