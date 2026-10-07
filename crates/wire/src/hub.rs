@@ -10,6 +10,9 @@
 //! run ends. The body starts a new message. A message with more keys or ends than
 //! remain is not valid.
 //!
+//! A message that does not decode, comes from the wrong side, or breaks a rule of this
+//! module stops the stream with [`MALFORMED`](crate::header::MALFORMED).
+//!
 //! Fields are little-endian.
 //!
 //! - [`Open`]: kind 1 (latest) or 2 (complete), then for complete `limit_bytes`
