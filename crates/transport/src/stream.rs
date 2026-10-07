@@ -290,8 +290,8 @@ struct Sending<'a> {
 
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
-        if !self.done && self.message.is_none() {
-            self.session.cancel(self.stream);
+        if !self.done {
+            self.session.abandon(self.stream, self.message.is_none());
         }
     }
 }
@@ -1213,6 +1213,51 @@ mod tests {
                 let mut elsewhere = Context::from_waker(Waker::noop());
                 assert!(read.as_mut().poll(&mut elsewhere).is_pending());
                 assert_eq!(bytes(read.await), Ok(Some(b"b".to_vec())));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_send_dropped_behind_part_of_an_earlier_message_leaves_no_waker() {
+        struct Count(AtomicU32);
+        impl std::task::Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let body = vec![7; 60_000];
+                // Until the stream holds part of a message and gives the next back.
+                while sender.try_send(side.block(&body)).expect("open").is_none() {}
+                let count = Arc::new(Count(AtomicU32::new(0)));
+                let waker = Waker::from(Arc::clone(&count));
+                {
+                    let mut send = pin!(sender.send(side.block(b"b")));
+                    let mut cx = Context::from_waker(&waker);
+                    assert!(send.as_mut().poll(&mut cx).is_pending());
+                }
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                assert_eq!(count.0.load(Ordering::Relaxed), 0);
+                sender.send(side.block(b"c")).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut messages = Vec::new();
+                while let Some(message) = incoming.receiver.recv().await.expect("read") {
+                    messages.push(message.to_vec());
+                }
+                assert_eq!(messages.pop(), Some(b"c".to_vec()));
+                assert!(messages.iter().all(|message| message == &[7; 60_000]));
                 side.session.close(Code(4));
             },
         );
