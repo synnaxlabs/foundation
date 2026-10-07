@@ -4468,4 +4468,8 @@ simulated InfluxDB store gets a compact form first (#1419). No scheduled run on 
 rented host runs the hour. The person decided ("Let's do a smaller scenario. It can
 still prove a significant amount of the behavior." and "Copy, yes I can agree with
 that", relayed by `monitor`:
-https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221).
+https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221). 5.5 sets
+no drain rate: after the heal, the lab waits a drain span sized for the delay before
+the drain and the backlog at the measured rate, times two (#1477, decided by
+architect-2:
+https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
