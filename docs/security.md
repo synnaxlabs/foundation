@@ -221,8 +221,9 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`, which opens the ring and reads each path back. Its inputs
-  reach a record of three blocks, an entry table of three blocks, a tail at each
-  block of the area, a wrap record, and the end of the offsets. Open on `main`:
+  reach a record of four blocks, an entry table of three blocks, a tail at each
+  block of the area, a wrap record, a full ring, and the end of the offsets. Open on
+  `main`:
   #392 (three ways a ring loses data it reported durable or cannot open), #566 (a write
   of a dead process can land on a ring that a new process opened), #572 (`append` takes
   a record over the pool's largest block, and then each open fails), #657 (an open
