@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use env::thread::Handle;
 use types::frame::key_set::Interner;
-use types::time::Span;
+use types::time::{Span, Stamp};
 
 use crate::handoff::{Give, Take};
 use crate::stop::{Guard, Stop};
@@ -96,6 +96,13 @@ struct Shard {
 const BODY_MAX: usize = 1 << 20;
 /// The longest an entry waits for its group commit to start.
 const COMMIT: Span = Span::from_nanos(2_000_000);
+/// The stamps each home accepts. A patch until the limits are settings (#1285):
+/// 2000-01-01 refuses a clock that was never set, and 10 s is ten times the time
+/// error target.
+const LIMITS: home::order::Limits = home::order::Limits {
+    earliest: Stamp::from_nanos(946_684_800_000_000_000),
+    ahead: Span::from_nanos(10 * Span::SECOND.nanos()),
+};
 
 impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
@@ -158,7 +165,7 @@ impl Node {
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
         let cores = shards.cores().get();
-        let (mesh, _reader) = clock::Clock::new(monotonic.clone());
+        let (mesh, reader) = clock::Clock::new(monotonic.clone());
         // Shard 0 runs the mesh clock, and gives the first interner once it has
         // claimed the data directory.
         let mut first = Some((mesh, wall, give));
@@ -188,6 +195,7 @@ impl Node {
                 take,
                 give,
                 clock: monotonic.clone(),
+                reader: reader.clone(),
                 entropy: entropy.clone(),
                 layout,
                 failed: Arc::clone(&failed),
@@ -278,6 +286,8 @@ struct Open {
     take: Take<Interner>,
     give: Give<Interner>,
     clock: env::clock::Clock,
+    /// The node's mesh clock, for the shard's home.
+    reader: clock::Reader,
     entropy: env::entropy::Entropy,
     layout: buffer::Layout,
     failed: Arc<OnceLock<Error>>,
@@ -333,8 +343,8 @@ impl Open {
         }
     }
 
-    /// Opens the shard's buffer and keeps it until `guard` completes. A failed open
-    /// drops `guard`, which stops the node.
+    /// Opens the shard's buffer, builds its home over it, and keeps the home until
+    /// `guard` completes. A failed open drops `guard`, which stops the node.
     async fn serve(
         self,
         files: env::files::Files,
@@ -342,22 +352,23 @@ impl Open {
         tasks: env::tasks::Tasks,
         guard: Guard,
     ) {
-        if let Some(buffer) = self.run(files, pool, tasks).await {
+        if let Some(home) = self.run(files, pool, tasks).await {
             guard.await;
-            drop(buffer);
+            drop(home);
         }
     }
 
-    /// Waits for the interner, opens the shard's buffer on the shard's thread, and
-    /// gives the interner to the next shard. A failed open is kept for
-    /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
-    /// So does a stop raised before the open, but it is not a failure.
+    /// Waits for the interner, opens the shard's buffer on the shard's thread, gives
+    /// the interner to the next shard, and gives the shard's home over the buffer. A
+    /// failed open is kept for [`Node::join`], keeps the interner from the shards
+    /// after it, and gives `None`. So does a stop raised before the open, but it is
+    /// not a failure.
     async fn run(
         self,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
-    ) -> Option<buffer::Buffer> {
+    ) -> Option<home::Shard> {
         let mut interner = self.take.await?;
         if self.stop.raised() {
             return None;
@@ -375,7 +386,13 @@ impl Open {
         match buffer::Buffer::open(config, interner.slots()).await {
             Ok(buffer) => {
                 self.give.give(interner);
-                Some(buffer)
+                Some(home::Shard::new(home::Config {
+                    shard: u32::try_from(self.core)
+                        .expect("invariant: a core fits a u32"),
+                    buffer,
+                    clock: self.reader,
+                    limits: LIMITS,
+                }))
             }
             Err(error) => {
                 let error = Error::Buffer {
