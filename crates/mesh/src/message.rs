@@ -60,7 +60,7 @@ impl Message {
     ///
     /// # Panics
     ///
-    /// When a grant or a proof entry has no signature: the caller signs them first.
+    /// When a claim has no signature: the caller signs each claim first.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {

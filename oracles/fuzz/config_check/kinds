@@ -1,0 +1,8 @@
+placement "a" {
+  select = "x"
+  home = "n"
+}
+retention "A" {
+  select = "x"
+  keep = "1d"
+}
