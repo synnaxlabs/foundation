@@ -359,7 +359,7 @@ impl Half {
 const ZEROS: &[u8; 255] = &[0; 255];
 
 /// The bytes of a message in hand that the stream has not taken: a chunk of its block
-/// for each range, and a chunk of [`ZEROS`] for each run of zeros.
+/// for each run of adjacent ranges, and a chunk of [`ZEROS`] for each run of zeros.
 #[derive(Debug, Default)]
 struct Chunks {
     /// From `next` on. Its capacity stays, so a message allocates no list.
@@ -375,23 +375,43 @@ impl Chunks {
     fn load(&mut self, block: Block, parts: &[Part]) {
         let last = parts.iter().rposition(|part| !part.range.is_empty());
         let mut whole = Bytes::from_owner(Body(block));
-        for (index, part) in parts.iter().enumerate() {
-            let Range { start, end } = part.range.clone();
+        // The open run of adjacent ranges, and the index of its last part.
+        let mut run: Option<(Range<usize>, usize)> = None;
+        let mut flush = |run: &mut Option<(Range<usize>, usize)>, list: &mut Vec<_>| {
+            let Some((Range { start, end }, index)) = run.take() else {
+                return;
+            };
             if Some(index) == last {
-                // The block's own handle, so a message of one range changes no
+                // The block's own handle, so a message of one run changes no
                 // reference count.
                 let mut chunk = mem::take(&mut whole);
                 chunk.truncate(end);
                 chunk.advance(start);
-                self.list.push(chunk);
-            } else if start < end {
-                self.list.push(whole.slice(start..end));
+                list.push(chunk);
+            } else {
+                list.push(whole.slice(start..end));
+            }
+        };
+        for (index, part) in parts.iter().enumerate() {
+            let Range { start, end } = part.range.clone();
+            if start < end {
+                match &mut run {
+                    Some((open, at)) if open.end == start => {
+                        (open.end, *at) = (end, index);
+                    }
+                    _ => {
+                        flush(&mut run, &mut self.list);
+                        run = Some((start..end, index));
+                    }
+                }
             }
             if part.zeros > 0 {
+                flush(&mut run, &mut self.list);
                 let zeros = &ZEROS[..usize::from(part.zeros)];
                 self.list.push(Bytes::from_static(zeros));
             }
         }
+        flush(&mut run, &mut self.list);
         self.len = self.list.iter().map(Bytes::len).sum();
     }
 
@@ -4034,6 +4054,26 @@ mod tests {
                 endpoint.stop(now, receiver, Code(9));
             });
         }
+    }
+
+    #[test]
+    fn a_message_of_parts_gives_one_chunk_for_each_run_of_adjacent_ranges() {
+        testing::run(1, |shard| {
+            let part = |range: Range<usize>, zeros| Part { range, zeros };
+            let parts = [
+                part(0..3, 0),
+                part(9..9, 0),
+                part(3..5, 0),
+                part(5..7, 2),
+                part(7..8, 0),
+                part(9..10, 0),
+            ];
+            let mut chunks = Chunks::default();
+            chunks.load(shard.block(b"0123456789"), &parts);
+            let list: Vec<&[u8]> = chunks.list.iter().map(|chunk| &chunk[..]).collect();
+            assert_eq!(list, [&b"0123456"[..], &[0, 0], b"7", b"9"]);
+            assert_eq!(chunks.len(), 11);
+        });
     }
 
     #[test]

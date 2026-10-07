@@ -24,6 +24,10 @@
 //! waiting`, whose send must wait in each round. Each poll has a timing cost, so
 //! compare the two lines with their polls per send.
 //!
+//! The `parts` lines time, in alternating rounds on one stream, a `send` of one block
+//! and a `send_parts` of the same bytes as ranges of a larger block. Their allocations
+//! differ only by the carrier's copies of ranges of up to 1452 bytes.
+//!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
 //! times a sim one, and an `os` wake about a quarter of a sim one. Compare a send with
@@ -41,6 +45,7 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
+use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -50,7 +55,7 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
-use transport::stream::Sender;
+use transport::stream::{Part, Sender};
 use transport::{Address, Class, Code, Config, Error, Port, Session, Transport};
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
@@ -76,6 +81,8 @@ const TIGHT: Room = Room {
 
 /// Sends per round. A round fits the `WIDE` window, so no send waits there.
 const SENDS: usize = 64;
+/// Sends per round of a [`Shape`], whose message is up to 64 KiB.
+const PARTS_SENDS: usize = 16;
 /// Rounds per scenario before the timed rounds.
 const WARMUP: usize = 50;
 /// Timed rounds per scenario.
@@ -117,6 +124,47 @@ enum Call {
     Send,
     TrySend,
 }
+
+/// The parts of a message for [`measure_parts`]: `ranges` ranges of `len` bytes, each
+/// `stride` bytes after the one before.
+#[derive(Clone, Copy)]
+struct Shape {
+    name: &'static str,
+    ranges: usize,
+    len: usize,
+    stride: usize,
+}
+
+impl Shape {
+    fn parts(&self) -> Vec<Part> {
+        let part = |at: usize| Part {
+            range: at * self.stride..at * self.stride + self.len,
+            zeros: 0,
+        };
+        (0..self.ranges).map(part).collect()
+    }
+}
+
+const SHAPES: [Shape; 3] = [
+    Shape {
+        name: "8 ranges of 8 KiB",
+        ranges: 8,
+        len: 8 << 10,
+        stride: (8 << 10) + 8,
+    },
+    Shape {
+        name: "1000 ranges of 8 B",
+        ranges: 1000,
+        len: 8,
+        stride: 16,
+    },
+    Shape {
+        name: "1 range of 64 KiB",
+        ranges: 1,
+        len: 64 << 10,
+        stride: 64 << 10,
+    },
+];
 
 const SCENARIOS: [Scenario; 5] = [
     Scenario {
@@ -189,6 +237,8 @@ struct Measured {
     polls: u64,
     /// The timed sends of all rounds.
     sends: u64,
+    /// The sends of a round.
+    round: usize,
 }
 
 fn main() {
@@ -218,6 +268,12 @@ fn main() {
                 for sender in &mut senders {
                     sender.finish().expect("the stream finishes");
                 }
+            }
+            for shape in &SHAPES {
+                let mut sender = session.open_sender(Class::Complete).await;
+                let sender = sender.as_mut().expect("a stream");
+                lines.extend(measure_parts(&clock, &pool, sender, shape).await);
+                sender.finish().expect("the stream finishes");
             }
             session.close(Code(0));
             let session = transport
@@ -331,9 +387,76 @@ async fn measure(
                 allocations,
                 polls,
                 sends,
+                round: SENDS,
             }
         })
         .collect()
+}
+
+/// Runs the rounds of `shape` on `sender`: in alternating rounds, a `send` of one block
+/// of the message's bytes and a `send_parts` of the message. Gives a line for each.
+async fn measure_parts(
+    clock: &env::clock::Clock,
+    pool: &Pool,
+    sender: &mut Sender,
+    shape: &Shape,
+) -> Vec<Measured> {
+    let parts = shape.parts();
+    let bytes = shape.ranges * shape.len;
+    let mut nanos = [Vec::with_capacity(ROUNDS), Vec::with_capacity(ROUNDS)];
+    let mut allocations = [0; 2];
+    for round in 0..WARMUP + ROUNDS {
+        for (at, nanos) in nanos.iter_mut().enumerate() {
+            clock.sleep(PAUSE).await;
+            let (span, counted) = if at == 0 {
+                let blocks = (0..PARTS_SENDS).map(|_| filled(pool, bytes)).collect();
+                ALLOCATOR.count(|| poll_sends(slice::from_mut(sender), blocks))
+            } else {
+                let block = shape.ranges * shape.stride;
+                let blocks = (0..PARTS_SENDS).map(|_| filled(pool, block)).collect();
+                ALLOCATOR.count(|| poll_parts(sender, blocks, &parts))
+            };
+            if round >= WARMUP {
+                nanos.push(per(span) / per(PARTS_SENDS));
+                allocations[at] += counted;
+            }
+        }
+    }
+    let sends = u64::try_from(ROUNDS * PARTS_SENDS).expect("fits");
+    let names = ["send", "send_parts"];
+    let lines = names.into_iter().zip(nanos).zip(allocations);
+    lines
+        .map(|((call, mut nanos), allocations)| {
+            nanos.sort_unstable_by(f64::total_cmp);
+            Measured {
+                name: format!("{call} {}", shape.name),
+                nanos,
+                allocations,
+                polls: sends,
+                sends,
+                round: PARTS_SENDS,
+            }
+        })
+        .collect()
+}
+
+/// Polls a `send_parts` of `parts` of each block once, on `sender`, and gives the
+/// nanoseconds it took.
+///
+/// # Panics
+///
+/// When a send waits or fails.
+#[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
+fn poll_parts(sender: &mut Sender, blocks: Vec<Block>, parts: &[Part]) -> u64 {
+    let mut cx = Context::from_waker(Waker::noop());
+    let start = Instant::now();
+    for block in blocks {
+        match pin!(sender.send_parts(block, parts)).poll(&mut cx) {
+            Poll::Ready(sent) => sent.expect("the send goes"),
+            Poll::Pending => panic!("a send waited on its first poll: raise PAUSE"),
+        }
+    }
+    nanos(Instant::now().duration_since(start))
 }
 
 /// Polls one send of each block once, on `senders` in turn, and gives the nanoseconds
@@ -475,6 +598,7 @@ async fn compete(
         allocations,
         polls,
         sends: timed,
+        round: SENDS,
     }
 }
 
@@ -700,7 +824,7 @@ fn print(lines: &[Measured]) {
         let at = |percent: usize| line.nanos[ROUNDS * percent / 100];
         let allocations = per(line.allocations) / per(line.sends);
         let polls = per(line.polls) / per(line.sends);
-        let timed = per(line.sends) / per(ROUNDS * SENDS);
+        let timed = per(line.sends) / per(ROUNDS * line.round);
         let name = &line.name;
         let (p10, p50, p90) = (at(10), at(50), at(90));
         println!(
