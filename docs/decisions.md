@@ -1995,8 +1995,8 @@ How to read this record:
   supersedes the doc texts of
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 and
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823, and the
-  Display text of the first stands; the text of the two cases by the architect,
-  2026-10-07T12:08:39Z:
+  Display text of the first (2026-10-07T11:52:00Z) stands; the text of the two cases by
+  the architect, 2026-10-07T12:08:39Z:
   https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
   checks the wait before each other check of a message or of a forwarded proposal, so
   each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
