@@ -5,7 +5,7 @@ use types::node::{self, PublicKey};
 
 use crate::change::Unknown;
 use crate::region::Unfit;
-use crate::{claim, log, status};
+use crate::{claim, log};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,11 +42,6 @@ pub enum Error {
     Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
-    /// This node has no mesh time that can stamp a join: none yet, one with an unknown
-    /// error, or one whose later edge is before the Unix epoch.
-    Unsynced,
-    /// A join request names more than 64 status channels.
-    Status(status::Many),
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
     /// write of the log, the group takes no proposal and no message until the write
     /// ends. For the answer to a forwarded proposal, the peer gets no answer, and the
@@ -91,11 +86,6 @@ impl fmt::Display for Error {
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
-            Self::Unsynced => f.write_str(
-                "this node has no mesh time with a known error at or after the Unix \
-                 epoch, so it stamps no join",
-            ),
-            Self::Status(many) => many.fmt(f),
             Self::Pool(cause) => {
                 write!(f, "the pool has no block for the mesh now: {cause}")
             }

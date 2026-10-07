@@ -144,7 +144,6 @@ fn create_config_on(
         members,
         files: node.files(),
         clock: node.clock(),
-        time: clock::Clock::new(node.clock()).1,
         entropy: node.entropy(),
         tasks: tasks.clone(),
         transport: Rc::new(transport),
@@ -391,6 +390,28 @@ fn watch_member_next_serve_and_set_home_have_the_signatures_that_a_caller_holds(
     assert_gives_a_home(Watch::next);
     assert_serves(Mesh::serve);
     assert_sets(Mesh::set_home);
+}
+
+// The match has no wildcard arm, so a new case of `Error` does not compile here.
+#[test]
+fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
+    let cases = |error: &Error| match error {
+        Error::Log(_)
+        | Error::Raft(_)
+        | Error::Spoofed { .. }
+        | Error::NotVoter { .. }
+        | Error::PeerNotVoter { .. }
+        | Error::Claim(_)
+        | Error::NotMember(_)
+        | Error::NoVote
+        | Error::Member(_)
+        | Error::WrongKey
+        | Error::Pool(_)
+        | Error::Malformed
+        | Error::Stream(_)
+        | Error::Stopped(_) => {}
+    };
+    let _: fn(&Error) = cases;
 }
 
 #[test]
