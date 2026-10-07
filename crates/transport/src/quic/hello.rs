@@ -344,6 +344,10 @@ mod tests {
             Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (5, 0), (3, 0)])),
             fault("a hello with id 3 after id 5")
         );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 1_472), (1, 1_472), (2, 0), (2, 0)])),
+            fault("a hello with id 2 after id 2")
+        );
     }
 
     #[test]
