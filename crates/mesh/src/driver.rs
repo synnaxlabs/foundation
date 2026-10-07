@@ -1020,6 +1020,15 @@ mod tests {
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
     }
 
+    /// Polls each call one time.
+    async fn poll_each<F: Future>(calls: &mut [Pin<Box<F>>]) -> Vec<Poll<F::Output>> {
+        poll_fn(|cx| {
+            let polls = calls.iter_mut().map(|call| call.as_mut().poll(cx));
+            Poll::Ready(polls.collect())
+        })
+        .await
+    }
+
     /// Proposes `change`, and gives the result when the call does not wait.
     async fn started(mesh: &Mesh, change: Change) -> Poll<Result<Position, Error>> {
         now(pin!(mesh.propose(change))).await
@@ -1788,22 +1797,19 @@ mod tests {
             };
             let mesh = Mesh::open(config).await.unwrap();
             let first = lead(&mesh, &node.clock(), home(1)).await;
-            let results = Rc::new(RefCell::new(Vec::new()));
-            for id in 2..=100 {
-                let (other, results) = (mesh.clone(), Rc::clone(&results));
-                tasks.spawn(async move {
-                    let at = other.propose(home(id)).await.unwrap();
-                    results.borrow_mut().push((at, id));
-                });
-            }
+            // One poll starts each proposal, so one `Ready` holds the 99 entries.
+            let mut calls: Vec<_> = (2..=100)
+                .map(|id| Box::pin(mesh.propose(home(id))))
+                .collect();
+            let waits = poll_each(&mut calls).await;
+            assert!(waits.iter().all(Poll::is_pending));
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-            let mut results = results.take();
-            results.sort_by_key(|&(at, _)| at.index);
-            let positions: Vec<_> = results.iter().map(|&(at, _)| at).collect();
-            let expected: Vec<_> = (1..=99).map(|count| after(first, count)).collect();
+            let positions = poll_each(&mut calls).await;
+            let expected: Vec<_> = (1..=99)
+                .map(|count| Poll::Ready(Ok(after(first, count))))
+                .collect();
             assert_eq!(positions, expected);
-            let &(_, last) = results.last().unwrap();
-            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(last))));
+            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(100))));
         });
     }
 
