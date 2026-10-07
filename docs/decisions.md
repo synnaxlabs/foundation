@@ -1516,7 +1516,10 @@ How to read this record:
   Supersedes
   https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6042336187 and the
   copy cost of
-  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673. So
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673. A
+  test asserts that each read leaves no view of a chunk, and that each reader holds
+  at most one buffer, whose capacity is the length of its message (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6043389350). So
   bytes that wait for a block never use up the credit that a started message needs,
   and a peer that breaks the send rule holds at most the receive budget and stops only
   its own connection. Each node's first one-way stream is its hello, with no class byte:
