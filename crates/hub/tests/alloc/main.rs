@@ -1,6 +1,6 @@
-//! A write and the `next` of a complete reader make no heap allocation once the hub
-//! has taken a few frames, when frames wait for the reader and when it waits for
-//! them. The commit task is not counted. This binary has no test harness: the count
+//! A write and `next` make no heap allocation once the hub has taken a few frames:
+//! for a complete reader when frames wait for it and when it waits for them, and for
+//! a latest reader that the write wakes. The commit task is not counted. This binary has no test harness: the count
 //! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -168,6 +168,10 @@ fn main() {
             channels: vec![name("time"), name("value")],
         };
         let mut writer = hub.writer(config).await.expect("opens");
+        let mut latest = hub
+            .reader(&[name("value")], Mode::Latest)
+            .await
+            .expect("opens");
         for n in 0..WARM + COUNTED {
             let written = write(&mut writer, now + n);
             node.clock().sleep(SETTLE).await;
@@ -184,6 +188,18 @@ fn main() {
             let read = read(&mut reader);
             if n >= WARM {
                 assert_eq!((waited, written, read), (0, 0, 0), "frame {n} allocated");
+            }
+        }
+        let now = now + WARM + COUNTED;
+        read(&mut latest);
+        for n in 0..WARM + COUNTED {
+            let waited = wait(&mut latest);
+            let written = write(&mut writer, now + n);
+            let taken = read(&mut latest);
+            node.clock().sleep(SETTLE).await;
+            let read = read(&mut reader);
+            if n >= WARM {
+                assert_eq!((waited, written, taken, read), (0, 0, 0, 0), "latest {n}");
             }
         }
     })
