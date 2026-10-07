@@ -53,6 +53,11 @@ pub(super) enum Cost {
     Places(Box<Places>),
 }
 
+const _: () = assert!(
+    size_of::<Cost>() == size_of::<usize>(),
+    "a `Cost` grows each session by more than one pointer"
+);
+
 #[derive(Debug)]
 pub(super) struct Places {
     slots: Box<[Slot]>,
