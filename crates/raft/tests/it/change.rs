@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Answer, Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Proof,
-    Raft, Role, Start, Term, Voters,
+    Answer, Body, Change, Config, Data, Entry, Error, Grant, Hard, Link, Message,
+    Position, Proof, Raft, Role, Start, Term, Voters,
 };
 use types::node;
 
@@ -102,6 +102,7 @@ fn sent(round: u32, from: u8, to: u8, term: u64, body: Body) -> Sent {
             term,
             body,
             proof: None,
+            chain: Vec::new(),
         },
     )
 }
@@ -284,6 +285,7 @@ fn lose_the_release(count: u8) -> BTreeMap<node::Key, Raft> {
             term: Term(1),
             body: release,
             proof: None,
+            chain: Vec::new(),
         }]
     );
     let new = Voters {
@@ -522,22 +524,13 @@ fn leased_voters_refuse_a_removed_node_that_missed_a_new_term() {
     };
     // Each refusal carries the proof of term 2: node 1 holds the votes of the
     // heartbeat that moved it, nodes 2 and 3 the pre-votes of the election.
-    let refuse = |id, grant| {
-        let mut refusal = sent(ELECTION, id, 4, 2, REFUSED);
-        refusal.1.proof = Some(Proof {
-            grant,
-            candidate: key(2),
-            voters: [2, 3].map(|id| (key(id), None)).into(),
-        });
-        refusal
-    };
     let mut expected = vec![
         sent(0, 1, 4, 1, Body::Heartbeat { commit: 2 }),
         sent(0, 4, 1, 1, Body::HeartbeatReply),
     ];
     expected.extend(campaign(ELECTION, 4, &[1, 2, 3], 2, end));
-    expected.push(refuse(1, Grant::Vote));
-    expected.extend([2, 3].map(|id| refuse(id, Grant::PreVote)));
+    expected.push(refusal(1, Grant::Vote));
+    expected.extend([2, 3].map(|id| refusal(id, Grant::PreVote)));
     expected.extend((2..8).flat_map(|n| campaign(n * ELECTION, 4, &[1, 2, 3], 3, end)));
     assert_eq!(with_4, expected);
     assert_eq!(
@@ -647,6 +640,48 @@ fn votes(candidate: u8, voters: &[u8]) -> Proof {
     }
 }
 
+// The refusal node `id` sends node 4 in term 2 with the proof of the term by nodes
+// 2 and 3, and the chain of term 1: the joint entry and the leave to {1, 2, 3}.
+fn refusal(id: u8, grant: Grant) -> Sent {
+    let mut refusal = sent(ELECTION, id, 4, 2, REFUSED);
+    refusal.1.proof = Some(Proof {
+        grant,
+        candidate: key(2),
+        voters: [2, 3].map(|id| (key(id), None)).into(),
+    });
+    let joint = Voters {
+        incoming: set(&[1, 2, 3]),
+        outgoing: set(&[1, 2, 3, 4]),
+    };
+    refusal.1.chain = vec![
+        link(2, joint),
+        link(
+            3,
+            Voters {
+                incoming: set(&[1, 2, 3]),
+                outgoing: BTreeSet::new(),
+            },
+        ),
+    ];
+    refusal
+}
+
+// The change to `voters` that leader 1 wrote at `index` of term 1, elected by every
+// node, as a link of a chain.
+fn link(index: u64, voters: Voters) -> Link {
+    Link {
+        at: Position {
+            term: Term(1),
+            index,
+        },
+        change: Change {
+            voters,
+            votes: votes(1, &[1, 2, 3, 4]),
+            signature: None,
+        },
+    }
+}
+
 // A heartbeat from `from` to node 4 that claims to lead `term` with the votes of
 // `voters`.
 pub(crate) fn heartbeat(from: u8, term: u64, voters: &[u8]) -> Message {
@@ -656,6 +691,7 @@ pub(crate) fn heartbeat(from: u8, term: u64, voters: &[u8]) -> Message {
         term: Term(term),
         body: Body::Heartbeat { commit: 0 },
         proof: Some(votes(from, voters)),
+        chain: Vec::new(),
     }
 }
 
@@ -696,6 +732,7 @@ pub(crate) fn joining() -> (Raft, Raft) {
             commit: 1,
         },
         proof: Some(votes(1, &[1, 2])),
+        chain: Vec::new(),
     };
     node.step(append).unwrap();
     assert_eq!(node.voters(), &joint);
