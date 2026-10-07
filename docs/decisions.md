@@ -525,17 +525,20 @@ How to read this record:
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
   is known. Decided by the `write-path` builder (#191).
 - **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
-  clocks in its `Config`, in each call that needs them. Before the node first has mesh
+  `clock::Reader` in its `Config`, in each call that needs them. One
+  `clock::Reader::now` gives both at one instant, so a control lease and a stamp check
+  in one call see the same time, and a lease never compares readings of two clocks
+  (approved by the coordinator on 2026-10-06, #964). Before the node first has mesh
   time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
   so it never meets that case. This is a patch: #523 decides where samples wait before
   the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. Lost: time as
   arguments of each call, because each caller repeats the same two reads and can pass an
   old one. Approved by the coordinator on 2026-10-05 (#191). Mesh time in the home (the
-  ahead limit and the stamp of each entry) is the midpoint of `clock::Reader::now`,
-  which never goes back. Lost: the latest edge, because it goes back when the error
-  shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500 days ahead, so the
-  ahead limit stops nothing and one bad stamp makes each later true stamp `Backwards`
-  (#952 review, 2026-10-06).
+  ahead limit and the stamp of each entry) is the midpoint of the mesh time of
+  `clock::Reader::now`, which never goes back. Lost: the latest edge, because it goes
+  back when the error shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500
+  days ahead, so the ahead limit stops nothing and one bad stamp makes each later true
+  stamp `Backwards` (#952 review, 2026-10-06).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -855,7 +858,11 @@ How to read this record:
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
   `clock::Reader::first` gives that stamp: the first estimate at a reading. Later
   estimates never change it, so the stamps keep the order of their readings and are
-  never after mesh time (#523).
+  never after mesh time (#523). `clock::Reader::now` gives a `clock::Time`: a reading
+  of the monotonic clock, and mesh time at that reading, from one read of the clock, so
+  a sample with no mesh time keeps that reading. Lost: mesh time at a reading the
+  caller made, which can go back while the clock slews down. Approved by the
+  coordinator on 2026-10-06 (#964).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
