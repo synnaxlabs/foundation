@@ -511,6 +511,31 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
     });
 }
 
+/// A commit task that waits for a commit when the hub and its sessions drop ends at
+/// once, and so drops the commit, which holds the ring open.
+#[test]
+fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
+    run(23, |test| async move {
+        let reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[1]);
+        let Test {
+            pool,
+            clock,
+            hub,
+            ended,
+            ..
+        } = test;
+        clock.sleep(Span::from_nanos(1)).await;
+        drop((hub, reader, writer));
+        clock.sleep(Span::from_nanos(1)).await;
+        assert_eq!(ended.get(), 1, "the commit task ended before the commit");
+        clock.sleep(SETTLE).await;
+        assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+    });
+}
+
 #[test]
 fn frees_the_frames_of_a_reader_when_it_drops() {
     run(7, |test| async move {

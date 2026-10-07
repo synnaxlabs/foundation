@@ -887,6 +887,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929). The
   surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
+- **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
+  waker in the state while it sleeps and while it waits for a commit. The state wakes
+  it on drop. So the task ends, and drops the commit it waits for, at its first poll
+  after the hub and each of its sessions drop, and the home and its buffer end then.
+  `node` relies on this to close a shard's ring before it lets go of the data
+  directory lock. Lost: `Hub::close(self) -> Commit`, which each caller must call, and
+  which a clone or a live session defeats. Decided by `laptop.architect`
+  (2026-10-07T18:07:55Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
