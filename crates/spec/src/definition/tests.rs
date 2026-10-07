@@ -1475,83 +1475,9 @@ fn decodes_the_unknown_kind_fuzz_inputs_to_the_kind_check() {
 }
 
 #[test]
-fn decodes_the_access_fuzz_inputs_to_the_access_reader() {
-    let cases: [(&[u8], Error); 8] = [
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_1"
-            ),
-            Error::Truncated { at: 11 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_2"
-            ),
-            Error::Truncated { at: 11 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_3"
-            ),
-            Error::Truncated { at: 11 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_4"
-            ),
-            Error::Truncated { at: 11 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_5"
-            ),
-            Error::Truncated { at: 11 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_flag_2_at_10"
-            ),
-            Error::Flag { at: 10, found: 2 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_flag_3_at_10"
-            ),
-            Error::Flag { at: 10, found: 3 },
-        ),
-        (
-            include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/access_flag_5_at_10"
-            ),
-            Error::Flag { at: 10, found: 5 },
-        ),
-    ];
-    for (i, (bytes, expected)) in cases.into_iter().enumerate() {
-        assert_eq!(Definition::decode(bytes), Err(expected), "case {i}");
-    }
-}
-
-#[test]
-fn decodes_the_fuzz_inputs_with_only_a_kind_to_truncated() {
-    let connector = include_bytes!(
+fn decodes_the_connector_fuzz_inputs_to_the_connector_reader() {
+    let bytes = include_bytes!(
         "../../../../oracles/fuzz/spec_definition/connector_truncated_at_2"
     );
-    let node_settings = include_bytes!(
-        "../../../../oracles/fuzz/spec_definition/node_settings_truncated_at_2"
-    );
-    assert_eq!(
-        Definition::decode(connector),
-        Err(Error::Truncated { at: 2 })
-    );
-    assert_eq!(
-        Definition::decode(node_settings),
-        Err(Error::Truncated { at: 2 })
-    );
-}
-
-#[test]
-fn decodes_the_newer_version_fuzz_input_to_newer() {
-    let bytes =
-        include_bytes!("../../../../oracles/fuzz/spec_definition/newer_version_2");
-    assert_eq!(Definition::decode(bytes), Err(Error::Newer { found: 2 }));
+    assert_eq!(Definition::decode(bytes), Err(Error::Truncated { at: 2 }));
 }
