@@ -2192,9 +2192,15 @@ How to read this record:
   before `Raft::claims`, and steps the message that it checked (decided by
   `laptop.director`, 2026-10-07T17:18:49Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6043037608). A
+  For an append, a join above `prev` gives no key to the claims of the message: the
+  append can replace it, and the run brings the real join, so the next append checks
+  the claim (`box2.builder-7`, 2026-10-07:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6045701609). A
   hard proof that lost such a claim can be no quorum at a node with a newer
   configuration, which then learns the term from the leader. A follower answers a cut
-  run with the last entry it kept, and the leader sends the rest from there.
+  run with the last entry it kept, and the leader sends the rest from there. This
+  supersedes rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423.
   `propose_voters` refuses a set with a node that is not a member in the applied
   state of this node (`Error::NotMember`, the first such key), so each log
   that holds the `Voters` entry holds the join of each of its voters before it, and the
@@ -3958,6 +3964,7 @@ How to read this record:
 | Retired entry | Replaced by |
 | --- | --- |
 | A1 sketch: channel `home` field, epoch and seq pair, standby in the mesh file | S5, S12, A8 |
+| Rule 3 of #1382 (6038235423): a claim of a signer with no key refuses the message | MESH DRIVER: the claim is removed, or the append or chain is cut (6042828979, 6043037608) |
 | A1 "control is a lease" (for every holder) | S11 (optional writer setting) |
 | A2 and A15 "mesh file" and placeholder commands | K1, K3 |
 | A5 tie rule (ties ordered by seq) | S6 strict increase |

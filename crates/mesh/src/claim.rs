@@ -233,6 +233,11 @@ mod tests {
     // from 1, 2 and 3 to 1 alone, elected by all three. The receiver reads the
     // link, which makes the proof a quorum.
     fn chained() -> Message {
+        chained_in(Term(TERM.0 + 1))
+    }
+
+    // As `chained`, with the heartbeat in `term`.
+    fn chained_in(term: Term) -> Message {
         let alone = Voters {
             incoming: [key(1)].into(),
             outgoing: BTreeSet::new(),
@@ -247,7 +252,7 @@ mod tests {
             voters: [(key(1), None)].into(),
         };
         let mut heartbeat = message(1, 2, Body::Heartbeat { commit: 0 });
-        heartbeat.term = Term(TERM.0 + 1);
+        heartbeat.term = term;
         heartbeat.proof = Some(proof);
         heartbeat.chain = vec![link];
         let mut ready = Ready {
@@ -317,11 +322,14 @@ mod tests {
 
     // The chain of `chained` with its link to 1 and 2, then a link by leader 4 at
     // the next index to 1 alone, voted by 1 and 2.
+    // As `chained`, with a second link: in the term after `TERM`, leader 4 moved
+    // the voters from 1 and 2 to 1 alone, elected by 1 and 2. The message is of the
+    // term after that.
     fn two_links() -> Message {
-        let mut message = chained();
+        let mut message = chained_in(Term(TERM.0 + 2));
         let next = Position {
+            term: Term(TERM.0 + 1),
             index: 3,
-            ..written()
         };
         let pair = Voters {
             incoming: [key(1), key(2)].into(),
@@ -365,7 +373,7 @@ mod tests {
         assert_eq!(checked(&mut message, members(&[1, 2, 3])), Ok(()));
         assert_eq!(message.chain, two_links().chain[..1]);
         let unproven = raft::Error::Unproven {
-            term: Term(TERM.0 + 1),
+            term: Term(TERM.0 + 2),
             from: key(1),
         };
         assert_eq!(node(key(2)).step(message), Err(unproven));

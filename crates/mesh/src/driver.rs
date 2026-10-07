@@ -224,6 +224,7 @@ impl Mesh {
     ///   hold. A claim of a signer with no key at this node is not an error: a voter
     ///   of the proof with no key is removed, and an append is cut before the first
     ///   entry with a claim of such a signer, so the group takes the shorter run.
+    ///   For an append, a join above `prev` gives no key: the append can replace it.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
@@ -238,8 +239,7 @@ impl Mesh {
         let mut group = self.group.borrow_mut();
         group.taking()?;
         let from = message.from;
-        let public_key = |key| group.public_key(key);
-        if public_key(from) != Some(peer) {
+        if group.public_key(from, u64::MAX) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
         let Voters { incoming, outgoing } = group.raft.voters();
@@ -247,6 +247,11 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
+        let below = match &message.body {
+            Body::Append { prev, .. } => prev.index,
+            _ => u64::MAX,
+        };
+        let public_key = |key| group.public_key(key, below);
         claim::check(&group.raft, &mut message, public_key)?;
         group.raft.step(message)?;
         group.sync();
@@ -359,7 +364,8 @@ impl Mesh {
             let group = self.group.borrow();
             group.taking()?;
             let Voters { incoming, outgoing } = group.raft.voters();
-            let holds = |voter: &node::Key| group.public_key(*voter) == Some(peer);
+            let holds =
+                |voter: &node::Key| group.public_key(*voter, u64::MAX) == Some(peer);
             if !incoming.iter().chain(outgoing).any(holds) {
                 return Err(Error::PeerNotVoter { peer });
             }
@@ -512,13 +518,15 @@ struct Group {
 
 impl Group {
     // The public key of `key` in the applied state, else in the joins of the log
-    // as `raft` holds it. A node key whose unapplied joins name two public keys has
-    // none until the apply decides: the first can be a forgery.
-    fn public_key(&self, key: node::Key) -> Option<PublicKey> {
+    // as `raft` holds it at or below index `below`. A node key whose unapplied joins
+    // name two public keys has none until the apply decides: the first can be a
+    // forgery.
+    fn public_key(&self, key: node::Key, below: u64) -> Option<PublicKey> {
         if let Some(member) = self.state.member(key) {
             return Some(member.public_key());
         }
-        let mut unapplied = self.unapplied.values().filter(|(of, _)| *of == key);
+        let unapplied = self.unapplied.range(..=below).map(|(_, join)| join);
+        let mut unapplied = unapplied.filter(|(of, _)| *of == key);
         let (_, first) = unapplied.next()?;
         unapplied.all(|(_, other)| other == first).then_some(*first)
     }
@@ -2532,6 +2540,54 @@ mod tests {
             });
         }
 
+        // Node 1 holds a forged join of node 4 that no leader committed. The log of
+        // leader 3 replaces it with the real join, adds 4 to the voters, and holds a
+        // change of a term that 4 voted in, all in one append.
+        #[test]
+        fn takes_a_change_voted_by_a_node_whose_stale_join_the_append_replaces() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                write(&mesh, changes(&[Change::Join(forged)])).await;
+                let next = Term(later().0 + 1);
+                let last = Term(later().0 + 2);
+                let at = |term, index| Position { term, index };
+                let set = |incoming: &[u8], outgoing: &[u8]| Voters {
+                    incoming: incoming.iter().map(|&id| key(id)).collect(),
+                    outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+                };
+                let entries = vec![
+                    Entry {
+                        at: at(later(), 1),
+                        data: changes(&[join(4)]).remove(0),
+                    },
+                    common::change_voted(
+                        3,
+                        at(later(), 2),
+                        set(&[2, 3, 4], &[2, 3]),
+                        &[2, 3],
+                    ),
+                    common::change_voted(
+                        3,
+                        at(later(), 3),
+                        set(&[2, 3, 4], &[]),
+                        &[2, 3],
+                    ),
+                    common::change_voted(2, at(next, 4), set(&[2, 3, 4], &[]), &[2, 4]),
+                ];
+                let body = Body::Append {
+                    prev: Position::default(),
+                    entries,
+                    commit: 0,
+                };
+                let replace = proven_at(3, 1, last, &[(2, 2), (3, 3)], body);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+            });
+        }
+
         #[test]
         fn a_join_keeps_its_key_when_a_step_follows_before_the_write() {
             solo(|node, tasks| async move {
@@ -4150,6 +4206,8 @@ mod tests {
 
     /// A chain with a vote or a leader of a node that has no key at this node.
     mod chain {
+        use transport::{Class, Code};
+
         use super::*;
         use crate::common::proven_at;
 
@@ -4246,6 +4304,22 @@ mod tests {
             takes(&FOUNDERS, heartbeat(links(2, &[2, 3, 4])), Err(unproven()));
         }
 
+        // The founders' votes of term 6 for 3 prove nothing against the voters
+        // after the two links of 4, which a cut leaves out.
+        #[test]
+        fn a_chain_cut_leaves_out_each_link_after_the_cut() {
+            let mut chain = links(4, &ALL);
+            chain.push(link(3, 6, 5, voters(&[3], &[]), &FOUNDERS));
+            let body = Body::Heartbeat { commit: 0 };
+            let mut heartbeat = proven_at(3, 1, Term(7), &[(3, 3)], body);
+            heartbeat.chain = chain;
+            let unproven = raft::Error::Unproven {
+                term: Term(7),
+                from: key(3),
+            };
+            takes(&FOUNDERS, heartbeat, Err(Error::Raft(unproven)));
+        }
+
         #[test]
         fn a_chain_is_cut_before_a_link_whose_leader_has_no_key() {
             takes(&ALL, heartbeat(links(4, &ALL)), Ok(()));
@@ -4261,6 +4335,73 @@ mod tests {
             votes.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
             let claim = Error::Claim(claim::Error::Forged { signer: key(3) });
             takes(&FOUNDERS, forged, Err(claim));
+        }
+
+        // Node 1, with the keys of `members`, takes `heartbeat` through `serve` on a
+        // stream that node 3 opens. Gives what `serve` returned, and what node 3 saw
+        // on its sends after, within 100 ms.
+        fn served(
+            members: &'static [u8],
+            heartbeat: raft::Message,
+        ) -> (Option<Result<(), Error>>, Result<(), transport::Error>) {
+            let outcome = Arc::new(Mutex::new((None, Ok(()))));
+            let shared = Arc::clone(&outcome);
+            solo(move |node, tasks| async move {
+                let config = config_at(&node, &tasks, 1, PORT, members, &FOUNDERS);
+                let transport = Rc::clone(&config.transport);
+                let mesh = Mesh::start(config).await.unwrap();
+                let served = Arc::clone(&shared);
+                tasks.spawn(async move {
+                    let session = transport.accept().await.unwrap();
+                    let Peer::Node(peer) = session.peer() else {
+                        panic!("a peer with no node key opened a session");
+                    };
+                    let mut incoming = session.accept().await.unwrap();
+                    let header = incoming.receiver.recv().await.unwrap().unwrap();
+                    let protocol = wire::header::decode(&header).unwrap();
+                    assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                    served.lock().unwrap().0 = Some(mesh.serve(peer, incoming).await);
+                    // The stop reaches node 3 before the session closes.
+                    drop(session.closed().await);
+                });
+                let pool = create_pool();
+                let own =
+                    create_transport(&node, &tasks, 3, PORT + 1, Rc::clone(&pool));
+                let at = Address::Udp(SocketAddr::new(node.addresses()[0], PORT));
+                let session = own.dial(public(1), &[at]).await.unwrap();
+                let mut sender = session.open_sender(Class::Command).await.unwrap();
+                let block = |bytes: &[u8]| {
+                    let mut block = pool.alloc(bytes.len()).unwrap();
+                    block.copy_from_slice(bytes);
+                    block.freeze()
+                };
+                let header = block(&wire::header::encode(Protocol::Mesh));
+                sender.send(header).await.unwrap();
+                let bytes = Message::Raft(heartbeat).encode();
+                sender.send(block(&bytes)).await.unwrap();
+                for _ in 0..100 {
+                    node.clock().sleep(Span::MILLISECOND).await;
+                    let sent = sender.send(block(&bytes)).await;
+                    shared.lock().unwrap().1 = sent;
+                    if shared.lock().unwrap().1.is_err() {
+                        break;
+                    }
+                }
+            });
+            let outcome = outcome.lock().unwrap();
+            (outcome.0.clone(), outcome.1.clone())
+        }
+
+        #[test]
+        fn a_refused_link_stops_the_stream_with_the_refused_code() {
+            let stopped = Err(transport::Error::Stopped { code: Code(16) });
+            let served_unproven = served(&FOUNDERS, heartbeat(links(2, &[2, 3, 4])));
+            assert_eq!(served_unproven, (Some(Err(unproven())), stopped.clone()));
+            let mut forged = heartbeat(links(2, &ALL));
+            let votes = &mut forged.chain[2].change.votes.voters;
+            votes.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+            let claim = Error::Claim(claim::Error::Forged { signer: key(3) });
+            assert_eq!(served(&FOUNDERS, forged), (Some(Err(claim)), stopped));
         }
     }
 
