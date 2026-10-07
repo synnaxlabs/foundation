@@ -123,6 +123,9 @@ impl Node {
         let pinnable = shards.pinnable();
         let cores = shards.cores().get();
         for core in 0..cores {
+            // A shard that does not start drops `give`, so `interner` gives `None`.
+            let (give, take) = handoff::pair();
+            let take = std::mem::replace(&mut interner, take);
             let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
             let config = block::Config { budget };
             let pool = match memory(config.reservation()) {
@@ -141,10 +144,9 @@ impl Node {
             let mesh = mesh.take();
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
-            let (give, take) = handoff::pair();
             let open = Open {
                 core,
-                take: std::mem::replace(&mut interner, take),
+                take,
                 give,
                 files: Arc::clone(&files),
                 clock: monotonic.clone(),

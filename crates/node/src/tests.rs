@@ -418,6 +418,7 @@ mod buffer {
     use ::buffer::{Buffer, Entry};
     use types::channel::{Key, Slots};
     use types::frame::Path as Stream;
+    use types::frame::key_set::Interner;
     use types::time::Stamp;
 
     use super::*;
@@ -459,6 +460,12 @@ mod buffer {
         .expect("the run ends");
     }
 
+    /// What the node's interner gives now.
+    fn taken(node: &mut Node) -> Poll<Option<Interner>> {
+        let mut cx = Context::from_waker(Waker::noop());
+        Pin::new(&mut node.interner).poll(&mut cx)
+    }
+
     #[test]
     fn the_shards_assign_the_indexes_they_recover_in_one_table() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -467,10 +474,7 @@ mod buffer {
         write(&mut sim, &host, 1, 2);
         let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
-        let mut cx = Context::from_waker(Waker::noop());
-        let Poll::Ready(Some(mut interner)) =
-            Pin::new(&mut node.interner).poll(&mut cx)
-        else {
+        let Poll::Ready(Some(mut interner)) = taken(&mut node) else {
             panic!("the last shard gave the interner");
         };
         let slots = interner.slots();
@@ -532,7 +536,8 @@ mod buffer {
     #[test]
     fn a_crash_during_the_opens_leaves_rings_the_next_start_opens() {
         for crash in [sim::Crash::Process, sim::Crash::Power] {
-            for step in 0..40 {
+            // The opens end at about 1.14 ms.
+            for step in 0..60 {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
@@ -583,6 +588,26 @@ mod buffer {
                 code: 5,
             }),
         }
+    }
+
+    #[test]
+    fn no_shard_opens_after_a_ring_that_does_not_open() {
+        let mut run = start(7, 3, &[]);
+        run.host
+            .fail_file(Path::new("shard-1/ring"), env::files::Operation::Open);
+        assert_eq!(panics(&mut run), Vec::<String>::new());
+        assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
+        assert_eq!(run.node.join(), Err(opened(1)));
+        let shards = ["shard-0"].map(PathBuf::from);
+        assert_eq!(listed(&mut run.sim, &run.host, ""), shards);
+    }
+
+    #[test]
+    fn a_shard_with_no_memory_keeps_the_interner_from_the_node() {
+        let refused = os::memory::Error::Refused;
+        let mut run = start_with(7, 3, &[], 1 << 20, refuse(1, refused));
+        assert_eq!(run.sim.run(), Ok(()));
+        assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
     }
 
     #[test]
