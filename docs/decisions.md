@@ -2309,7 +2309,7 @@ How to read this record:
   letter or `_`, or that is `true`, `false`, or `null`, has no reference form, and
   `write` refuses it with `Unwritable::Reference`. A file writes such a name as a string
   where a kind takes a name: a kind reads a string or a reference as the same `Name`,
-  through one reader in `document::read` (#474). `export` and `discover` write every
+  through `document::read::name` (#474, #1150). `export` and `discover` write every
   name as a string (`"site_a.pt_1"`): they need no HCL rule, and a generated file reads
   back as exactly the Document it came from. This replaces the #363 ruling that a file
   writes a reserved name only as a string. The advisor decided (names and architecture
