@@ -10,8 +10,8 @@ use crate::bytes::{
     put_key, put_optional_proof, put_position, put_signature, take, take_bool,
     take_key, take_position, take_proof, take_signature,
 };
+use crate::change::Change;
 use crate::entry;
-use crate::region::Change;
 
 const RAFT: u8 = 1;
 const PROPOSE: u8 = 2;

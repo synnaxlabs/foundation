@@ -303,7 +303,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
-| `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
+| `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |

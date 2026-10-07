@@ -3,7 +3,8 @@ use std::fmt;
 use raft::Position;
 use types::node::{self, PublicKey};
 
-use crate::region::{Unfit, Unknown};
+use crate::change::Unknown;
+use crate::region::Unfit;
 use crate::{claim, log, status};
 
 /// Why a mesh call failed.

@@ -19,12 +19,13 @@ use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
+use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Signer};
 use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
-use crate::region::{self, Change, Join, Malformed, Refused, Request};
+use crate::region::{self, Refused, Request};
 use crate::status::Status;
 
 /// The time of one `raft` tick.
@@ -683,8 +684,9 @@ mod tests {
 
     use super::*;
     use crate::card;
+    use crate::change::Unknown;
     use crate::common::{self, create_pool, key, message, private, proven, public};
-    use crate::region::{Unfit, Unknown};
+    use crate::region::Unfit;
     use crate::status::Many;
     use crate::ticket::Options;
 
