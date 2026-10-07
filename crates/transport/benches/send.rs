@@ -4,22 +4,27 @@
 //! Each round fills its blocks, then times one poll of each send. A sim sleep between
 //! rounds lets the peer read and acknowledge. A send that waits on its first poll
 //! panics, so no number holds a wait.
+//!
+//! A send reads the sim clock and wakes a sim task, which `os` does more cheaply, so
+//! the control does both per block. Compare a send with the control, or a build
+//! with another build, not with an `os` number.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::future;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
 use transport::stream::Sender;
-use transport::{Address, Class, Code, Config, Port, Transport};
+use transport::{Address, Class, Code, Config, Error, Port, Transport};
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -38,53 +43,57 @@ const WARMUP: usize = 50;
 const ROUNDS: usize = 500;
 /// The sim time between rounds, in which the peer reads and acknowledges a round.
 const PAUSE: Span = Span::from_nanos(100_000_000);
+/// How the session ends.
+const CLOSED: Error = Error::PeerClosed { code: Code(0) };
 
-/// What one scenario sends: one stream per class, in turn, or no stream for the
-/// control, which moves each block into a list in place of a send.
+/// What one scenario sends.
 struct Scenario {
     name: &'static str,
-    classes: &'static [Class],
+    load: Load,
     bytes: usize,
 }
 
-const SCENARIOS: [Scenario; 6] = [
+enum Load {
+    /// No send: the same loop polls a ready future, reads the clock, and wakes the
+    /// task, for the floor of the harness and of the sim.
+    Control,
+    /// One stream per class, sent on in turn.
+    Streams(&'static [Class]),
+}
+
+const SCENARIOS: [Scenario; 5] = [
     Scenario {
         name: "control 1 KiB",
-        classes: &[],
+        load: Load::Control,
         bytes: 1024,
     },
     Scenario {
         name: "complete 64 B",
-        classes: &[Class::Complete],
+        load: Load::Streams(&[Class::Complete]),
         bytes: 64,
     },
     Scenario {
         name: "complete 1 KiB",
-        classes: &[Class::Complete],
+        load: Load::Streams(&[Class::Complete]),
         bytes: 1024,
     },
     Scenario {
         name: "complete 16 KiB",
-        classes: &[Class::Complete],
+        load: Load::Streams(&[Class::Complete]),
         bytes: 16 * 1024,
     },
     Scenario {
-        name: "latest and complete 1 KiB",
-        classes: &[Class::Latest, Class::Complete],
-        bytes: 1024,
-    },
-    Scenario {
         name: "8 complete 1 KiB",
-        classes: &[Class::Complete; 8],
+        load: Load::Streams(&[Class::Complete; 8]),
         bytes: 1024,
     },
 ];
 
 /// The result of one scenario.
-struct Line {
+struct Measured {
     name: &'static str,
     /// The nanoseconds of each timed round, sorted.
-    nanos: Vec<usize>,
+    nanos: Vec<u64>,
     allocations: u64,
 }
 
@@ -107,8 +116,12 @@ fn main() {
             let clock = node.clock();
             let mut lines = Vec::with_capacity(SCENARIOS.len());
             for scenario in &SCENARIOS {
-                let mut senders = Vec::with_capacity(scenario.classes.len());
-                for &class in scenario.classes {
+                let classes = match scenario.load {
+                    Load::Control => &[][..],
+                    Load::Streams(classes) => classes,
+                };
+                let mut senders = Vec::with_capacity(classes.len());
+                for &class in classes {
                     senders.push(session.open_sender(class).await.expect("a stream"));
                 }
                 lines.push(measure(&clock, &pool, &mut senders, scenario).await);
@@ -127,6 +140,10 @@ fn main() {
 
 /// Starts a shard on `node` that accepts one session and reads each stream until the
 /// session closes.
+///
+/// # Panics
+///
+/// On an error other than the client's close with code 0.
 fn serve(node: &Node) {
     let own = node.clone();
     let shard = env::shards::Config {
@@ -137,22 +154,34 @@ fn serve(node: &Node) {
         let config = config(&own, tasks.clone(), SERVER);
         let transport = Transport::new(config, part(&own, PORT)).expect("a transport");
         let session = transport.accept().await.expect("a session");
-        while let Ok(incoming) = session.accept().await {
-            let mut receiver = incoming.receiver;
-            tasks
-                .spawn(async move { while let Ok(Some(_)) = receiver.recv().await {} });
+        loop {
+            let mut receiver = match session.accept().await {
+                Ok(incoming) => incoming.receiver,
+                Err(CLOSED) => return,
+                Err(error) => panic!("the server failed to accept: {error}"),
+            };
+            tasks.spawn(async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(CLOSED) => return,
+                        Err(error) => panic!("the server failed to read: {error}"),
+                    }
+                }
+            });
         }
     });
     drop(started.expect("a shard"));
 }
 
-/// Runs the rounds of `scenario` on `senders` and gives its line.
+/// Runs the rounds of `scenario` on `senders`, empty for the control.
 async fn measure(
     clock: &env::clock::Clock,
     pool: &Pool,
     senders: &mut [Sender],
     scenario: &Scenario,
-) -> Line {
+) -> Measured {
+    let waker = future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
     let mut nanos = Vec::with_capacity(ROUNDS);
     let mut allocations = 0;
     let mut held = Vec::with_capacity(SENDS);
@@ -160,7 +189,10 @@ async fn measure(
         clock.sleep(PAUSE).await;
         let blocks: Vec<Block> =
             (0..SENDS).map(|_| filled(pool, scenario.bytes)).collect();
-        let (span, counted) = ALLOCATOR.count(|| time(senders, blocks, &mut held));
+        let (span, counted) = ALLOCATOR.count(|| match scenario.load {
+            Load::Control => poll_control(clock, &waker, blocks, &mut held),
+            Load::Streams(_) => poll_sends(senders, blocks),
+        });
         held.clear();
         if round >= WARMUP {
             nanos.push(span);
@@ -168,7 +200,7 @@ async fn measure(
         }
     }
     nanos.sort_unstable();
-    Line {
+    Measured {
         name: scenario.name,
         nanos,
         allocations,
@@ -176,19 +208,16 @@ async fn measure(
 }
 
 /// Polls one send of each block once, on `senders` in turn, and gives the nanoseconds
-/// it took. With no sender, it moves each block into `held` in place of a send.
+/// it took.
 ///
 /// # Panics
 ///
 /// When a send waits or fails.
 #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
-fn time(senders: &mut [Sender], blocks: Vec<Block>, held: &mut Vec<Block>) -> usize {
+fn poll_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
     let mut cx = Context::from_waker(Waker::noop());
     let mut blocks = blocks.into_iter();
     let start = Instant::now();
-    if senders.is_empty() {
-        held.extend(std::hint::black_box(&mut blocks));
-    }
     while blocks.len() > 0 {
         for (sender, block) in senders.iter_mut().zip(&mut blocks) {
             match pin!(sender.send(block)).poll(&mut cx) {
@@ -197,8 +226,34 @@ fn time(senders: &mut [Sender], blocks: Vec<Block>, held: &mut Vec<Block>) -> us
             }
         }
     }
-    let nanos = Instant::now().duration_since(start).as_nanos();
-    usize::try_from(nanos).expect("a round takes under 2^64 ns")
+    nanos(Instant::now().duration_since(start))
+}
+
+/// The loop of [`poll_sends`] with no send: per block, it polls a ready future,
+/// reads `clock`, wakes `waker`, and moves the block into `held`. Gives the
+/// nanoseconds it took.
+#[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
+fn poll_control(
+    clock: &env::clock::Clock,
+    waker: &Waker,
+    blocks: Vec<Block>,
+    held: &mut Vec<Block>,
+) -> u64 {
+    let mut cx = Context::from_waker(Waker::noop());
+    let start = Instant::now();
+    for block in blocks {
+        match pin!(future::ready(Ok::<_, Error>(block))).poll(&mut cx) {
+            Poll::Ready(block) => held.push(block.expect("a ready future")),
+            Poll::Pending => panic!("a ready future is ready"),
+        }
+        std::hint::black_box(clock.now());
+        waker.wake_by_ref();
+    }
+    nanos(Instant::now().duration_since(start))
+}
+
+fn nanos(span: Duration) -> u64 {
+    u64::try_from(span.as_nanos()).expect("a round takes under 2^64 ns")
 }
 
 /// A block from `pool` of `bytes` bytes.
@@ -211,7 +266,8 @@ fn filled(pool: &Pool, bytes: usize) -> Block {
 /// A config for `key` on `node`, with room for a round of the largest message in
 /// flight.
 fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
-    let memory = Heap::new(block::Config { budget: 1 << 24 }.reservation());
+    let pool = block::Config { budget: 1 << 24 };
+    let memory = Heap::new(pool.reservation());
     Config {
         private_key: key,
         message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
@@ -221,7 +277,7 @@ fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
         clock: node.clock(),
         entropy: node.entropy(),
         tasks,
-        pool: Rc::new(Pool::new(block::Config { budget: 1 << 24 }, memory)),
+        pool: Rc::new(Pool::new(pool, memory)),
     }
 }
 
@@ -240,18 +296,18 @@ fn public(key: &PrivateKey) -> PublicKey {
 }
 
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
-fn print(lines: &[Line]) {
+fn print(lines: &[Measured]) {
     println!("ns per send over {ROUNDS} rounds of {SENDS} sends");
+    println!("p50: the median round, over its sends; mean: all rounds, over all sends");
     println!(
         "{:<28} {:>9} {:>9} {:>12}",
         "scenario", "p50", "mean", "allocs/send"
     );
-    let sends = float(ROUNDS * SENDS);
+    let sends = per(ROUNDS * SENDS);
     for line in lines {
-        let p50 = float(line.nanos[ROUNDS / 2]) / float(SENDS);
-        let mean = float(line.nanos.iter().sum()) / sends;
-        let allocations = line.allocations;
-        let allocations = float(usize::try_from(allocations).expect("fits")) / sends;
+        let p50 = per(line.nanos[ROUNDS / 2]) / per(SENDS);
+        let mean = per(line.nanos.iter().sum::<u64>()) / sends;
+        let allocations = per(line.allocations) / sends;
         println!(
             "{:<28} {p50:>9.1} {mean:>9.1} {allocations:>12.2}",
             line.name
@@ -259,6 +315,12 @@ fn print(lines: &[Line]) {
     }
 }
 
-fn float(value: usize) -> f64 {
-    f64::from(u32::try_from(value).expect("a value under 2^32"))
+/// `value` as a float, exact below 2^53.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "a printed figure loses no digit it shows"
+)]
+fn per(value: impl TryInto<u64, Error: std::fmt::Debug>) -> f64 {
+    value.try_into().expect("fits 64 bits") as f64
 }
