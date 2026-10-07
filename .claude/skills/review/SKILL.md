@@ -36,15 +36,29 @@ returns (`git worktree remove --force <path>`).
 
 1. Check each finding against the code yourself. Drop the ones you cannot confirm, and
    say so.
-2. Post one PR comment for each round, also a round that finds nothing: its reviewers,
-   its range (`<from>..<head sha>`), and the confirmed findings, most severe first: file
-   and line, what goes wrong, and the fix.
+2. Post one PR comment for each round, also a round that finds nothing. It starts with
+   the rating and summary from the `reviewer`'s report, as given (Rating). Then its
+   reviewers, its range (`<from>..<head sha>`), and the confirmed findings, most severe
+   first: file and line, what goes wrong, and the fix.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
    the answer, also when the code is already on `main`. A deferral in a risk crate
    (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
    `transport`) needs the explicit OK of `laptop.architect`: link its comment. A fix or
    an answer that makes such a public surface change, or decides what a ruling means,
-   needs the architect's approval too: link its comment.
+   needs the architect's approval too: link its comment. So does a fix that reverses
+   a finding of the architect.
+
+## Rating
+
+Each round comment, architect review, director verdict, and red-team approval starts
+with two lines for a person who has not read the code:
+
+1. `Quality: <n>/10` for the whole PR at its head. 10: nothing to improve. 8: small
+   fixes only. 5: it works, with real problems in tests, design, or performance. 3: a
+   defect or a missing test on a failure path. 1: the wrong design.
+2. A summary of its code quality in 2 or 3 short sentences.
+
+A reviewer that did not write the PR gives both. An author never rates its own PR.
 
 ## Second round
 
@@ -65,5 +79,4 @@ nothing checked again. So when round 1 led to fix commits:
 Review is done when the last round comment ends at the PR head, finds nothing, and
 names each reviewer that the table requires, each deferral in a risk crate links its
 OK, each public surface change links the architect's approval, and each issue that the
-review or the architect promised exists. Only then does the
-author run `gh pr ready`.
+review or the architect promised exists. Only then does the author run `gh pr ready`.
