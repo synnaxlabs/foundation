@@ -1911,6 +1911,20 @@ How to read this record:
   which every member could replay and which binds to no card. Decided by
   `laptop.architect` (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
+  A `Ticket` change (kind 3) records a ticket's public key and `Options`. Apply refuses a
+  second record for one public key and a prefix that is not under the region's prefix;
+  the signature of the admin who made the ticket waits for #1213. A `Join` change (kind
+  2) carries the ticket's public key, a `Stamp` (the later edge of the admitting
+  voter's mesh time interval; a voter with no mesh time proposes no `Join`), the node
+  key, the card and its signature, the admission, and the status keys, which the voter
+  assigns (UUIDv7). Apply refuses, in this order, a forged card, a key that is already a
+  member (the one check that `State::new` also runs), an unknown ticket, and each
+  refusal of `Record::admit`. A refused change is a no-op on every node, so a forged
+  card in the log cannot stop a node. Each number in a change is little endian; a
+  `Ticket` is the public key, the prefix behind a length byte, a reusable byte (0 or
+  1), the expiry (8 bytes), and the ephemeral span behind a presence byte. Decided by
+  `laptop.architect` (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
