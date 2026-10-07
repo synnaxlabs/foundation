@@ -360,6 +360,7 @@ dependencies = [
 name = "connector-influx"
 version = "0.0.0"
 dependencies = [
+ "counting",
  "influxdb-line-protocol",
  "proptest",
  "types",
