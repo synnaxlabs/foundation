@@ -1162,10 +1162,10 @@ mod tests {
             .collect()
     }
 
-    /// A frame that no block of the shard holds: entry 0 with stamps from `first`,
-    /// entry 1 with as many scattered values, and the series of `more`. The shard's
-    /// largest block is 1835008 bytes. The writer's pool has larger blocks, and
-    /// scattered values do not compress.
+    /// A frame that no block of the shard holds: entry 0 with 240000 stamps from
+    /// `first`, entry 1 with as many scattered values, and the series of `more`. The
+    /// shard's largest block is 1835008 bytes. The writer's pool has larger blocks,
+    /// and scattered values do not compress.
     fn over_block(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
         let len = 240_000;
         let stamps: Vec<i64> = (first..).take(len).collect();
