@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::{Rc, Weak};
 use std::task::Poll;
 
@@ -41,13 +42,10 @@ impl Senders {
         let mut started = BTreeSet::new();
         loop {
             let fresh = poll_fn(|cx| {
-                let Some(group) = self.group.upgrade() else {
+                let Some(group) = self.running() else {
                     return Poll::Ready(None);
                 };
                 let mut group = group.borrow_mut();
-                if group.running().is_err() {
-                    return Poll::Ready(None);
-                }
                 let members = group.queues.keys().copied();
                 let fresh: Vec<_> =
                     members.filter(|to| !started.contains(to)).collect();
@@ -70,9 +68,11 @@ impl Senders {
     async fn send(self, to: node::Key) {
         let mut link = Link::default();
         while let Some(message) = self.next(to).await {
-            let Err(error) = self.forward(to, &mut link, message).await else {
-                continue;
+            let forward = self.forward(to, &mut link, message);
+            let Some(sent) = self.alive(to, forward).await else {
+                return;
             };
+            let Err(error) = sent else { continue };
             match error {
                 Error::Pool(_) | Error::Stream(transport::Error::TooLarge { .. }) => {}
                 Error::Stream(
@@ -94,6 +94,28 @@ impl Senders {
             group.borrow_mut().outgoing(to, cx).map(Result::ok)
         })
         .await
+    }
+
+    // What `future` gives, or `None` as soon as the group stops or drops: a send can
+    // wait for its peer with no bound.
+    async fn alive<F: Future>(&self, to: node::Key, future: F) -> Option<F::Output> {
+        let mut future = pin!(future);
+        poll_fn(|cx| {
+            let Some(group) = self.running() else {
+                return Poll::Ready(None);
+            };
+            let waker = Some(cx.waker().clone());
+            group.borrow_mut().queues.entry(to).or_default().waker = waker;
+            future.as_mut().poll(cx).map(Some)
+        })
+        .await
+    }
+
+    // The group, while it lives and runs.
+    fn running(&self) -> Option<Rc<RefCell<Group>>> {
+        let group = self.group.upgrade()?;
+        let running = group.borrow().running().is_ok();
+        running.then_some(group)
     }
 
     // Sends `message` on the stream of `link`. With no stream it opens one and sends

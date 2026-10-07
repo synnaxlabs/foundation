@@ -2020,9 +2020,10 @@ How to read this record:
   session that other protocols use, and the one session for each pair of nodes is the
   job of `transport` (#1363) (approved by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). The
-  tasks end when the group stops or when each `Mesh` drops. The task of a member that
-  left the region ends only then (#1401). Proposed by box1.builder-3, decided by the
-  architect (#471), 2026-10-07T04:11:26Z:
+  tasks end when the group stops or when each `Mesh` drops, also a task that waits in
+  a dial or in a send. The task of a member that left the region ends only then
+  (#1401). Proposed by box1.builder-3, decided by the architect (#471),
+  2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque

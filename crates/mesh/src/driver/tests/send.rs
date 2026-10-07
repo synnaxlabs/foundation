@@ -318,28 +318,36 @@ fn assert_ends<M: Future<Output = ()> + 'static>(
     assert_eq!(closed, transport::Error::PeerClosed { code: Code(0) });
 }
 
-// The test holds the transport, so only the tasks that send can end the session.
+/// Asserts that each task that sends ended, also the task of node 3, which waits in
+/// a dial: only the test holds `transport`, so only those tasks can end the session.
+async fn assert_ended(clock: &Clock, transport: Rc<Transport>) {
+    clock.sleep(Span::MILLISECOND).await;
+    assert_eq!(Rc::strong_count(&transport), 1, "a task that sends runs");
+    pending::<()>().await;
+}
+
 #[test]
-fn the_session_of_a_member_ends_when_the_mesh_drops() {
+fn each_task_that_sends_ends_when_the_mesh_drops() {
     assert_ends(|node, tasks| async move {
         let config = create_config(&node, &tasks, create_pool());
-        let _transport = Rc::clone(&config.transport);
+        let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(2)).await;
         drop(mesh);
-        pending::<()>().await;
+        assert_ended(&node.clock(), transport).await;
     });
 }
 
 #[test]
-fn the_session_of_a_member_ends_when_the_group_stops() {
+fn each_task_that_sends_ends_when_the_group_stops() {
     assert_ends(|node, tasks| async move {
         let config = create_config(&node, &tasks, create_pool());
+        let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(2)).await;
         fail_sync(&node);
         let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
         mesh.receive(public(2), heartbeat).unwrap();
-        pending::<()>().await;
+        assert_ended(&node.clock(), transport).await;
     });
 }
