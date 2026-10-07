@@ -251,8 +251,12 @@ How to read this record:
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at
   a crash restores as closed at the restore. Complete and latest sessions have
-  separate key types, so a call in the wrong mode does not compile (#725). Supersedes
-  the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+  separate key types, so a call in the wrong mode does not compile (#725). Only a
+  named complete session needs mesh time to close: `Readers::close_named` and
+  `Readers::open_named_latest` take a stamp, and no other open or close does, so the
+  home opens unnamed readers before the first estimate. A named complete session has a
+  `complete::Key`, and the wrong close panics; the architect decided (#1024).
+  Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -1748,6 +1752,13 @@ How to read this record:
   places). Codes go into `oracles/conformance/document/` at the first stable release;
   the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
   builder; approved by the coordinator (#137).
+  A message or a fix quotes text from a file with `types::text::Quoted`: U+0020 to
+  U+007E as written, except `\"`, `\\`, and `$` or `%` for a `$` or `%`
+  before `{`; each other character as `\u` and four upper-case hex digits, or `\U` and
+  eight above U+FFFF. HCL, YAML, and TOML read the form back as the text, and a
+  look-alike shows. The `config-hcl` writer keeps its own rule, because a person edits
+  what it writes. Lost: Rust's `Debug` form, which no file reads; `$$` and `%%`, which
+  only HCL reads. Decided by the architect (#941).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -2994,7 +3005,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
