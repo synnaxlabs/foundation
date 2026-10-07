@@ -2433,7 +2433,8 @@ How to read this record:
   `Status`, until the join answer of #336 gives them a caller (MESH REGION). Decided by
   `laptop.architect` (2026-10-07T22:33:29Z), which supersedes the sentence on
   `Unsynced` and `Status` of the approval below:
-  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563. `open` does not check that the transport proves the key of
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563. `open`
+  does not check that the transport proves the key of
   `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
   `Debug` text of a `Config` does not show the private key. The calls that change the
   region and the change records stay private. The surface is approved by the architect,
