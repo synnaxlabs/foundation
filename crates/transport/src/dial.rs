@@ -120,6 +120,9 @@ impl Dial<'_> {
     ///
     /// [`Error::Network`] when the socket broke.
     fn start(&mut self, index: usize) -> Result<(), Error> {
+        // Also for an unroutable address, so the kind of the next address does not
+        // decide whether a break ends the dial.
+        self.carrier.check()?;
         match self.addresses[index] {
             Address::Udp(remote) if routable(remote) => {
                 let session = self.carrier.dial(self.peer, remote)?;
@@ -367,6 +370,29 @@ mod tests {
             assert!(started.await);
             // The first attempt fails, and the socket breaks, while the dial is not
             // polled. So the next start meets the break.
+            node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+            node.fail_udp(address(&node));
+            node.clock().sleep(Span::MILLISECOND).await;
+            let broken = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(dialed.await.err(), Some(broken));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_socket_that_breaks_before_an_unroutable_attempt_ends_the_dial() {
+        let (mut sim, client, _) = nodes(0);
+        let impostor_node = sim.node(sim::node::Config::default());
+        impostor(&impostor_node);
+        let other = address(&impostor_node);
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let addresses = [Address::Udp(other), Address::Udp(PORT_ZERO)];
+            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+            let started =
+                poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
+            assert!(started.await);
             node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
             node.fail_udp(address(&node));
             node.clock().sleep(Span::MILLISECOND).await;
