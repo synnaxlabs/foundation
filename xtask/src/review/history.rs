@@ -316,7 +316,7 @@ impl<'a> History<'a> {
         let tree = String::from_utf8_lossy(fields.next().unwrap_or_default());
         let conflicts = fields
             .take_while(|path| !path.is_empty())
-            .map(|path| String::from_utf8_lossy(path).into_owned());
+            .map(|path| unrenamed(&String::from_utf8_lossy(path), [first, second]));
         Ok(Merged {
             clean,
             tree: tree.into_owned(),
@@ -350,21 +350,34 @@ struct Merged {
     /// The merged tree, with conflict markers in each file whose content conflicts.
     tree: String,
     /// Each path with a conflict, in the order `git` gives, with each byte that is not
-    /// UTF-8 replaced.
+    /// UTF-8 replaced. A file that `git` moves aside has its path before the move.
     conflicts: Vec<String>,
 }
 
 impl Merged {
-    /// The first conflicted path that is a code path, also one that `git` renamed to
-    /// `<path>~<side>` for a file/directory conflict.
+    /// The first conflicted path that is a code path.
     fn code_conflict(&self) -> Option<&str> {
         self.conflicts
             .iter()
-            .find(|p| {
-                code_path(p) || p.rsplit_once('~').is_some_and(|(p, _)| code_path(p))
-            })
+            .find(|p| code_path(p))
             .map(String::as_str)
     }
+}
+
+/// `path` without the suffix `~<side>` or `~<side>_<n>` that `git merge-tree` adds to
+/// a file that it moves aside in a file/directory conflict, where `<side>` is one of
+/// `sides`, the two commits as given to it.
+fn unrenamed(path: &str, sides: [&str; 2]) -> String {
+    let moved = path.rsplit_once('~').filter(|(_, label)| {
+        sides.iter().any(|side| {
+            label.strip_prefix(side).is_some_and(|n| {
+                n.is_empty()
+                    || n.strip_prefix('_')
+                        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            })
+        })
+    });
+    moved.map_or(path, |(path, _)| path).to_string()
 }
 
 /// Whether a change to `path`, a path as `git` gives it, can change code: a `.rs`
