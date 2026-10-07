@@ -180,6 +180,22 @@ mod tests {
         assert_eq!(bytes.held(), 0);
     }
 
+    // The trait's own `realloc` allocates before it frees, so it never gives back the
+    // old block. glibc shrinks this block in place.
+    #[test]
+    #[cfg_attr(
+        any(miri, not(all(target_os = "linux", target_env = "gnu"))),
+        ignore = "only glibc is known to shrink this block in place"
+    )]
+    fn shrinks_a_block_in_place_as_the_system_does() {
+        let bytes = Bytes::new();
+        let ptr = filled(&bytes);
+        // SAFETY: `bytes` returned `ptr` for `LAYOUT`, and 56 is not zero.
+        let shrunk = unsafe { bytes.realloc(ptr, LAYOUT, 56) };
+        assert_eq!((shrunk, bytes.held()), (ptr, 56));
+        free(&bytes, shrunk, sized(56));
+    }
+
     #[test]
     fn holds_each_block_until_its_own_free() {
         let bytes = Bytes::new();

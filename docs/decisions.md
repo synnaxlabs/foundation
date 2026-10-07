@@ -3612,6 +3612,8 @@ How to read this record:
   `realloc` that doubles 64 B to 1 MiB took 15.4 µs, not 1.6 µs (Apple M3 Max).
   Decided by `laptop.architect` on 2026-10-07T17:59:58Z
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6043758919, #1536).
+  Supersedes the reason of 5d23e00e
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042860057).
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
