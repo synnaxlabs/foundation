@@ -13,11 +13,12 @@ clock, the network, the disk, or a random source directly. Clippy's
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
-behavior. Never print a pointer. No `thread_local!` state. Two exceptions: TLS draws its
-own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions.md`), and the `hyper`
-server of HTTP SIM SERVER reads OS time into a `thread_local!` on each poll, only for
-the `date` header, which is off. It gets no `timer`, so no read changes what it does
-(the person,
+behavior. Never print a pointer. No `thread_local!` state. Three exceptions: TLS draws
+its own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions.md`). `sim::Sim::new`
+reads `Instant::now` once as the epoch of the run, and only differences from it are
+read. The `hyper` server of HTTP SIM SERVER reads OS time into a `thread_local!` on each
+poll, only for the `date` header, which is off. It gets no `timer`, so no read changes
+what it does (the person,
 https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
 2026-10-07T17:04:29Z).
 
@@ -143,13 +144,14 @@ Agents add to them freely and never weaken them. Weakening means a removed test 
 assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
 or proptest failure file. A change to the bytes of a fuzz input deletes the old input:
 keep the old file and add the new bytes as a new file. A move that keeps the bytes is
-not a deletion. Only a byte string that `main` held counts. A byte string that only a PR
-branch held, such as the old bytes of an input that a PR adds and then changes before it
-merges, was never an oracle. A PR deletes an input when a byte string that its merge
-base with `main` (`git merge-base origin/main HEAD`) holds in `oracles/fuzz/` is in no
-file there at its head. An audit of `main` takes each state that
+not a deletion. Each target's corpus, `oracles/fuzz/<target>/`, is its own oracle, and
+only a byte string that `main` held counts. A byte string that only a PR branch held,
+such as the old bytes of an input that a PR adds and then changes before it merges, was
+never an oracle. A PR deletes an input when a byte string that `oracles/fuzz/<target>/`
+holds at its merge base with `main` (`git merge-base origin/main HEAD`) is in no file of
+`oracles/fuzz/<target>/` at its head. An audit of `main` takes each state that
 `git log --first-parent origin/main -- oracles/fuzz/<target>` lists: a byte string that
-one state holds and `origin/main` does not hold was deleted
+`oracles/fuzz/<target>/` holds in one state and not on `origin/main` was deleted
 (https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500,
 2026-10-07T19:46:25Z).
 
