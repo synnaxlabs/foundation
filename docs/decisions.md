@@ -579,9 +579,9 @@ How to read this record:
   stamp makes each later true stamp `Backwards` (#952 review, 2026-10-06).
 - **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
   `codec`, and `home` items, apart from two. `Config`, which only `node` builds, names
-  `buffer` and `clock` types. `Shard::pool` gives the `block::Pool` of the shard's
-  buffer, which is in the `hub` row: a writer's frames come from it, so `hub` takes no
-  pool of its own and the two cannot differ (architect,
+  `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
+  shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool,
+  so `hub` takes no pool of its own and the two cannot differ (architect,
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051). `Config`
   takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
   for monotonic and mesh time. `home::Error` holds only what `write` gives, and each

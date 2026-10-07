@@ -487,11 +487,12 @@ impl Shard {
     /// Opens an unnamed complete reader on the index at `slot`, with a credit of
     /// `limit_bytes`. From the index's live tail on, it gets each live frame with
     /// samples after the commit that holds it, while the bytes it has spent are
-    /// below its credit. The first such frame that finds the credit spent is a miss:
-    /// the reader gets neither it nor a later frame, no grant changes that, and no
-    /// call reports it. The home does not read a missed frame back from disk yet.
-    /// Close the reader and open a new one. The new one starts at the live tail of
-    /// its open, so the frames from the miss to there reach neither reader.
+    /// below its credit: a frame spends its [`Frame::charge`]. The first such frame
+    /// that finds the credit spent is a miss: the reader gets neither it nor a later
+    /// frame, no grant changes that, and no call reports it. The home does not read
+    /// a missed frame back from disk yet. Close the reader and open a new one. The
+    /// new one starts at the live tail of its open, so the frames from the miss to
+    /// there reach neither reader.
     ///
     /// # Panics
     ///
@@ -1217,9 +1218,34 @@ mod tests {
         );
     }
 
+    const CREDIT: u64 = 1 << 20;
+
+    fn woken(shard: &mut Shard) -> Vec<reader::Key> {
+        let mut keys = Vec::new();
+        shard.woken(&mut keys);
+        keys
+    }
+
+    /// Opens a complete reader on the index at `slot`, with a credit of `CREDIT`.
+    fn complete(shard: &mut Shard, slot: Slot) -> reader::Key {
+        shard.open_complete(slot, CREDIT).into()
+    }
+
+    /// The seq of the index group `group` of each frame `reader` takes now.
+    fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
+        iter::from_fn(|| shard.take(reader))
+            .map(|frame| frame.range(group).expect("the index is present"))
+            .collect()
+    }
+
+    fn seq(seq: u64, count: u32) -> Range {
+        Range { seq, count }
+    }
+
     /// The first seq on `path` of the index at `slot` that the ring does not hold
     /// on disk. It reads the buffer of the shard, because no call of `Shard` gives
-    /// a stored seq, and no reader shows the stored seq of the backfill path.
+    /// a stored seq. Use it only where no complete reader shows the seq: on the
+    /// backfill path, for a lost frame, after a restart, and while a sync runs.
     fn stored(shard: &Shard, slot: Slot, path: Path) -> u64 {
         shard.buffer.durable(slot, path).seq
     }
@@ -1229,6 +1255,8 @@ mod tests {
         run(1, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
+            let zero = complete(&mut shard, Slot::new(0));
+            let two = complete(&mut shard, Slot::new(2));
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let both = frame(
                 &test.pool,
@@ -1241,10 +1269,11 @@ mod tests {
             );
             let one = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
             assert_eq!(shard.write(a, LIVE, one), Ok(&[applied(0, 2, 1)][..]));
-            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
+            assert_eq!(woken(&mut shard), []);
             shard.committed().await.expect("the commit ends");
-            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 3);
-            assert_eq!(stored(&shard, Slot::new(2), Path::Live), 1);
+            assert_eq!(woken(&mut shard), [zero, two]);
+            assert_eq!(taken(&mut shard, zero, 0), [seq(0, 2), seq(2, 1)]);
+            assert_eq!(taken(&mut shard, two, 1), [seq(0, 1)]);
             assert_eq!(stored(&shard, Slot::new(0), Path::Backfill), 0);
         });
     }
@@ -2428,28 +2457,9 @@ mod tests {
 
     mod read {
         use super::*;
-        const CREDIT: u64 = 1 << 20;
-
-        fn woken(shard: &mut Shard) -> Vec<reader::Key> {
-            let mut keys = Vec::new();
-            shard.woken(&mut keys);
-            keys
-        }
-
-        /// Opens a complete reader on the index at `slot`, with a credit of `CREDIT`.
-        fn complete(shard: &mut Shard, slot: Slot) -> reader::Key {
-            shard.open_complete(slot, CREDIT).into()
-        }
 
         fn latest(shard: &mut Shard, slot: Slot) -> reader::Key {
             shard.open_latest(slot)
-        }
-
-        /// The seq of the index group `group` of each frame `reader` takes now.
-        fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
-            iter::from_fn(|| shard.take(reader))
-                .map(|frame| frame.range(group).expect("the index is present"))
-                .collect()
         }
 
         fn close(shard: &mut Shard, reader: reader::Key) {
@@ -2466,10 +2476,6 @@ mod tests {
                 matches!(written, [Outcome::Applied { .. } | Outcome::Lost { .. }]),
                 "{written:?}"
             );
-        }
-
-        fn seq(seq: u64, count: u32) -> Range {
-            Range { seq, count }
         }
 
         #[test]
@@ -2670,19 +2676,24 @@ mod tests {
             run(104, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let session = shard.open_complete(Slot::new(2), 0);
+                let session = shard.open_complete(Slot::new(2), 1);
                 let reader = reader::Key::from(session);
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-                let empty = frame(&test.pool, &set, &[(2, &[])]);
-                assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(2, 0, 0)][..]));
-                shard.committed().await.expect("the commit ends");
-                assert_eq!(woken(&mut shard), []);
-                shard.grant(session, CREDIT);
-                let later = frame(&test.pool, &set, &[(2, &[10])]);
-                assert_eq!(shard.write(a, LIVE, later), Ok(&[applied(2, 0, 1)][..]));
+                let first = frame(&test.pool, &set, &[(2, &[10])]);
+                assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(2, 0, 1)][..]));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 1), [seq(0, 1)]);
+                let empty = frame(&test.pool, &set, &[(2, &[])]);
+                assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(2, 1, 0)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                shard.grant(session, CREDIT);
+                let later = frame(&test.pool, &set, &[(2, &[20])]);
+                assert_eq!(shard.write(a, LIVE, later), Ok(&[applied(2, 1, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 1), [seq(1, 1)]);
             });
         }
 
@@ -2932,7 +2943,6 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(Span::from_nanos(100_000_000)).await;
-                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
             });
@@ -3094,6 +3104,7 @@ mod tests {
         run(67, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
+            let reader = complete(&mut shard, Slot::new(0));
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             shard.write(a, LIVE, first).expect("written");
@@ -3101,7 +3112,8 @@ mod tests {
             let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
             assert_eq!(shard.write(a, LIVE, second), Ok(&[applied(0, 1, 1)][..]));
             commit.await.expect("the commit ends");
-            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 2);
+            assert_eq!(woken(&mut shard), [reader]);
+            assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1), seq(1, 1)]);
         });
     }
 
