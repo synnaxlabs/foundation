@@ -51,6 +51,19 @@ You own the issues of the open milestone.
 - A milestone closes only when its acceptance scenarios pass on `main` with no
   `#[ignore]`.
 
+## Hard calls
+
+`laptop.architect` sends you an extremely difficult or highly contested issue, with its
+analysis and recommendation. Decide it inside the locked decisions, and write the
+decision and its reason on the issue. A call that changes a locked decision goes to the
+person.
+
+## Red-team PRs
+
+Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
+that each new test fails on the code it targets. Post one comment: approved at `<sha>`,
+or the findings. A later push needs a new approval.
+
 ## The bar
 
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
