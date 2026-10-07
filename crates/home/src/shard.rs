@@ -190,8 +190,8 @@ struct Scratch {
     /// The check of each present group, in group order, with its index frame once
     /// frozen.
     checks: Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
-    /// The stored entry of each accepted group, in group order. Empty between
-    /// appends.
+    /// The stored entry of each accepted group with samples, in group order. Empty
+    /// between appends.
     entries: Vec<Entry>,
     outcomes: Vec<Outcome>,
 }
@@ -199,15 +199,16 @@ struct Scratch {
 /// What became of one group of a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Queued for the next group commit.
+    /// Queued for the next group commit. A group with no samples stores nothing and
+    /// is applied with an empty range, also when the write found no room.
     Applied {
         /// The slot of the group's index.
         slot: Slot,
         /// The seq of the group's samples.
         range: frame::Range,
     },
-    /// A live group found no room in the ring or the pool. Its seq is a gap in the
-    /// log.
+    /// A live group with samples found no room in the ring or the pool. Its seq is a
+    /// gap in the log.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -399,8 +400,8 @@ impl Shard {
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
     /// whose bodies no record or no block of the pool holds; no seq moves for either.
-    /// A handoff with no room decides before the size: the frame is lost or gets
-    /// [`Error::Full`]. [`Error::Disk`] after a failed commit, before any other error
+    /// A handoff with no room decides before the size: each group with samples of the
+    /// frame is lost, or the frame gets [`Error::Full`]. [`Error::Disk`] after a failed commit, before any other error
     /// but [`Error::Resend`].
     ///
     /// # Panics
@@ -654,11 +655,10 @@ fn freeze(
 ) -> Result<(), block::Error> {
     for (group, checked, frozen) in checks {
         if let Ok(accepted) = checked
-            && !accepted.seq().is_empty()
+            && let Some(last) = accepted.last()
         {
             let draft = split.frame(pool, *group)?;
             let frame = frozen.insert(accepted.freeze(draft, *group));
-            let last = accepted.last();
             entries.push(stored::entry(pool, frame, set, last, stored_at)?);
         }
     }
@@ -728,14 +728,17 @@ fn spend<'a>(
         let index = &mut indexes[claim.place];
         out.push(match checked {
             // A group with no samples stores nothing, so it needs no room.
-            Ok(accepted) if room || accepted.seq().is_empty() => {
+            Ok(accepted) if accepted.last().is_none() => {
+                let range = range(&accepted.seq());
+                index.spend(accepted);
+                Outcome::Applied { slot, range }
+            }
+            Ok(accepted) if room => {
                 let seq = accepted.seq();
                 let range = range(&seq);
                 index.spend(accepted);
-                if !seq.is_empty() {
-                    let frame = frozen.expect("invariant: a stored frame was frozen");
-                    readers.applied(claim.place, frame, seq);
-                }
+                let frame = frozen.expect("invariant: a stored frame was frozen");
+                readers.applied(claim.place, frame, seq);
                 Outcome::Applied { slot, range }
             }
             Ok(accepted) => {
@@ -2532,6 +2535,25 @@ mod tests {
             shard.committed().await.expect("the commit ends");
             let two = key(Slot::new(2)).as_u128();
             assert_eq!(headers(&test.ring().await, marked), [(two, 0, 1, 1, 0)]);
+        });
+    }
+
+    #[test]
+    fn applies_a_write_with_no_samples_whose_handoff_has_no_room() {
+        run(118, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            let blocks = test.fill();
+            let a = shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(0, 0, 0)][..]));
+            drop(blocks);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(find(&test.ring().await, &handoff_to("subject-a")).len(), 1);
         });
     }
 

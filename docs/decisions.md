@@ -604,10 +604,10 @@ How to read this record:
   index. A write with more than one present group pays one copy of its series into
   the index frames. Decided by the `write-path` builder; approved by the coordinator
   (#191). A group with no samples gets no index frame and no data entry. It still
-  records its handoff and renews its lease, spends a seq range of zero, and is
-  applied, also when another group of the write is lost. A write with no samples
-  still reports a failed commit. Decided by the coordinator with the advisor on
-  2026-10-06 (#885):
+  records its handoff (or keeps it waiting when it finds no room), renews its lease,
+  spends a seq range of zero, and is applied, also when another group of the write
+  is lost or its own handoff finds no room. A write with no samples still reports a
+  failed commit. Decided by the coordinator with the advisor on 2026-10-06 (#885):
   https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
