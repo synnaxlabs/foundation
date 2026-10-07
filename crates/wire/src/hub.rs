@@ -12,6 +12,9 @@
 //! [`Home`] decodes the messages from the reader's node, and [`Reader`] those from the
 //! home. Each checks the order and the runs of its side of the session.
 //!
+//! A message that does not decode, comes from the wrong side, or breaks a rule of this
+//! module stops the stream with [`MALFORMED`](crate::header::MALFORMED).
+//!
 //! Fields are little-endian.
 //!
 //! - [`Open`]: kind 1 (latest) or 2 (complete), then for complete `limit_bytes`
@@ -319,23 +322,44 @@ pub mod keys {
 pub mod ends {
     use std::slice;
 
-    use super::{Error, Writer, run};
+    use super::{Error, run};
 
     /// The bytes of one end.
     pub const LEN: usize = 8;
 
-    /// Writes `ends`, each a place and an end, into `out`, one message of the run.
+    /// Writes the first `out.len() / LEN` ends of `ends`, each a place and an end, into
+    /// `out`, one message of the run. It takes no more, so a caller that passes
+    /// `by_ref()` writes the rest into the next message.
     ///
     /// # Panics
     ///
-    /// When `ends` is empty, or `out` is not 8 bytes for each end.
-    pub fn encode(ends: impl ExactSizeIterator<Item = (u32, u32)>, out: &mut [u8]) {
-        let out = Writer::run(out, ends.len(), LEN);
-        for (out, (place, end)) in out.0.as_chunks_mut::<LEN>().0.iter_mut().zip(ends) {
-            let [p0, p1, p2, p3] = place.to_le_bytes();
-            let [e0, e1, e2, e3] = end.to_le_bytes();
-            *out = [p0, p1, p2, p3, e0, e1, e2, e3];
-        }
+    /// When `out` is empty or not a whole count of ends, or when `ends` gives fewer ends
+    /// than `out` holds.
+    pub fn encode(ends: impl IntoIterator<Item = (u32, u32)>, out: &mut [u8]) {
+        let len = out.len();
+        let (slots, rest) = out.as_chunks_mut::<LEN>();
+        assert!(
+            rest.is_empty(),
+            "out has {len} bytes, not a whole count of ends"
+        );
+        assert!(
+            !slots.is_empty(),
+            "a message of a run holds at least one item"
+        );
+        let count = slots.len();
+        let written = slots
+            .iter_mut()
+            .zip(ends)
+            .map(|(slot, (place, end))| {
+                let [p0, p1, p2, p3] = place.to_le_bytes();
+                let [e0, e1, e2, e3] = end.to_le_bytes();
+                *slot = [p0, p1, p2, p3, e0, e1, e2, e3];
+            })
+            .count();
+        assert!(
+            written == count,
+            "ends gave {written} of the {count} ends that out holds"
+        );
     }
 
     /// The ends of one message of the run, in order, each a place and an end.
@@ -724,6 +748,15 @@ mod tests {
         }
 
         #[test]
+        fn decodes_an_open_of_one_channel() {
+            let open = Open {
+                mode: Mode::Latest,
+                channels: 1,
+            };
+            assert_eq!(Open::decode(&[1, 1, 0, 0, 0]), Ok(open));
+        }
+
+        #[test]
         #[should_panic(expected = "an open names at least one channel")]
         fn panics_on_an_open_of_no_channel() {
             let open = Open {
@@ -814,6 +847,13 @@ mod tests {
         #[test]
         fn refuses_a_head_of_no_series() {
             assert_eq!(Reply::decode(&zeros(2, 18)), Err(Error::Series));
+        }
+
+        #[test]
+        fn decodes_a_head_of_one_series() {
+            let mut bytes = zeros(2, 18);
+            bytes[14] = 1;
+            assert_eq!(Reply::decode(&bytes), Ok(live()));
         }
 
         #[test]
@@ -969,9 +1009,82 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 8 bytes, and the message has 16")]
-        fn panics_when_out_has_the_wrong_length() {
-            super::super::ends::encode([(0, 1), (1, 2)].into_iter(), &mut [0; 8]);
+        #[should_panic(expected = "out has 9 bytes, not a whole count of ends")]
+        fn panics_on_a_partial_end_in_out() {
+            super::super::ends::encode([(0, 1)], &mut [0; 9]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 7 bytes, not a whole count of ends")]
+        fn panics_on_an_out_shorter_than_an_end() {
+            super::super::ends::encode([(0, 1)], &mut [0; 7]);
+        }
+
+        #[test]
+        #[should_panic(expected = "ends gave 1 of the 2 ends that out holds")]
+        fn panics_on_fewer_ends_than_out_holds() {
+            super::super::ends::encode([(0, 1)], &mut [0; 16]);
+        }
+
+        #[test]
+        fn keeps_the_ends_that_out_does_not_hold() {
+            let mut ends = [(0, 1), (1, 2), (2, 3)].into_iter();
+            let mut out = [0xaa; 8];
+            super::super::ends::encode(ends.by_ref(), &mut out);
+            assert_eq!(out.as_slice(), encode_ends(&[(0, 1)]));
+            assert_eq!(ends.collect::<Vec<_>>(), [(1, 2), (2, 3)]);
+        }
+
+        #[test]
+        fn takes_no_end_past_out_from_an_iterator_of_no_known_length() {
+            let mut ends = [(0, 1), (1, 2), (2, 3)].into_iter().filter(|_| true);
+            super::super::ends::encode(ends.by_ref(), &mut [0xaa; 8]);
+            assert_eq!(ends.collect::<Vec<_>>(), [(1, 2), (2, 3)]);
+        }
+
+        #[test]
+        #[should_panic(expected = "ends gave 1 of the 3 ends that out holds")]
+        fn panics_on_one_end_for_an_out_of_three() {
+            super::super::ends::encode([(0, 1)], &mut [0; 24]);
+        }
+
+        #[test]
+        #[should_panic(expected = "a message of a run holds at least one item")]
+        fn panics_on_an_empty_out_with_an_end() {
+            super::super::ends::encode([(0, 1)], &mut []);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 17 bytes, not a whole count of ends")]
+        fn panics_on_a_partial_end_after_two_ends() {
+            super::super::ends::encode([(0, 1), (1, 2)], &mut [0; 17]);
+        }
+
+        #[test]
+        fn writes_a_run_split_into_two_messages_from_one_iterator() {
+            let sent: Vec<_> = (0..400).map(|place| (place, (place + 1) * 8)).collect();
+            let mut ends = sent.iter().copied();
+            let mut run = vec![0xaa; sent.len() * super::super::ends::LEN];
+            let (first, second) = run.split_at_mut(184 * super::super::ends::LEN);
+            super::super::ends::encode(ends.by_ref(), first);
+            super::super::ends::encode(ends.by_ref(), second);
+            assert_eq!(ends.next(), None);
+            assert_eq!(run, encode_ends(&sent));
+        }
+
+        #[test]
+        fn writes_ends_in_place_order_from_a_list_by_place() {
+            // Home entry 0 is place 2, entry 1 is place 0, entry 2 is place 1.
+            let lens = [3, 16, 1];
+            let mut places = [(2, 0), (0, 1), (1, 2)];
+            places.sort_unstable();
+            let ends = types::frame::ends(
+                places.iter().map(|&(place, entry)| (place, lens[entry])),
+            )
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
+            let mut out = [0xaa; 24];
+            super::super::ends::encode(ends, &mut out);
+            assert_eq!(out.as_slice(), encode_ends(&[(0, 16), (1, 17), (2, 27)]));
         }
     }
 

@@ -1374,57 +1374,89 @@ fn the_digest_holds_the_polls_before_an_arrival() {
 /// The error of a receive of a failed socket.
 const EIO: Net = Net::Io { code: 5 };
 
-/// The results of receives into a buffer of 8 bytes.
-type Results = Arc<Mutex<Vec<Result<usize, Net>>>>;
+/// The results of receives into a buffer of 8 bytes: the datagrams of each batch.
+type Results = Arc<Mutex<Vec<Result<Vec<Vec<u8>>, Net>>>>;
 
-/// Starts a shard on `node` that receives from `receiver` into `results` three
+/// Starts a shard on `node` that receives from `receiver` into `results` `times`
 /// times, whatever each result.
-fn receive_three(
+fn receive_times(
     node: &node::Node,
     mut receiver: Receiver,
     results: &Results,
+    times: usize,
 ) -> Handle {
     let results = Arc::clone(results);
     let handle = node.shards().start(shard("receive"), move |_| async move {
-        for _ in 0..3 {
+        for _ in 0..times {
             let (mut bytes, mut meta) = ([0; 8], [Meta::default()]);
             let result = poll_fn(|cx| {
                 let mut buffers = [IoSliceMut::new(&mut bytes)];
                 receiver.poll_recv(cx, &mut buffers, &mut meta)
             })
             .await;
-            results.lock().unwrap().push(result);
+            let [meta] = meta;
+            let batch = result.map(|count| {
+                assert_eq!(count, 1);
+                let chunks = bytes[..meta.len].chunks(meta.stride);
+                chunks.map(<[u8]>::to_vec).collect()
+            });
+            results.lock().unwrap().push(batch);
         }
     });
     handle.unwrap()
 }
 
-/// Fails the socket of `b` on port 4433 `faults` times after three datagrams from
-/// `a` arrive at it, then gives the results of its receives.
-fn results_after(faults: usize) -> Vec<Result<usize, Net>> {
+/// Three datagrams, each longer than the one before, so each needs its own batch.
+fn uneven() -> Vec<Vec<u8>> {
+    vec![vec![0], vec![1, 1], vec![2, 2, 2]]
+}
+
+/// Fails the socket of `b` on port 4433 `faults` times after [`uneven`] from `a`
+/// arrive at it, then gives the results of five receives.
+fn results_after(faults: usize) -> Vec<Result<Vec<Vec<u8>>, Net>> {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
     let (_b, receiver) = udp(&b, 4433);
-    let _send = send(&a, sender, at(&b, 4433), numbered(3));
+    let _send = send(&a, sender, at(&b, 4433), uneven());
     sim.run_for(Span::SECOND).unwrap();
     for _ in 0..faults {
         b.fail_udp(at(&b, 4433));
     }
     let results = Results::default();
-    let _receive = receive_three(&b, receiver, &results);
+    let _receive = receive_times(&b, receiver, &results, 5);
     sim.run_for(Span::SECOND).unwrap();
     results.lock().unwrap().clone()
 }
 
 #[test]
-fn each_receive_of_a_failed_socket_gives_eio_and_never_its_queue() {
-    assert_eq!(results_after(0).first(), Some(&Ok(1)));
-    assert_eq!(results_after(1), [Err(EIO), Err(EIO), Err(EIO)]);
+fn a_failed_socket_gives_its_queue_then_eio() {
+    let batches = uneven().into_iter().map(|datagram| Ok(vec![datagram]));
+    let mut expected: Vec<_> = batches.collect();
+    assert_eq!(results_after(0), expected);
+    expected.extend([Err(EIO), Err(EIO)]);
+    assert_eq!(results_after(1), expected);
+}
+
+#[test]
+fn a_datagram_that_arrives_after_the_fault_is_lost_behind_the_queue() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (before, _a) = udp(&a, 4433);
+    let (after, _a2) = udp(&a, 4434);
+    let (_b, receiver) = udp(&b, 4433);
+    let _send = send(&a, before, at(&b, 4433), vec![vec![0]]);
+    sim.run_for(Span::SECOND).unwrap();
+    b.fail_udp(at(&b, 4433));
+    let _send = send(&a, after, at(&b, 4433), vec![vec![1, 1]]);
+    sim.run_for(Span::SECOND).unwrap();
+    let results = Results::default();
+    let _receive = receive_times(&b, receiver, &results, 2);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*results.lock().unwrap(), [Ok(vec![vec![0]]), Err(EIO)]);
 }
 
 #[test]
 fn a_second_fault_does_nothing() {
-    assert_eq!(results_after(2), [Err(EIO), Err(EIO), Err(EIO)]);
+    assert_eq!(results_after(2), results_after(1));
 }
 
 #[test]
@@ -1432,7 +1464,7 @@ fn a_receive_that_waits_wakes_with_the_fault() {
     let (mut sim, _a, b) = pair(0, link::Config::default());
     let (_b, receiver) = udp(&b, 4433);
     let results = Results::default();
-    let _receive = receive_three(&b, receiver, &results);
+    let _receive = receive_times(&b, receiver, &results, 3);
     sim.run_for(millis(10)).unwrap();
     b.fail_udp(at(&b, 4433));
     sim.run_for(millis(10)).unwrap();

@@ -296,6 +296,41 @@ mod tests {
     }
 
     #[test]
+    fn a_dial_that_connects_in_the_poll_whose_receive_fails_keeps_its_session() {
+        let (mut sim, client, server) = nodes(0);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            node.clock().sleep(spans(IDLE, 3)).await;
+            drop(transport);
+        });
+        let at = vec![Address::Udp(address(&server))];
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let start = node.clock().now();
+            let session = transport.dial(public(&SERVER), &at).await;
+            let session = session.expect("a session");
+            // The dial ends in the first poll after the pause, not at 1.5 ms.
+            assert!(node.clock().now() - start >= spans(Span::MILLISECOND, 21));
+            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            let broken = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(session.closed().await, broken);
+        });
+        // The client connects at 1.5 ms. The server's last handshake datagrams reach
+        // the client's queue in the pause, then the fault comes, so the first poll
+        // after the pause takes both.
+        testing::shard(&client, OTHER, |_, node| async move {
+            node.clock().sleep(Span::from_nanos(1_250_000)).await;
+            node.pause(spans(Span::MILLISECOND, 20));
+        });
+        let paused = client.clone();
+        testing::shard(&server, OTHER, move |_, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+            paused.fail_udp(address(&paused));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_dial_gives_the_session_of_a_server_that_proves_its_key() {
         let (mut sim, client, server) = nodes(0);
         serve(&server);

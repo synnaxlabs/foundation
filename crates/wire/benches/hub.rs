@@ -4,7 +4,7 @@
 use divan::Bencher;
 use types::{
     channel,
-    frame::{Path, Range},
+    frame::{self, Path, Range},
 };
 use wire::hub::{
     Credit, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply, ends, keys,
@@ -48,6 +48,39 @@ fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
     bencher.bench_local(|| {
         let ends = (0..series).map(|place| (place, (place + 1) * 8));
         ends::encode(divan::black_box(ends), &mut run);
+    });
+}
+
+/// A home's list of each place and its home entry, sorted by place, with entries in
+/// the reverse order of places, and the series length of each entry.
+fn list_of(series: u32) -> (Vec<(u32, usize)>, Vec<usize>) {
+    let places = (0..series)
+        .map(|place| (place, usize::try_from(series - 1 - place).expect("fits")))
+        .collect();
+    (
+        places,
+        (0..series)
+            .map(|entry| usize::try_from(entry % 13 + 1).expect("fits"))
+            .collect(),
+    )
+}
+
+/// The ends of a frame as the home writes them: from its list by place through
+/// `frame::ends`, in messages of 184 ends.
+#[divan::bench(args = SERIES)]
+fn encode_ends_by_place(bencher: Bencher<'_, '_>, series: u32) {
+    let (places, lens) = list_of(series);
+    let mut run =
+        vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
+    bencher.bench_local(|| {
+        let lens = divan::black_box(&places)
+            .iter()
+            .map(|&(place, entry)| (place, lens[entry]));
+        let mut each = frame::ends(lens)
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
+        for message in run.chunks_mut(184 * ends::LEN) {
+            ends::encode(each.by_ref(), message);
+        }
     });
 }
 
@@ -100,7 +133,7 @@ fn decode_a_body(bencher: Bencher<'_, '_>, messages: u32) {
     let mut out = [0; 18];
     head(1).encode(&mut out);
     let mut run = [0; ends::LEN];
-    ends::encode([(0, messages * 1_024)].into_iter(), &mut run);
+    ends::encode([(0, messages * 1_024)], &mut run);
     let body = vec![7; usize::try_from(messages * 1_024).expect("a u32 fits a usize")];
     let mut reader = opened(1);
     bencher.bench_local(|| {

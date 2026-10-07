@@ -21,6 +21,7 @@ use types::time::Span;
 use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
+use crate::member::Member;
 use crate::region::{self, Change};
 
 /// The time of one `raft` tick.
@@ -38,9 +39,10 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// The public key of each member of the region, this node included. A member's
-    /// peer proves the key, and the key signs the member's grants.
-    pub(crate) members: BTreeMap<node::Key, PublicKey>,
+    /// Each member of the region, this node included, one record for each node. A
+    /// member's peer proves the public key of its card, and that key signs the member's
+    /// grants.
+    pub(crate) members: Vec<Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
@@ -77,20 +79,24 @@ impl Mesh {
     ///
     /// # Errors
     ///
+    /// - [`Error::Duplicate`] when two of `config.members` name one node.
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
+        let state = region::State::new(config.members).map_err(Error::Duplicate)?;
         let signer = Signer::new(config.key, &config.private_key);
-        match config.members.get(&config.key) {
+        match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
-            Some(&public) if !signer.owns(public) => return Err(Error::WrongKey),
+            Some(own) if !signer.owns(own.public_key()) => {
+                return Err(Error::WrongKey);
+            }
             Some(_) => {}
         }
         let mut voters = config.voters.iter();
-        if let Some(&key) = voters.find(|key| !config.members.contains_key(key)) {
+        if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
@@ -110,8 +116,7 @@ impl Mesh {
         };
         let group = Rc::new(RefCell::new(Group {
             raft: Raft::new(fixed, start)?,
-            members: config.members,
-            state: region::State::default(),
+            state,
             queues: BTreeMap::new(),
             stopped: Rc::default(),
             task: None,
@@ -140,6 +145,13 @@ impl Mesh {
         }
     }
 
+    /// The member with `key` in this node's view of the region, or `None` when the
+    /// region has no such member. It answers also after the group stops, from the view
+    /// at the stop.
+    pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
+        self.group.borrow().state.member(key).cloned()
+    }
+
     /// Gives the group `message`, which `peer` sent.
     ///
     /// # Errors
@@ -166,7 +178,8 @@ impl Mesh {
         let mut group = self.group.borrow_mut();
         group.running()?;
         let from = message.from;
-        if group.members.get(&from) != Some(&peer) {
+        let public_key = |key| group.state.member(key).map(Member::public_key);
+        if public_key(from) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
         let Voters { incoming, outgoing } = group.raft.voters();
@@ -174,7 +187,7 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
-        grant::check(&message, &group.members)?;
+        grant::check(&message, public_key)?;
         group.raft.step(message)?;
         group.wake();
         Ok(())
@@ -277,7 +290,6 @@ impl Drop for Watch {
 
 struct Group {
     raft: Raft,
-    members: BTreeMap<node::Key, PublicKey>,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
@@ -467,9 +479,12 @@ mod tests {
     use env::net::udp::{self, Meta, Transmit};
     use raft::{Answer, Hard, Term};
     use sim::{Crash, Sim, link};
+    use transport::Address;
+    use types::node::SealKey;
 
     use super::*;
-    use crate::common::{self, key, message, pool, private, proven, public};
+    use crate::card;
+    use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
     use crate::region::Malformed;
 
@@ -522,7 +537,7 @@ mod tests {
             clock: node.clock(),
             entropy: node.entropy(),
             tasks: tasks.clone(),
-            pool: pool(),
+            pool: create_pool(),
         }
     }
 
@@ -534,6 +549,17 @@ mod tests {
         voters: &[u8],
     ) -> Result<Mesh, Error> {
         Mesh::open(config(node, tasks, id, members, voters)).await
+    }
+
+    /// The record of node `id` with the card of node `signer` at `version`, which
+    /// `signer` signed.
+    fn record(id: u8, signer: u8, version: u64) -> Member {
+        let mut card = common::member(signer).card.card().clone();
+        card.version = version;
+        Member {
+            card: card::Signed::sign(key(id), card, &private(signer)),
+            ..common::member(id)
+        }
     }
 
     /// A pool of one page.
@@ -952,6 +978,16 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_grant_of_a_voter_that_is_not_a_member() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                let refused = Error::Grant(grant::Error::NotMember { voter: key(3) });
+                assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
+            });
+        }
+
+        #[test]
         fn checks_the_peer_then_the_voter_then_the_grants() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
@@ -1175,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_with_no_block_for_a_write_stops_the_group() {
+    fn a_pool_with_no_block_of_one_sector_does_not_open() {
         solo(|node, tasks| async move {
             let budget = block::Config { budget: 0 };
             let memory = block::Heap::new(budget.reservation());
@@ -1183,17 +1219,12 @@ mod tests {
                 pool: Rc::new(Pool::new(budget, memory)),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
-            let mut watch = mesh.watch(INDEX);
-            assert_eq!(watch.next().await, Ok(None));
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             let cause = block::Error::TooLarge {
-                requested: 1,
+                requested: 512,
                 largest: 0,
             };
-            let stopped = Stopped::Write(log::Error::Pool(cause));
-            assert_eq!(watch.next().await, Err(Error::Stopped(stopped)));
+            let error = Error::Log(log::Error::Pool(cause));
+            assert_eq!(Mesh::open(config).await.err(), Some(error));
         });
     }
 
@@ -1302,11 +1333,10 @@ mod tests {
         });
     }
 
-    // A known defect (#1066): an open after a failed sync loses the records that it
-    // writes next. No run may lose the home. The draws of `sim` choose the runs.
     #[test]
-    fn a_power_cut_loses_a_home_after_a_failed_sync_and_a_new_open() {
-        let (mut kept, mut lost) = (0, 0);
+    fn a_power_cut_keeps_a_home_after_a_failed_sync_and_a_new_open() {
+        let mut lost = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let mut sim = Sim::new(sim::Config {
                 seed: run,
@@ -1330,27 +1360,33 @@ mod tests {
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
-            let end = sim
+            let changes = sim
                 .run_on(&node, |node, _| async move {
                     let files = node.files();
                     let (_, stored) =
-                        Log::open(files, LOG.into(), pool()).await.unwrap();
-                    let entry = stored.entries.last()?;
-                    let Data::Bytes(bytes) = &entry.data else {
-                        return None;
-                    };
-                    Change::decode(bytes).ok()
+                        Log::open(files, LOG.into(), create_pool()).await.unwrap();
+                    let changes = stored.entries.into_iter().map(|entry| {
+                        let Data::Bytes(bytes) = entry.data else {
+                            return None;
+                        };
+                        Change::decode(&bytes).ok()
+                    });
+                    changes.collect::<Vec<_>>()
                 })
                 .unwrap();
-            if end == Some(home(3)) {
-                kept += 1;
-            } else {
-                assert_eq!(end, Some(home(1)), "run {run}");
-                lost += 1;
+            if changes.contains(&Some(home(2))) {
+                gave = gave.saturating_add(1);
+            }
+            let end = changes.last().copied().flatten();
+            if end != Some(home(3)) {
+                lost.push((run, end));
             }
         }
-        assert_ne!(lost, 0, "no run lost the home");
-        assert_ne!(kept, 0, "each run lost the home");
+        assert_eq!(lost, [], "(run, the last change after the power cut)");
+        assert!(
+            gave > 16,
+            "runs in which the open gave the failed change: {gave}"
+        );
     }
 
     #[test]
@@ -1391,6 +1427,93 @@ mod tests {
             assert_eq!(refused.to_string(), text);
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
         });
+    }
+
+    #[test]
+    fn member_gives_the_record_of_a_member_and_none_for_another_node() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            assert_eq!(mesh.member(key(2)), Some(common::member(2)));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1)));
+            assert_eq!(mesh.member(key(9)), None);
+        });
+    }
+
+    #[test]
+    fn member_gives_the_record_after_the_group_stops() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stopped = fail_sync(&node);
+            mesh.propose(home(2)).unwrap();
+            assert_eq!(watch.next().await, Err(stopped));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1)));
+            assert_eq!(mesh.member(key(2)), None);
+        });
+    }
+
+    #[test]
+    fn member_gives_the_record_that_its_card_names_for_each_order_of_the_records() {
+        let orders = [
+            [1, 2, 3],
+            [1, 3, 2],
+            [2, 1, 3],
+            [2, 3, 1],
+            [3, 1, 2],
+            [3, 2, 1],
+        ];
+        for order in orders {
+            solo(move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &order, &[1]).await.unwrap();
+                for id in IDS {
+                    let member = Some(common::member(id));
+                    assert_eq!(mesh.member(key(id)), member, "{order:?}");
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn open_refuses_two_records_of_one_node() {
+        let admitted = Member {
+            admission: [1; 64],
+            ..common::member(2)
+        };
+        let mut card = record(2, 3, 2).card.card().clone();
+        card.seal_key = SealKey::new([8; 32]).unwrap();
+        let address = Address::Udp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4100));
+        card.addresses = card::addresses::Addresses::new(vec![address]).unwrap();
+        let other = Member {
+            card: card::Signed::sign(key(2), card, &private(3)),
+            admission: [1; 64],
+            ephemeral: Some(Span::MILLISECOND),
+            status: [("clock.offset".parse().unwrap(), INDEX)].into(),
+        };
+        let cases = [
+            ("an equal record", record(2, 2, 1)),
+            ("another version", record(2, 2, 2)),
+            ("another signer", record(2, 3, 1)),
+            ("another admission", admitted),
+            ("another record in each field", other),
+        ];
+        for (case, second) in cases {
+            for at in [0, 3] {
+                let second = second.clone();
+                solo(move |node, tasks| async move {
+                    let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
+                    config.members.insert(at, second);
+                    let opened = Mesh::open(config).await.err();
+                    let duplicate = Some(Error::Duplicate(key(2)));
+                    assert_eq!(opened, duplicate, "{case} at {at}");
+                    assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+                });
+            }
+        }
+        let text = format!("node {} has two member records", key(2));
+        assert_eq!(Error::Duplicate(key(2)).to_string(), text);
     }
 
     #[test]
@@ -1527,8 +1650,9 @@ mod tests {
         solo(|node, tasks| async move {
             drop(open(&node, &tasks, 1, &[1], &[1]).await.unwrap());
             node.clock().sleep(seconds(5)).await;
-            let (_, stored) =
-                Log::open(node.files(), LOG.into(), pool()).await.unwrap();
+            let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
             assert_eq!((stored.hard, stored.entries), (Hard::default(), Vec::new()));
         });
     }

@@ -6,7 +6,7 @@
 
 use types::{
     channel,
-    frame::{Path, Range},
+    frame::{self, Path, Range},
 };
 use wire::hub::{
     Credit, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply, ends, keys,
@@ -31,6 +31,7 @@ fn main() {
     for series in [1, 1_000, 100_000_u32] {
         ends(series);
     }
+    ends_by_place();
 }
 
 /// A reader that has decoded `Opened` and a head of `series` series.
@@ -120,4 +121,21 @@ fn ends(series: u32) {
         let end = at.map(|at| at + message.len());
         assert_eq!(last, end == Some(body.len()), "the body ends at {end:?}");
     }
+}
+
+/// A run that the home writes by place, split into messages of 184 ends.
+fn ends_by_place() {
+    let lens: Vec<_> = (0..400_u32).map(|place| (place, 3)).collect();
+    let mut run = vec![0; lens.len() * ends::LEN];
+    let ((), allocations) = ALLOCATOR.count(|| {
+        let mut each = frame::ends(lens.iter().copied())
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
+        for message in run.chunks_mut(184 * ends::LEN) {
+            ends::encode(each.by_ref(), message);
+        }
+    });
+    assert_eq!(
+        allocations, 0,
+        "the encode of a run split by place allocated"
+    );
 }
