@@ -1855,6 +1855,16 @@ How to read this record:
   would move the policy to other voters silently, and X26 could never fail), and the
   region from the directory (K2 makes the layout a default only; r3 rejected a
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
+  The `<kind>` segment of each of the seven kinds: `@access`, `@connector`, `@region`,
+  `@node_settings`, `@compression`, `@placement`, and `@time`. Each is the kind's HCL
+  keyword: `compression` (compression section), `placement` (S12), and `time`, which
+  the architect decided here (C6 shows `[[time]]`, and X36 replaced its content). The
+  kind is `spec::definition::Kind`, and the module `spec::key` holds the whole key rule:
+  the segments, the `@` rule, the bound, `Kind::key`, and `key::Error`. Lost: a module
+  `spec::kind`, because in `spec` "kind" also names a connector's driver. Decided by the
+  architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031286198 and
+  https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031290037).
 
 ### 1.12 Access, identity, and secrets
 

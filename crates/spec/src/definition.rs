@@ -54,7 +54,6 @@ use types::name::{self, Name, Selector, Written};
 use crate::access::{Action, Actions, Policy};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
-use crate::kind::Kind;
 use crate::node_settings;
 use crate::placement;
 use crate::region::{Delegation, NoVoters};
@@ -93,21 +92,26 @@ pub enum Definition {
     Time(time::Policy),
 }
 
-impl Definition {
-    /// The kind of the definition.
-    #[must_use]
-    pub const fn kind(&self) -> Kind {
-        match self {
-            Self::Access(_) => Kind::Access,
-            Self::Connector(_) => Kind::Connector,
-            Self::Region(_) => Kind::Region,
-            Self::NodeSettings(_) => Kind::NodeSettings,
-            Self::Compression(_) => Kind::Compression,
-            Self::Placement(_) => Kind::Placement,
-            Self::Time(_) => Kind::Time,
-        }
-    }
+/// The kind of a definition, which its tree key names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// An access policy.
+    Access,
+    /// A connector.
+    Connector,
+    /// The record of a child region.
+    Region,
+    /// A node settings policy.
+    NodeSettings,
+    /// A compression policy.
+    Compression,
+    /// A placement policy.
+    Placement,
+    /// A time policy.
+    Time,
+}
 
+impl Definition {
     /// Writes the canonical bytes of the definition.
     #[must_use]
     #[expect(

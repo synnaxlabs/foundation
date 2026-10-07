@@ -843,19 +843,3 @@ proptest! {
         }
     }
 }
-
-#[test]
-fn gives_the_kind_of_each_definition() {
-    use crate::kind::Kind;
-    assert_eq!(policy().kind(), Kind::Access);
-    assert_eq!(connector().kind(), Kind::Connector);
-    assert_eq!(region().kind(), Kind::Region);
-    assert_eq!(settings(Some(1), None).kind(), Kind::NodeSettings);
-    let compression = Definition::Compression(compression::Policy {
-        select: select(),
-        mode: Mode::Auto,
-    });
-    assert_eq!(compression.kind(), Kind::Compression);
-    assert_eq!(placement(None, &["n_2"]).kind(), Kind::Placement);
-    assert_eq!(time_policy(None).kind(), Kind::Time);
-}

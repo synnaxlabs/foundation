@@ -6,7 +6,7 @@ pub mod access;
 pub mod compression;
 pub mod connector;
 pub mod definition;
-pub mod kind;
+pub mod key;
 pub mod node_settings;
 pub mod placement;
 pub mod region;
