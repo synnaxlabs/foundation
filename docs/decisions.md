@@ -3328,13 +3328,20 @@ How to read this record:
   can hold bytes the program never wrote, such as padding or the spare capacity of a
   `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
   and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
-  3605); when Rust has one, `freed_holding` uses it and the exception goes. The static
-  also holds the count of `Allocator::held`: the bytes in the blocks that it gave out
-  and did not free, so a test can bound the memory of a structure. It is one more atomic
-  count, so the exception "Allow in test binaries" covers it as it is. Decided by
-  `laptop.architect` on 2026-10-07T14:33:00Z, and corrected to `usize` on
-  2026-10-07T14:48:34Z
-  (https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190).
+  3605); when Rust has one, `freed_holding` uses it and the exception goes. A binary
+  that bounds the memory of a structure holds `counting::Bytes`, one atomic count of
+  the bytes it holds; a binary holds one counting allocator, `Allocator` or `Bytes`.
+  `Allocator` does not keep that count: a benchmark must not pay for a count that only
+  a test reads, or its baseline moves with no product change, as
+  `transport/benches/send.rs` did (+4.2% to +11.2% at p50). Lost: `Allocator` keeps
+  `held` (that cost in each counting binary); a `bool` at construction (a branch on
+  each allocation and free, and a `held` that must panic when it is false);
+  `Allocator<const HELD: bool>` (no branch, but `Allocator<true>` says nothing at the
+  call site, and no caller needs both counts in one binary). Decided by
+  `laptop.architect` on 2026-10-07T16:28:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242).
+  Supersedes the `held` part of
+  https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190.
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
