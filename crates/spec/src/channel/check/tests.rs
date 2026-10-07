@@ -35,12 +35,11 @@ fn f64() -> DataType {
 }
 
 fn check_all(channels: &[(&str, Channel)]) -> Vec<Problem> {
-    let names: Vec<_> = channels.iter().map(|(text, _)| name(text)).collect();
-    check(
-        names
-            .iter()
-            .zip(channels.iter().map(|(_, channel)| channel)),
-    )
+    let channels = channels
+        .iter()
+        .map(|(text, channel)| (name(text), channel.clone()))
+        .collect();
+    check(&channels)
 }
 
 #[test]
@@ -48,11 +47,26 @@ fn accepts_channels_with_correct_edges() {
     let channels = [
         ("a.time", index(1, Some(2), Some(3))),
         ("a.error", data(2, 1, None, f64())),
-        ("a.control", data(3, 1, None, f64())),
+        ("a.control_time", index(6, None, None)),
+        ("a.control", data(3, 6, None, f64())),
         ("a.quality", data(4, 1, None, DataType::Quality)),
         ("a.pressure", data(5, 1, Some(4), f64())),
     ];
     assert_eq!(check_all(&channels), []);
+}
+
+#[test]
+fn refuses_a_control_channel_on_the_index_it_controls() {
+    let channels = [
+        ("a.time", index(1, None, Some(3))),
+        ("a.control", data(3, 1, None, f64())),
+    ];
+    let wrong = Problem::Wrong {
+        from: name("a.time"),
+        edge: Edge::Control,
+        to: name("a.control"),
+    };
+    assert_eq!(check_all(&channels), [wrong]);
 }
 
 #[test]
@@ -103,66 +117,14 @@ fn refuses_an_edge_to_a_key_that_no_channel_has() {
 }
 
 #[test]
-fn refuses_two_channels_with_one_key() {
-    let channels = [
+#[should_panic(
+    expected = "`a.time` and `b.time` have the same key 00000000-0000-0000-0000-000000000001"
+)]
+fn panics_on_two_channels_with_one_key() {
+    check_all(&[
         ("b.time", index(1, None, None)),
         ("a.time", index(1, None, None)),
-        ("c.time", index(1, None, None)),
-    ];
-    let shared = |second: &str| Problem::Shared {
-        key: key(1),
-        first: name("a.time"),
-        second: name(second),
-    };
-    assert_eq!(check_all(&channels), [shared("b.time"), shared("c.time")]);
-}
-
-#[test]
-fn refuses_one_name_given_twice_with_one_key() {
-    let channels = [
-        ("a.time", index(1, None, None)),
-        ("a.time", index(1, None, None)),
-    ];
-    let shared = Problem::Shared {
-        key: key(1),
-        first: name("a.time"),
-        second: name("a.time"),
-    };
-    assert_eq!(check_all(&channels), [shared]);
-}
-
-#[test]
-fn gives_only_the_shared_key_for_an_edge_to_it() {
-    let channels = [
-        ("c.time", index(1, None, None)),
-        ("a.x", data(1, 1, None, f64())),
-        ("b.p", data(2, 1, None, f64())),
-    ];
-    let shared = Problem::Shared {
-        key: key(1),
-        first: name("a.x"),
-        second: name("c.time"),
-    };
-    assert_eq!(check_all(&channels), [shared]);
-}
-
-#[test]
-fn checks_the_edges_of_each_channel_with_a_shared_key() {
-    let channels = [
-        ("a.time", index(1, None, None)),
-        ("b.x", data(1, 99, None, f64())),
-    ];
-    let shared = Problem::Shared {
-        key: key(1),
-        first: name("a.time"),
-        second: name("b.x"),
-    };
-    let dangling = Problem::Dangling {
-        from: name("b.x"),
-        edge: Edge::Index,
-        to: key(99),
-    };
-    assert_eq!(check_all(&channels), [shared, dangling]);
+    ]);
 }
 
 #[test]
@@ -186,8 +148,7 @@ fn gives_each_problem_a_message_and_a_fix() {
                 edge: Edge::Index,
                 to: key(1),
             },
-            "the index channel of `a.pressure` is 00000000-0000-0000-0000-000000000001, \
-             which no channel has",
+            "the index channel of `a.pressure` points at no channel",
             "Point it at a channel that exists",
         ),
         (
@@ -209,18 +170,8 @@ fn gives_each_problem_a_message_and_a_fix() {
         (
             wrong(Edge::Control),
             "the control channel of `a.pressure` is `a.time`, which is not a data \
-             channel",
-            "Point it at a data channel",
-        ),
-        (
-            Problem::Shared {
-                key: key(1),
-                first: to.clone(),
-                second: from.clone(),
-            },
-            "`a.time` and `a.pressure` have the same key \
-             00000000-0000-0000-0000-000000000001",
-            "Give each channel its own key",
+             channel on another index",
+            "Point it at a data channel on another index",
         ),
     ] {
         assert_eq!(problem.to_string(), message);
@@ -238,28 +189,40 @@ fn edge(from: u128, len: u128) -> BoxedStrategy<Option<u128>> {
 }
 
 /// A set of channels with correct edges: indexes, then quality channels, then other
-/// data channels, each edge drawn from the channels of the kind it needs.
+/// data channels, then control channels, each on an index other than the one it
+/// controls. Each edge is drawn from the channels of the kind it needs.
 fn correct() -> impl Strategy<Value = Vec<Channel>> {
     (1_u128..4, 0_u128..3, 1_u128..5)
         .prop_flat_map(|(indexes, qualities, others)| {
-            let data = indexes + qualities + others;
+            let end = indexes + qualities + others;
+            let control = if indexes > 1 {
+                prop::option::of(1..indexes).boxed()
+            } else {
+                Just(None).boxed()
+            };
             (
                 prop::collection::vec(
-                    (edge(indexes, data - indexes), edge(indexes, data - indexes)),
+                    (edge(indexes, end - indexes), control),
                     usize::try_from(indexes).unwrap(),
                 ),
                 prop::collection::vec(
                     (0..indexes, edge(indexes, qualities)),
-                    usize::try_from(data - indexes).unwrap(),
+                    usize::try_from(end - indexes).unwrap(),
                 ),
-                Just((indexes, qualities)),
+                Just((indexes, qualities, end)),
             )
         })
-        .prop_map(|(index_edges, data_edges, (indexes, qualities))| {
-            let mut channels: Vec<_> = (0..)
-                .zip(index_edges)
-                .map(|(n, (error, control))| index(n, error, control))
-                .collect();
+        .prop_map(|(index_edges, data_edges, (indexes, qualities, end))| {
+            let mut channels = Vec::new();
+            let mut controls = Vec::new();
+            for (n, (error, offset)) in (0..).zip(index_edges) {
+                let control = offset.map(|offset| {
+                    let key = end + n;
+                    controls.push(data(key, (n + offset) % indexes, None, f64()));
+                    key
+                });
+                channels.push(index(n, error, control));
+            }
             for (n, (to, quality)) in (indexes..).zip(data_edges) {
                 if n < indexes + qualities {
                     channels.push(data(n, to, None, DataType::Quality));
@@ -267,15 +230,18 @@ fn correct() -> impl Strategy<Value = Vec<Channel>> {
                     channels.push(data(n, to, quality, f64()));
                 }
             }
+            channels.extend(controls);
             channels
         })
-        .prop_shuffle()
 }
 
 proptest! {
     #[test]
     fn finds_no_problem_in_correct_edges(channels in correct()) {
-        let names: Vec<_> = (0..channels.len()).map(|n| name(&format!("c{n}"))).collect();
-        prop_assert_eq!(check(names.iter().zip(&channels)), []);
+        let channels = (0..)
+            .zip(channels)
+            .map(|(n, channel)| (name(&format!("c{n}")), channel))
+            .collect();
+        prop_assert_eq!(check(&channels), []);
     }
 }

@@ -8,33 +8,25 @@ use types::name::Name;
 
 use super::{Channel, DataType, Kind};
 
-/// Checks the edges between `channels`, each with its name: a data channel's index is
-/// an index channel, its quality is a data channel of type quality, an index's error
-/// and control channels are data channels, and no two channels share a key. An
-/// edge to a shared key gives only the [`Problem::Shared`].
+/// Checks the edges between `channels`: a data channel's index is an index channel,
+/// its quality is a data channel of type quality, an index's error channel is a data
+/// channel, and its control channel is a data channel on another index.
 ///
 /// Gives every problem, in name order.
-pub fn check<'a>(
-    channels: impl IntoIterator<Item = (&'a Name, &'a Channel)>,
-) -> Vec<Problem> {
-    let mut channels: Vec<_> = channels.into_iter().collect();
-    channels.sort_by_key(|(name, _)| *name);
+///
+/// # Panics
+///
+/// When two channels have one key, which only a defect gives.
+#[must_use]
+pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
     let mut keys = BTreeMap::new();
-    for (at, &(_, channel)) in channels.iter().enumerate() {
-        keys.entry(channel.key)
-            .and_modify(|(_, shared)| *shared = true)
-            .or_insert((at, false));
+    for (name, channel) in channels {
+        if let Some((first, _)) = keys.insert(channel.key, (name, channel)) {
+            panic!("`{first}` and `{name}` have the same key {}", channel.key);
+        }
     }
     let mut problems = Vec::new();
-    for (at, &(name, channel)) in channels.iter().enumerate() {
-        let (first, _) = keys[&channel.key];
-        if first != at {
-            problems.push(Problem::Shared {
-                key: channel.key,
-                first: channels[first].0.clone(),
-                second: name.clone(),
-            });
-        }
+    for (name, channel) in channels {
         for (edge, to) in edges(&channel.kind).into_iter().flatten() {
             match keys.get(&to) {
                 None => problems.push(Problem::Dangling {
@@ -42,11 +34,11 @@ pub fn check<'a>(
                     edge,
                     to,
                 }),
-                Some(&(target, false)) if !edge.fits(&channels[target].1.kind) => {
+                Some(&(target, to)) if !edge.fits(channel.key, &to.kind) => {
                     problems.push(Problem::Wrong {
                         from: name.clone(),
                         edge,
-                        to: channels[target].0.clone(),
+                        to: target.clone(),
                     });
                 }
                 Some(_) => {}
@@ -69,12 +61,11 @@ fn edges(kind: &Kind) -> [Option<(Edge, channel::Key)>; 2] {
     }
 }
 
-/// A problem across channels: an edge to a missing or wrong channel, or one key on
-/// two channels. `Display` gives the message: a lower-case clause with no final
-/// period. [`Problem::fix`] gives what to do instead.
+/// An edge to a missing or wrong channel. `Display` gives the message: a lower-case
+/// clause with no final period. [`Problem::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
-    /// No channel has the key `to`.
+    /// No channel has the key `to`. The message does not show the key.
     Dangling {
         /// The channel the edge starts at.
         from: Name,
@@ -92,15 +83,6 @@ pub enum Problem {
         /// The channel the edge points at.
         to: Name,
     },
-    /// Two channels have one key.
-    Shared {
-        /// The key.
-        key: channel::Key,
-        /// The first channel with the key, in name order.
-        first: Name,
-        /// The next channel with the key.
-        second: Name,
-    },
 }
 
 impl Problem {
@@ -110,7 +92,6 @@ impl Problem {
         match self {
             Self::Dangling { .. } => "Point it at a channel that exists",
             Self::Wrong { edge, .. } => edge.need().1,
-            Self::Shared { .. } => "Give each channel its own key",
         }
     }
 }
@@ -118,15 +99,12 @@ impl Problem {
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Dangling { from, edge, to } => {
-                write!(f, "the {edge} of `{from}` is {to}, which no channel has")
+            Self::Dangling { from, edge, .. } => {
+                write!(f, "the {edge} of `{from}` points at no channel")
             }
             Self::Wrong { from, edge, to } => {
                 let need = edge.need().0;
                 write!(f, "the {edge} of `{from}` is `{to}`, which is not {need}")
-            }
-            Self::Shared { key, first, second } => {
-                write!(f, "`{first}` and `{second}` have the same key {key}")
             }
         }
     }
@@ -141,19 +119,21 @@ pub enum Edge {
     Quality,
     /// From an index channel to the channel that holds its clock error bound.
     Error,
-    /// From an index channel to the channel that holds its control handoffs.
+    /// From an index channel to the channel that holds its control handoffs, which is
+    /// on another index.
     Control,
 }
 
 impl Edge {
-    /// Reports whether the edge can point at a channel of `kind`.
-    const fn fits(self, kind: &Kind) -> bool {
+    /// Reports whether the edge from the channel `from` can point at a channel of
+    /// `kind`.
+    fn fits(self, from: channel::Key, kind: &Kind) -> bool {
         match (self, kind) {
             (Self::Quality, Kind::Data(data)) => {
                 matches!(data.data_type(), DataType::Quality)
             }
-            (Self::Index, Kind::Index { .. })
-            | (Self::Error | Self::Control, Kind::Data(_)) => true,
+            (Self::Control, Kind::Data(data)) => data.index() != from,
+            (Self::Index, Kind::Index { .. }) | (Self::Error, Kind::Data(_)) => true,
             _ => false,
         }
     }
@@ -166,9 +146,11 @@ impl Edge {
                 "a data channel of type quality",
                 "Point it at a data channel of type quality",
             ),
-            Self::Error | Self::Control => {
-                ("a data channel", "Point it at a data channel")
-            }
+            Self::Error => ("a data channel", "Point it at a data channel"),
+            Self::Control => (
+                "a data channel on another index",
+                "Point it at a data channel on another index",
+            ),
         }
     }
 }
