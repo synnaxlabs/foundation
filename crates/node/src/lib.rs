@@ -55,7 +55,7 @@ pub struct Config<M> {
     pub entropy: env::entropy::Entropy,
     /// The disk budget of the node's rings, split evenly across its shards; shard 0
     /// also takes the remainder. Each ring that the start makes fits its part. A ring
-    /// already there keeps its size, which can be more than its part.
+    /// with a checkpoint keeps its size, which can be more than its part.
     pub disk: types::byte::Size,
 }
 
