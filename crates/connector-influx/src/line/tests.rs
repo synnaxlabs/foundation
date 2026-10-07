@@ -290,6 +290,19 @@ fn refuses_a_tab_or_nul_in_any_part() {
 }
 
 #[test]
+fn names_the_first_refused_character() {
+    refuses(&[(
+        Measurement::new("m", &[], &["a\0b\tc"]),
+        Error::Character {
+            part: Part::FieldKey,
+            text: "a\0b\tc".into(),
+            character: '\0',
+        },
+        "the field key \"a\\0b\\tc\" holds '\\0', which a line cannot hold",
+    )]);
+}
+
+#[test]
 fn refuses_a_name_influxdb_keeps_or_repeats() {
     refuses(&[
         (
