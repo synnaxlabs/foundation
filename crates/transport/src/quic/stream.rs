@@ -3091,6 +3091,27 @@ mod tests {
         });
     }
 
+    /// The peer resets a stream before accept, after its first byte. Its first read
+    /// finds no room, and no later event wakes it, so that read gives the reset.
+    #[test]
+    fn a_reset_first_message_that_waits_for_room_fails_its_first_read() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            prefixes(&mut pair, 4);
+            let _receivers = wait(&mut pair);
+            let header = [byte(Class::Complete), 10];
+            let id = raw(pair.client.connection(), Dir::Uni, &header, false);
+            pair.run(RUN);
+            let reset = pair.client.connection().send_stream(id).reset(7u32.into());
+            reset.expect("reset");
+            pair.run(RUN);
+            let (now, server) = (pair.now(), key(&pair.server));
+            let mut incoming = pair.server.endpoint.accept(server).expect("a stream");
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(7) }));
+        });
+    }
+
     #[test]
     fn a_reset_message_that_waits_for_budget_fails_the_read_and_stops_waiting() {
         testing::run(1, |shard| {

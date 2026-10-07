@@ -753,25 +753,32 @@ mod tests {
             assert_eq!(reader.buffer().capacity(), 0);
         }
 
-        #[test]
-        fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
-            let pool = pool(1 << 16);
-            let message: Vec<u8> = (0..65).collect();
-            let batch = Bytes::from(encode(slice::from_ref(&message)));
-            let (mut reader, mut at) = (Reader::new(100), 0);
+        /// The step of `reader` once it has read a message of `len` bytes, each byte
+        /// in its own chunk.
+        fn read_bytewise(reader: &mut Reader, len: usize) -> Result<Step, Error> {
+            let batch = Bytes::from(encode(&[(0..=255).cycle().take(len).collect()]));
+            let mut at = 0;
             let mut source = |_| {
                 let chunk = batch.slice(at..=at);
                 at = at.saturating_add(1);
                 Ok(Poll::Ready(Some(chunk)))
             };
-            assert_eq!(reader.read(&mut source), Ok(Step::Room(65)));
+            assert_eq!(reader.read(&mut source), Ok(Step::Room(len)));
             reader.admit();
-            let read = reader.read(&mut source);
-            assert_eq!(read, Ok(Step::Block(65)));
-            // No call shows the heap that the reader keeps.
-            assert_eq!(reader.chunks.len(), 1);
-            assert_eq!(*reader.buffer(), message[..64]);
-            assert_eq!(reader.buffer().capacity(), 65);
+            reader.read(&mut source)
+        }
+
+        #[test]
+        fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
+            let pool = pool(1 << 16);
+            let mut reader = Reader::new(100);
+            assert_eq!(read_bytewise(&mut reader, 64), Ok(Step::Block(64)));
+            // Private: no call shows the heap that the reader keeps.
+            assert_eq!(reader.held(), (None, 64));
+            reader.clear();
+            assert_eq!(read_bytewise(&mut reader, 65), Ok(Step::Block(65)));
+            assert_eq!(reader.held(), (Some((64, 65)), 1));
+            let message: Vec<u8> = (0..=255).cycle().take(65).collect();
             let read = reader.fill(pool.alloc(65).ok());
             assert_eq!(read.map(|block| block.to_vec()), Poll::Ready(message));
             assert_eq!(reader.held(), (None, 0));
