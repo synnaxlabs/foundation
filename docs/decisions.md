@@ -1773,13 +1773,15 @@ How to read this record:
   `update` a `Refusal`: the problems in the old text, or else the parts of the new
   Document that HCL text cannot hold. Nesting past the depth limit is
   `Error::TooDeep` from `read`, with `document`'s diagnostic; `write` and `update`
-  take a `Checked` Document, so they cannot meet it (#828). Lost: one `Error` for all
-  three, so each caller of `read` handled a variant that `read` never gives; a
-  `write` that takes a plain Document and clones it into a `Checked`, which copies
-  each tree only to check its depth and keeps `Unwritable::TooDeep`; and
-  an `update` that takes the Document that `read` gave for the text, so it gives only
-  `Unwritable`, but writes wrong text with no error when a caller gives another
-  Document. Decided by the `config` builder; approved by the coordinator (#330).
+  take a `Checked` Document, so they cannot meet it. Lost: one `Error` for all three,
+  so each caller of `read` handled a variant that `read` never gives; a `write` that
+  takes a plain Document and clones it into a `Checked`, which copies each tree only
+  to check its depth and keeps `Unwritable::TooDeep`; and an `update` that takes the
+  Document that `read` gave for the text, so it gives only `Unwritable`, but writes
+  wrong text with no error when a caller gives another Document. Decided by the
+  `config` builder; approved by the coordinator (#330). `write` and `update` take a
+  `Checked`, and `read` does not change: decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
