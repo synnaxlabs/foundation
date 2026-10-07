@@ -61,7 +61,8 @@ const _: () = assert!(
 #[derive(Debug)]
 pub(super) struct Places {
     slots: Box<[Slot]>,
-    /// The places in each key set that the session charged, kept until it closes.
+    /// The places in each key set that the session charged, kept until it closes. The
+    /// node builds key sets only from the spec, which bounds them.
     held: hash::Map<key_set::Key, Held>,
 }
 
