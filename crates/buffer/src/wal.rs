@@ -57,7 +57,8 @@ fn window(body_max: usize) -> Option<u64> {
 
 /// The smallest area with a largest record of `window` bytes. It holds three
 /// commits of one record in a row and the blocks that one wrap skips, so, when each
-/// commit trims, a steady load of one record in each commit gets no [`Full`].
+/// commit and each open trims, a steady load of one record in each commit gets no
+/// [`Full`].
 fn area_min(window: u64) -> u64 {
     4 * window
 }
@@ -2010,7 +2011,7 @@ mod tests {
                 prop_assert_eq!(singles(layout, lens), None);
             }
 
-            /// So does the smallest ring of any `body_max`.
+            /// So does the smallest ring, for a largest record of 1 to 6 blocks.
             #[test]
             fn the_smallest_ring_refuses_no_record_of_a_steady_load(
                 body_max in BODY_MIN..=6 * ALIGN - HEADER_LEN,
