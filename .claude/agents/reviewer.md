@@ -53,10 +53,13 @@ Check:
   public call that shows the same behavior. When the PR replaces such a compare, or
   another compare of a whole value, name each part that the old compare checked, and the
   test that now fails when a call changes it. A part with no test is a finding. When the
-  PR exists to remove work, which test fails if it is reverted? Does each new
-  `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an entry skip code
-  that the PR adds or changes, when the entry is wider than one function or its reason
-  ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
+  PR exists to remove work, which test fails if it is reverted? For a bug fix, revert
+  the fix, run its regression test, and name the path it fails through. A test that
+  passes, or fails only through another path, is a finding. Do this again in each round
+  whose range changes the fix or that test. Does each new `.cargo/mutants.toml` entry
+  meet the rule in `testing.md`? Does an entry skip code that the PR adds or changes,
+  when the entry is wider than one function or its reason ends with the PR (a stub that
+  it fills)? The PR narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a
