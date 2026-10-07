@@ -3136,6 +3136,56 @@ mod tests {
     }
 
     #[test]
+    fn after_a_peer_close_or_a_fault_give_its_error_until_it_drains() {
+        let ends: [(fn(&mut Pair), Error); 2] = [
+            (
+                |pair| {
+                    let (now, key) = (pair.now(), key(&pair.server));
+                    pair.server.endpoint.close(now, key, Code(7));
+                },
+                Error::PeerClosed { code: Code(7) },
+            ),
+            (
+                |pair| drop(raw(pair.server.connection(), Dir::Uni, &[4], false)),
+                Error::Broken {
+                    reason: "a stream of class 4".into(),
+                },
+            ),
+        ];
+        for (end, error) in ends {
+            testing::run(1, move |shard| {
+                let mut pair = connected(shard);
+                let (now, key) = (pair.now(), key(&pair.client));
+                let opened = pair.client.endpoint.open(now, key, Class::Complete);
+                let (mut sender, mut receiver) = opened.expect("a stream");
+                let mut other = open_sender(&mut pair, Class::Latest);
+                let mut finishing = open_sender(&mut pair, Class::Latest);
+                end(&mut pair);
+                let ended = |event: &&Event| matches!(event, Event::Closed { .. });
+                while !events(&pair.client).iter().any(ended) {
+                    pair.run(STEP);
+                }
+                let now = pair.now();
+                let read = next(&mut pair.client, now, &mut receiver);
+                assert_eq!(read, Err(error.clone()));
+                let endpoint = &mut pair.client.endpoint;
+                let flushed = endpoint.flush(now, &mut sender);
+                assert_eq!(flushed, Err(error.clone()));
+                let written = endpoint.write(now, &mut sender, shard.block(b"a"));
+                assert_eq!(written, Err(error.clone()));
+                let finished = endpoint.finish(now, &mut finishing);
+                assert_eq!(finished, Err(error.clone()));
+                let block = shard.block(b"b");
+                let given = try_write(&mut pair.client, now, &mut other, block);
+                assert_eq!(given, Err(error.clone()));
+                let endpoint = &mut pair.client.endpoint;
+                endpoint.reset(now, sender, Code(9));
+                endpoint.stop(now, receiver, Code(9));
+            });
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "a sender holds part of a message")]
     fn a_write_while_the_sender_holds_part_of_a_message_panics() {
         testing::run(1, |shard| {
