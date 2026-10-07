@@ -287,21 +287,21 @@ fn watch_member_next_and_serve_have_the_signatures_that_a_caller_holds() {
 #[test]
 fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
     let cases = |error: &Error| match error {
-        Error::Log(_) => 0,
-        Error::Raft(_) => 1,
-        Error::Spoofed { .. } => 2,
-        Error::NotVoter { .. } => 3,
-        Error::PeerNotVoter { .. } => 4,
-        Error::Claim(_) => 5,
-        Error::NotMember(_) => 6,
-        Error::Member(_) => 7,
-        Error::WrongKey => 8,
-        Error::Pool(_) => 9,
-        Error::Malformed => 10,
-        Error::Stream(_) => 11,
-        Error::Stopped(_) => 12,
+        Error::Log(_)
+        | Error::Raft(_)
+        | Error::Spoofed { .. }
+        | Error::NotVoter { .. }
+        | Error::PeerNotVoter { .. }
+        | Error::Claim(_)
+        | Error::NotMember(_)
+        | Error::Member(_)
+        | Error::WrongKey
+        | Error::Pool(_)
+        | Error::Malformed
+        | Error::Stream(_)
+        | Error::Stopped(_) => {}
     };
-    assert_eq!(cases(&Error::Stopped(Stopped::Dropped)), 12);
+    let _: fn(&Error) = cases;
 }
 
 #[test]

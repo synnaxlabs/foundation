@@ -2432,8 +2432,8 @@ How to read this record:
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
   crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
   `Status`: no public call reads the one or gives the two. The join answer of #336
-  decides, with its caller, how a node gets the mesh time for a stamp and where a
-  refusal goes (MEMBER RECORD). Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  decides, with its caller, where a refusal goes (MEMBER RECORD). Decided by
+  `laptop.architect` (2026-10-07T22:33:29Z):
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the

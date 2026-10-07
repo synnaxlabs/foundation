@@ -3183,6 +3183,7 @@ mod tests {
         let text = "this node has no mesh time with a known error at or after the Unix \
                     epoch, so it stamps no join";
         assert_eq!(Unstamped::Unsynced.to_string(), text);
+        let _: &dyn std::error::Error = &Unstamped::Unsynced;
     }
 
     #[test]
