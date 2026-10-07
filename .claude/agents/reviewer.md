@@ -32,18 +32,19 @@ Check:
   the tests. If none fails, it is a finding.
 - Tests: does each test fail if the behavior breaks? Name a change to the code that no
   test would catch. `cargo mutants` never removes a call or widens a pattern, so its
-  result does not answer this: remove each call that reports a problem, and widen each
-  pattern that stops a check, then run the tests. For each sentence that the PR adds to
-  a public doc or to `docs/decisions.md` that states a behavior, which test fails when
-  the code breaks it? Does a test assert through a field or call that is not public, or
-  compare the `Debug` string of the type under test, with no written reason that holds?
-  Name the public call that shows the same behavior. When the PR replaces such a
-  compare, or another compare of a whole value, name each part that the old compare
-  checked, and the test that now fails when a call changes it. A part with no test is a
-  finding. When the PR exists to remove work, which test fails if it is reverted? Does
-  each new `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an entry skip
-  code that the PR adds or changes, when the entry is wider than one function or its
-  reason ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
+  result does not answer this: remove each call that reports a problem, move it past the
+  next early return, and widen each pattern that stops a check, then run the tests. For
+  each sentence that the PR adds to a public doc or to `docs/decisions.md` that states a
+  behavior, which test fails when the code breaks it, in each place that the sentence
+  covers? Does a test assert through a field or call that is not public, or compare the
+  `Debug` string of the type under test, with no written reason that holds? Name the
+  public call that shows the same behavior. When the PR replaces such a compare, or
+  another compare of a whole value, name each part that the old compare checked, and the
+  test that now fails when a call changes it. A part with no test is a finding. When the
+  PR exists to remove work, which test fails if it is reverted? Does each new
+  `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an entry skip code
+  that the PR adds or changes, when the entry is wider than one function or its reason
+  ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds (bytes from a peer, a file,
