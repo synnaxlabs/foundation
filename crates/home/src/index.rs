@@ -77,7 +77,7 @@ impl Index {
         now: Monotonic,
         mesh: Stamp,
     ) -> Result<Accepted, Refusal> {
-        let permit = self.gate.check(key, now)?;
+        let permit = self.gate.check(key, now).map_err(Refusal::control)?;
         let mut stamps = stamps?;
         // A codec error comes first, so the vectors after an order error still decode.
         let mut order = Ok(self.order.check(path, mesh));

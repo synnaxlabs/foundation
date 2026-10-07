@@ -4,7 +4,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use types::frame::{Path, Range};
+use types::frame::{self, Path, Range};
 use wire::hub::{Credit, Head, Reply, ends};
 
 #[global_allocator]
@@ -52,4 +52,18 @@ fn main() {
             "the last end round trips"
         );
     }
+
+    let lens: Vec<_> = (0..400_u32).map(|place| (place, 3)).collect();
+    let mut run = vec![0; lens.len() * ends::LEN];
+    let ((), allocations) = ALLOCATOR.count(|| {
+        let mut each = frame::ends(lens.iter().copied())
+            .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
+        for message in run.chunks_mut(184 * ends::LEN) {
+            ends::encode(each.by_ref(), message);
+        }
+    });
+    assert_eq!(
+        allocations, 0,
+        "the encode of a run split by place allocated"
+    );
 }

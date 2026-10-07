@@ -2,6 +2,25 @@
 
 use types::channel::{self, Slot};
 use types::frame::key_set::Interner;
+use types::sample::Scalar;
+
+/// Each scalar.
+pub(crate) const SCALARS: [Scalar; 14] = [
+    Scalar::Bool,
+    Scalar::I8,
+    Scalar::I16,
+    Scalar::I32,
+    Scalar::I64,
+    Scalar::U8,
+    Scalar::U16,
+    Scalar::U32,
+    Scalar::U64,
+    Scalar::F32,
+    Scalar::F64,
+    Scalar::Stamp,
+    Scalar::Span,
+    Scalar::Uuid,
+];
 
 /// A pool of `budget` bytes on the heap.
 pub(crate) fn pool(budget: usize) -> block::Pool {

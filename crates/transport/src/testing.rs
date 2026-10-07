@@ -8,7 +8,7 @@ use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::Poll;
 
-use block::{Block, Heap, Pool};
+use block::{Block, Heap, Pool, Unique};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::net::Net;
@@ -100,6 +100,11 @@ impl Shard {
     pub(crate) fn committed(&self) -> usize {
         self.pool.committed()
     }
+}
+
+/// A block of `len` bytes from `pool`, or `None` when it has no room.
+pub(crate) fn alloc(pool: &Pool, len: usize) -> Option<Unique> {
+    pool.alloc(len).ok()
 }
 
 /// A block from `pool` that holds `bytes`.
@@ -202,6 +207,7 @@ pub(crate) struct Side {
     pub(crate) session: Session,
     pub(crate) node: Node,
     pub(crate) pool: Rc<Pool>,
+    pub(crate) transport: Transport,
 }
 
 impl Side {
@@ -217,7 +223,7 @@ impl Side {
 /// that drops its session at the end sends the close.
 pub(crate) fn sessions<C, S>(
     value: u64,
-    tune: fn(Config) -> Config,
+    tune: impl FnOnce(Config) -> Config + Send + 'static,
     client: impl FnOnce(Side) -> C + Send + 'static,
     server: impl FnOnce(Side) -> S + Send + 'static,
 ) -> (Sim, Node, Node)
@@ -228,8 +234,8 @@ where
     let (sim, client_node, server_node) = nodes(value);
     let at = address(&server_node);
     shard(&server_node, SERVER, move |config, node| async move {
-        let pool = Rc::clone(&config.pool);
         let config = tune(config);
+        let pool = Rc::clone(&config.pool);
         let part = part(&node.net(), address(&node));
         let transport = Transport::new(config, part).expect("a transport");
         let session = transport.accept().await.expect("a session");
@@ -238,6 +244,7 @@ where
             session,
             node,
             pool,
+            transport,
         })
         .await;
         // A shard that ends drops its tasks, so give the close time to go out.
@@ -257,6 +264,7 @@ where
             session,
             node,
             pool,
+            transport,
         })
         .await;
         // A shard that ends drops its tasks, so give the close time to go out.

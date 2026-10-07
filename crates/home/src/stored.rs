@@ -129,6 +129,10 @@ pub(crate) struct Series<'a> {
 /// If `body` is shorter than its header. The iterator panics on an unknown kind or
 /// scalar, and on ends that do not fit the series bytes. Bytes from another node must
 /// be checked before they reach `read`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "catch-up from disk (#274) is the first user")
+)]
 pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
     let Some(count) = body.first_chunk() else {
         panic!("the stored body of {} bytes has no count", body.len());
@@ -250,24 +254,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::{interner, key, pool};
-
-    const SCALARS: [Scalar; 14] = [
-        Scalar::Bool,
-        Scalar::I8,
-        Scalar::I16,
-        Scalar::I32,
-        Scalar::I64,
-        Scalar::U8,
-        Scalar::U16,
-        Scalar::U32,
-        Scalar::U64,
-        Scalar::F32,
-        Scalar::F64,
-        Scalar::Stamp,
-        Scalar::Span,
-        Scalar::Uuid,
-    ];
+    use crate::common::{SCALARS, interner, key, pool};
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.
