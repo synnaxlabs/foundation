@@ -41,12 +41,16 @@ const COMMIT: Span = Span::from_nanos(10_000_000);
 const POOL: usize = 1 << 21;
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
-/// Where a header block keeps its version, its `body_max`, and its CRC.
+/// Where a header block keeps its version, its `body_max`, its tail, and its CRC.
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
+const TAIL_AT: usize = 22;
 const CRC_AT: usize = 42;
 /// The bytes the header CRC covers.
 const COVER: usize = 512;
+/// The kind byte of a restart record. Its body is the chain value of the next
+/// record; after a data record, that value is the record's CRC.
+const RESTART: u8 = 3;
 
 /// What one test gets on its shard.
 struct Shard {
@@ -103,9 +107,21 @@ impl Shard {
         }
     }
 
+    /// Opens a ring that holds bytes at `offset` that this build cannot read. The
+    /// open must give `Invalid` and leave the file as it was.
+    async fn open_invalid(&self, layout: Layout, offset: u64) {
+        let before = self.memory.bytes(RING);
+        let opened = self.open(layout, &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Invalid { offset }));
+        assert!(
+            self.memory.bytes(RING) == before,
+            "the open changed the ring"
+        );
+    }
+
     /// Puts `bytes` at `at` of the body of the record at `offset` of the area,
-    /// and fixes the record's CRC so that it still follows the restart record in
-    /// the block before it.
+    /// and fixes the record's CRC so that it still follows the record in the block
+    /// before it: a restart record, or a data record of one block.
     fn tamper_record(&self, offset: u64, at: usize, bytes: &[u8]) {
         let file = self.memory.bytes(RING);
         let start = to_usize(AREA_START + offset);
@@ -113,7 +129,11 @@ impl Shard {
             u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
         };
         let len = to_usize(u64::from(u32_at(start)));
-        let chain = u32_at(start - to_usize(BLOCK) + 9);
+        let before = start - to_usize(BLOCK);
+        let chain = match file[before + 8] {
+            RESTART => u32_at(before + 9),
+            _ => u32_at(before + 4),
+        };
         let mut body = file[start + 9..start + 9 + len].to_vec();
         body[at..at + bytes.len()].copy_from_slice(bytes);
         let mut crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
@@ -2013,8 +2033,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
         buffer.committed().await.expect("commits");
         drop(buffer);
         shard.tamper_record(BLOCK, 4 + 16, &[2]);
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+        shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
 
@@ -2079,8 +2098,7 @@ fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
         drop(buffer);
         // `first` of the first entry: after the count, the index, and the path.
         shard.tamper_record(BLOCK, 4 + 16 + 1, &u64::MAX.to_le_bytes());
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+        shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
 
@@ -2104,8 +2122,47 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
         // `first` of the second entry: after the count, one table of 51 bytes,
         // the index, and the path.
         shard.tamper_record(BLOCK, 4 + 51 + 16 + 1, &1u64.to_le_bytes());
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+        shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
+    });
+}
+
+/// The open writes the header blocks and the records before the invalid one again.
+#[test]
+fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
+    run(107, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        for (first, stamp) in [(0, 30), (3, 60)] {
+            buffer
+                .append([entry(
+                    1,
+                    a,
+                    Path::Live,
+                    first,
+                    3,
+                    Some(stamp),
+                    Parts::default(),
+                )])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        drop(buffer);
+        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
+#[test]
+fn an_open_that_finds_an_invalid_header_leaves_the_ring_as_read() {
+    run(108, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        shard.tamper(TAIL_AT, &(BLOCK + 1).to_le_bytes());
+        shard.open_invalid(layout(AREA, BODY_MAX), 0).await;
     });
 }
 
