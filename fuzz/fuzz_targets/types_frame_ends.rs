@@ -142,10 +142,13 @@ fn fit(len: usize, ends: &[(usize, usize)]) {
     }
     assert_eq!(unfit, [], "the check took ends that do not fit");
     let mut last = 0;
-    for (end, series) in frame::split(&body, ends.iter().map(|&(_, end)| (end, end))) {
-        assert_eq!(series, &body[start(last)..end], "a series moved");
+    let cut = ends.iter().map(|&(entry, end)| {
+        let series = &body[start(last)..end];
         last = end;
-    }
+        (entry, series)
+    });
+    let split = frame::split(&body, ends.iter().copied());
+    assert!(split.eq(cut), "the split gave other series");
 }
 
 /// A frame drafted from `layout`, the layout of `ends`, must have them, and its series
@@ -165,9 +168,9 @@ fn draft(set: &KeySet, layout: Layout, ends: &[(usize, usize)]) {
     assert!(frame.ends().eq(ends()), "the frame has other ends");
     let body = frame.body();
     assert_eq!(frame::check(&body, ends()), Ok(()), "the ends do not fit");
-    for (entry, series) in frame::split(&body, ends()) {
-        assert_eq!(frame.series(entry), Some(series), "a series moved");
-    }
+    let series = ends().map(|(entry, _)| Some((entry, frame.series(entry)?)));
+    let split = frame::split(&body, ends()).map(Some);
+    assert!(split.eq(series), "the split gave other series");
     let indexes = ends().filter(|(entry, _)| set.groups().contains(entry));
     if indexes.count() == 1 {
         let charge = frame::charge(ends().count(), body_len);
