@@ -295,6 +295,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -317,6 +318,5 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages and change records (`mesh::region::Change::decode`, with `Card::decode`
-and `Member::decode`, #1339), `spec` tree chunks (#64),
-`types::time::Rate`, and each connector's protocol parser.
+messages, `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
+tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.

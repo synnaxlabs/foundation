@@ -6,8 +6,8 @@ use types::name::Selector;
 use types::time::Span;
 
 /// Caps the holds on the indexes that `select` matches: past `keep` after its store
-/// time, a sample is trimmed, also when a reader holds it. An index that no policy
-/// selects has no time cap.
+/// time, no hold keeps a sample, so the node may trim it when it needs disk. An index
+/// that no policy selects has no time cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
     select: Selector,
@@ -16,7 +16,8 @@ pub struct Policy {
 
 impl Policy {
     /// Makes a policy. A `keep` of zero is valid: then no hold keeps a sample after its
-    /// store time, so a reader that is behind gets a gap.
+    /// store time, so a reader that is behind gets a gap for each sample that the node
+    /// trims before the reader gets it.
     ///
     /// # Errors
     ///

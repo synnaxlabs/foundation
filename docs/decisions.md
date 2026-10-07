@@ -249,9 +249,13 @@ How to read this record:
   its store time, so a reader that is behind gets a gap. Most specific wins as a whole
   policy (X25), equal specificity is a plan error (S12), and a data channel takes its
   index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", and a
-  size cap per index.
+  size cap per index. In `config`, `select` and `keep` are both required. `keep` reads
+  with `document::read::span` (`document.bad-span`), where a negative span reads, and
+  `config` refuses it with `config.negative-span` at the `keep` value. The code names
+  the defect, so a later span bound (a reader `hold`, S10) uses it too.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on
@@ -550,11 +554,15 @@ How to read this record:
   disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
   reads, which reads each record twice, and windows held until the walk ends, which
   takes memory up to the area. Decided by the architect (#1049,
-  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). One
-  case differs: on a file with no header, the open writes and syncs the first checkpoint
-  before the walk, so a false CRC match of the new chain value, 1 in 2^32, can give
-  `Invalid` after that write. Each statement about a record holds only when no CRC gives
-  a false match. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). A file
+  with no checkpoint is no case of its own: the open makes it again (#1254), so the walk
+  after the first checkpoint reads a zero area and ends. This supersedes the case "on a
+  file with no header" of
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971. Decided
+  by the architect (#1286,
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034555756,
+  2026-10-07T08:58:30Z). Each statement about a record holds only when no CRC gives a
+  false match. Decided by the architect (#1049,
   https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
   `Unaligned` says that the header block that the open takes holds a tail off a block
   boundary, and gives that tail. An open that gives `Unaligned` also leaves the ring as
@@ -612,8 +620,41 @@ How to read this record:
   `body_max` comes from a constant of `node`, never a config value; if it ever does,
   the panic becomes an error first. Decided by the architect on #1166:
   https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
-  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
-  and a random chain value.
+  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0 and
+  a random chain value. A ring file with no checkpoint (an empty file, or two zero
+  header blocks) holds no record, because an open syncs the first checkpoint before it
+  writes a record. A crash before that sync leaves such a file. An open removes it and
+  makes the ring again with `Config::layout`, then syncs the directories and writes the
+  first checkpoint, so a ring with no checkpoint takes the layout of the open and a ring
+  with one keeps its own (#1254). The open holds its write handle of the old file
+  through the remove, so of two opens at once one gets `Busy`; an `os` open can still
+  take a removed file, which `os` is to close (#1297). An open that finds no ring while
+  other opens of the directory run can get an error from its create, and each commit
+  stays: `Files(Length)` when another open made a ring with another layout, and
+  `Files(Full)` on a disk with room for one ring when another open removed a ring with
+  no checkpoint and has not yet synced the directory. The open does not look again,
+  because no caller opens one directory two times at once. A dropped open can leave its
+  remove in flight, and a later open of the same directory in the process can lose its
+  ring (#1310). It syncs the directory before each create of a ring, because a disk
+  gives the room of a removed file back only then, and a kill after the remove leaves
+  such a file: the remake needs room for the larger of the two files, not for both.
+  `Length` stays for a ring with a checkpoint whose length does not fit its header, and
+  for a file that is not empty and ends inside its header blocks. A crash at any point
+  of the remake leaves a ring that the next open takes, or no ring. Lost: fit the layout
+  to the length of the file (a ring whose size no config gave), and keep the file when
+  its length fits (two paths for one case). It does not wait for `File::resize` (#1238).
+  Decided by `laptop.architect` (2026-10-07T07:47:16Z):
+  https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001. The held
+  handle, the sync before the create, and the `Length` text: decided by
+  `laptop.architect` (2026-10-07T09:08:16Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034721207. The
+  deferral of the dropped open to #1310: decided by `laptop.architect`
+  (2026-10-07T09:34:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6035164599. The open
+  that gets an error from its create: decided by `laptop.architect`
+  (2026-10-07T10:59:02Z and 2026-10-07T11:18:03Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036483605 and
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036799415.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group with
   samples of a write: the writer's key set with only that group present, its range,
   and its encoded series. The home stores it, keeps it as the index's newest frame,
@@ -1771,32 +1812,53 @@ How to read this record:
   second region adds the region key under `foundation/grant/2`. The driver (#471)
   checks each claim of a message against the public keys of the members before each
   `step`. The format version stays 1: no log has shipped. A later record replaces the
-  entries from its first index. A file is 1 MiB, or the length of its first
-  record when that is more, and a record that does not fit starts the next file. In a
-  file with no record, it makes that file again, larger, so each file but the last
-  holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
-  header never crosses a `SECTOR`: a record whose header would cross one starts at the
-  next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
-  header is whole or absent. At a restart, zeros where a record should start, or a good
-  header with a torn body, are the end of the log. Anything else, or a record after a
-  torn one, is `Error::Corrupt`, and the node does not start. Open writes again, whole,
-  the end file that it finds: the records as it read them, then zeros to the end of the
-  file. So a torn record leaves nothing that a later open reads as a header. Each read
-  and each write of the open is whole sectors, so a header gets one write. An open
-  with a pool whose largest block is less than one sector gives
-  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
-  the directory, and its parent, because `raft` acts on what open gives and a crash can
-  leave any of them with no sync. The write is there because a read sees, from the
-  cache, the writes that a failed sync of this boot lost, and a later sync does not
-  write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
-  the disk does not hold (#1066; the ring has the same rule, #698). Each file before the
-  end file is durable, because a failed write poisons the log, and the next open has the
-  file of that write as its end file or removes it. An open of a log that has a file
-  thus writes and syncs 1 MiB or more, for each region. P1 gives a Raspberry Pi 4 under
-  1 s to start, and no one has measured this cost there (#1140). Lost: zeros only after
-  a torn end (the first shape), which is the defect; and a read with direct I/O, which
-  not each driver can give: macOS does not promise a read that skips the cache (decided
-  by the architect, #1128, 2026-10-07T05:37:30Z:
+  entries from its first index. A file is 1 MiB, or the length of the record that the
+  log made it for when that is more. A record that does not fit starts the next file.
+  In a file with no record, it makes that file again, larger, so each file but the last
+  holds a record. After a stopped write that made a file, the next record starts that
+  file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, and the last sentence at
+  2026-10-07T11:05:15Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
+  puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
+  the end of the record to its start, and then syncs one time. Each block but the one at
+  the end of the record ends at a multiple of the block size in the file, so no two
+  blocks share a sector. The block with the header is the last that it writes, so a
+  write that the pool stops (`Error::Pool`) leaves no header: the log holds what it
+  held, and the bytes of the stopped write stay after its end. Decided by
+  `laptop.architect` (2026-10-07T09:12:02Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034784720. So a pool
+  that opens holds each write. A write that a file call fails, or that its caller drops,
+  poisons the log (`Error::Poisoned`), and a write that the pool stops does not. The
+  next write puts zeros over the bytes of the stopped write and syncs, and only then
+  writes its record: with one sync, a power cut can keep the record and not the zeros
+  (SIM CRASH), and an open then reads the old bytes as a header (PR 1 of #1091, approved
+  by the architect, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973, and the
+  text of this rule, 2026-10-07T08:42:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A header
+  never crosses a `SECTOR`: a record whose header would cross one starts at the next
+  sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
+  whole or absent. At a restart, zeros where a record should start, or a good header
+  with a torn body, are the end of the log. Anything else, or a record after a torn one,
+  is `Error::Corrupt`, and the node does not start. Open writes again, whole, the end
+  file that it finds: the records as it read them, then zeros to the end of the file. So
+  a torn record leaves nothing that a later open reads as a header. Each read and each
+  write of the open is whole sectors, so a header gets one write. An open with a pool
+  whose largest block is less than one sector gives `Error::Pool(TooLarge)` before it
+  reads or makes a file. Then it syncs the end file, the directory, and its parent,
+  because `raft` acts on what open gives and a crash can leave any of them with no sync.
+  The write is there because a read sees, from the cache, the writes that a failed sync
+  of this boot lost, and a later sync does not write them (SIM CRASH): an open that only
+  syncs gives records, or keeps zeros, that the disk does not hold (#1066; the ring has
+  the same rule, #698). Each file before the end file is durable, because a failed write
+  poisons the log, and the next open has the file of that write as its end file or
+  removes it. An open of a log that has a file thus writes and syncs 1 MiB or more, for
+  each region. P1 gives a Raspberry Pi 4 under 1 s to start, and no one has measured
+  this cost there (#1140). Lost: zeros only after a torn end (the first shape), which is
+  the defect; and a read with direct I/O, which not each driver can give: macOS does not
+  promise a read that skips the cache (decided by the architect, #1128,
+  2026-10-07T05:37:30Z:
   https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
   check over the whole record lost: a damaged length then reads as a torn end, and the
   log drops the good records after it. Zeros over the header of a durable record, which
@@ -1822,7 +1884,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
   has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
   messages share the byte form of an entry. Decided by `consensus`, approved by the
-  coordinator (#471).
+  coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
+  gives the fuzz target `mesh_change` the decode and encode of a change record; no
+  change type is public (decided by the architect, 2026-10-07T11:17:12Z:
+  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
   the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
@@ -1837,7 +1902,7 @@ How to read this record:
   log from that leader (a known defect, #1096, that #1107 fixes). A node with no
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242:
+  (decided by the architect, #242, 2026-10-07T04:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
   `propose` returns the position of its entry only after the write that holds the entry
   ends: a lone voter leads before its term is on disk, and after a power cut the same
@@ -1870,17 +1935,35 @@ How to read this record:
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
   system refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
-  and until then no message leaves, nothing applies, and the group gets no tick. Nothing
-  bounds the proposals and the messages that the group takes in that time, and a write
-  whose blocks the pool can never hold at one time waits with no end (#1091). A free
-  block of a size with a block in use keeps its budget (#291), so a write can also wait
-  while the budget has room for its blocks: with no end when the block in use is its own
-  (#1091), and else until the other user of the pool drops its block (#1134). A pool
-  whose largest block is less than one sector does not open (MESH LOG), so no write
-  gives `TooLarge` and the group does not stop for it (decided by the architect,
-  2026-10-07T06:32:47Z:
+  and until then no message leaves, nothing applies, and the group gets no tick. From
+  the write that finds no block until the write ends, `propose` and `receive` give
+  `Error::Pool` with the cause of the wait, so the group takes no proposal and no
+  message, and what `raft` holds does not grow. A forwarded proposal that gets it did
+  not reach the group. A leader that waits sends no heartbeat, so the other voters elect
+  a new leader. A follower that waits answers no message and falls behind until its
+  write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
+  of the variant decided by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
+  of the two cases by the architect, 2026-10-07T12:08:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
+  checks the wait before each other check of a message or of a forwarded proposal, so
+  each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
+  other order lost: it gives the exact refusal, but the group drops each of them in a
+  wait in both orders, and a node that is short of memory then also pays for the
+  signature checks (decided by the architect, 2026-10-07T12:31:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037964937). A write
+  holds one block of the pool at a time (MESH LOG), so no record is too large for a
+  pool that opens, and a write does not wait for a block of its own (decided by the
+  architect, 2026-10-07T08:42:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A free
+  block of a size with a block in use keeps its budget (#291), so a write can wait while
+  the budget has room for its block, until the other user of the pool drops its block
+  (#1134). A pool whose largest block is less than one sector does not open (MESH LOG),
+  so no write gives `TooLarge` and the group does not stop for it (decided by the
+  architect, 2026-10-07T06:32:47Z:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
-  `Refused` wait decided by the architect:
+  `Refused` wait decided by the architect, 2026-10-07T04:39:07Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge
@@ -1916,7 +1999,7 @@ How to read this record:
   `Join` (#336) refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). Proposed
-  by box1.builder-3, decided by the architect (#471):
+  by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
@@ -2096,6 +2179,13 @@ How to read this record:
   (precedence in X22). Amended: the `home` field restores the recorded intent
   ("placement decides home", r8 Q8), which the bootstrap list left out (architect,
   #1150, https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+  `config` refuses a node with two roles with `config.role-overlap` at the last value in
+  source order that names it. A `copies` list is one value (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151). A
+  placement that names no node is `config.empty-placement`, at the `copies` value when
+  the block has one, else at the block. `copies = []` next to a home or a standby is
+  valid (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037713864).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
@@ -2567,20 +2657,23 @@ How to read this record:
   no shard starts, and `join` gives `Error::Disk` with the budget, the shard count, and
   the least budget (`n` times the least ring that `fit` gives, capped at the largest
   `Size`); `config` cannot check it, as for the pool part (NODE SETTINGS). The ring is
-  the whole store. A ring already there keeps its size, which can be more than its part,
-  until `Buffer::resize` exists (#451). So oldest first (B1) holds per shard, not per
-  node. This is a patch. The long-term path is small rings for commits, then segments
-  that draw from one node-wide allowance (#1081). The 5.5 lab sizes the budget for the
-  shard that holds the index. With `Buffer::resize`, `node` computes the `Layout` with
-  `fit` and calls `Buffer::resize`, nothing more: `buffer` sets the file length itself,
-  so `node` never extends or cuts the ring file and does not learn the format (after
+  the whole store. A ring with a checkpoint keeps its size, which can be more than its
+  part, until `Buffer::resize` exists (#451). A ring with none is made again at its part
+  (#1254). So oldest first (B1) holds per shard, not per node. This is a patch. The
+  long-term path is small rings for commits, then segments that draw from one node-wide
+  allowance (#1081). The 5.5 lab sizes the budget for the shard that holds the index.
+  With `Buffer::resize`, `node` computes the `Layout` with `fit` and calls
+  `Buffer::resize`, nothing more: `buffer` sets the file length itself, so `node` never
+  extends or cuts the ring file and does not learn the format (after
   https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843).
   Decided by the architect, #342:
   https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
   https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187,
   https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257,
-  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672, and
-  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447.
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447, and, for
+  a ring with no checkpoint (2026-10-07T08:52:34Z),
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034449677.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
@@ -2633,6 +2726,12 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
+- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
+  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+  `Prefix::contains` holds, so no caller writes the root case. Decided by
+  `laptop.architect` on 2026-10-07T12:47:19Z
+  ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
+  applied in #1402.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -3032,6 +3131,11 @@ How to read this record:
   2026-10-05 ("Yeah taht's fine"), #461. `block::testing::{Scarce, Switch}`, behind
   the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
   above `block` tests a refused commit through its production path (#591).
+  `Pool::heap(config)` makes a pool on a `Heap` of `Config::reservation` bytes, so a
+  caller that wants heap memory does not size it. `Pool::new` stays for injected
+  memory, such as `os::memory::Memory` in `node` and `testing::Scarce` in a test
+  (decided by the architect, 2026-10-07T08:55:57Z, #1294:
+  https://github.com/synnaxlabs/foundation/issues/1294#issuecomment-6034509040).
 - **SHARD POOLS (2026-10-06)** `Node::start` makes one `block::Pool` for each shard
   and moves it into the shard, which drops it (M4). Each of `n` shards gets
   `budget / n`, and shard 0 also gets the remainder, so the parts add up to the node's
