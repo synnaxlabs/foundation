@@ -95,6 +95,7 @@ fn refuses_an_unknown_kind() {
             PLACEMENT,
             TIME,
             CHANNEL,
+            RETENTION,
         ]
         .contains(t)
     }) {
@@ -574,37 +575,57 @@ fn names(bytes: &mut Vec<u8>, names: &[&[u8]]) {
 }
 
 /// The bytes of a placement, from its parts.
-fn placement_bytes(standby: Option<&[u8]>, copies: &[&[u8]]) -> Vec<u8> {
+fn placement_bytes(
+    home: Option<&[u8]>,
+    standby: Option<&[u8]>,
+    copies: &[&[u8]],
+) -> Vec<u8> {
     let mut rest = Vec::new();
-    match standby {
-        None => rest.push(0),
-        Some(node) => {
-            rest.push(1);
-            length(&mut rest, node.len());
-            rest.extend_from_slice(node);
+    for node in [home, standby] {
+        match node {
+            None => rest.push(0),
+            Some(node) => {
+                rest.push(1);
+                length(&mut rest, node.len());
+                rest.extend_from_slice(node);
+            }
         }
     }
     names(&mut rest, copies);
     select_bytes(PLACEMENT, &rest)
 }
 
-fn placement(standby: Option<&str>, copies: &[&str]) -> Definition {
-    let copies = copies.iter().map(|c| name(c));
-    let policy = placement::Policy::new(select(), standby.map(name), copies);
-    Definition::Placement(policy.unwrap())
+fn placement(home: Option<&str>, standby: Option<&str>, copies: &[&str]) -> Definition {
+    let nodes = placement::Nodes {
+        home: home.map(name),
+        standby: standby.map(name),
+        copies: copies.iter().map(|c| name(c)).collect(),
+    };
+    Definition::Placement(placement::Policy::new(select(), nodes).unwrap())
 }
 
 #[test]
 fn writes_the_documented_placement_layout() {
     for (definition, expected) in [
         (
-            placement(Some("n_1"), &["n_3", "n_2"]),
-            placement_bytes(Some(b"n_1"), &[b"n_2", b"n_3"]),
+            placement(Some("n_4"), Some("n_1"), &["n_3", "n_2"]),
+            placement_bytes(Some(b"n_4"), Some(b"n_1"), &[b"n_2", b"n_3"]),
         ),
-        (placement(None, &["n_2"]), placement_bytes(None, &[b"n_2"])),
         (
-            placement(Some("n_1"), &[]),
-            placement_bytes(Some(b"n_1"), &[]),
+            placement(None, Some("n_1"), &["n_3", "n_2"]),
+            placement_bytes(None, Some(b"n_1"), &[b"n_2", b"n_3"]),
+        ),
+        (
+            placement(None, None, &["n_2"]),
+            placement_bytes(None, None, &[b"n_2"]),
+        ),
+        (
+            placement(None, Some("n_1"), &[]),
+            placement_bytes(None, Some(b"n_1"), &[]),
+        ),
+        (
+            placement(Some("n_1"), None, &[]),
+            placement_bytes(Some(b"n_1"), None, &[]),
         ),
     ] {
         assert_eq!(definition.encode(), expected);
@@ -614,13 +635,15 @@ fn writes_the_documented_placement_layout() {
 
 #[test]
 fn refuses_a_presence_flag_that_is_not_0_or_1() {
-    let mut bytes = placement_bytes(None, &[b"n_2"]);
-    let at = select_bytes(PLACEMENT, &[]).len();
-    bytes[at] = 2;
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Flag { at, found: 2 })
-    );
+    let home = select_bytes(PLACEMENT, &[]).len();
+    for at in [home, home + 1] {
+        let mut bytes = placement_bytes(None, None, &[b"n_2"]);
+        bytes[at] = 2;
+        assert_eq!(
+            Definition::decode(&bytes),
+            Err(Error::Flag { at, found: 2 })
+        );
+    }
 }
 
 #[test]
@@ -636,9 +659,9 @@ fn refuses_a_time_presence_flag_that_is_not_0_or_1() {
 
 #[test]
 fn refuses_copies_out_of_order_or_repeated() {
-    let at = select_bytes(PLACEMENT, &[]).len() + 1 + 8 + 11;
+    let at = select_bytes(PLACEMENT, &[]).len() + 2 + 8 + 11;
     for copies in [[b"n_3", b"n_2"], [b"n_2", b"n_2"]] {
-        let bytes = placement_bytes(None, &copies.map(|c| &c[..]));
+        let bytes = placement_bytes(None, None, &copies.map(|c| &c[..]));
         assert_eq!(Definition::decode(&bytes), Err(Error::Order { at }));
     }
 }
@@ -646,7 +669,7 @@ fn refuses_copies_out_of_order_or_repeated() {
 #[test]
 fn refuses_a_placement_the_policy_refuses() {
     let at = select_bytes(PLACEMENT, &[]).len();
-    let bytes = placement_bytes(None, &[]);
+    let bytes = placement_bytes(None, None, &[]);
     let error = Error::Placement {
         at,
         error: placement::Error::Empty,
@@ -654,9 +677,12 @@ fn refuses_a_placement_the_policy_refuses() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        format!("the placement at byte {at}: a placement has no standby and no copy")
+        format!(
+            "the placement at byte {at}: a placement names no home, no standby, and no \
+             copy"
+        )
     );
-    let bytes = placement_bytes(Some(b"n_2"), &[b"n_1", b"n_2"]);
+    let bytes = placement_bytes(Some(b"n_2"), None, &[b"n_1", b"n_2"]);
     let error = Error::Placement {
         at,
         error: placement::Error::Overlap(name("n_2")),
@@ -666,7 +692,7 @@ fn refuses_a_placement_the_policy_refuses() {
 
 #[test]
 fn refuses_a_placement_that_ends_early() {
-    let bytes = placement_bytes(Some(b"n_1"), &[]);
+    let bytes = placement_bytes(Some(b"n_2"), Some(b"n_1"), &[]);
     let end = bytes.len();
     assert_eq!(
         Definition::decode(&bytes[..end - 1]),
@@ -714,6 +740,47 @@ fn refuses_peers_out_of_order() {
     let bytes = time_bytes(Some(&[b"n_2", b"n_1"]));
     let at = select_bytes(TIME, &[]).len() + 1 + 8 + 11;
     assert_eq!(Definition::decode(&bytes), Err(Error::Order { at }));
+}
+
+fn retention(keep: Span) -> Definition {
+    Definition::Retention(retention::Policy::new(select(), keep).unwrap())
+}
+
+#[test]
+fn writes_the_documented_retention_layout() {
+    for nanos in [0, 1, 3 * Span::DAY.nanos(), i64::MAX] {
+        let definition = retention(Span::from_nanos(nanos));
+        let expected = select_bytes(RETENTION, &nanos.to_le_bytes());
+        assert_eq!(definition.encode(), expected);
+        assert_eq!(Definition::decode(&expected), Ok(definition));
+    }
+}
+
+#[test]
+fn refuses_a_retention_that_keeps_below_zero() {
+    for nanos in [-1, i64::MIN] {
+        let bytes = select_bytes(RETENTION, &nanos.to_le_bytes());
+        let error = Error::Retention {
+            at: bytes.len() - 8,
+            error: retention::Error::Negative(Span::from_nanos(nanos)),
+        };
+        assert_eq!(Definition::decode(&bytes), Err(error));
+    }
+    let error = Error::Retention {
+        at: 5,
+        error: retention::Error::Negative(Span::from_nanos(-1)),
+    };
+    assert_eq!(
+        error.to_string(),
+        "the retention at byte 5: a retention keeps -1ns, which is below zero"
+    );
+}
+
+#[test]
+fn refuses_a_retention_that_ends_early() {
+    let bytes = select_bytes(RETENTION, &[0; 7]);
+    let at = bytes.len() - 7;
+    assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at }));
 }
 
 fn key(n: u128) -> Key {
@@ -1100,11 +1167,17 @@ fn compression_strategy() -> impl Strategy<Value = Definition> {
 }
 
 fn placement_strategy() -> impl Strategy<Value = Definition> {
+    let node = || prop::option::of(name_strategy());
     let copies = prop::collection::vec(name_strategy(), 0..4);
-    (selectors(), prop::option::of(name_strategy()), copies).prop_filter_map(
-        "a policy refuses no standby and no copy, or a standby that is a copy",
-        |(select, standby, copies)| {
-            let policy = placement::Policy::new(select, standby, copies);
+    (selectors(), node(), node(), copies).prop_filter_map(
+        "a policy refuses no node, or a node with two roles",
+        |(select, home, standby, copies)| {
+            let nodes = placement::Nodes {
+                home,
+                standby,
+                copies,
+            };
+            let policy = placement::Policy::new(select, nodes);
             policy.ok().map(Definition::Placement)
         },
     )
@@ -1115,6 +1188,17 @@ fn time_strategy() -> impl Strategy<Value = Definition> {
         .prop_map(|peers| peers.map_or(time::Peers::Voters, time::Peers::Listed));
     (selectors(), peers)
         .prop_map(|(select, peers)| Definition::Time(time::Policy::new(select, peers)))
+}
+
+fn retention_strategy() -> impl Strategy<Value = Definition> {
+    (
+        selectors(),
+        prop_oneof![Just(0), Just(i64::MAX), 0..=i64::MAX],
+    )
+        .prop_map(|(select, nanos)| {
+            let keep = Span::from_nanos(nanos);
+            Definition::Retention(retention::Policy::new(select, keep).unwrap())
+        })
 }
 
 fn data_type_strategy() -> impl Strategy<Value = DataType> {
@@ -1162,6 +1246,7 @@ fn definition() -> impl Strategy<Value = Definition> {
         placement_strategy(),
         time_strategy(),
         channel_strategy(),
+        retention_strategy(),
     ]
 }
 
@@ -1236,4 +1321,21 @@ proptest! {
             prop_assert_eq!(definition.encode(), bytes);
         }
     }
+}
+
+#[test]
+fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
+    let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/retention");
+    let negative =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/retention_negative");
+    let keep = Span::from_nanos(3 * Span::DAY.nanos());
+    let policy = retention::Policy::new(selector(&["a.*"]), keep).unwrap();
+    assert_eq!(Definition::decode(valid), Ok(Definition::Retention(policy)));
+    assert_eq!(
+        Definition::decode(negative),
+        Err(Error::Retention {
+            at: 22,
+            error: retention::Error::Negative(Span::from_nanos(-1)),
+        })
+    );
 }

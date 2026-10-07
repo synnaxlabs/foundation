@@ -122,7 +122,14 @@ state on `main`.
 ### Node to node
 
 - Node-to-node traffic is authorized by role (BQ12). A new node joins only with a
-  signed ticket, and voters record membership (BQ11a). Not built (`mesh`).
+  signed ticket, and voters record membership (BQ11a). Every node checks each `Join`
+  change at apply: the card's signature, a name and status channel names that are not
+  reserved, under the region, not too long, and not held by a member, a key that is not
+  yet a member, status keys that no member holds, and the ticket's admission, scope,
+  uses, and expiry. A status holds at most 64 entries, so decode refuses more, and
+  checks no signature. So a forged card or a body that does not decode in a committed
+  entry is a refused change, not a stopped group. The proposing voter and the join
+  answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
@@ -286,7 +293,8 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
-| `wire_hub` | `wire::hub::Open::decode`, `Credit::decode`, `Reply::decode`, `keys::decode`, `ends::decode`, `Open::encode`, `Credit::encode`, `Reply::encode`, `keys::encode`, `ends::encode` | Encodes to the same bytes; each valid message made from the input decodes to itself |
+| `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
@@ -310,5 +318,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages (their encoding is in `mesh`), `spec` tree chunks (#64),
+messages and change records (`mesh::region::Change::decode`, with `Card::decode`
+and `Member::decode`, #1339), `spec` tree chunks (#64),
 `types::time::Rate`, and each connector's protocol parser.

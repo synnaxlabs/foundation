@@ -1,17 +1,11 @@
 //! The region's record of one node.
 
-use std::collections::BTreeMap;
-
-use types::channel;
-use types::name::Name;
 use types::node::PublicKey;
 use types::time::Span;
 
-use crate::bytes::{
-    ABSENT, PRESENT, put_channel, put_count, put_name, take, take_channel, take_name,
-    take_present, take_rising,
-};
+use crate::bytes::{put_optional_span, take, take_optional_span};
 use crate::card;
+use crate::status::Status;
 
 /// The region's record of one node. Its key is `card.key()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,7 +19,7 @@ pub struct Member {
     /// The node's status channel keys, by name under the node's name: `clock.offset`
     /// is `<card.name>.clock.offset` (X27). A status name keeps its meaning and data
     /// type in every release; a change takes a new name.
-    pub status: BTreeMap<Name, channel::Key>,
+    pub status: Status,
 }
 
 impl Member {
@@ -45,18 +39,8 @@ impl Member {
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         self.card.encode(out);
         out.extend(self.admission);
-        match self.ephemeral {
-            None => out.push(ABSENT),
-            Some(span) => {
-                out.push(PRESENT);
-                out.extend(span.nanos().to_le_bytes());
-            }
-        }
-        put_count(self.status.len(), out);
-        for (name, &key) in &self.status {
-            put_name(name, out);
-            put_channel(key, out);
-        }
+        put_optional_span(self.ephemeral, out);
+        self.status.encode(out);
     }
 
     /// Takes one record from the start of `bytes`. `None` when the bytes do not start
@@ -69,16 +53,8 @@ impl Member {
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let card = card::Signed::decode(bytes)?;
         let admission = take(bytes)?;
-        let ephemeral = if take_present(bytes)? {
-            Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?)))
-        } else {
-            None
-        };
-        let mut status = BTreeMap::new();
-        take_rising(bytes, take_name, |name, bytes| {
-            status.insert(name, take_channel(bytes)?);
-            Some(())
-        })?;
+        let ephemeral = take_optional_span(bytes)?;
+        let status = Status::decode(bytes)?;
         Some(Self {
             card,
             admission,
@@ -90,15 +66,20 @@ impl Member {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use proptest::prelude::*;
+    use types::channel;
 
     use super::*;
+    use crate::bytes::{put_count, put_name};
     use crate::common::{key, member};
 
-    fn status() -> impl Strategy<Value = BTreeMap<Name, channel::Key>> {
+    fn status() -> impl Strategy<Value = Status> {
         let name = "[a-z]{1,6}(\\.[a-z]{1,6})?".prop_map(|name| name.parse().unwrap());
         let key = any::<u128>().prop_map(channel::Key::from_u128);
         prop::collection::btree_map(name, key, 0..6)
+            .prop_map(|map| Status::new(map).unwrap())
     }
 
     fn admission() -> impl Strategy<Value = [u8; 64]> {
@@ -146,7 +127,7 @@ mod tests {
         Member {
             admission: [5; 64],
             ephemeral: Some(Span::from_nanos(-2)),
-            status,
+            status: Status::new(status).unwrap(),
             ..member(3)
         }
     }
@@ -202,7 +183,7 @@ mod tests {
     fn a_member_that_is_not_ephemeral_has_an_absent_byte() {
         let member = Member {
             ephemeral: None,
-            status: BTreeMap::new(),
+            status: Status::new(BTreeMap::new()).unwrap(),
             ..with_status(&[])
         };
         assert_eq!(encoded(&member), entries(&[]));
@@ -217,10 +198,25 @@ mod tests {
     }
 
     #[test]
+    fn decode_refuses_more_than_64_status_entries() {
+        let names: Vec<String> = (0..65).map(|i| format!("s{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(
+            decoded(&entries(&names[..64])).map(|m| m.status.as_map().len()),
+            Some(64)
+        );
+        assert_eq!(decoded(&entries(&names)), None);
+    }
+
+    #[test]
     fn decode_refuses_a_presence_byte_that_is_neither_value() {
         let mut bytes = entries(&[]);
         let at = head(&with_status(&[])).len();
         assert_eq!(bytes[at], 0);
+        bytes[at] = 2;
+        assert_eq!(decoded(&bytes), None);
+        let mut bytes = encoded(&with_status(&[]));
+        assert_eq!(bytes[at], 1);
         bytes[at] = 2;
         assert_eq!(decoded(&bytes), None);
     }
@@ -236,6 +232,27 @@ mod tests {
         assert_eq!(decoded(&bytes), Some(member));
         bytes[0] ^= 1;
         assert_eq!(decoded(&bytes), None);
+    }
+
+    proptest! {
+        // Each case checks one card signature for each byte, so it is slow.
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        // A decode that takes two forms of one value fails here.
+        #[test]
+        fn a_changed_byte_that_decodes_encodes_back(
+            member in records(),
+            flip in 1..=u8::MAX,
+        ) {
+            let bytes = encoded(&member);
+            for at in 0..bytes.len() {
+                let mut bytes = bytes.clone();
+                bytes[at] ^= flip;
+                if let Some(changed) = decoded(&bytes) {
+                    prop_assert_eq!(encoded(&changed), bytes);
+                }
+            }
+        }
     }
 
     proptest! {

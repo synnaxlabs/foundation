@@ -348,7 +348,7 @@ impl Endpoint {
     ) -> Result<Poll<()>, Error> {
         sender.check_unfinished();
         if let Some(message) = message {
-            sender.check_size(message)?;
+            stream::check_size(message.len(), sender.bytes_max())?;
         }
         let key = sender.key().connection;
         self.streams(now, key, Poll::Pending, |streams, inner, _, _| {
@@ -381,7 +381,7 @@ impl Endpoint {
         message: Block,
     ) -> Result<Option<Block>, Error> {
         sender.check_unfinished();
-        sender.check_size(&message)?;
+        stream::check_size(message.len(), sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
         self.streams(now, key, (), |streams, inner, _, _| {

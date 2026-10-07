@@ -20,31 +20,33 @@ pub struct Channel {
     pub kind: Kind,
 }
 
-/// An index channel or a data channel.
+/// An index channel or a data channel. `R` is how an edge names the channel that it
+/// points at: a key in the spec, a name in a file.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Kind {
+pub enum Kind<R = channel::Key> {
     /// An index channel: the time base of the data channels that point at it.
     Index {
         /// The channel that holds the clock error bound of its timestamps.
-        error: Option<channel::Key>,
+        error: Option<R>,
         /// The channel that the home writes control handoffs to.
-        control: Option<channel::Key>,
+        control: Option<R>,
     },
     /// A data channel.
-    Data(Data),
+    Data(Data<R>),
 }
 
 /// A data channel: what its values are, their unit, and the channels it points at.
+/// `R` is how an edge names the channel that it points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(clippy::struct_field_names, reason = "the data type of a data channel")]
-pub struct Data {
-    index: channel::Key,
-    quality: Option<channel::Key>,
+pub struct Data<R = channel::Key> {
+    index: R,
+    quality: Option<R>,
     data_type: DataType,
     unit: Option<Unit>,
 }
 
-impl Data {
+impl<R> Data<R> {
     /// Makes a data channel on the index channel `index`, with the quality channel
     /// `quality`.
     ///
@@ -52,8 +54,8 @@ impl Data {
     ///
     /// [`Error::Unit`] when `unit` is set and `data_type` holds no number.
     pub fn new(
-        index: channel::Key,
-        quality: Option<channel::Key>,
+        index: R,
+        quality: Option<R>,
         data_type: DataType,
         unit: Option<Unit>,
     ) -> Result<Self, Error> {
@@ -70,14 +72,14 @@ impl Data {
 
     /// The index channel that times the values.
     #[must_use]
-    pub const fn index(&self) -> channel::Key {
-        self.index
+    pub const fn index(&self) -> &R {
+        &self.index
     }
 
     /// The channel that holds the quality of the values, if any.
     #[must_use]
-    pub const fn quality(&self) -> Option<channel::Key> {
-        self.quality
+    pub const fn quality(&self) -> Option<&R> {
+        self.quality.as_ref()
     }
 
     /// What the values are.
@@ -168,6 +170,8 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
+    use types::name::Name;
+
     use super::*;
 
     const NUMBERS: [Scalar; 10] = [
@@ -248,6 +252,23 @@ mod tests {
                 assert_eq!(data.data_type(), &data_type);
             }
         }
+    }
+
+    #[test]
+    fn keeps_the_unit_rule_for_name_edges() {
+        let name = |text: &str| text.parse::<Name>().unwrap();
+        let unit = || Some(Unit::new("kPa").unwrap());
+        let f64 = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+        let data =
+            Data::new(name("edge.time"), Some(name("edge.q")), f64, unit()).unwrap();
+        assert_eq!(data.index(), &name("edge.time"));
+        assert_eq!(data.quality(), Some(&name("edge.q")));
+        assert_eq!(
+            Data::new(name("edge.time"), None, DataType::Quality, unit()),
+            Err(Error::Unit {
+                data_type: DataType::Quality
+            })
+        );
     }
 
     #[test]

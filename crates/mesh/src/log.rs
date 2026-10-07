@@ -26,7 +26,7 @@ use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
 use crate::bytes::{
-    put_optional_key, put_optional_proof, take, take_key, take_present, take_proof,
+    put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
 
@@ -586,17 +586,17 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         NO_HARD => {}
         HARD => {
             let term = Term(u64::from_le_bytes(take(body)?));
-            let vote = if take_present(body)? {
+            let vote = if take_bool(body)? {
                 Some(take_key(body)?)
             } else {
                 None
             };
-            let leader = if take_present(body)? {
+            let leader = if take_bool(body)? {
                 Some(take_key(body)?)
             } else {
                 None
             };
-            let proof = if take_present(body)? {
+            let proof = if take_bool(body)? {
                 Some(take_proof(body)?)
             } else {
                 None
@@ -664,7 +664,7 @@ mod tests {
         }
     }
 
-    fn sim(seed: u64) -> (Sim, sim::node::Node) {
+    fn create_node(seed: u64) -> (Sim, sim::node::Node) {
         let mut sim = Sim::new(sim::Config {
             seed,
             ..sim::Config::default()
@@ -749,13 +749,13 @@ mod tests {
 
     #[test]
     fn a_new_log_is_empty() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
     }
 
     #[test]
     fn gives_back_what_it_wrote_after_a_restart() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let entries = vec![
             entry(1, 1, Data::Empty),
             entry(1, 2, voters(&[1, 2, 3], &[1, 2])),
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn a_later_record_replaces_the_entries_from_its_first_index() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             let first = [bytes(1, 1), bytes(2, 1), bytes(3, 1)];
@@ -812,7 +812,7 @@ mod tests {
     fn a_power_cut_keeps_each_write_that_ended_and_all_or_none_of_the_next() {
         let mut torn = 0;
         for seed in 0..64 {
-            let (mut sim, node) = sim(seed);
+            let (mut sim, node) = create_node(seed);
             let ended = Arc::new(AtomicU64::new(0));
             let count = Arc::clone(&ended);
             let own = node.clone();
@@ -858,7 +858,7 @@ mod tests {
     fn a_power_cut_after_an_open_keeps_what_the_open_gave() {
         let mut lost = Vec::new();
         for seed in 0..64 {
-            let (mut sim, node) = sim(seed);
+            let (mut sim, node) = create_node(seed);
             let own = node.clone();
             let handle = node.shards().start(shard("before"), move |_| async move {
                 let (mut log, _) = open(&own).await.unwrap();
@@ -888,7 +888,7 @@ mod tests {
         let mut lost = Vec::new();
         let mut gave = 0_usize;
         for seed in 0..64 {
-            let (mut sim, node) = sim(seed);
+            let (mut sim, node) = create_node(seed);
             let expected = sim
                 .run_on(&node, |node, _| async move {
                     let (mut log, _) = open(&node).await.unwrap();
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn a_write_after_a_failed_open_survives_a_power_cut() {
         for dir in ["", DIR] {
-            let (mut sim, node) = sim(0);
+            let (mut sim, node) = create_node(0);
             let error = sim
                 .run_on(&node, move |node, _| async move {
                     node.fail_file(Path::new(dir), Operation::SyncDir);
@@ -960,7 +960,7 @@ mod tests {
     }
 
     /// Writes three records of one entry each. Returns where each one starts.
-    fn three(sim: &mut Sim, node: &sim::node::Node) -> Vec<u64> {
+    fn create_three(sim: &mut Sim, node: &sim::node::Node) -> Vec<u64> {
         sim.run_on(node, |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             let mut starts = Vec::new();
@@ -975,8 +975,8 @@ mod tests {
 
     #[test]
     fn drops_a_bad_record_at_the_end() {
-        let (mut sim, node) = sim(0);
-        let starts = three(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        let starts = create_three(&mut sim, &node);
         let at = starts[2] + wide(HEADER) + 50;
         sim.run_on(&node, move |node, _| async move {
             put(&node, "log-0", at, &[0xFF]).await;
@@ -991,8 +991,8 @@ mod tests {
 
     #[test]
     fn writes_over_a_dropped_record_with_no_stale_bytes_after_it() {
-        let (mut sim, node) = sim(0);
-        let starts = three(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        let starts = create_three(&mut sim, &node);
         let at = starts[2] + wide(HEADER) + 50;
         sim.run_on(&node, move |node, _| async move {
             put(&node, "log-0", at, &[0xFF]).await;
@@ -1042,8 +1042,8 @@ mod tests {
     fn a_power_cut_keeps_the_zeros_of_an_open_after_a_failed_open() {
         let mut torn = Vec::new();
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
-            let starts = three(&mut sim, &node);
+            let (mut sim, node) = create_node(run);
+            let starts = create_three(&mut sim, &node);
             if !zeros_after_a_failed_open(&mut sim, &node, starts[2]) {
                 torn.push(run);
             }
@@ -1056,7 +1056,7 @@ mod tests {
     fn a_power_cut_keeps_the_zeros_of_an_open_that_gave_no_record() {
         let mut torn = Vec::new();
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
+            let (mut sim, node) = create_node(run);
             sim.run_on(&node, |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
                 log.write(None, &[bytes(1, 700)]).await.unwrap();
@@ -1074,7 +1074,7 @@ mod tests {
     fn a_power_cut_keeps_the_zeros_of_an_open_across_two_blocks() {
         let mut torn = Vec::new();
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
+            let (mut sim, node) = create_node(run);
             let end = sim
                 .run_on(&node, |node, _| async move {
                     let (mut log, _) = open(&node).await.unwrap();
@@ -1096,7 +1096,7 @@ mod tests {
     fn a_power_cut_keeps_the_zeros_of_an_open_to_the_last_block() {
         let mut torn = Vec::new();
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
+            let (mut sim, node) = create_node(run);
             sim.run_on(&node, |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
                 log.write(None, &[bytes(1, 15 * CHUNK + 1000)])
@@ -1113,8 +1113,8 @@ mod tests {
 
     #[test]
     fn an_open_gives_the_error_of_a_failed_write() {
-        let (mut sim, node) = sim(0);
-        three(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        create_three(&mut sim, &node);
         let opened = sim
             .run_on(&node, |node, _| async move {
                 node.fail_file(&file("log-0"), Operation::WriteAt);
@@ -1164,7 +1164,7 @@ mod tests {
         let mut refused = Vec::new();
         let mut gave = 0_usize;
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
+            let (mut sim, node) = create_node(run);
             sim.run_on(&node, |node, _| async move {
                 let (mut log, _) = odd_open(&node).await.unwrap();
                 log.write(None, &[bytes(1, 1710)]).await.unwrap();
@@ -1212,7 +1212,7 @@ mod tests {
         let mut refused = Vec::new();
         let mut gave = 0_usize;
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
+            let (mut sim, node) = create_node(run);
             let opened = sim
                 .run_on(&node, |node, _| async move {
                     let (mut log, _) = odd_open(&node).await.unwrap();
@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn refuses_a_pool_with_no_block_of_one_sector() {
         for (budget, largest) in [(0, 0), (256, 192), (512, 448)] {
-            let (mut sim, node) = sim(0);
+            let (mut sim, node) = create_node(0);
             let (new, listed, held) = sim
                 .run_on(&node, move |node, _| async move {
                     let config = block::Config { budget };
@@ -1274,7 +1274,7 @@ mod tests {
     // no room for a block of one sector and a block of the rest.
     #[test]
     fn writes_a_record_that_one_block_of_the_pool_holds() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let written = sim
             .run_on(&node, |node, _| async move {
                 let config = block::Config { budget: 704 };
@@ -1301,7 +1301,7 @@ mod tests {
     // and 100 bytes, and has no block of 1,892.
     #[test]
     fn writes_a_record_that_no_block_of_the_pool_holds() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let written = sim
             .run_on(&node, |node, _| async move {
                 let entry = bytes(1, 1832);
@@ -1323,7 +1323,7 @@ mod tests {
     #[test]
     fn a_block_of_a_write_is_at_most_a_chunk() {
         for (budget, record) in [(147_584, CHUNK), (147_712, CHUNK + 1)] {
-            let (mut sim, node) = sim(0);
+            let (mut sim, node) = create_node(0);
             let written = sim
                 .run_on(&node, move |node, _| async move {
                     let config = block::Config { budget };
@@ -1348,7 +1348,7 @@ mod tests {
 
     #[test]
     fn opens_with_a_pool_whose_largest_block_is_one_sector() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             let config = block::Config { budget: 576 };
             let memory = block::Heap::new(config.reservation());
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn each_open_gives_the_records_past_one_block() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let entries = vec![bytes(1, 10), bytes(2, 3 * CHUNK), bytes(3, 10)];
         let written = entries.clone();
         sim.run_on(&node, move |node, _| async move {
@@ -1394,8 +1394,8 @@ mod tests {
 
     #[test]
     fn each_open_gives_the_records_of_three_files() {
-        let (mut sim, node) = sim(0);
-        let expected = three_files(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        let expected = create_three_files(&mut sim, &node);
         assert_eq!(stored(&mut sim, &node), Ok(expected.clone()));
         assert_eq!(stored(&mut sim, &node), Ok(expected.clone()));
         sim.crash(&node, Crash::Power);
@@ -1417,7 +1417,7 @@ mod tests {
         let mut lost = Vec::new();
         let mut gave = 0_usize;
         for run in 0..64 {
-            let (mut sim, node) = sim(run);
+            let (mut sim, node) = create_node(run);
             let count = before.len();
             let before = before.to_vec();
             let expected = sim
@@ -1504,7 +1504,7 @@ mod tests {
     #[test]
     fn a_record_over_a_torn_first_record_leaves_no_bytes_after_it() {
         for (torn, over) in [(700, 10), (3 * CHUNK, CHUNK + 100)] {
-            let (mut sim, node) = sim(0);
+            let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
                 log.write(None, &[bytes(1, torn)]).await.unwrap();
@@ -1527,8 +1527,8 @@ mod tests {
     // the torn end.
     #[test]
     fn refuses_a_bad_header_at_the_end() {
-        let (mut sim, node) = sim(0);
-        let starts = three(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        let starts = create_three(&mut sim, &node);
         // The first byte of the body length of the last record.
         let at = starts[2] + wide(CHECK) + 10;
         sim.run_on(&node, move |node, _| async move {
@@ -1548,7 +1548,7 @@ mod tests {
             [0, 478, 479, 512, 1000].map(start),
             [0, 478, 512, 512, 1024]
         );
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         // Each record is 61 bytes, so the ninth would start 24 bytes before 512.
         let entries: Vec<Entry> = (1..=9).map(|index| bytes(index, 1)).collect();
         let written = entries.clone();
@@ -1575,7 +1575,7 @@ mod tests {
     #[test]
     fn refuses_a_file_that_is_not_the_next_log_file() {
         for name in ["notes", "log-2", "log-01"] {
-            let (mut sim, node) = sim(0);
+            let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 drop(open(&node).await.unwrap());
                 let mode = Mode::Create { len: 0 };
@@ -1597,8 +1597,8 @@ mod tests {
 
     #[test]
     fn refuses_a_bad_record_with_a_good_one_after_it() {
-        let (mut sim, node) = sim(0);
-        let starts = three(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        let starts = create_three(&mut sim, &node);
         let at = starts[1] + wide(HEADER) + 50;
         sim.run_on(&node, move |node, _| async move {
             put(&node, "log-0", at, &[0xFF]).await;
@@ -1630,7 +1630,7 @@ mod tests {
 
     #[test]
     fn refuses_a_record_that_passes_its_check_with_a_body_it_cannot_read() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             drop(open(&node).await.unwrap());
             let mut record = encode(0, None, &[bytes(1, 4)]);
@@ -1651,7 +1651,7 @@ mod tests {
     fn refuses_a_hard_record_with_a_byte_it_cannot_read() {
         // The presence byte of the vote, then the grant byte of the proof.
         for at in [HEADER + 9, HEADER + 44] {
-            let (mut sim, node) = sim(0);
+            let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 drop(open(&node).await.unwrap());
                 let hard = Hard {
@@ -1707,7 +1707,7 @@ mod tests {
 
     #[test]
     fn refuses_a_record_of_another_format_version() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             drop(open(&node).await.unwrap());
             let mut record = encode(0, Some(hard(1, None)), &[]);
@@ -1732,7 +1732,7 @@ mod tests {
     const LARGE: usize = 3 << 19;
 
     /// Writes a small record, one larger than a file, and two small ones: three files.
-    fn three_files(sim: &mut Sim, node: &sim::node::Node) -> Stored {
+    fn create_three_files(sim: &mut Sim, node: &sim::node::Node) -> Stored {
         sim.run_on(node, |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             let entries =
@@ -1753,15 +1753,15 @@ mod tests {
 
     #[test]
     fn a_record_that_does_not_fit_starts_a_file_that_holds_it() {
-        let (mut sim, node) = sim(0);
-        let expected = three_files(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        let expected = create_three_files(&mut sim, &node);
         sim.crash(&node, Crash::Power);
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
     #[test]
     fn a_record_that_ends_at_the_end_of_a_file_stays_in_it() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let empty = encode(1, None, &[bytes(2, 0)]).len();
         let (len, names) = sim
             .run_on(&node, move |node, _| async move {
@@ -1797,8 +1797,8 @@ mod tests {
     #[test]
     fn refuses_a_bad_last_record_of_a_file_before_a_file_with_records() {
         for (name, number) in [("log-0", 0), ("log-1", 1)] {
-            let (mut sim, node) = sim(0);
-            three_files(&mut sim, &node);
+            let (mut sim, node) = create_node(0);
+            create_three_files(&mut sim, &node);
             sim.run_on(&node, move |node, _| async move {
                 put(&node, name, wide(HEADER) + 5, &[0xFF]).await;
             })
@@ -1815,35 +1815,151 @@ mod tests {
     // the one the next record needs.
     #[test]
     fn removes_a_file_with_no_record_after_the_end() {
-        let (mut sim, node) = sim(0);
-        sim.run_on(&node, |node, _| async move {
+        removes_a_spare(512);
+    }
+
+    // A crash before the allocation of a create leaves a file with no bytes.
+    #[test]
+    fn removes_a_file_with_no_bytes_after_the_end() {
+        removes_a_spare(0);
+    }
+
+    /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
+    /// and no record, then cuts the power.
+    fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
+        sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len: 512 };
+            let mode = Mode::Create { len };
             drop(node.files().open(&file("log-1"), mode).await.unwrap());
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
         .unwrap();
-        let expected = sim
-            .run_on(&node, |node, _| async move {
-                let (mut log, stored) = open(&node).await.unwrap();
-                let names = node.files().list(Path::new(DIR)).await.unwrap();
-                assert_eq!(names, [PathBuf::from("log-0")]);
-                let large = bytes(2, LARGE);
-                log.write(None, std::slice::from_ref(&large)).await.unwrap();
-                Stored {
-                    hard: Hard::default(),
-                    entries: stored.entries.into_iter().chain([large]).collect(),
-                }
-            })
-            .unwrap();
-        assert_eq!(expected.entries.len(), 2);
+        sim.crash(node, Crash::Power);
+    }
+
+    /// The files of a log after `create_spare`.
+    fn spare(len: u64) -> [(PathBuf, u64); 2] {
+        [("log-0".into(), SEGMENT), ("log-1".into(), len)]
+    }
+
+    fn removes_a_spare(len: u64) {
+        let (mut sim, node) = create_node(0);
+        create_spare(&mut sim, &node, len);
+        sim.run_on(&node, move |node, _| async move {
+            assert_eq!(lens(&node).await, spare(len));
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored.entries, [bytes(1, 10)]);
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, [PathBuf::from("log-0")]);
+            log.write(None, &[bytes(2, LARGE)]).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, 10), bytes(2, LARGE)],
+        };
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
     #[test]
+    fn a_failed_remove_of_a_spare_fails_the_open() {
+        for len in [0, 512] {
+            let (mut sim, node) = create_node(0);
+            create_spare(&mut sim, &node, len);
+            let (refused, lens) = sim
+                .run_on(&node, |node, _| async move {
+                    node.fail_file(&file("log-1"), Operation::Remove);
+                    let refused = open(&node).await.map(|(_, stored)| stored);
+                    (refused, lens(&node).await)
+                })
+                .unwrap();
+            let expected = io("log-1", Operation::Remove);
+            assert_eq!(refused, Err(expected), "{len} bytes");
+            assert_eq!(lens, spare(len));
+            sim.crash(&node, Crash::Power);
+            let expected = Stored {
+                hard: Hard::default(),
+                entries: vec![bytes(1, 10)],
+            };
+            assert_eq!(stored(&mut sim, &node), Ok(expected), "{len} bytes");
+        }
+    }
+
+    /// The name and the length of each file of the log.
+    async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
+        let mut lens = Vec::new();
+        for name in node.files().list(Path::new(DIR)).await.unwrap() {
+            let path = Path::new(DIR).join(&name);
+            let len = node.files().open(&path, Mode::Read).await.unwrap().len();
+            lens.push((name, len));
+        }
+        lens
+    }
+
+    /// Makes `log-0` with no bytes, as a crash before the allocation of a create
+    /// leaves it, then cuts the power.
+    fn create_first_file_with_no_bytes(sim: &mut Sim, node: &sim::node::Node) {
+        sim.run_on(node, |node, _| async move {
+            node.files().create_dir(Path::new(DIR)).await.unwrap();
+            let mode = Mode::Create { len: 0 };
+            drop(node.files().open(&file("log-0"), mode).await.unwrap());
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+            node.files().sync_dir(Path::new("")).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(node, Crash::Power);
+    }
+
+    #[test]
+    fn a_first_file_with_no_bytes_is_an_empty_log() {
+        let (mut sim, node) = create_node(0);
+        create_first_file_with_no_bytes(&mut sim, &node);
+        sim.run_on(&node, |node, _| async move {
+            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), 0)]);
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored, Stored::default());
+            log.write(None, &[bytes(1, 10)]).await.unwrap();
+            drop(log);
+            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), SEGMENT)]);
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, 10)],
+        };
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    // The write removes a first file with no record to make it again, larger.
+    #[test]
+    fn a_failed_remove_of_a_first_file_with_no_bytes_poisons_the_log() {
+        let (mut sim, node) = create_node(0);
+        create_first_file_with_no_bytes(&mut sim, &node);
+        let (errors, lens) = sim
+            .run_on(&node, |node, _| async move {
+                let (mut log, _) = open(&node).await.unwrap();
+                node.fail_file(&file("log-0"), Operation::Remove);
+                let first = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+                let second = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+                drop(log);
+                ((first, second), lens(&node).await)
+            })
+            .unwrap();
+        let poisoned = Error::Poisoned {
+            path: file("log-0"),
+        };
+        assert_eq!(errors, (io("log-0", Operation::Remove), poisoned));
+        assert_eq!(lens, [(PathBuf::from("log-0"), 0)]);
+        sim.crash(&node, Crash::Power);
+        assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
+    }
+
+    #[test]
     fn gives_the_error_of_a_file_call_that_fails() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let error = sim
             .run_on(&node, |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
@@ -1861,7 +1977,7 @@ mod tests {
 
     #[test]
     fn gives_the_error_of_a_pool_with_no_block_for_a_read() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let (error, expected) = sim
             .run_on(&node, |node, _| async move {
                 drop(open(&node).await.unwrap());
@@ -1889,8 +2005,8 @@ mod tests {
         let damages: [(usize, u64, &[u8]); 2] =
             [(0, wide(CHECK) + 10, &[127]), (2, 0, &[0; HEADER])];
         for (record, at, damage) in damages {
-            let (mut sim, node) = sim(0);
-            let starts = three(&mut sim, &node);
+            let (mut sim, node) = create_node(0);
+            let starts = create_three(&mut sim, &node);
             sim.run_on(&node, |node, _| async move {
                 let (mut log, stored) = open(&node).await.unwrap();
                 assert_eq!(stored.entries.len(), 3);
@@ -1922,8 +2038,8 @@ mod tests {
 
     #[test]
     fn refuses_a_file_with_no_record_before_another_file() {
-        let (mut sim, node) = sim(0);
-        three(&mut sim, &node);
+        let (mut sim, node) = create_node(0);
+        create_three(&mut sim, &node);
         sim.run_on(&node, |node, _| async move {
             for name in ["log-1", "log-2"] {
                 let mode = Mode::Create { len: 512 };
@@ -1942,7 +2058,7 @@ mod tests {
     // A cut can keep the header of the first record of a file and tear its body.
     #[test]
     fn a_record_that_does_not_fit_replaces_a_file_with_no_record() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let len = usize::try_from(SEGMENT).unwrap() - 1000;
         sim.run_on(&node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
@@ -1972,19 +2088,13 @@ mod tests {
 
     #[test]
     fn a_first_record_larger_than_a_file_is_in_log_0() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let files = sim
             .run_on(&node, |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
                 log.write(None, &[bytes(1, LARGE)]).await.unwrap();
                 drop(log);
-                let mut files = Vec::new();
-                for name in node.files().list(Path::new(DIR)).await.unwrap() {
-                    let path = Path::new(DIR).join(&name);
-                    let len = node.files().open(&path, Mode::Read).await.unwrap().len();
-                    files.push((name, len));
-                }
-                files
+                lens(&node).await
             })
             .unwrap();
         let len = wide(encode(0, None, &[bytes(1, LARGE)]).len());
@@ -1993,7 +2103,7 @@ mod tests {
 
     #[test]
     fn refuses_a_write_after_a_failed_or_dropped_one() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         let dropped = sim
             .run_on(&node, |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
@@ -2058,7 +2168,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the entries of a write must follow the log")]
     fn panics_on_a_write_whose_entries_do_not_follow_the_log() {
-        let (mut sim, node) = sim(0);
+        let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 1)]).await.unwrap();
