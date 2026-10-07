@@ -13,6 +13,7 @@ influxdb-line-protocol = { workspace = true, optional = true }
 types = { path = "../types" }
 
 [dev-dependencies]
+counting = { path = "../counting" }
 proptest.workspace = true
 
 [[test]]

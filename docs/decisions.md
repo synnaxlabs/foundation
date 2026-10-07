@@ -2437,6 +2437,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033140752,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033409699,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033688614).
+  Memory: each series keeps its points in chunks of at most 4096, one time column and
+  one typed column for each field key, so the STORE AND FORWARD scenario holds about
+  6e7 points on a CI runner (#1149). A point with one float field takes about 17 heap
+  bytes, with no dependence on its tags; `tests/memory.rs` counts the heap bytes with
+  `counting` and bounds them at 32 a point. `Point::fields` is a `Fields` view of the
+  chunk. Lost: runs of points on a fixed time step, as mesh slew moves each time off
+  any grid (MESH SLEW); and RSS in place of a byte count, as RSS depends on the
+  allocator and the OS. Decided by the architect (`laptop.architect-2`), #1419
+  (https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

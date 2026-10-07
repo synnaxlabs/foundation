@@ -1,36 +1,26 @@
 //! A store of the lab's data lines holds each point in a few tens of bytes, so the
-//! STORE AND FORWARD scenario fits a CI runner. This binary has no test harness, so
-//! no other test grows the process while it measures.
+//! STORE AND FORWARD scenario fits a CI runner. The count covers each thread, so this
+//! binary has no test harness.
+
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::io::Write as _;
 
 use connector_influx::sim::Store;
 
-const POINTS: u64 = 1_000_000;
+#[global_allocator]
+static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
-/// The most bytes a point may take: 8 of time, 8 of value, and 1 of presence, with
-/// room for the allocator.
-const BUDGET: u64 = 32;
+const POINTS: usize = 1_000_000;
 
-/// The resident memory of this process, in bytes.
-fn resident() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").expect("Linux");
-    let kib: u64 = status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|kib| kib.parse().ok())
-        .expect("a VmRSS line in KiB");
-    kib * 1024
-}
+/// The most heap bytes a point may take: 8 of time, 8 of value, and 1 of presence,
+/// with room for the chunks.
+const BUDGET: usize = 32;
 
 fn main() {
-    if !cfg!(target_os = "linux") {
-        return;
-    }
     let mut store = Store::default();
     let mut body = Vec::new();
-    let before = resident();
+    let before = ALLOCATOR.held();
     for k in 0..POINTS {
         writeln!(
             body,
@@ -45,15 +35,14 @@ fn main() {
     }
     store.write(&body).expect("valid lines");
     drop(body);
-    let grown = resident().saturating_sub(before);
+    let held = ALLOCATOR.held().saturating_sub(before);
     assert_eq!(
-        u64::try_from(store.points("edge.value", &[]).count()),
-        Ok(POINTS),
+        store.points("edge.value", &[]).count(),
+        POINTS,
         "each point is stored"
     );
     assert!(
-        grown <= BUDGET * POINTS,
-        "the store took {} bytes a point, more than {BUDGET}",
-        grown / POINTS
+        held <= BUDGET * POINTS,
+        "the store holds {held} bytes, more than {BUDGET} a point"
     );
 }
