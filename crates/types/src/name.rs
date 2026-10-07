@@ -664,7 +664,10 @@ mod tests {
         fn segments(
             count: std::ops::Range<usize>,
         ) -> impl Strategy<Value = Vec<&'static str>> {
-            prop::collection::vec(prop::sample::select(vec!["a", "b", "@x"]), count)
+            prop::collection::vec(
+                prop::sample::select(vec!["a", "ab", "b", "@x"]),
+                count,
+            )
         }
 
         #[test]
@@ -698,6 +701,7 @@ mod tests {
         fn refuses_text_that_is_not_a_name_with_its_error() {
             assert_eq!("a..b".parse::<Prefix>(), Err(segment_error("a..b", "")));
             assert_eq!("a.*".parse::<Prefix>(), Err(wildcard_error("a.*")));
+            assert_eq!(" ".parse::<Prefix>(), Err(segment_error(" ", " ")));
         }
 
         #[test]
