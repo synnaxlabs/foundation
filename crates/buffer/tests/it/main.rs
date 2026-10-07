@@ -482,6 +482,34 @@ fn a_memory_path_with_a_trailing_slash_names_only_a_directory() {
 }
 
 #[test]
+fn a_memory_path_of_the_data_directory_names_no_file() {
+    let files = Memory::default().files();
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("./", Mode::Read),
+        ("./", Mode::Write),
+        (".", Mode::Read),
+        (".", Mode::Create { len: 1 }),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("."))));
+    let expected = [
+        Err(io("./", Operation::Open, 21)),
+        Err(io("./", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Remove, 21)),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
 fn a_new_ring_keeps_its_layout_across_opens() {
     let memory = Memory::default();
     run(1, memory.clone(), |shard| async move {

@@ -346,6 +346,30 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
 }
 
 #[test]
+fn a_path_of_the_data_directory_names_no_file() {
+    run(|files, _| async move {
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("./", Mode::Read),
+            ("./", Mode::Write),
+            (".", Mode::Read),
+            (".", Mode::Create { len: 1 }),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new(".")).await);
+        let expected = [
+            Err(io("./", Operation::Open, 21)),
+            Err(io("./", Operation::Open, 21)),
+            Err(io(".", Operation::Open, 21)),
+            Err(io(".", Operation::Open, 21)),
+            Err(io(".", Operation::Remove, 21)),
+        ];
+        assert_eq!(results, expected);
+    });
+}
+
+#[test]
 fn a_rename_onto_a_file_that_is_there_gives_exists_and_changes_nothing() {
     run(|files, _| async move {
         let pool = pool();

@@ -95,7 +95,8 @@ fn key(path: &Path) -> PathBuf {
 
 /// Whether `path` ends in `/` or `/.`, as `a/` does. Such a path names only a
 /// directory: a disk gives `EISDIR` (21) on a create and `ENOTDIR` (20) on a
-/// file that is there.
+/// file that is there. A path with no name at all, as `.`, is the directory
+/// itself: `EISDIR` on each call.
 fn slashed(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
     bytes.ends_with(b"/") || bytes.ends_with(b"/.")
@@ -126,6 +127,7 @@ impl Driver for Memory {
         let mut files = lock(&self.files);
         let found = files.get(&key(path)).cloned();
         let result = match (found, mode) {
+            _ if key(path).as_os_str().is_empty() => Err(io(path, Operation::Open, 21)),
             (_, Mode::Create { .. }) if slashed(path) => {
                 Err(io(path, Operation::Open, 21))
             }
@@ -175,7 +177,9 @@ impl Driver for Memory {
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
         let mut files = lock(&self.files);
-        let result = if files.contains_key(&key(path)) && slashed(path) {
+        let result = if key(path).as_os_str().is_empty() {
+            Err(io(path, Operation::Remove, 21))
+        } else if files.contains_key(&key(path)) && slashed(path) {
             Err(io(path, Operation::Remove, 20))
         } else {
             files.remove(&key(path));

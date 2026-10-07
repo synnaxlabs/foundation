@@ -853,6 +853,32 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
     assert_eq!(results, expected);
 }
 
+#[test]
+fn a_path_of_the_data_directory_names_no_file() {
+    let results = run(0, MIB, |node, _| async move {
+        let files = node.files();
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("./", Mode::Read),
+            ("./", Mode::Write),
+            (".", Mode::Read),
+            (".", Mode::Create { len: 1 }),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new(".")).await);
+        results
+    });
+    let expected = [
+        Err(io("./", Operation::Open, 21)),
+        Err(io("./", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Remove, 21)),
+    ];
+    assert_eq!(results, expected);
+}
+
 /// The first 200 bytes of a file after the writes of `order` (offset, length, and
 /// value), each started when the one before it ended or, when `spawned`, at once with
 /// it.
