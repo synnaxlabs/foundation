@@ -483,9 +483,9 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
     file.sync().await.expect("the ring syncs");
 }
 
-/// Opens the changed ring. With no edits, it must give the tails and the entries the
-/// build left. When it opens, each path must read, and one commit on it must
-/// survive a reopen and read back the same before and after.
+/// Opens the changed ring. With no edits, it must open unless it is full, and give
+/// the tails and the entries the build left. When it opens, each path must read, and
+/// one commit on it must survive a reopen and read back the same before and after.
 ///
 /// The commit is one entry of `CHECK_PART` bytes at each tail. A record edit can put a
 /// tail at `u64::MAX`, a precondition of `append`, so such a ring is not checked.
@@ -500,6 +500,10 @@ async fn check(
     let (buffer, slots) = match open(node, tasks, pool).await {
         Ok(opened) => opened,
         Err(Error::Pool(_) | Error::Files(_)) => panic!("open failed outside the ring"),
+        Err(Error::Full { .. }) => return,
+        Err(other) if input.edits.is_empty() => {
+            panic!("an open refused the ring the build wrote: {other}")
+        }
         Err(_) => return,
     };
     let read = read_paths(&buffer, &slots).await;
