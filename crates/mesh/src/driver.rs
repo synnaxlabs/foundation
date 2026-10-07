@@ -39,10 +39,10 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// Each member of the region, this node included. A member's peer proves the
-    /// public key of its card, and that key signs the member's grants. Each card must
-    /// be signed for its key here: `open` does not check it (#1259).
-    pub(crate) members: BTreeMap<node::Key, Member>,
+    /// Each member of the region, this node included, one record for each node. A
+    /// member's peer proves the public key of its card, and that key signs the member's
+    /// grants.
+    pub(crate) members: Vec<Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
@@ -79,14 +79,16 @@ impl Mesh {
     ///
     /// # Errors
     ///
+    /// - [`Error::Duplicate`] when two of `config.members` name one node.
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
+        let state = region::State::new(config.members).map_err(Error::Duplicate)?;
         let signer = Signer::new(config.key, &config.private_key);
-        match config.members.get(&config.key) {
+        match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
             Some(own) if !signer.owns(own.public_key()) => {
                 return Err(Error::WrongKey);
@@ -94,7 +96,7 @@ impl Mesh {
             Some(_) => {}
         }
         let mut voters = config.voters.iter();
-        if let Some(&key) = voters.find(|key| !config.members.contains_key(key)) {
+        if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
@@ -114,7 +116,7 @@ impl Mesh {
         };
         let group = Rc::new(RefCell::new(Group {
             raft: Raft::new(fixed, start)?,
-            state: region::State::new(config.members),
+            state,
             queues: BTreeMap::new(),
             stopped: Rc::default(),
             task: None,
@@ -479,7 +481,6 @@ mod tests {
     use sim::{Crash, Sim, link};
 
     use super::*;
-    use crate::card;
     use crate::common::{self, key, message, pool, private, proven, public};
     use crate::message::Message;
     use crate::region::Malformed;
@@ -1440,20 +1441,28 @@ mod tests {
         });
     }
 
-    // `open` does not check that a card is signed for its key in `members` (#1259).
     #[test]
-    fn open_takes_a_card_that_is_signed_for_another_key() {
+    fn member_gives_the_record_that_its_card_names_for_each_order_of_the_records() {
         solo(|node, tasks| async move {
-            let mut config = config(&node, &tasks, 1, &[1, 2], &[1]);
-            config.members.insert(key(2), common::member(3));
+            let mut config = config(&node, &tasks, 1, &[2, 3, 1], &[1]);
+            config.members.reverse();
             let mesh = Mesh::open(config).await.unwrap();
-            let given = mesh.member(key(2)).unwrap();
-            assert_eq!(given, common::member(3));
-            let card = given.card.card().clone();
-            assert_eq!(
-                card::Signed::check(key(2), card, *given.card.signature()).err(),
-                Some(card::Forged { node: key(2) }),
-            );
+            for id in [1, 2, 3] {
+                assert_eq!(mesh.member(key(id)), Some(common::member(id)));
+            }
+        });
+    }
+
+    #[test]
+    fn open_refuses_two_records_of_one_node() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
+            config.members.push(common::member(2));
+            let opened = Mesh::open(config).await.err();
+            assert_eq!(opened, Some(Error::Duplicate(key(2))));
+            assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+            let text = format!("node {} has two member records", key(2));
+            assert_eq!(Error::Duplicate(key(2)).to_string(), text);
         });
     }
 

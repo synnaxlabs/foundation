@@ -1605,8 +1605,13 @@ How to read this record:
   gives `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A
   watch does not keep the group running, and a dropped watch leaves no waker. `open`
   refuses a node or a voter that is not a member (`Error::NotMember`), and a private key
-  that is not the key of this node's member (`Error::WrongKey`). Proposed by
-  box1.builder-3, decided by the architect (#471):
+  that is not the key of this node's member (`Error::WrongKey`). `Config.members` is a
+  list, and the region state holds each record under the key of its card, so the key of
+  a member has one copy. `open` refuses two records of one node (`Error::Duplicate`),
+  and it is the one check of that case (decided by `laptop.architect`:
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
+  reverses the map of the ruling below). Proposed by box1.builder-3, decided by the
+  architect (#471):
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
@@ -1690,7 +1695,11 @@ How to read this record:
   and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
   rotation that only the node signs lets a stolen key lock the node out. Lost: a record
   that only the admitting voter checks (a voter that lies admits any key, against BQ12).
-  Decided by the architect, #242
+  A `card::Signed` holds the `node::Key` that its signature covers (`Signed::key`): the
+  key cannot come from the public key, which can rotate, so the signed record is its one
+  place (decided by `laptop.architect`:
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). Decided
+  by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
