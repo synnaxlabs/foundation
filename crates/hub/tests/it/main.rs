@@ -558,14 +558,26 @@ fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
             ..
         } = test;
         clock.sleep(Span::from_nanos(1)).await;
-        // A dropped writer wakes the task, so the last drop is not a writer.
-        drop(writer);
-        clock.sleep(Span::from_nanos(1)).await;
-        drop((hub, reader));
+        drop((hub, reader, writer));
         clock.sleep(Span::from_nanos(1)).await;
         assert_eq!(ended.get(), 1, "the commit task ended before the commit");
         clock.sleep(SETTLE).await;
         assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+    });
+}
+
+/// The commit task that went back to sleep after a commit wakes for the next write.
+#[test]
+fn wakes_the_commit_task_for_a_write_after_a_commit() {
+    run(23, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[1]);
+        assert_eq!(samples(&reader.next().await.expect("a frame"), 2), [1]);
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[2]);
+        assert_eq!(samples(&reader.next().await.expect("a frame"), 2), [2]);
     });
 }
 
