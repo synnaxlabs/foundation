@@ -267,11 +267,9 @@ impl State {
     /// Ends each session with [`Error::Network`], and refuses each later dial, and
     /// each accept once none that connected waits.
     fn fail(&mut self, error: env::net::Error) {
-        for slot in self.sessions.values_mut() {
-            slot.end.get_or_insert_with(|| Error::Network {
-                error: error.clone(),
-            });
-            slot.wake();
+        self.endpoint.fail(&error);
+        while let Some(event) = self.endpoint.poll() {
+            self.dispatch(event);
         }
         self.accepting.drain(..).for_each(Waker::wake);
         self.failed = Some(error);

@@ -259,6 +259,14 @@ impl Endpoint {
         self.connections.iter().all(Option::is_none)
     }
 
+    /// Ends each connection after the socket broke, and queues the
+    /// [`Event::Closed`] of each one the caller has, with [`Error::Network`].
+    pub(crate) fn fail(&mut self, error: &env::net::Error) {
+        let connections = self.connections.iter_mut().flatten();
+        let closed = connections.filter_map(|connection| connection.fail(error));
+        self.events.extend(closed);
+    }
+
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
     /// with [`Error::Closed`]. Does nothing when the connection already ended: its
     /// [`Event::Closed`] is queued or was given.

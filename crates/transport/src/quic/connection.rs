@@ -248,6 +248,20 @@ impl Connection {
         }
     }
 
+    /// Ends a live connection after the socket broke, and gives its
+    /// [`Event::Closed`] with [`Error::Network`] when the caller has the key.
+    pub(super) fn fail(&mut self, error: &env::net::Error) -> Option<Event> {
+        if !self.live() {
+            return None;
+        }
+        let known = !matches!(self.end(), State::Accepting);
+        known.then(|| {
+            self.closed(Error::Network {
+                error: error.clone(),
+            })
+        })
+    }
+
     /// Ends the connection, frees the datagrams that no caller can take now, and
     /// gives the state it had.
     fn end(&mut self) -> State {
