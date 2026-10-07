@@ -29,14 +29,18 @@ impl Peer {
 
     /// Whether node 1 opens one more stream of `session`, and whether it opens one
     /// more session, in 3 s.
+    ///
+    /// # Panics
+    ///
+    /// When `session` fails in that time.
     async fn more(&self, session: &Session) -> [bool; 2] {
         let mut stream = pin!(session.accept());
         let mut other = pin!(self.transport.accept());
         let mut end = self.node.clock().sleep(seconds(3));
         poll_fn(|cx| {
             let opened = [
-                stream.as_mut().poll(cx).is_ready(),
-                other.as_mut().poll(cx).is_ready(),
+                stream.as_mut().poll(cx).map(Result::unwrap).is_ready(),
+                other.as_mut().poll(cx).map(Result::unwrap).is_ready(),
             ];
             if opened != [false; 2] {
                 return Poll::Ready(opened);
@@ -84,9 +88,7 @@ impl Peer {
     }
 
     fn block(&self, bytes: &[u8]) -> block::Block {
-        let mut block = self.pool.alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        block.freeze()
+        crate::bytes::block(&self.pool, bytes).unwrap()
     }
 }
 
@@ -156,16 +158,42 @@ where
 {
     let mut sim = Sim::new(sim::Config::default());
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
-    let shard = |name: &str| env::shards::Config {
+    start(&nodes[0], "mesh", mesh);
+    let read = start_peer(&nodes[1], id, limit, peer);
+    sim.run_for(seconds(30)).unwrap();
+    let output = read.lock().unwrap().take();
+    output.expect("the peer did not return in 30 s")
+}
+
+/// Starts `main` on a shard of `node`.
+fn start<M: Future<Output = ()> + 'static>(
+    node: &sim::node::Node,
+    name: &str,
+    main: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
+) {
+    let config = env::shards::Config {
         name: name.into(),
         core: None,
     };
-    let node = nodes[0].clone();
-    let main = move |tasks: Tasks| mesh(node, tasks);
-    drop(nodes[0].shards().start(shard("mesh"), main).unwrap());
+    let inner = node.clone();
+    let main = move |tasks: Tasks| main(inner, tasks);
+    drop(node.shards().start(config, main).unwrap());
+}
+
+/// Starts `peer` on `node` with the keys of node `id`, and gives the place of what it
+/// returns.
+fn start_peer<P>(
+    node: &sim::node::Node,
+    id: u8,
+    limit: usize,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Arc<Mutex<Option<P::Output>>>
+where
+    P: Future<Output: Send + 'static> + 'static,
+{
     let read = Arc::new(Mutex::new(None));
-    let (node, result) = (nodes[1].clone(), Arc::clone(&read));
-    let main = move |tasks: Tasks| async move {
+    let result = Arc::clone(&read);
+    start(node, "peer", move |node, tasks| async move {
         let pool = create_pool();
         let config = transport::Config {
             message_bytes_max: NonZeroUsize::new(limit).unwrap(),
@@ -180,11 +208,8 @@ where
         };
         let output = peer(side).await;
         *result.lock().unwrap() = Some(output);
-    };
-    drop(nodes[1].shards().start(shard("peer"), main).unwrap());
-    sim.run_for(seconds(30)).unwrap();
-    let output = read.lock().unwrap().take();
-    output.expect("the peer did not return in 30 s")
+    });
+    read
 }
 
 /// Holds the mesh of node 1 open.
@@ -247,6 +272,32 @@ fn a_session_that_the_peer_closes_gives_way_to_a_new_session() {
     });
     assert_eq!(sent, [(); 2].map(|()| Ok(Some(pre_vote()))));
     assert_eq!(more, [false; 2]);
+}
+
+// Node 3 has an address here. The send that finds the failed session of node 2 comes
+// before node 3 stops its stream.
+#[test]
+fn a_session_that_fails_leaves_the_session_to_each_other_member() {
+    let mut sim = Sim::new(sim::Config::default());
+    let nodes = IDS.map(|_| sim.node(sim::node::Config::default()));
+    start(&nodes[0], "mesh", hold);
+    drop(start_peer(&nodes[1], 2, LIMIT, |peer| async move {
+        let session = peer.session().await;
+        let mut receiver = stream(&session).await;
+        assert_eq!(next(&mut receiver).await, Ok(Some(pre_vote())));
+        session.close(Code(7));
+        let _session = peer.session().await;
+        pending::<()>().await;
+    }));
+    let more = start_peer(&nodes[2], 3, LIMIT, |peer| async move {
+        let session = peer.session().await;
+        let receiver = stream(&session).await;
+        peer.node.clock().sleep(seconds(10)).await;
+        receiver.stop(Code(7));
+        peer.more(&session).await
+    });
+    sim.run_for(seconds(30)).unwrap();
+    assert_eq!(more.lock().unwrap().take(), Some([true, false]));
 }
 
 #[test]
@@ -403,8 +454,8 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
 
 /// Whether node 2, which takes a message of at most `limit` bytes, got the entry of
 /// 2000 bytes that node 1 proposed as the leader, and what `Peer::more` gave after 16
-/// messages.
-fn large(limit: usize) -> (bool, [bool; 2]) {
+/// messages, and again after node 2 stopped the stream.
+fn large(limit: usize) -> (bool, [[bool; 2]; 2]) {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
         let config = create_config(&node, &tasks, create_pool());
         let transport = Rc::clone(&config.transport);
@@ -433,14 +484,17 @@ fn large(limit: usize) -> (bool, [bool; 2]) {
             };
             got |= entries.iter().any(large);
         }
-        (got, peer.more(&session).await)
+        let quiet = peer.more(&session).await;
+        receiver.stop(Code(7));
+        (got, [quiet, peer.more(&session).await])
     })
 }
 
 #[test]
 fn a_message_that_is_too_large_for_the_peer_drops_and_its_stream_stays() {
-    assert_eq!(large(LIMIT), (true, [false; 2]));
-    assert_eq!(large(1472), (false, [false; 2]));
+    let more = [[false; 2], [true, false]];
+    assert_eq!(large(LIMIT), (true, more));
+    assert_eq!(large(1472), (false, more));
 }
 
 /// Asserts that node 2 gets a message, and that its stream and its session then end
