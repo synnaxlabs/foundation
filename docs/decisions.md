@@ -614,16 +614,18 @@ How to read this record:
   wakes its own task and returns `Pending`. So it yields under `sim` as under `os`, and
   `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does nothing
   outside a Tokio runtime. A complete session that misses a frame (a window of untaken
-  frames, or a commit of more than a window) gets no later frame and no error until it
-  closes; the docs of `Mode::Complete` and `next` state it. This is a patch until
-  catch-up from the buffer exists. After a warmup, a write and a read make no heap
-  allocation, which a counting allocator test binary checks (COUNTING ALLOCATOR). `next`
-  gives a `types::frame::View` of the reader's channels and their index (M2), never the
-  frame. The view borrows the reader, which releases the frame at the next call, so the
-  grant at the next take follows CREDIT RULES; a caller that keeps data copies it. A
-  session that ends gives `reader::Ended`. `Hub::define` stands. Decided by the
-  architect, #1133
-  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575 and
+  frames, or a commit of more than a window) gets no later frame, as there is no
+  catch-up from the buffer yet. The director chose that `delivery` reports the miss and
+  wakes the session, and that `next` then ends with an error, in this PR; until that
+  lands, the session waits with no error. #1170 sizes the window to one commit
+  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). After a
+  warmup, a write and a read make no heap allocation, which a counting allocator test
+  binary checks (COUNTING ALLOCATOR). `next` gives a `types::frame::View` of the
+  reader's channels and their index (M2), never the frame. The view borrows the reader,
+  which releases the frame at the next call, so the grant at the next take follows
+  CREDIT RULES; a caller that keeps data copies it. A session that ends gives
+  `reader::Ended`. `Hub::define` stands. Decided by the architect, except the stall,
+  #1133 (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575 and
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
