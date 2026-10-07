@@ -39,4 +39,6 @@ exclude_re = [
   # A `Tcp` has no write buffer, so a flush is ready at once. `Poll::Ready(Ok(()))` is
   # what the body returns.
   'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
+  # macOS only. CI runs Linux and does not build it; its tests run on macOS.
+  'crates/os/src/allocate\.rs:',
 ]

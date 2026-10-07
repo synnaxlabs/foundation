@@ -24,6 +24,10 @@ pub enum Error {
         /// Each address tried, with why it failed.
         attempts: Vec<(Address, Error)>,
     },
+    /// In [`Error::Unreachable`], the cause at an address this node cannot send to:
+    /// its port is 0, its IP is unspecified, or this node runs no carrier for its
+    /// kind.
+    Unroutable,
     /// The peer could not prove that it holds the key that was dialed.
     Authentication {
         /// The key that was dialed.
@@ -101,6 +105,7 @@ impl fmt::Display for Error {
                     write!(f, "; {address:?}: {error}")
                 })
             }
+            Self::Unroutable => write!(f, "this node cannot send to that address"),
             Self::Authentication { expected } => {
                 write!(f, "the peer did not prove key {expected}")
             }
@@ -176,6 +181,11 @@ mod tests {
                     hex()
                 ),
             );
+        }
+
+        #[test]
+        fn says_this_node_cannot_send_to_the_address() {
+            check(&Error::Unroutable, "this node cannot send to that address");
         }
 
         #[test]

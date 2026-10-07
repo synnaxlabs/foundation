@@ -1176,6 +1176,24 @@ How to read this record:
   states leak into `hub`), and the stream ends (memory pressure becomes stream churn and
   lost messages, and `Command` streams drop first). Decided by the advisor under the
   delivery and wire internals delegation.
+- **DIAL ORDER (#68, 2026-10-07)** `Transport::dial` tries a peer's addresses UDP, then
+  TCP, then relays, in the given order within a kind. It starts the next address 250 ms
+  after the newest attempt started, or at once when the newest fails, and keeps the
+  first session that completes; dropping the others closes them. Before it starts a
+  carrier, it checks each address: port 0, an unspecified IP, or a kind with no carrier
+  on this node is the cause `Error::Unroutable` in `Error::Unreachable`, so
+  `Endpoint::connect` keeps its invariant panic. A broken socket ends the dial with
+  `Error::Network`. Rejected: the carrier maps noq-proto's invalid address to an error
+  (each later carrier would need its own check), and `Network` with neutral text (one
+  variant with two meanings: a caller cannot tell a dead socket from a bad address). An
+  attempt that connected before the break still wins, and its session ends with
+  `Error::Network`, as `accept` gives such a session, so the result does not depend on
+  the order of the attempts. The order and the stagger: proposed by `box2.builder-5`
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6022920297), decided
+  by the architect in review of #1067. `Unroutable`: decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
+  connected attempt: proposed by `box2.builder-5`, decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1666,14 +1684,19 @@ How to read this record:
   one byte string, with no spans: a version byte, then tagged values, blocks in the
   producer's order, keys in byte order, and fixed-width little-endian integers (`u64`
   counts and lengths, `i128` integers, and `f64` floats as their bits). `decode`
-  refuses every byte string that `encode` cannot write. Both refuse nesting past 64
-  levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
-  `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
-  `check` refuses the same Documents as `encode` without writing, so another writer
-  (`config-hcl`) uses the same limit (#287). `spec` stores and hashes these bytes.
-  Pinned bytes are an oracle in `oracles/conformance/document/`. A new format takes a
-  new version byte. Decided by the `config` builder; approved by the coordinator
-  (#62).
+  refuses every byte string that `Checked::encode` cannot write. Only a `Checked`
+  Document encodes: `Checked::new` refuses nesting past 64 levels with `TooDeep`, so
+  `Checked::encode` cannot fail, and `decode` gives a `Checked` or an `Error`. Front
+  ends refuse files that nest deeper. `spec` holds a connector config as a `Checked`,
+  and `config-hcl` `write` and `update` take one. Lost: a depth on each tree type,
+  which makes each producer of a tree pay for a rule that only the writers (the
+  encoding and `config-hcl`) need. `spec` stores and hashes these bytes. Pinned bytes
+  are an oracle in `oracles/conformance/document/`. A new format takes a new version
+  byte. Decided by the `config` builder; approved by the coordinator (#62). `Checked`
+  decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030763787, and
+  for `write` and `update`,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
@@ -1769,13 +1792,16 @@ How to read this record:
   can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
   `update` a `Refusal`: the problems in the old text, or else the parts of the new
   Document that HCL text cannot hold. Nesting past the depth limit is
-  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
-  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
-  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
-  shared type (#370); a checked Document type, which gives each caller two calls; and
-  an `update` that takes the Document that `read` gave for the text, so it gives only
-  `Unwritable`, but writes wrong text with no error when a caller gives another
-  Document. Decided by the `config` builder; approved by the coordinator (#330).
+  `Error::TooDeep` from `read`, with `document`'s diagnostic; `write` and `update`
+  take a `Checked` Document, so they cannot meet it. Lost: one `Error` for all three,
+  so each caller of `read` handled a variant that `read` never gives; a `write` that
+  takes a plain Document and clones it into a `Checked`, which copies each tree only
+  to check its depth and keeps `Unwritable::TooDeep`; and an `update` that takes the
+  Document that `read` gave for the text, so it gives only `Unwritable`, but writes
+  wrong text with no error when a caller gives another Document. Decided by the
+  `config` builder; approved by the coordinator (#330). `write` and `update` take a
+  `Checked`, and `read` does not change: decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -2116,7 +2142,17 @@ How to read this record:
   adapter hides the gap between frames, so a seam that split frames would act
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
-  thread panics.
+  thread panics. Amended (2026-10-07, #995): `env::net` also gives name lookups.
+  `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
+  lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a
+  retry may fix, and a caller matches the variant, not the code. On `os`,
+  `getaddrinfo` maps `EAI_NONAME` and `EAI_NODATA` to `NotFound`, `EAI_SYSTEM` to
+  `Io` with `errno`, `EAI_AGAIN` to `Io` with `EAGAIN`, `EAI_MEMORY` to `Io` with
+  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Decided by the
+  architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
+  mean to a caller.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -2154,7 +2190,17 @@ How to read this record:
   drops it. As on Linux, a send goes whole while the send buffer is empty or takes
   less than `send_buffer_bytes`, and is pending from then. When a datagram leaves and
   the send buffer is no longer full, each send that waits wakes in the same step.
-  Approved by the coordinator.
+  Approved by the coordinator. Amended (2026-10-07, #995): `Net::resolve` gives the
+  addresses of a host name. An IP literal gives its one address with no lookup, and
+  no lookup is cached. `Sim::name` sets the answer to each lookup of a name in the
+  run, on any node: its addresses in order, none (`NotFound`), or a failure (`Io`
+  with `EAGAIN`), after a delay on the clock of the node. A lookup reads the answer
+  at its first poll and sends no packet, so a partition does not stop it. Decided by
+  the architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  From the review of #1018: a name matches in any ASCII case and with or without one
+  final dot, as in DNS. An IP literal as a name panics, because no lookup reads it.
+  A lookup that would end past the end of the clock never answers.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -3116,7 +3162,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |

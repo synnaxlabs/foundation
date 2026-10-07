@@ -17,6 +17,7 @@ the person's laptop and runs its launcher line there: `cmux new-workspace --name
 | `laptop.architect` | laptop | the person | `/architect` | `~/.factory/bin/factory-agent laptop.architect` |
 | `laptop.integrator-1` | laptop | the person | `/build` | `~/.factory/bin/factory-agent laptop.integrator-1` |
 | `laptop.integrator-2` | laptop | the person | `/build` | `~/.factory/bin/factory-agent laptop.integrator-2` |
+| `laptop.director` | laptop | the person | `/direct` | `~/.factory/bin/factory-agent laptop.director` |
 | `laptop.monitor` | laptop | the person | none | none: it runs already |
 | `box1.builder-1` | box1 | Ronaldo | `/build` | `~/.factory/bin/factory-agent box1.builder-1` |
 | `box1.builder-2` | box1 | Ronaldo | `/build` | `~/.factory/bin/factory-agent box1.builder-2` |
@@ -32,9 +33,10 @@ the person's laptop and runs its launcher line there: `cmux new-workspace --name
 The launcher sources `~/.factory/env`, so `gh` and `git` act as the GitHub App
 `synnax-foundation-factory[bot]` (one private key per machine). It makes the worktree
 `~/Desktop/synnaxlabs/foundation-wt/<role>`, sets `FACTORY_NAME`, and starts Claude
-Code with `--name <role>`, the factory mod, and the role's skill. The architect runs at
-`xhigh` effort, the others at `high`. The monitor watches factory efficiency and
-performance.
+Code with `--name <role>`, the factory mod, and the role's skill. The architect and the
+director run at `xhigh` effort, the others at `high`. The director owns the quality bar
+and the issue queue. The monitor keeps the work moving: it unblocks sessions and
+watches efficiency.
 
 A builder works one issue per context. When its PR merges, it calls the factory mod's
 `next` tool, which runs `/clear` and then `/build` by itself.
@@ -104,10 +106,11 @@ that pass in CI.
 
 - Tasks, decisions, and approvals live in issues, PRs, and the repo, never only in a
   message or a session's context.
-- An approval is a link to the person's or engineer's own comment, with its UTC time.
-  Never record a paraphrase as an approval.
-- A new decision says "Supersedes <link>". Decision changes ship in their own PRs, never
-  inside code.
+- An approval is a link to the person's or the architect's own comment, with its UTC
+  time. Never record a paraphrase as an approval.
+- A new decision says "Supersedes <link>". A ruling ships in the code PR that needs it,
+  with the link to the architect's comment. A change to the meaning of a ruling needs a
+  new approval before the PR merges.
 - Each issue's last state comment says what is done, the next step, and open questions.
 
 ## Models

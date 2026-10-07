@@ -6,6 +6,7 @@
     "laptop.architect",
     "laptop.integrator-1",
     "laptop.integrator-2",
+    "laptop.director",
     "laptop.monitor",
     "box1.builder-1",
     "box1.builder-2",
@@ -19,6 +20,7 @@
     "box2.red-team"
   ],
   "turnCaps": {
-    "laptop.coordinator": 600
+    "laptop.coordinator": 600,
+    "laptop.architect": 600
   }
 }

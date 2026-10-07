@@ -5,7 +5,7 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
-use document::encoding::{Error, decode, encode};
+use document::encoding::{Checked, Error, decode};
 use document::value::{Call, Float, Kind, Value};
 use document::{Attribute, Block, Document, Label, Map};
 
@@ -42,8 +42,8 @@ fn string(text: &str) -> Vec<u8> {
 }
 
 fn check(document: &Document, bytes: &[u8]) {
-    assert_eq!(encode(document).unwrap(), bytes);
-    assert_eq!(&decode(bytes).unwrap(), document);
+    assert_eq!(Checked::new(document.clone()).unwrap().encode(), bytes);
+    assert_eq!(decode(bytes).unwrap().document(), document);
 }
 
 #[test]
@@ -307,7 +307,8 @@ fn nested(level: Level, levels: usize) -> (Vec<u8>, Option<usize>) {
 fn reads_64_levels_and_refuses_65() {
     for level in [Level::Block, Level::List, Level::Map, Level::Call] {
         let (bytes, _) = nested(level, 64);
-        assert_eq!(encode(&decode(&bytes).unwrap()).unwrap(), bytes);
+        let document = decode(&bytes).unwrap().into_document();
+        assert_eq!(Checked::new(document).unwrap().encode(), bytes);
         let (bytes, at) = nested(level, 65);
         assert_eq!(decode(&bytes), Err(Error::Depth { at: at.unwrap() }));
     }

@@ -44,14 +44,20 @@ async function boot(
   mock.env(on, { HOME: '/h', ...(name ? { FACTORY_NAME: name } : {}) })
   const clock = mock.clock(on, { now: 1_000_000 })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
-  on('fs.read', () => ({ value: JSON.stringify(opts.roster ?? ROSTER) }))
+  let roster = opts.roster ?? ROSTER
+  on('fs.read', () => ({ value: JSON.stringify(roster) }))
   on('store.get', (_: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: any, e: any) => {
     store.set(e.key, e.value)
     poke()
     return { value: undefined }
   })
-  on('tool.register', () => ({ value: undefined }))
+  const registered: any[] = []
+  on('tool.register', (_: any, e: any) => {
+    registered.push(e)
+    poke()
+    return { value: undefined }
+  })
   on('session.usage', () => {
     poke()
     return {
@@ -92,6 +98,8 @@ async function boot(
     published,
     started,
     statuses,
+    registered,
+    setRoster: (next: object) => (roster = next),
     store,
     clock,
     feed: (...more: string[]) => {
@@ -302,6 +310,20 @@ test('takes the cap of a session from turnCaps in the roster', async ($, on) => 
   w.feed(inbox(PEER, { id: 'm2', text: 'hi' }))
   await w.until(() => w.statuses.some(s => s.includes('capped at 2 turns an hour')))
   expect(w.started.length).toBe(2)
+  await w.settle()
+})
+
+test('applies a roster change within a minute, with no reload', async ($, on) => {
+  const NEW = 'laptop.director'
+  const w = await boot($, on)
+  const sends = () => w.registered.filter(r => r.name === 'send')
+  w.setRoster({ ...ROSTER, names: [...ROSTER.names, NEW] })
+  await w.clock.advance(60_000)
+  await w.until(() => sends().length === 2)
+  expect(sends()[1].inputSchema.properties.to.enum).toContain(NEW)
+  w.feed(inbox(NEW, { id: 'm1', text: 'hi' }))
+  await w.until(() => w.started.length === 1)
+  expect(w.started).toEqual([`fmsg m1 from ${NEW}: hi`])
   await w.settle()
 })
 
