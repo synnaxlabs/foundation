@@ -23,14 +23,16 @@ impl Repo {
     }
 
     /// A `git` command in the repository, with an identity and no global or system
-    /// config, so the machine's settings cannot change a test.
+    /// config, ignore file, or attributes file, so the machine's settings cannot
+    /// change a test.
     fn command(&self) -> Command {
-        let mut command = Command::new("git");
+        let mut command = command(&self.dir);
         command
-            .current_dir(&self.dir)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"]);
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "core.excludesFile=/dev/null"])
+            .args(["-c", "core.attributesFile=/dev/null"]);
         command
     }
 
@@ -573,4 +575,41 @@ fn a_directory_left_by_a_killed_run_does_not_break_a_test() {
     };
     let (repo, end) = Repo::with_pr("stale");
     assert_eq!(repo.reaches(&end, &end), Ok(true));
+}
+
+#[test]
+fn an_inherited_git_environment_does_not_reach_another_repository() {
+    let other = Repo::new("inherited");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "review::history::tests::reaches_through_clean_merges_of_main",
+        ])
+        .env("GIT_DIR", other.dir.join(".git"))
+        .env("GIT_CONFIG_PARAMETERS", "'commit.gpgsign'='true'")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 passed"), "{output:?}");
+    let refs = other.command().arg("show-ref").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&refs.stdout), "");
+}
+
+#[test]
+fn a_global_ignore_file_does_not_break_a_test() {
+    let xdg =
+        std::env::temp_dir().join(format!("xtask-history-xdg-{}", std::process::id()));
+    std::fs::create_dir_all(xdg.join("git")).unwrap();
+    std::fs::write(xdg.join("git/ignore"), "Cargo.lock\n").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "review::history::tests::a_moved_file_and_a_manifest_change_code",
+        ])
+        .env("XDG_CONFIG_HOME", &xdg)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&xdg).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 passed"), "{output:?}");
 }

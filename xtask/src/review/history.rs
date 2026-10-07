@@ -182,8 +182,7 @@ impl<'a> History<'a> {
 
     /// Reports whether `commit` is an ancestor of the commit `base`.
     fn on_base(&self, commit: &str, base: &str) -> Result<bool, String> {
-        let status = Command::new("git")
-            .current_dir(self.root)
+        let status = command(self.root)
             .args(["merge-base", "--is-ancestor", commit, base])
             .status()
             .map_err(|e| format!("git merge-base: {e}"))?;
@@ -199,8 +198,7 @@ impl<'a> History<'a> {
     /// Reports whether `merge` has the tree that a merge of `first` and `second`
     /// makes with no conflict.
     fn clean(&self, merge: &str, first: &str, second: &str) -> Result<bool, String> {
-        let output = Command::new("git")
-            .current_dir(self.root)
+        let output = command(self.root)
             .args(["merge-tree", "--write-tree", first, second])
             .output()
             .map_err(|e| format!("git merge-tree: {e}"))?;
@@ -222,8 +220,7 @@ impl<'a> History<'a> {
 
     /// The output of a `git` command that must succeed.
     fn output(&self, args: &[&str]) -> Result<Vec<u8>, String> {
-        let output = Command::new("git")
-            .current_dir(self.root)
+        let output = command(self.root)
             .args(args)
             .output()
             .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
@@ -232,6 +229,19 @@ impl<'a> History<'a> {
         }
         Ok(output.stdout)
     }
+}
+
+/// A `git` command in `root` with no inherited `GIT_*` variable, so no variable such
+/// as `GIT_DIR` can point it at another repository.
+fn command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(key);
+        }
+    }
+    command.current_dir(root);
+    command
 }
 
 /// Whether `text`, a changed line of a file, is code: any line of a file that is not
