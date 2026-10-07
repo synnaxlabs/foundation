@@ -408,9 +408,8 @@ impl Buffer {
         self.shared.layout
     }
 
-    /// The block pool from [`Config::pool`]. Its largest block bounds an entry
-    /// ([`Limit::Block`]), so a caller that makes the [`Parts`](crate::Parts) of its
-    /// entries from it needs no pool of its own.
+    /// The block pool from [`Config::pool`]. Its largest block bounds an entry, with
+    /// [`Limit::Block`].
     #[must_use]
     pub fn pool(&self) -> &Pool {
         &self.shared.pool
