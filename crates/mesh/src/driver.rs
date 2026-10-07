@@ -644,7 +644,7 @@ mod tests {
         Config {
             key: key(id),
             private_key: private(id),
-            members: common::members(members),
+            members: common::create_members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
             clock: node.clock(),

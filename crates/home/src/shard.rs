@@ -795,7 +795,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_pool, interner, key};
+    use crate::common::{create_interner, create_pool, key};
 
     const DIR: &str = "shard-0";
     const RING: &str = "shard-0/ring";
@@ -853,7 +853,7 @@ mod tests {
         /// with slots 0 to `slots` assigned and no index carried, once the node has
         /// mesh time.
         async fn open(&self, area: u64, slots: u32) -> Shard {
-            let buffer = self.buffer(area, BODY_MAX, slots).await;
+            let buffer = self.create_buffer(area, BODY_MAX, slots).await;
             self.over(buffer).await
         }
 
@@ -873,7 +873,7 @@ mod tests {
         /// A shard over the ring of the node that never has mesh time, with no index
         /// carried.
         async fn unsynced(&self) -> Shard {
-            let buffer = self.buffer(AREA, BODY_MAX, 4).await;
+            let buffer = self.create_buffer(AREA, BODY_MAX, 4).await;
             // A clock that never runs never has mesh time.
             let (_, reader) = clock::Clock::new(self.clock.clone());
             Self::with(0, buffer, reader)
@@ -897,7 +897,12 @@ mod tests {
 
         /// The ring of the node, made with `area` bytes and bodies of `body_max` when
         /// it is new, with slots 0 to `slots` assigned.
-        async fn buffer(&self, area: u64, body_max: usize, slots: u32) -> Buffer {
+        async fn create_buffer(
+            &self,
+            area: u64,
+            body_max: usize,
+            slots: u32,
+        ) -> Buffer {
             let config = buffer::Config {
                 files: self.node.files(),
                 dir: PathBuf::from(DIR),
@@ -951,7 +956,7 @@ mod tests {
                     }
                 })
                 .collect();
-            (shard, interner().intern(&groups))
+            (shard, create_interner().intern(&groups))
         }
 
         /// The bytes of the ring file.
@@ -993,7 +998,7 @@ mod tests {
     where
         F: Future<Output = ()> + 'static,
     {
-        let (sim, node) = one_node(seed);
+        let (sim, node) = create_node(seed);
         let config = env::shards::Config {
             name: DIR.into(),
             core: None,
@@ -1005,7 +1010,7 @@ mod tests {
         (sim, handle)
     }
 
-    fn one_node(seed: u64) -> (sim::Sim, sim::node::Node) {
+    fn create_node(seed: u64) -> (sim::Sim, sim::node::Node) {
         let mut sim = sim::Sim::new(sim::Config {
             seed,
             ..sim::Config::default()
@@ -1025,7 +1030,7 @@ mod tests {
 
     /// Two indexes: slot 0 with an `i64` channel at slot 1, then slot 2 alone.
     fn two_indexes() -> Arc<KeySet> {
-        interner().intern(&[
+        create_interner().intern(&[
             Group {
                 index: key(Slot::new(0)),
                 data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
@@ -1039,7 +1044,7 @@ mod tests {
 
     /// The key set of one index, at a slot that [`Test::shard`] does not carry.
     fn not_carried() -> Arc<KeySet> {
-        interner().intern(&[Group {
+        create_interner().intern(&[Group {
             index: key(Slot::new(3)),
             data: &[],
         }])
@@ -1548,7 +1553,7 @@ mod tests {
         run(73, |test| async move {
             let mut shard = test.open(AREA, 2).await;
             shard.carry(Slot::new(1));
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(1)),
                 data: &[(key(Slot::new(0)), Type::Scalar(Scalar::I64))],
             }]);
@@ -1833,11 +1838,11 @@ mod tests {
     fn records_a_handoff_with_room_at_close_when_an_earlier_one_has_none() {
         run(25, |test| async move {
             let set = two_indexes();
-            let zero = interner().intern(&[Group {
+            let zero = create_interner().intern(&[Group {
                 index: key(Slot::new(0)),
                 data: &[],
             }]);
-            let two = interner().intern(&[Group {
+            let two = create_interner().intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[],
             }]);
@@ -2320,7 +2325,7 @@ mod tests {
 
     #[test]
     fn continues_each_path_after_a_power_cut_after_a_commit() {
-        let (mut sim, node) = one_node(62);
+        let (mut sim, node) = create_node(62);
         sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
             let set = two_indexes();
@@ -2365,7 +2370,7 @@ mod tests {
 
     #[test]
     fn continues_from_the_stored_tail_after_a_power_cut_before_a_commit() {
-        let (mut sim, node) = one_node(63);
+        let (mut sim, node) = create_node(63);
         sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
             let set = two_indexes();
@@ -2410,10 +2415,10 @@ mod tests {
     #[test]
     fn records_the_largest_handoff_in_the_smallest_ring() {
         run(42, |test| async move {
-            let buffer = test.buffer(AREA, 4087, 1).await;
+            let buffer = test.create_buffer(AREA, 4087, 1).await;
             let mut shard = test.over(buffer).await;
             shard.carry(Slot::new(0));
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(0)),
                 data: &[],
             }]);
@@ -2483,7 +2488,7 @@ mod tests {
     #[test]
     fn stores_a_body_under_its_index_when_a_data_channel_has_a_lower_slot() {
         run(46, |test| async move {
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
             }]);
@@ -2613,7 +2618,7 @@ mod tests {
         #[test]
         fn gives_frames_to_a_reader_of_each_mode_opened_with_no_mesh_time() {
             run(98, |test| async move {
-                let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+                let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
                 let (clock, mesh) = clock::Clock::new(test.clock.clone());
                 let mut shard = Test::with(0, buffer, mesh.clone());
                 shard.carry(Slot::new(0));
@@ -3414,7 +3419,7 @@ mod tests {
     ) -> Result<(), sim::Error> {
         let (mut sim, _handle) = start(seed, move |test| async move {
             let set = two_indexes();
-            let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             let mut shard = test.numbered(3, buffer).await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
@@ -3478,7 +3483,7 @@ mod tests {
     #[test]
     fn gives_and_takes_keys_of_its_own_number() {
         run(76, |test| async move {
-            let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             let mut shard = test.numbered(1, buffer).await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
@@ -3552,7 +3557,7 @@ mod tests {
     /// and gives the run.
     fn write_of_another_key_set(seed: u64, label: Label) -> Result<(), sim::Error> {
         let (mut sim, _handle) = start(seed, move |test| async move {
-            let mut interner = interner();
+            let mut interner = create_interner();
             let group = Group {
                 index: key(Slot::new(2)),
                 data: &[],
@@ -3588,7 +3593,7 @@ mod tests {
 
     /// A key set of the index at slot 2 with a `String` series.
     fn string_series() -> Arc<KeySet> {
-        interner().intern(&[Group {
+        create_interner().intern(&[Group {
             index: key(Slot::new(2)),
             data: &[(key(Slot::new(3)), Type::String)],
         }])
@@ -3617,7 +3622,7 @@ mod tests {
     fn refuses_the_type_of_a_series_before_the_panic_of_an_index_not_carried() {
         run(102, |test| async move {
             let mut shard = test.shard(AREA).await;
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(3)),
                 data: &[(key(Slot::new(1)), Type::Bytes)],
             }]);
@@ -3687,7 +3692,7 @@ mod tests {
     #[test]
     fn leaves_each_gate_as_it_was_after_an_unsynced_open() {
         run(68, |test| async move {
-            let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             let (clock, mesh) = clock::Clock::new(test.clock.clone());
             let mut shard = Shard::new(Config {
                 shard: 0,
