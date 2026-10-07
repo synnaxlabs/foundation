@@ -2145,6 +2145,27 @@ How to read this record:
   to the code that encodes definitions. A chunk's address is a `types::digest::Digest`,
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
+- **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
+  node's disk through `env::files`. A put returns only after the chunk is durable. A
+  put of a digest that the store holds makes no file call. A get gives bytes only when
+  they hash to the digest; a chunk that fails the check (a write torn by a crash, a bad
+  sector) reads as absent, so the caller fetches it again as for any absent chunk, and
+  the store counts each one in a crate-private count: an `interface` issue makes it
+  public, with a noun for a name, when the first caller (the node's status of its disk)
+  needs it. `env::files` has no rename, so a torn chunk must read as absent, never as
+  a short chunk. A get or a put holds at most one chunk in memory. `put` borrows its
+  chunk (`&Block`). A put whose future is dropped stores nothing that a get gives
+  unchecked: the next put or get of the digest reads the file first. Layout: one flat
+  directory, one file per chunk named by the 64 hex digits of its digest, with the
+  chunk's bytes and nothing else, so the bytes are their own check and the layout
+  needs no header, no check field, and no rename. The open lists the directory and
+  trusts no name: a get of a listed digest reads and checks its bytes, and a put of
+  one writes it again, because a process crash leaves whole bytes in the cache that
+  no sync covers, and a put that trusted a read of them would return before they are
+  durable. A pack file with an index lost: it needs record headers, a scan of every
+  byte at open, and compaction for removal. Removal of chunks that no kept root reaches
+  is a follow-up. Architect:
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
