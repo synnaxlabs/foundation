@@ -2249,6 +2249,18 @@ fn seal_refuses_the_first_record_under_two_tail_chains() {
     });
 }
 
+/// Two whole header blocks can hold two tail chains, and the open takes one of them.
+#[test]
+#[should_panic(expected = "the header blocks differ before the seq")]
+fn seal_refuses_the_first_record_under_the_tail_chains_of_two_whole_blocks() {
+    run(121, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        let chain = shard.memory.bytes(RING)[CHAIN_AT] ^ 1;
+        shard.tamper_block(to_usize(BLOCK), CHAIN_AT, &[chain]);
+        shard.seal(0);
+    });
+}
+
 /// Two zero header blocks hold no tail chain: the open draws a new one.
 #[test]
 #[should_panic(expected = "the ring has no header")]
@@ -2376,13 +2388,11 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
                 shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes());
             }
             shard.tamper_block(unaligned, TAIL_AT, &(BLOCK + 1).to_le_bytes());
-            if taken {
-                let error = Error::Unaligned { tail: BLOCK + 1 };
-                return shard.open_refused(ring, error).await;
-            }
             let opened = shard.open(ring, &mut Slots::new()).await;
+            let refused = Err(Error::Unaligned { tail: BLOCK + 1 });
+            let expected = if taken { refused } else { Ok(()) };
             let case = format!("newer: {newer:?}, the block at {unaligned}");
-            assert_eq!(opened.map(drop), Ok(()), "{case}");
+            assert_eq!(opened.map(drop), expected, "{case}");
         });
     }
 }
