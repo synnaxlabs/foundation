@@ -339,8 +339,8 @@ impl<'a> Layout<'a> {
     }
 
     /// Takes a block of [`Layout::block_len`] bytes from `pool`, and writes the
-    /// header, ranges, and descriptors. Each range starts at zero, and series bytes
-    /// are not cleared.
+    /// header, ranges, and descriptors. Each range starts at zero; series bytes and
+    /// padding are not cleared.
     ///
     /// # Errors
     ///
@@ -360,7 +360,7 @@ impl<'a> Layout<'a> {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        let (ranges, descriptors, body) = parts_mut(&mut block);
+        let (ranges, descriptors, _) = parts_mut(&mut block);
         let indexes = series
             .iter()
             .map(|&(entry, _)| entry)
@@ -371,8 +371,6 @@ impl<'a> Layout<'a> {
         }
         let mut end = 0_usize;
         for (descriptor, &(entry, size)) in descriptors.iter_mut().zip(series) {
-            let start = padded(end);
-            body[end..start].fill(0);
             end = sizes.end(end, size);
             put(descriptor, 0, &to_u32(entry).to_le_bytes());
             put(descriptor, 4, &to_u32(end).to_le_bytes());
@@ -388,7 +386,7 @@ pub struct Draft(block::Unique);
 impl Draft {
     /// Takes a block from `pool` for a frame of `set` and `series`, and writes its
     /// header, ranges, and descriptors: [`Layout::new`], then [`Layout::draft`]. Each
-    /// range starts at zero, and series bytes are not cleared.
+    /// range starts at zero; series bytes and padding are not cleared.
     ///
     /// # Errors
     ///
@@ -405,28 +403,34 @@ impl Draft {
     }
 
     /// The series bytes, with the padding between series, as [`Frame::body`] gives
-    /// them after [`Draft::freeze`]. Use it to fill a body received whole.
+    /// them after [`Draft::freeze`]. Use it to fill a body received whole. The caller
+    /// writes every byte, padding too.
     pub fn body_mut(&mut self) -> &mut [u8] {
         let (_, _, body) = parts_mut(&mut self.0);
         body
     }
 
-    /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Time is
-    /// logarithmic in the number of present series.
+    /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Writes
+    /// zeros in the padding after the series. Time is logarithmic in the number of
+    /// present series.
     pub fn series_mut(&mut self, entry: usize) -> Option<&mut [u8]> {
         let (_, descriptors, body) = parts_mut(&mut self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
-        Some(&mut body[start..end])
+        let (series, rest) = body[start..].split_at_mut(end - start);
+        pad(end, rest);
+        Some(series)
     }
 
-    /// Each present entry and its series bytes, to fill, in entry order.
+    /// Each present entry and its series bytes, to fill, in entry order. Writes zeros
+    /// in the padding after each series as it gives it.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
         let (_, descriptors, mut body) = parts_mut(&mut self.0);
         let mut offset = 0_usize;
         spans(descriptor_ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
             let (series, rest) = rest.split_at_mut(end - start);
+            pad(end, rest);
             (body, offset) = (rest, end);
             (entry, series)
         })
@@ -816,6 +820,15 @@ const fn padded(end: usize) -> usize {
     }
 }
 
+/// Writes zeros in the padding after a series that ends at `end`, at the start of
+/// `rest`, the series bytes after it.
+fn pad(end: usize, rest: &mut [u8]) {
+    let len = (padded(end) - end).min(rest.len());
+    if len != 0 {
+        rest[..len].fill(0);
+    }
+}
+
 fn get<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
     *bytes[at..]
         .first_chunk()
@@ -1041,6 +1054,58 @@ mod tests {
         assert_eq!(&*frame.body(), expected.as_slice());
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         assert!(empty.freeze(Path::Live).body().is_empty());
+    }
+
+    /// Series over [`two_groups`] with padding after entry 0, which an empty series
+    /// follows, and after entry 2: ends 3, 8, 13, and 17.
+    const PADDED: [(usize, usize); 4] = [(0, 3), (1, 0), (2, 5), (3, 1)];
+
+    /// A draft of [`PADDED`] in a block that held `0xff`.
+    fn dirty_draft(pool: &block::Pool) -> Draft {
+        let set = two_groups();
+        let layout = Layout::new(&set, &PADDED).unwrap();
+        pool.alloc(layout.block_len()).unwrap().fill(0xff);
+        layout.draft(pool, Form::Raw).unwrap()
+    }
+
+    #[test]
+    fn leaves_the_whole_body_to_body_mut() {
+        let pool = pool(1 << 16);
+        let mut draft = dirty_draft(&pool);
+        assert_eq!(draft.body_mut(), [0xff; 17]);
+        let written: Vec<u8> = (1..=17).collect();
+        draft.body_mut().copy_from_slice(&written);
+        assert_eq!(&*draft.freeze(Path::Live).body(), written.as_slice());
+    }
+
+    #[test]
+    fn zeros_only_the_padding_after_the_series_that_series_mut_gives() {
+        let pool = pool(1 << 16);
+        let mut draft = dirty_draft(&pool);
+        assert_eq!(draft.series_mut(2).unwrap(), [0xff; 5]);
+        let expected = [[0xff; 13].as_slice(), &[0; 3], &[0xff]].concat();
+        assert_eq!(draft.body_mut(), expected.as_slice());
+        assert_eq!(draft.series_mut(0).unwrap(), [0xff; 3]);
+        assert!(draft.series_mut(1).unwrap().is_empty());
+        assert_eq!(draft.series_mut(3).unwrap(), [0xff]);
+        let expected = [[0xff; 3].as_slice(), &[0; 5], &[0xff; 5], &[0; 3], &[0xff]];
+        assert_eq!(draft.body_mut(), expected.concat().as_slice());
+    }
+
+    #[test]
+    fn zeros_the_padding_after_each_series_that_iter_mut_gives() {
+        let pool = pool(1 << 16);
+        let mut draft = dirty_draft(&pool);
+        let (entry, series) = draft.iter_mut().next().unwrap();
+        assert_eq!((entry, &*series), (0, [0xff; 3].as_slice()));
+        let expected = [[0xff; 3].as_slice(), &[0; 5], &[0xff; 9]].concat();
+        assert_eq!(draft.body_mut(), expected.as_slice());
+        drop(draft);
+        let mut draft = dirty_draft(&pool);
+        let lens: Vec<_> = draft.iter_mut().map(|(e, s)| (e, s.len())).collect();
+        assert_eq!(lens, PADDED);
+        let expected = [[0xff; 3].as_slice(), &[0; 5], &[0xff; 5], &[0; 3], &[0xff]];
+        assert_eq!(draft.body_mut(), expected.concat().as_slice());
     }
 
     #[test]
