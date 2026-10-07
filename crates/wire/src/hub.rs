@@ -113,7 +113,7 @@ pub enum Mode {
     Latest,
     /// Each live frame after its commit.
     Complete {
-        /// The first grant (CREDIT RULES), in bytes.
+        /// The first grant of credit, in bytes.
         limit_bytes: u64,
     },
 }
