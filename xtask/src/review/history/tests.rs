@@ -106,10 +106,15 @@ fn refuses_a_merge_that_resolves_a_conflict() {
     repo.advance_main("a.txt", "main side\n");
     let merge = Command::new("git")
         .current_dir(&repo.dir)
-        .args(["merge", "--quiet", "--no-edit", "origin/main"])
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(["merge", "--no-edit", "origin/main"])
         .output()
         .unwrap();
-    assert!(!merge.status.success(), "the merge has a conflict");
+    let out = String::from_utf8_lossy(&merge.stdout);
+    assert!(
+        out.contains("CONFLICT (content): Merge conflict in a.txt"),
+        "{merge:?}"
+    );
     std::fs::write(repo.dir.join("a.txt"), "resolved\n").unwrap();
     repo.git(&["add", "a.txt"]);
     repo.git(&["commit", "--quiet", "--no-edit"]);
