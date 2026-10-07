@@ -288,10 +288,15 @@ mod tests {
 
     #[test]
     fn refuses_a_behind_in_a_latest_session() {
-        let mut reader = Reader::new(&Open {
+        let latest = Open {
             mode: Mode::Latest,
             channels: 1,
-        });
+        };
+        assert_eq!(
+            Reader::new(&latest).decode(&[BEHIND]).err(),
+            Some(Error::Unopened { kind: 3 })
+        );
+        let mut reader = Reader::new(&latest);
         assert_eq!(event(&mut reader, &[OPENED]), Ok(Event::Opened));
         assert_eq!(
             reader.decode(&[BEHIND]).err(),
