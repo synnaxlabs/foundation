@@ -5,5 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc db0d34b776ce3b0bfe8a522b3848bed349bf85b7dd3a0f28b24359705fc5febd # shrinks to ops = [Trim { count: 1 }, Read { batch: 1, lost: false }]
-cc c643f4b044f7df1515b96bab6833256bd45a4d0802f6c573f03c6cf8760a42d2 # shrinks to ops = [Trim { count: 1 }, Read { batch: 1, lost: false }]
 cc 298f014a1a7ee985249bcb42a0eebce4ccd0e87866cc31cb42e561912758e156 # shrinks to ops = [Read { batch: 1, lost: true }, Trim { count: 1 }, Read { batch: 1, lost: false }]

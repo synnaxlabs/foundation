@@ -4,14 +4,10 @@ use super::*;
 
 const FIRST: u64 = 100;
 
-fn record() -> Record {
-    Record {
-        connector: "influx".into(),
-        index: "edge.time".into(),
-        measurement: "edge.value".into(),
+fn written() -> Written {
+    Written {
         seqs: FIRST..FIRST + 100,
-        stamp: Stamp::from_nanos(1_000),
-        interval: Span::from_nanos(10),
+        index: "edge.time".into(),
     }
 }
 
@@ -41,7 +37,7 @@ fn gap_line(seq: u64, count: i64) -> String {
 fn check(body: &str) -> Received {
     let mut store = Store::default();
     store.write(body.as_bytes()).unwrap();
-    record().stored(&store)
+    stored(&store, "influx", "edge.value", &written())
 }
 
 mod stored {
@@ -157,34 +153,21 @@ mod stored {
         );
     }
 
+    /// A resend after a lost confirmation: the later gap line starts before the
+    /// earlier one and ends after it.
     #[test]
-    fn merges_touching_gap_ranges_into_one_gap() {
-        let body = gap_line(FIRST + 2, 2)
-            + &gap_line(FIRST + 4, 2)
-            + &samples(FIRST + 4..FIRST + 5);
-        assert_eq!(
-            check(&body),
-            Received {
-                samples: 1,
-                seqs: Some(FIRST + 4..FIRST + 5),
-                contiguous: true,
-                gaps: vec![Gap { after: 0, count: 4 }],
-            }
-        );
-    }
-
-    #[test]
-    fn adds_no_gap_for_a_gap_range_that_ends_at_a_silent_loss() {
-        let body = samples(FIRST..FIRST + 1)
-            + &gap_line(FIRST + 1, 1)
-            + &samples(FIRST + 2..FIRST + 3);
+    fn merges_a_gap_range_inside_a_later_gap_range() {
+        let body = gap_line(FIRST + 3, 2)
+            + &samples(FIRST + 3..FIRST + 4)
+            + &gap_line(FIRST + 5, 5)
+            + &samples(FIRST + 5..FIRST + 6);
         assert_eq!(
             check(&body),
             Received {
                 samples: 2,
-                seqs: Some(FIRST..FIRST + 3),
-                contiguous: false,
-                gaps: vec![],
+                seqs: Some(FIRST + 3..FIRST + 6),
+                contiguous: true,
+                gaps: vec![Gap { after: 0, count: 3 }, Gap { after: 1, count: 1 }],
             }
         );
     }
@@ -223,28 +206,16 @@ mod stored {
     fn is_not_contiguous_after_a_silent_loss_between_two_gap_runs() {
         let body = samples(FIRST..FIRST + 1)
             + &gap_line(FIRST + 2, 1)
+            + &samples(FIRST + 2..FIRST + 3)
             + &gap_line(FIRST + 5, 1)
             + &samples(FIRST + 5..FIRST + 6);
         assert_eq!(
             check(&body),
             Received {
-                samples: 2,
+                samples: 3,
                 seqs: Some(FIRST..FIRST + 6),
                 contiguous: false,
-                gaps: vec![Gap { after: 1, count: 1 }, Gap { after: 1, count: 1 }],
-            }
-        );
-    }
-
-    #[test]
-    fn gives_a_gap_line_with_no_stored_sample_after_it() {
-        assert_eq!(
-            check(&(samples(FIRST..FIRST + 1) + &gap_line(FIRST + 4, 2))),
-            Received {
-                samples: 1,
-                seqs: Some(FIRST..FIRST + 1),
-                contiguous: true,
-                gaps: vec![Gap { after: 1, count: 2 }],
+                gaps: vec![Gap { after: 1, count: 1 }, Gap { after: 2, count: 1 }],
             }
         );
     }
@@ -286,39 +257,39 @@ mod stored {
 
     #[test]
     #[should_panic(
-        expected = "lab failure: no sample of edge.time was written at 1005"
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Float(0.5)}, not one float that is a whole number below 100"
     )]
-    fn panics_on_a_point_between_two_stamps() {
-        check("edge.value value=0 1005\n");
-    }
-
-    #[test]
-    #[should_panic(expected = "lab failure: no sample of edge.time was written at 990")]
-    fn panics_on_a_point_before_the_first_stamp() {
-        check("edge.value value=0 990\n");
+    fn panics_on_a_value_that_is_not_a_whole_number() {
+        check("edge.value value=0.5 1000\n");
     }
 
     #[test]
     #[should_panic(
-        expected = "lab failure: no sample of edge.time was written at 2000"
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Float(-1.0)}"
     )]
-    fn panics_on_a_point_after_the_last_stamp() {
-        check("edge.value value=0 2000\n");
+    fn panics_on_a_negative_value() {
+        check("edge.value value=-1 1000\n");
     }
 
     #[test]
     #[should_panic(
-        expected = "lab failure: edge.value at 1010 holds {\"value\": Float(2.0)}, \
-                               not 1"
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Float(100.0)}"
     )]
-    fn panics_on_a_wrong_value() {
-        check("edge.value value=2 1010\n");
+    fn panics_on_a_value_at_the_written_count() {
+        check("edge.value value=100 1000\n");
     }
 
     #[test]
     #[should_panic(
-        expected = "lab failure: edge.value at 1000 holds {\"a\": Float(0.0), \
-                               \"value\": Float(0.0)}, not 0"
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Integer(0)}"
+    )]
+    fn panics_on_an_integer_value() {
+        check("edge.value value=0i 1000\n");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"a\": Float(0.0), \"value\": Float(0.0)}"
     )]
     fn panics_on_a_second_field() {
         check("edge.value value=0,a=0 1000\n");
@@ -326,31 +297,47 @@ mod stored {
 
     #[test]
     #[should_panic(
-        expected = "lab failure: two points hold seq 100, or the points are not \
-                               in seq order"
+        expected = "the store holds what the lab did not write: edge.value holds seq 100 at 1010, not above seq 101 at 1000"
     )]
-    fn panics_on_two_points_at_one_stamp() {
+    fn panics_on_a_seq_below_the_seq_before_it() {
+        check("edge.value value=1 1000\nedge.value value=0 1010\n");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: edge.value holds seq 100 at 1000, not above seq 100 at 1000"
+    )]
+    fn panics_on_two_points_with_one_seq() {
         check("edge.value value=0 1000\nedge.value,host=a value=0 1000\n");
     }
 
     #[test]
     #[should_panic(
-        expected = "lab failure: a gap line at 1030 has path Some(\"backfill\"); \
-                               backfill waits on #1270"
+        expected = "the store holds what the lab did not write: a gap line at 1030 has path Some(\"backfill\"); backfill waits on #1270"
     )]
     fn panics_on_a_backfill_gap_line() {
         check(&gap_line(FIRST + 3, 1).replace("live", "backfill"));
     }
 
     #[test]
-    #[should_panic(expected = "lab failure: a gap line at 1030 has path None")]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: a gap line at 1030 has path None"
+    )]
     fn panics_on_a_gap_line_with_no_path() {
         check(&gap_line(FIRST + 3, 1).replace(",path=live", ""));
     }
 
     #[test]
     #[should_panic(
-        expected = "lab failure: a gap line at 1030 has count Some(Integer(0))"
+        expected = "the store holds what the lab did not write: a gap line at 1030 has the tags {\"connector\": \"influx\", \"host\": \"a\", \"index\": \"edge.time\", \"path\": \"live\"}"
+    )]
+    fn panics_on_a_gap_line_with_another_tag() {
+        check(&gap_line(FIRST + 3, 1).replace(",path", ",host=a,path"));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: a gap line at 1030 has the fields {\"count\": Integer(0)}"
     )]
     fn panics_on_a_zero_count() {
         check(&gap_line(FIRST + 3, 0));
@@ -358,7 +345,7 @@ mod stored {
 
     #[test]
     #[should_panic(
-        expected = "lab failure: a gap line at 1030 has count Some(Float(1.0))"
+        expected = "the store holds what the lab did not write: a gap line at 1030 has the fields {\"count\": Float(1.0)}"
     )]
     fn panics_on_a_float_count() {
         check(&gap_line(FIRST + 3, 1).replace("1i", "1"));
@@ -366,19 +353,38 @@ mod stored {
 
     #[test]
     #[should_panic(
-        expected = "lab failure: a gap line at 1030 counts 4 seqs before seq 103, \
-                               below the first written seq 100"
+        expected = "the store holds what the lab did not write: a gap line at 1030 has the fields {\"count\": Integer(1), \"first\": Integer(1)}"
     )]
-    fn panics_on_a_gap_range_below_the_first_written_seq() {
-        check(&gap_line(FIRST + 3, 4));
+    fn panics_on_a_gap_line_with_another_field() {
+        check(&gap_line(FIRST + 3, 1).replace("1i", "1i,first=1i"));
     }
 
     #[test]
     #[should_panic(
-        expected = "lab failure: no sample of edge.time was written at 1005"
+        expected = "the store holds what the lab did not write: a gap line at 1030 counts 4 seqs before seq 103, below the first written seq 100"
     )]
-    fn panics_on_a_gap_line_between_two_stamps() {
-        check(&gap_line(FIRST, 1).replace(" 1000", " 1005"));
+    fn panics_on_a_gap_range_below_the_first_written_seq() {
+        check(&(gap_line(FIRST + 3, 4) + &samples(FIRST + 3..FIRST + 4)));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: a gap line at 1010 has no point of edge.value at its stamp"
+    )]
+    fn panics_on_a_gap_line_with_no_point_at_its_stamp() {
+        check(
+            &(samples(FIRST..FIRST + 1)
+                + &gap_line(FIRST + 1, 1)
+                + &samples(FIRST + 2..FIRST + 3)),
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: a gap line at 1040 has no point of edge.value at its stamp"
+    )]
+    fn panics_on_a_gap_line_after_the_last_point() {
+        check(&(samples(FIRST..FIRST + 1) + &gap_line(FIRST + 4, 2)));
     }
 }
 
@@ -386,6 +392,9 @@ mod stored {
 /// restarts the reader from its acked position, and trims that the reader gets as a
 /// gap. The expected value is the ground truth of the run, not the fold rule.
 mod connector {
+    use std::collections::VecDeque;
+
+    use connector_influx::gap;
     use connector_influx::line::{Float, Measurement, Value};
     use proptest::prelude::*;
     use types::frame::Path;
@@ -396,16 +405,20 @@ mod connector {
 
     #[derive(Debug, Clone, Copy)]
     enum Op {
-        /// Reads up to `batch` samples and writes them in one request.
-        Read { batch: u64, lost: bool },
+        /// Reads up to `batch` samples and sends them in one request, before the
+        /// requests in flight are confirmed.
+        Read { batch: u64 },
+        /// The oldest request in flight is confirmed, or its confirmation is lost and
+        /// the reader restarts from its acked position.
+        Confirm { lost: bool },
         /// The buffer drops its oldest `count` samples.
         Trim { count: u64 },
     }
 
     fn op() -> impl Strategy<Value = Op> {
         prop_oneof![
-            3 => (1..8_u64, proptest::bool::weighted(0.25))
-                .prop_map(|(batch, lost)| Op::Read { batch, lost }),
+            3 => (1..8_u64).prop_map(|batch| Op::Read { batch }),
+            2 => proptest::bool::weighted(0.25).prop_map(|lost| Op::Confirm { lost }),
             1 => (1..12_u64).prop_map(|count| Op::Trim { count }),
         ]
     }
@@ -424,13 +437,23 @@ mod connector {
         let data = Measurement::new("edge.value", &[], &["value"]).unwrap();
         let end = FIRST + WRITTEN;
         let (mut floor, mut position, mut acked) = (FIRST, FIRST, FIRST);
+        let mut flight = VecDeque::new();
         let mut gap = new_gap();
         let mut store = Store::default();
         let mut held = vec![false; usize::try_from(WRITTEN).unwrap()];
         for &op in ops {
             match op {
                 Op::Trim { count } => floor = (floor + count).min(end),
-                Op::Read { batch, lost } => {
+                Op::Confirm { lost } => match flight.pop_front() {
+                    None => {}
+                    Some(_) if lost => {
+                        position = acked;
+                        flight.clear();
+                        gap = new_gap();
+                    }
+                    Some(end) => acked = end,
+                },
+                Op::Read { batch } => {
                     if position < floor {
                         gap.add(position..floor);
                         position = floor;
@@ -453,12 +476,8 @@ mod connector {
                         held[usize::try_from(seq - FIRST).unwrap()] = true;
                     }
                     store.write(&body).unwrap();
-                    if lost {
-                        position = acked;
-                        gap = new_gap();
-                    } else {
-                        (acked, position) = (seqs.end, seqs.end);
-                    }
+                    flight.push_back(seqs.end);
+                    position = seqs.end;
                 }
             }
         }
@@ -509,7 +528,10 @@ mod connector {
             ops in proptest::collection::vec(op(), 0..60),
         ) {
             let (store, held) = run(&ops);
-            prop_assert_eq!(record().stored(&store), truth(&held));
+            prop_assert_eq!(
+                stored(&store, "influx", "edge.value", &written()),
+                truth(&held)
+            );
         }
     }
 }
