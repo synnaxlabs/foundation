@@ -2041,11 +2041,14 @@ How to read this record:
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
   In a file with no record, it makes that file again, larger, so each file but the last
-  holds a record. After a stopped write that made a file, the next record starts that
-  file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, and the last sentence at
-  2026-10-07T11:05:15Z):
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
+  holds a record. A file with no bytes, which a crash in a create can leave (ENV SEAMS,
+  #1264), is a file with no record. After a stopped write that made a file, the next
+  record starts that file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, the
+  last sentence at 2026-10-07T11:05:15Z, and the sentence on a file with no bytes at
+  2026-10-07T18:39:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314,
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297, and
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044422561. A write
   puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
   the end of the record to its start, and then syncs one time. Each block but the one at
   the end of the record ends at a multiple of the block size in the file, so no two
@@ -3562,6 +3565,13 @@ How to read this record:
   Supersedes the drop sentence of
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Lost:
   "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
+  Amended (2026-10-07, #1264): a crash before a `Mode::Create` open ends can leave the
+  file that it makes with no bytes, and `Create` makes a file with no bytes `len` zeroed
+  bytes. `sim` makes that file at a crash. Lost: an atomic create in `os` through a
+  temporary name and a rename; it leaves a temporary file after a crash, which needs a
+  sweep, and a caller already learns from its own header whether a file holds data.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -3701,6 +3711,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   text, 2026-10-07 17:35 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214.
+  Amended (2026-10-07, #1264): a `Mode::Create` open in flight at a crash that makes a
+  file draws its state. After a `Process` crash the file is whole or has no bytes. After
+  a `Power` crash there is no file, or the file with no bytes or whole, with the
+  entries of its directory durable, as when the file system commits its journal by
+  itself or the `fsync` of the open commits it. The commit acts as a `sync_dir` of the
+  directory, so it also keeps each earlier change there, a rename too, and the digest
+  holds the drawn state. Lost: a create in two calls, one that makes the entry and one
+  that allocates; it doubles the calls of each create, changes the stream of each run,
+  and adds a step that `env` does not have.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z, the entries of the
+  directory at 2026-10-07T19:22:31Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
