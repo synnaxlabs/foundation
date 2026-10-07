@@ -26,11 +26,16 @@ pub type Set<T> = std::collections::HashSet<T, FxBuildHasher>;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::hash::BuildHasher;
 
     use rustc_hash::FxBuildHasher;
 
     use super::{Map, Set};
+    use crate::channel;
+    use crate::time::Stamp;
+
+    const RANDOM: u128 = 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835;
 
     #[test]
     fn maps_and_sets_hash_with_the_fx_hasher() {
@@ -39,6 +44,22 @@ mod tests {
         let set = Set::<u64>::default();
         assert_eq!(map.hasher().hash_one(key), FxBuildHasher.hash_one(key));
         assert_eq!(set.hasher().hash_one(key), FxBuildHasher.hash_one(key));
+    }
+
+    #[test]
+    fn channel_keys_made_by_the_node_spread_over_a_table() {
+        let buckets = (0..1_i64 << 14)
+            .map(|n| {
+                let time = Stamp::from_nanos(1_700_000_000_000_000_000 + n * 250_000);
+                let random = u128::try_from(n).unwrap().wrapping_mul(RANDOM);
+                FxBuildHasher.hash_one(channel::Key::v7(time, random)) & 0xfff
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
+        assert!(
+            buckets >= 3_900,
+            "16384 keys filled {buckets} of 4096 buckets"
+        );
     }
 
     #[test]
