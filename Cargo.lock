@@ -934,6 +934,7 @@ name = "node"
 version = "0.0.0"
 dependencies = [
  "block",
+ "buffer",
  "clock",
  "env",
  "estimate",
