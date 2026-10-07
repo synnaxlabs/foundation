@@ -1666,14 +1666,19 @@ How to read this record:
   one byte string, with no spans: a version byte, then tagged values, blocks in the
   producer's order, keys in byte order, and fixed-width little-endian integers (`u64`
   counts and lengths, `i128` integers, and `f64` floats as their bits). `decode`
-  refuses every byte string that `encode` cannot write. Both refuse nesting past 64
-  levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
-  `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
-  `check` refuses the same Documents as `encode` without writing, so another writer
-  (`config-hcl`) uses the same limit (#287). `spec` stores and hashes these bytes.
-  Pinned bytes are an oracle in `oracles/conformance/document/`. A new format takes a
-  new version byte. Decided by the `config` builder; approved by the coordinator
-  (#62).
+  refuses every byte string that `Checked::encode` cannot write. Only a `Checked`
+  Document encodes: `Checked::new` refuses nesting past 64 levels with `TooDeep`, so
+  `Checked::encode` cannot fail, and `decode` gives a `Checked` or an `Error`. Front
+  ends refuse files that nest deeper. `spec` holds a connector config as a `Checked`,
+  and `config-hcl` `write` and `update` take one. Lost: a depth on each tree type,
+  which makes each producer of a tree pay for a rule that only the writers (the
+  encoding and `config-hcl`) need. `spec` stores and hashes these bytes. Pinned bytes
+  are an oracle in `oracles/conformance/document/`. A new format takes a new version
+  byte. Decided by the `config` builder; approved by the coordinator (#62). `Checked`
+  decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030763787, and
+  for `write` and `update`,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
@@ -1769,13 +1774,16 @@ How to read this record:
   can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
   `update` a `Refusal`: the problems in the old text, or else the parts of the new
   Document that HCL text cannot hold. Nesting past the depth limit is
-  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
-  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
-  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
-  shared type (#370); a checked Document type, which gives each caller two calls; and
-  an `update` that takes the Document that `read` gave for the text, so it gives only
-  `Unwritable`, but writes wrong text with no error when a caller gives another
-  Document. Decided by the `config` builder; approved by the coordinator (#330).
+  `Error::TooDeep` from `read`, with `document`'s diagnostic; `write` and `update`
+  take a `Checked` Document, so they cannot meet it. Lost: one `Error` for all three,
+  so each caller of `read` handled a variant that `read` never gives; a `write` that
+  takes a plain Document and clones it into a `Checked`, which copies each tree only
+  to check its depth and keeps `Unwritable::TooDeep`; and an `update` that takes the
+  Document that `read` gave for the text, so it gives only `Unwritable`, but writes
+  wrong text with no error when a caller gives another Document. Decided by the
+  `config` builder; approved by the coordinator (#330). `write` and `update` take a
+  `Checked`, and `read` does not change: decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
