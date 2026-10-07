@@ -369,7 +369,13 @@ mod tests {
             assert_eq!(readers.ack(new, live(1)), Ok(()));
             dropped(&mut readers, old.into());
             readers.flush();
-            assert_eq!(readers.records().count(), 1);
+            let acked = Record {
+                reader: name("a"),
+                position: live(1),
+                hold: Span::from_nanos(10),
+                closed: None,
+            };
+            assert_eq!(readers.records().collect::<Vec<_>>(), [acked]);
             readers.queue(&frames.frame(2), 1..2);
             readers.queue(&frames.frame(3), 2..3);
             assert_eq!(readers.release(3), []);
