@@ -3,6 +3,7 @@
 //! `spec::resolve`.
 
 pub mod access;
+pub mod channel;
 pub mod compression;
 pub mod connector;
 pub mod definition;
