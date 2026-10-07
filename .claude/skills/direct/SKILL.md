@@ -29,6 +29,10 @@ For each code PR, launch a fresh subagent with the PR number. It checks, with fi
   surface in the merged code has the architect's approval of that meaning.
 - **Design.** It fits the crate's section of `docs/decisions.md`. Each public item has a
   caller on the path. No patch hides a cause.
+- **Performance.** For a change on a hot path, the PR answers the six questions of
+  `docs/claude/performance.md` with numbers for `main` and the PR on a named machine,
+  and the `performance` reviewer ran. It also finds a hot path that the PR did not
+  declare, and each allocation, copy, lock, or wakeup on it that the rules forbid.
 - **Defects** it can show.
 
 Post the verdict as one comment on the PR. Then act on each problem:
@@ -58,5 +62,6 @@ You own the issues of the open milestone.
   audit shows a gap, change the rule in one small PR, and send the link to
   `laptop.monitor`, who gets the person's approval.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
-  merged PR, acceptance scenarios passing, and review rounds per PR.
+  merged PR, performance findings after merge, acceptance scenarios passing, and review
+  rounds per PR.
 - Never weaken an oracle or a review rule to gain speed.
