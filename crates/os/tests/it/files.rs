@@ -504,6 +504,7 @@ fn hold_while_another_create_fails(mode: Mode) {
 
 /// A remove that drops while it waits for room in the full queue of the I/O thread
 /// never runs.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
     run(|files, data| async move {
@@ -514,6 +515,7 @@ fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
         // The I/O thread blocks in the open of the FIFO until a writer opens it.
         let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
         assert!(blocker.as_mut().poll(&mut context).is_pending());
+        // 64 is the depth of the queue of the I/O thread.
         let mut frees: Vec<_> = (0..64).map(|_| Box::pin(files.free())).collect();
         for free in &mut frees {
             assert!(free.as_mut().poll(&mut context).is_pending());
