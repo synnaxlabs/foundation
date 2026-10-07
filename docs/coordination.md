@@ -77,8 +77,8 @@ Labels:
 - `blocked` -> waiting on another issue, linked in the body.
 - `security` -> a security finding.
 
-Builders file the next issues for their machine's crates from `docs/decisions.md` and
-the milestone, and the coordinator admits them. One task is in progress per crate.
+Builders file the next issues on the milestone path from `docs/decisions.md`, and the
+coordinator admits them. Any builder takes any crate. One task is in progress per crate.
 
 ## Pull requests
 
@@ -111,7 +111,7 @@ dependency:
 3. After the merge, the architect files an issue for each crate that must follow the
    change.
 
-A builder may change anything private inside its own crates without asking.
+A builder may change anything private inside the crates of its issue without asking.
 
 Two cases skip the interface issue:
 
@@ -146,6 +146,14 @@ Only the red-team sessions rent machines, within the test budget (`docs/decision
 - **A message is not a record.** Write the decision into the issue, the PR, or the docs
   first, then send the link.
 - Do not send a message to check if a session is alive.
+- **A relay of the person counts as the person.** When the coordinator or the monitor
+  posts the person's decision on an issue or PR from the factory account, it is the
+  person's own OK, approval, or waiver (also as box engineer). A builder acts on it at
+  once. The person never has to comment on GitHub.
+- **A stuck session tells the coordinator at once.** When a permission check refuses
+  a call, or work waits on the person, send `coordinator` the refused command, the
+  reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
+  person. Never try to get around a refusal.
 - **A question for the person** states the problem, the fix, its cost, and a
   recommendation. For each option, it says whether it is a patch or the long-term
   path; for a patch, it names the long-term fix. The person decided on 2026-10-05:

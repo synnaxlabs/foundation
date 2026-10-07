@@ -1,13 +1,16 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
-use clock::{Clock, Reader, Status};
+use clock::{Clock, Reader, Status, Time};
 use estimate::Measurement;
 use estimate::combine::Error;
 use estimate::discipline::Cause;
 use sim::node::Node;
 use types::time::{Monotonic, Span};
 
-use crate::common::{UNKNOWN, ms, node};
+use crate::common::{UNKNOWN, ms, node, time};
 
 fn us(n: i64) -> Span {
     Span::from_nanos(n * 1_000)
@@ -28,13 +31,14 @@ fn holdover(node: &Node, offset: Span, error: Span, cause: Cause) -> Status {
 }
 
 /// Mesh time that `reader` gives now, as the interval of a measurement now.
-fn read(node: &Node, reader: &Reader) -> Option<Measurement> {
-    let interval = reader.now()?;
-    let now = i128::from(node.clock().now().0);
+fn read(reader: &Reader) -> Option<Measurement> {
+    let Time { monotonic, mesh } = reader.now();
+    let interval = mesh?;
+    let now = i128::from(monotonic.0);
     let (earliest, latest) = (interval.earliest.nanos(), interval.latest.nanos());
     let offset = i128::from(earliest).midpoint(i128::from(latest)) - now;
     let m = Measurement::new(
-        node.clock().now(),
+        monotonic,
         Span::from_nanos(i64::try_from(offset).expect("fits")),
         Span::from_nanos((latest - earliest) / 2),
     );
@@ -50,11 +54,76 @@ fn read(node: &Node, reader: &Reader) -> Option<Measurement> {
 fn has_no_time_with_no_sources() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
-    assert_eq!(reader.now(), None);
+    assert_eq!(reader.now(), time(&node, None));
     let source = clock.add();
     clock.remove(source);
     assert_eq!(reader.status(), Status::Unsynced(Error::NoSources));
-    assert_eq!(reader.now(), None);
+    assert_eq!(reader.now(), time(&node, None));
+}
+
+#[test]
+fn gives_its_monotonic_reading_with_no_time() {
+    let (mut sim, node) = node();
+    let (_clock, reader) = Clock::new(node.clock());
+    sim.run_for(Span::SECOND).expect("the run ends");
+    assert_eq!(reader.now(), time(&node, None));
+}
+
+/// A monotonic clock that moves 1 ms at each read.
+struct Ticking(AtomicU64);
+
+impl env::clock::Driver for Ticking {
+    fn now(&self) -> Monotonic {
+        Monotonic(self.0.fetch_add(1_000_000, Ordering::Relaxed))
+    }
+
+    fn epoch(&self) -> Instant {
+        unreachable!("the test only reads")
+    }
+
+    fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
+        unreachable!("the test only reads")
+    }
+}
+
+#[test]
+fn gives_mesh_time_at_its_own_monotonic_reading() {
+    let monotonic = env::clock::Clock::new(Ticking(AtomicU64::new(0)));
+    let (mut clock, reader) = Clock::new(monotonic.clone());
+    let source = clock.add();
+    let m = Measurement::new(monotonic.now(), Span::HOUR, ms(2));
+    clock.push(source, m.expect("at most 36500 days"));
+    let mut last = Monotonic(0);
+    for _ in 0..3 {
+        let Time { monotonic, mesh } = reader.now();
+        assert!(monotonic > last, "{monotonic:?} after {last:?}");
+        let mesh = mesh.expect("synced");
+        let center = mesh.earliest.nanos().midpoint(mesh.latest.nanos());
+        let reading = i64::try_from(monotonic.0).expect("fits");
+        assert_eq!(
+            center - reading,
+            Span::HOUR.nanos(),
+            "{mesh:?} at {monotonic:?}"
+        );
+        last = monotonic;
+    }
+}
+
+#[test]
+fn reads_the_monotonic_clock_once_with_no_time() {
+    let monotonic = env::clock::Clock::new(Ticking(AtomicU64::new(0)));
+    let (_clock, reader) = Clock::new(monotonic.clone());
+    let start = monotonic.now();
+    for tick in 1..=3 {
+        let monotonic = Monotonic(start.0 + tick * 1_000_000);
+        assert_eq!(
+            reader.now(),
+            Time {
+                monotonic,
+                mesh: None
+            }
+        );
+    }
 }
 
 #[test]
@@ -70,10 +139,10 @@ fn has_no_time_until_a_majority_agrees() {
     };
     clock.push(a, m);
     assert_eq!(reader.status(), Status::Unsynced(alone));
-    assert_eq!(reader.now(), None);
+    assert_eq!(reader.now(), time(&node, None));
     clock.push(b, m);
     assert_eq!(reader.status(), Status::Synced(m));
-    assert_eq!(reader.now(), Some(m.interval()));
+    assert_eq!(reader.now(), time(&node, Some(m.interval())));
 }
 
 #[test]
@@ -106,7 +175,7 @@ fn an_add_after_the_first_estimate_holds_over_at_once() {
     };
     let cause = Cause::NoEstimate(alone);
     assert_eq!(reader.status(), Status::Holdover(first, cause));
-    assert_eq!(reader.now(), Some(first.interval()));
+    assert_eq!(reader.now(), time(&node, Some(first.interval())));
 }
 
 #[test]
@@ -123,10 +192,10 @@ fn a_source_that_pushes_first_cannot_set_mesh_time() {
     };
     clock.push(a, truth);
     assert_eq!(reader.status(), Status::Unsynced(split));
-    assert_eq!(reader.now(), None);
+    assert_eq!(reader.now(), time(&node, None));
     clock.push(b, truth);
     assert_eq!(reader.status(), Status::Synced(truth));
-    assert_eq!(reader.now(), Some(truth.interval()));
+    assert_eq!(reader.now(), time(&node, Some(truth.interval())));
 }
 
 #[test]
@@ -137,7 +206,7 @@ fn serves_the_first_measurement_at_once() {
     let first = measure(&node, Span::HOUR, ms(2));
     clock.push(source, first);
     assert_eq!(reader.status(), Status::Synced(first));
-    assert_eq!(reader.now(), Some(first.interval()));
+    assert_eq!(reader.now(), time(&node, Some(first.interval())));
 }
 
 #[test]
@@ -149,7 +218,7 @@ fn an_unknown_source_alone_gives_unknown_time() {
     clock.push(source, unknown);
     assert_eq!(reader.status(), Status::Synced(unknown));
     assert_eq!(unknown.error(), UNKNOWN);
-    assert_eq!(reader.now(), Some(unknown.interval()));
+    assert_eq!(reader.now(), time(&node, Some(unknown.interval())));
 }
 
 /// An unknown estimate never replaces a known one.
@@ -172,10 +241,7 @@ fn holds_over_when_only_an_unknown_source_is_left() {
     let grown = ms(721);
     let unknown = holdover(&node, Span::ZERO, grown, Cause::UnknownEstimate);
     assert_eq!(reader.status(), unknown);
-    assert_eq!(
-        read(&node, &reader),
-        Some(measure(&node, Span::ZERO, grown))
-    );
+    assert_eq!(read(&reader), Some(measure(&node, Span::ZERO, grown)));
     let peer = clock.add();
     clock.push(peer, measure(&node, Span::ZERO, ms(1)));
     assert_eq!(reader.status(), synced(&node, Span::ZERO, ms(1)));
@@ -235,10 +301,7 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
         reader.status(),
         holdover(&node, Span::ZERO, grown, Cause::NoEstimate(split))
     );
-    assert_eq!(
-        read(&node, &reader),
-        Some(measure(&node, Span::ZERO, grown))
-    );
+    assert_eq!(read(&reader), Some(measure(&node, Span::ZERO, grown)));
     sim.run_for(Span::SECOND).expect("the run ends");
     let grown = us(1_400);
     assert_eq!(
@@ -250,10 +313,7 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
         reader.status(),
         holdover(&node, Span::ZERO, grown, Cause::NoEstimate(split))
     );
-    assert_eq!(
-        read(&node, &reader),
-        Some(measure(&node, Span::ZERO, grown))
-    );
+    assert_eq!(read(&reader), Some(measure(&node, Span::ZERO, grown)));
     clock.push(c, measure(&node, Span::ZERO, ms(1)));
     assert_eq!(reader.status(), synced(&node, Span::ZERO, ms(1)));
 }
@@ -280,7 +340,7 @@ fn keeps_its_slew_in_holdover() {
         reader.status(),
         holdover(&node, us(200), us(280), Cause::NoEstimate(alone))
     );
-    assert_eq!(read(&node, &reader), Some(measure(&node, us(200), us(280))));
+    assert_eq!(read(&reader), Some(measure(&node, us(200), us(280))));
 }
 
 #[test]
@@ -293,7 +353,7 @@ fn steps_forward_to_an_estimate_far_ahead() {
     // The earliest offset the estimate allows is 999 ms; its latest is 2 ms above.
     clock.push(source, measure(&node, Span::SECOND, ms(1)));
     assert_eq!(reader.status(), synced(&node, ms(999), ms(2)));
-    assert_eq!(read(&node, &reader), Some(measure(&node, ms(999), ms(2))));
+    assert_eq!(read(&reader), Some(measure(&node, ms(999), ms(2))));
 }
 
 #[test]
@@ -303,14 +363,11 @@ fn slews_toward_an_estimate_near_ahead() {
     let source = clock.add();
     clock.push(source, measure(&node, Span::ZERO, Span::ZERO));
     clock.push(source, measure(&node, us(400), Span::ZERO));
-    assert_eq!(
-        read(&node, &reader),
-        Some(measure(&node, Span::ZERO, us(400)))
-    );
+    assert_eq!(read(&reader), Some(measure(&node, Span::ZERO, us(400))));
     // 400 ms at 500 ppm moves the offset 200 us, while drift widens the target by
     // 80 us.
     sim.run_for(ms(400)).expect("the run ends");
-    assert_eq!(read(&node, &reader), Some(measure(&node, us(200), us(280))));
+    assert_eq!(read(&reader), Some(measure(&node, us(200), us(280))));
 }
 
 #[test]
@@ -324,7 +381,7 @@ fn slews_at_500_ppm_however_often_sources_push() {
         sim.run_for(us(1)).expect("the run ends");
     }
     // 10 ms at 500 ppm moves 5 us toward the estimate.
-    let served = read(&node, &reader).expect("synced").offset();
+    let served = read(&reader).expect("synced").offset();
     assert_eq!(served, us(5), "mesh time stalled at {served}");
 }
 
@@ -355,7 +412,7 @@ fn a_remove_follows_the_sources_left_then_holds_over_with_none() {
         reader.status(),
         holdover(&node, stepped, ms(1), Cause::NoEstimate(Error::NoSources))
     );
-    assert_eq!(read(&node, &reader), Some(measure(&node, stepped, ms(1))));
+    assert_eq!(read(&reader), Some(measure(&node, stepped, ms(1))));
 }
 
 #[test]
@@ -459,8 +516,9 @@ async fn check(monotonic: env::clock::Clock, reader: Reader, truth: Truth, core:
             Status::Unsynced(_) => assert_eq!(last, None, "unsynced after mesh time"),
             status @ Status::Holdover(..) => panic!("{status:?}"),
         }
-        if let Some(interval) = reader.now() {
-            let now = monotonic.now();
+        let time = reader.now();
+        if let Some(interval) = time.mesh {
+            let now = time.monotonic;
             let time = i128::from(now.0) + truth.offset(now);
             let (earliest, latest) =
                 (interval.earliest.nanos(), interval.latest.nanos());
