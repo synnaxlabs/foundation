@@ -487,12 +487,14 @@ mod tests {
     use sim::{Crash, Sim, link};
     use transport::Address;
     use types::node::SealKey;
+    use types::time::Stamp;
 
     use super::*;
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
-    use crate::region::{Malformed, Refused};
+    use crate::region::{Join, Malformed, Refused};
+    use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
@@ -1419,6 +1421,53 @@ mod tests {
             let text = "the group stopped: the committed entry at index 1 of term 5 is \
                         not a change: change kind 9 is unknown";
             assert_eq!(stopped.to_string(), text);
+        });
+    }
+
+    /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
+    fn join(id: u8) -> Change {
+        let card = common::member(id).card;
+        Change::Join(Box::new(Join {
+            ticket: public(7),
+            at: Stamp::from_nanos(0),
+            key: key(id),
+            card: card.card().clone(),
+            signature: *card.signature(),
+            admission: common::ticket(7).admission(&card),
+            status: BTreeMap::new(),
+        }))
+    }
+
+    // Every node refuses the same changes, so a refused change in the log changes no
+    // state and the group applies the next entry.
+    #[test]
+    fn a_committed_join_with_a_forged_card_changes_nothing() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let options = Options {
+                prefix: "plant".parse().unwrap(),
+                reusable: true,
+                expiry: Stamp::from_nanos(1),
+                ephemeral: None,
+            };
+            let ticket = Change::Ticket {
+                public_key: public(7),
+                options,
+            };
+            lead(&mesh, &node.clock(), ticket).await;
+            let Change::Join(mut forged) = join(3) else {
+                unreachable!()
+            };
+            forged.signature[0] ^= 1;
+            mesh.propose(&Change::Join(forged)).unwrap();
+            mesh.propose(&join(4)).unwrap();
+            mesh.propose(&home(1)).unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            assert_eq!(mesh.member(key(3)), None);
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(common::member(4).card));
         });
     }
 
