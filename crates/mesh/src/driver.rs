@@ -40,7 +40,8 @@ pub(crate) struct Config {
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
     /// Each member of the region, this node included. A member's peer proves the
-    /// public key of its card, and that key signs the member's grants.
+    /// public key of its card, and that key signs the member's grants. Each card must
+    /// be signed for its key here: `open` does not check it (#1259).
     pub(crate) members: BTreeMap<node::Key, Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
@@ -960,6 +961,16 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_grant_of_a_voter_that_is_not_a_member() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                let refused = Error::Grant(grant::Error::NotMember { voter: key(3) });
+                assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
+            });
+        }
+
+        #[test]
         fn checks_the_peer_then_the_voter_then_the_grants() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
@@ -1408,6 +1419,22 @@ mod tests {
             assert_eq!(mesh.member(key(2)), Some(common::member(2)));
             assert_eq!(mesh.member(key(1)), Some(common::member(1)));
             assert_eq!(mesh.member(key(9)), None);
+        });
+    }
+
+    #[test]
+    fn member_gives_the_record_after_the_group_stops() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stopped = fail_sync(&node);
+            mesh.propose(home(2)).unwrap();
+            assert_eq!(watch.next().await, Err(stopped));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1)));
+            assert_eq!(mesh.member(key(2)), None);
         });
     }
 

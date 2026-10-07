@@ -1595,15 +1595,16 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
-  the first cause, and a watch gives it also after each `Mesh` drops. A stopped group
-  does not start again: the node opens the mesh again (#1066 for an open after a failed
-  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
-  and a write that waits for a block ends at the next tick; until then a new open gives
-  `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
-  does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
-  node or a voter that is not a member (`Error::NotMember`), and a private key that is
-  not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
-  decided by the architect (#471):
+  the first cause, and a watch gives it also after each `Mesh` drops. `member` has no
+  error (#562): it gives the record that the node holds, also after a stop. A stopped
+  group does not start again: the node opens the mesh again (#1066 for an open after a
+  failed sync). The task ends soon after the last `Mesh` drops, a write in progress ends
+  first, and a write that waits for a block ends at the next tick; until then a new open
+  gives `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A
+  watch does not keep the group running, and a dropped watch leaves no waker. `open`
+  refuses a node or a voter that is not a member (`Error::NotMember`), and a private key
+  that is not the key of this node's member (`Error::WrongKey`). Proposed by
+  box1.builder-3, decided by the architect (#471):
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
