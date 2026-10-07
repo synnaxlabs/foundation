@@ -102,6 +102,9 @@ take the next issue meanwhile.
 ## Rules
 
 - Never weaken an oracle. Add tests freely.
+- Never sit idle on a wait. When your work needs a PR that is in the merge queue,
+  build on its head and rebase when it merges. While a ruling is pending, build the
+  parts it does not touch.
 - In `acceptance`, a scenario that cannot run yet is `#[ignore = "waits on #<n>"]`.
   Never delete or weaken a scenario to make it pass.
 - A new third-party dependency needs the person's approval and an entry in
