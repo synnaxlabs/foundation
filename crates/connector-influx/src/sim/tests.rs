@@ -716,3 +716,27 @@ fn prints_fields_as_a_map() {
         "{\"i\": Integer(2), \"v\": Float(1.0)}"
     );
 }
+
+/// A read takes the next point from a heap of the series, not by a scan of each
+/// series. In a debug build on box2, a scan reads 1e5 points of 2e4 series in 48 s,
+/// and the heap in under 1 s.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test bounds the time of a read"
+)]
+fn reads_many_series_in_time_near_linear_in_the_points() {
+    const SERIES: usize = 20_000;
+    let mut body = String::new();
+    for k in 0..5 * SERIES {
+        writeln!(body, "m,s={} f=1 {k}", k % SERIES).unwrap();
+    }
+    let store = stored(&body);
+    let start = std::time::Instant::now();
+    assert_eq!(store.points("m", &[]).count(), 5 * SERIES);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the read took {elapsed:?}"
+    );
+}

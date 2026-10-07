@@ -50,23 +50,22 @@ struct Chunk {
     columns: BTreeMap<String, Column>,
 }
 
-/// The values of one field key in a chunk. A field type is fixed for each
-/// measurement, so one typed column holds it.
+/// The values of one field key in a chunk. `values[i]` is the value of the point at
+/// index `points[i]` of the chunk, so only the points that set the field take room.
 #[derive(Debug)]
-enum Column {
-    Float(Typed<f64>),
-    Integer(Typed<i64>),
-    Unsigned(Typed<u64>),
-    Boolean(Typed<bool>),
-    String(Typed<String>),
+struct Column {
+    points: Vec<u16>,
+    values: Values,
 }
 
-/// `values[i]` is the value of the point at index `points[i]` of the chunk. Only the
-/// points that set the field take room, so a sparse field costs little.
+/// A field type is fixed for each measurement, so one typed `Vec` holds the values.
 #[derive(Debug)]
-struct Typed<T> {
-    points: Vec<u16>,
-    values: Vec<T>,
+enum Values {
+    Float(Vec<f64>),
+    Integer(Vec<i64>),
+    Unsigned(Vec<u64>),
+    Boolean(Vec<bool>),
+    String(Vec<String>),
 }
 
 impl Store {
@@ -319,64 +318,16 @@ impl Chunk {
 impl Column {
     /// An empty column for the type of `field`.
     fn new(field: &Field) -> Self {
-        match field {
-            Field::Float(_) => Self::Float(Typed::new()),
-            Field::Integer(_) => Self::Integer(Typed::new()),
-            Field::Unsigned(_) => Self::Unsigned(Typed::new()),
-            Field::Boolean(_) => Self::Boolean(Typed::new()),
-            Field::String(_) => Self::String(Typed::new()),
-        }
-    }
-
-    fn insert(&mut self, at: usize) {
-        match self {
-            Self::Float(typed) => typed.insert(at),
-            Self::Integer(typed) => typed.insert(at),
-            Self::Unsigned(typed) => typed.insert(at),
-            Self::Boolean(typed) => typed.insert(at),
-            Self::String(typed) => typed.insert(at),
-        }
-    }
-
-    fn set(&mut self, at: usize, field: Field) {
-        match (self, field) {
-            (Self::Float(typed), Field::Float(value)) => typed.set(at, value),
-            (Self::Integer(typed), Field::Integer(value)) => typed.set(at, value),
-            (Self::Unsigned(typed), Field::Unsigned(value)) => typed.set(at, value),
-            (Self::Boolean(typed), Field::Boolean(value)) => typed.set(at, value),
-            (Self::String(typed), Field::String(value)) => typed.set(at, value),
-            (column, field) => {
-                unreachable!("the Conflict check refused {field:?} into {column:?}")
-            }
-        }
-    }
-
-    fn get(&self, at: usize) -> Option<Field> {
-        match self {
-            Self::Float(typed) => typed.get(at).copied().map(Field::Float),
-            Self::Integer(typed) => typed.get(at).copied().map(Field::Integer),
-            Self::Unsigned(typed) => typed.get(at).copied().map(Field::Unsigned),
-            Self::Boolean(typed) => typed.get(at).copied().map(Field::Boolean),
-            Self::String(typed) => typed.get(at).cloned().map(Field::String),
-        }
-    }
-
-    fn split(&mut self, half: usize) -> Self {
-        match self {
-            Self::Float(typed) => Self::Float(typed.split(half)),
-            Self::Integer(typed) => Self::Integer(typed.split(half)),
-            Self::Unsigned(typed) => Self::Unsigned(typed.split(half)),
-            Self::Boolean(typed) => Self::Boolean(typed.split(half)),
-            Self::String(typed) => Self::String(typed.split(half)),
-        }
-    }
-}
-
-impl<T> Typed<T> {
-    fn new() -> Self {
+        let values = match field {
+            Field::Float(_) => Values::Float(Vec::new()),
+            Field::Integer(_) => Values::Integer(Vec::new()),
+            Field::Unsigned(_) => Values::Unsigned(Vec::new()),
+            Field::Boolean(_) => Values::Boolean(Vec::new()),
+            Field::String(_) => Values::String(Vec::new()),
+        };
         Self {
             points: Vec::new(),
-            values: Vec::new(),
+            values,
         }
     }
 
@@ -390,18 +341,16 @@ impl<T> Typed<T> {
         }
     }
 
-    fn set(&mut self, at: usize, value: T) {
+    fn set(&mut self, at: usize, field: Field) {
         let at = u16::try_from(at).expect("a chunk holds at most CHUNK points");
-        match self.points.binary_search(&at) {
-            Ok(i) => *self.values.get_mut(i).expect("a value for each point") = value,
-            Err(i) => {
-                insert(&mut self.points, i, at);
-                insert(&mut self.values, i, value);
-            }
+        let slot = self.points.binary_search(&at);
+        if let Err(i) = slot {
+            insert(&mut self.points, i, at);
         }
+        self.values.put(slot, field);
     }
 
-    fn get(&self, at: usize) -> Option<&T> {
+    fn get(&self, at: usize) -> Option<Field> {
         let at = u16::try_from(at).ok()?;
         self.values.get(self.points.binary_search(&at).ok()?)
     }
@@ -414,14 +363,57 @@ impl<T> Typed<T> {
             .partition_point(|&point| usize::from(point) < half);
         let half = u16::try_from(half).expect("a chunk holds at most CHUNK points");
         Self {
-            points: self
-                .points
-                .split_off(from)
+            points: split(&mut self.points, from)
                 .into_iter()
                 .map(|point| point.strict_sub(half))
                 .collect(),
-            values: split(&mut self.values, from),
+            values: self.values.split(from),
         }
+    }
+}
+
+impl Values {
+    /// Puts `field` at `slot`: replaces the value at `Ok(i)`, or inserts it at `Err(i)`.
+    fn put(&mut self, slot: Result<usize, usize>, field: Field) {
+        match (self, field) {
+            (Self::Float(values), Field::Float(value)) => put(values, slot, value),
+            (Self::Integer(values), Field::Integer(value)) => put(values, slot, value),
+            (Self::Unsigned(values), Field::Unsigned(value)) => {
+                put(values, slot, value);
+            }
+            (Self::Boolean(values), Field::Boolean(value)) => put(values, slot, value),
+            (Self::String(values), Field::String(value)) => put(values, slot, value),
+            (values, field) => {
+                unreachable!("the Conflict check refused {field:?} into {values:?}")
+            }
+        }
+    }
+
+    fn get(&self, i: usize) -> Option<Field> {
+        match self {
+            Self::Float(values) => values.get(i).copied().map(Field::Float),
+            Self::Integer(values) => values.get(i).copied().map(Field::Integer),
+            Self::Unsigned(values) => values.get(i).copied().map(Field::Unsigned),
+            Self::Boolean(values) => values.get(i).copied().map(Field::Boolean),
+            Self::String(values) => values.get(i).cloned().map(Field::String),
+        }
+    }
+
+    fn split(&mut self, from: usize) -> Self {
+        match self {
+            Self::Float(values) => Self::Float(split(values, from)),
+            Self::Integer(values) => Self::Integer(split(values, from)),
+            Self::Unsigned(values) => Self::Unsigned(split(values, from)),
+            Self::Boolean(values) => Self::Boolean(split(values, from)),
+            Self::String(values) => Self::String(split(values, from)),
+        }
+    }
+}
+
+fn put<T>(values: &mut Vec<T>, slot: Result<usize, usize>, value: T) {
+    match slot {
+        Ok(i) => *values.get_mut(i).expect("a value for each point") = value,
+        Err(i) => insert(values, i, value),
     }
 }
 
