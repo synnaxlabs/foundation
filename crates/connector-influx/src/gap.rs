@@ -11,12 +11,12 @@ use crate::line::{Measurement, Value};
 /// The measurement of the gap lines.
 pub const MEASUREMENT: &str = "foundation_gaps";
 
-/// The gap of one index of one connector. It adds up trimmed samples until the next
-/// sample, then writes them as one line at that sample's stamp.
+/// The gap of one index of one connector. It holds the seqs from the first trimmed
+/// seq up to the next sample, then writes them as one line at that sample's stamp.
 #[derive(Debug)]
 pub struct Gap {
     measurement: Measurement,
-    count: i64,
+    seqs: Option<Range<u64>>,
 }
 
 impl Gap {
@@ -28,40 +28,57 @@ impl Gap {
         Self {
             measurement: Measurement::new(MEASUREMENT, &tags, &["count"])
                 .expect("invariant: a name is a valid tag value"),
-            count: 0,
+            seqs: None,
         }
     }
 
-    /// Adds the trimmed samples with the seqs in `seqs`. An empty range adds
-    /// nothing.
+    /// Adds the trimmed samples with the seqs in `seqs`. A seq that the gap already
+    /// holds is held once, so a gap that the reader reports again counts once. An
+    /// empty range adds nothing.
     ///
     /// # Panics
     ///
-    /// When the gap passes `i64::MAX` samples, which takes 2^63 samples on one index.
+    /// When `seqs` starts after its end.
     pub fn add(&mut self, seqs: Range<u64>) {
-        let held = self.count;
-        let count = seqs.end.saturating_sub(seqs.start);
-        self.count = i64::try_from(count)
-            .ok()
-            .and_then(|count| held.checked_add(count))
-            .unwrap_or_else(|| {
-                panic!(
-                    "invariant: a gap holds fewer than 2^63 samples, held {held}, \
-                     added {count}"
-                )
-            });
+        assert!(
+            seqs.start <= seqs.end,
+            "invariant: a gap range starts at or before its end, {seqs:?}"
+        );
+        if seqs.is_empty() {
+            return;
+        }
+        self.seqs = Some(match self.seqs.take() {
+            Some(held) => held.start.min(seqs.start)..held.end.max(seqs.end),
+            None => seqs,
+        });
     }
 
-    /// Appends the gap's line at `stamp`, the stamp of the first sample after the
-    /// gap, to `out`, and empties the gap. An empty gap appends nothing.
+    /// Appends the gap's line to `out` and empties the gap. The line counts each seq
+    /// from the gap's first seq up to `seq`, the seq of the first sample after the
+    /// gap, and has that sample's `stamp`. An empty gap appends nothing.
     ///
     /// Only `out` then holds the gap: a request built again from the samples holds
     /// it only when the reader reports the gap again.
-    pub fn line(&mut self, out: &mut Vec<u8>, stamp: Stamp) {
-        if self.count == 0 {
-            return;
-        }
-        let count = std::mem::take(&mut self.count);
+    ///
+    /// # Panics
+    ///
+    /// When `seq` is below the end of a range the gap holds, or the line counts
+    /// 2^63 seqs or more.
+    pub fn line(&mut self, out: &mut Vec<u8>, seq: u64, stamp: Stamp) {
+        let Some(seqs) = self.seqs.take() else { return };
+        assert!(
+            seqs.end <= seq,
+            "invariant: the sample after the gap {seqs:?} has seq {seq}"
+        );
+        let count = seq
+            .checked_sub(seqs.start)
+            .and_then(|count| i64::try_from(count).ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "invariant: a gap counts fewer than 2^63 seqs, from {} to {seq}",
+                    seqs.start
+                )
+            });
         self.measurement
             .line(out, &[Some(Value::Integer(count))], stamp);
     }
