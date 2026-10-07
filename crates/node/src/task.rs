@@ -1,9 +1,10 @@
-//! Tasks given from any thread that run with shard 0's hub, in the order given.
+//! Tasks given from any thread that shard 0 calls with its hub, in the order given.
 
 use std::cell::RefCell;
 use std::fmt;
+use std::future::poll_fn;
 use std::mem;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -80,7 +81,7 @@ pub(crate) struct Inbox<T>(Arc<Mutex<State<T>>>);
 impl<T> Inbox<T> {
     /// Gives each task pushed since the last call, oldest first, else wakes `cx` at
     /// the next push.
-    pub(crate) fn poll(&self, cx: &mut Context<'_>) -> Poll<Vec<T>> {
+    fn poll(&self, cx: &mut Context<'_>) -> Poll<Vec<T>> {
         let mut state = lock(&self.0);
         if state.tasks.is_empty() {
             state.waker = Some(cx.waker().clone());
@@ -101,78 +102,72 @@ impl<T> Drop for Inbox<T> {
     }
 }
 
-/// Runs tasks with one hub. Each task starts at its first poll, once each task given
-/// before it has started. Dropping it drops the hub and each task, run or not.
-pub(crate) struct Runner(Rc<RefCell<Set>>);
-
-struct Set {
-    hub: Hub,
-    tasks: env::tasks::Tasks,
-    /// The number of the next task given.
-    given: u64,
-    /// The number of the next task to start.
-    turn: u64,
-    /// The tasks that wait to start, by number.
-    queued: hash::Map<u64, Task>,
-    /// The waker of each queued task that was polled before its turn.
-    waiting: hash::Map<u64, Waker>,
-    running: hash::Map<u64, Boxed>,
-}
-
-impl Runner {
-    /// A runner of tasks with `hub`, which spawns them on `tasks`.
-    pub(crate) fn new(hub: Hub, tasks: env::tasks::Tasks) -> Self {
-        Self(Rc::new(RefCell::new(Set {
-            hub,
-            tasks,
-            given: 0,
-            turn: 0,
-            queued: hash::Map::default(),
-            waiting: hash::Map::default(),
-            running: hash::Map::default(),
-        })))
-    }
-
-    /// Spawns `task`, which starts after each task given before it.
-    pub(crate) fn spawn(&self, task: Task) {
-        let mut set = self.0.borrow_mut();
-        let number = set.given;
-        set.given += 1;
-        set.queued.insert(number, task);
-        let weak = Rc::downgrade(&self.0);
-        set.tasks
-            .spawn(std::future::poll_fn(move |cx| poll(&weak, number, cx)));
+impl Inbox<Task> {
+    /// Calls each task given with a clone of `hub`, in the order given, and runs its
+    /// future on `tasks`, until `stop` completes. Then drops each future, `hub`, and
+    /// the inbox. A future that completes drops at once.
+    pub(crate) async fn serve(
+        self,
+        hub: Hub,
+        tasks: env::tasks::Tasks,
+        stop: impl Future<Output = ()>,
+    ) {
+        let running: Rc<RefCell<hash::Map<u64, Slot>>> = Rc::default();
+        let mut next = 0;
+        let mut stop = pin!(stop);
+        poll_fn(|cx| {
+            if stop.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            while let Poll::Ready(given) = self.poll(cx) {
+                for task in given {
+                    let slot = Rc::new(RefCell::new(task(hub.clone())));
+                    let run = Spawned {
+                        slot: Rc::downgrade(&slot),
+                        running: Rc::downgrade(&running),
+                        number: next,
+                    };
+                    running.borrow_mut().insert(next, slot);
+                    next += 1;
+                    tasks.spawn(poll_fn(move |cx| run.poll(cx)));
+                }
+            }
+            Poll::Pending
+        })
+        .await;
+        drop(running);
     }
 }
 
-/// Polls task `number` of `set`, which ends once the runner has dropped.
-fn poll(set: &Weak<RefCell<Set>>, number: u64, cx: &mut Context<'_>) -> Poll<()> {
-    let Some(set) = set.upgrade() else {
-        return Poll::Ready(());
-    };
-    let mut set = set.borrow_mut();
-    let set = &mut *set;
-    if let Some(task) = set.queued.remove(&number) {
-        if number > set.turn {
-            set.queued.insert(number, task);
-            set.waiting.insert(number, cx.waker().clone());
-            return Poll::Pending;
+/// The future of one running task. Only the map of running futures holds it, so a
+/// stop drops it.
+type Slot = Rc<RefCell<Boxed>>;
+
+/// What the executor holds of one running task.
+struct Spawned {
+    slot: Weak<RefCell<Boxed>>,
+    running: Weak<RefCell<hash::Map<u64, Slot>>>,
+    /// The task's key in `running`.
+    number: u64,
+}
+
+impl Spawned {
+    /// Polls the task, then drops it from `running` once it completes. Ends once the
+    /// task has dropped.
+    fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(slot) = self.slot.upgrade() else {
+            return Poll::Ready(());
+        };
+        let polled = slot.borrow_mut().as_mut().poll(cx);
+        if polled.is_ready() {
+            drop(slot);
+            let running = self.running.upgrade();
+            let done = running.and_then(|r| r.borrow_mut().remove(&self.number));
+            // A future's drop may do anything, so it runs with no borrow held.
+            drop(done);
         }
-        set.turn += 1;
-        if let Some(next) = set.waiting.remove(&set.turn) {
-            next.wake();
-        }
-        set.running.insert(number, task(set.hub.clone()));
+        polled
     }
-    let future = set
-        .running
-        .get_mut(&number)
-        .expect("invariant: a task that has not ended is queued or running");
-    let polled = future.as_mut().poll(cx);
-    if polled.is_ready() {
-        set.running.remove(&number);
-    }
-    polled
 }
 
 #[cfg(test)]
@@ -185,6 +180,7 @@ mod tests {
     #[test]
     fn a_task_pushed_after_the_inbox_drops_is_dropped() {
         let (queue, inbox) = pair();
+        // Only `Node`'s derive uses the impl, so this is its one test.
         assert_eq!(format!("{queue:?}"), "Queue");
         drop(inbox);
         let task = Arc::new(());

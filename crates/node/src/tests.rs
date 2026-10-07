@@ -711,7 +711,8 @@ mod buffer {
     }
 
     /// With one least ring no part holds a ring; one byte short of two, shard 0's part
-    /// fits and shard 1's does not. Two least rings start.
+    /// fits and shard 1's does not. Two least rings start. A task given to a node that
+    /// started no shard is dropped unrun.
     #[test]
     fn a_disk_budget_that_holds_no_ring_on_each_shard_starts_no_shard() {
         let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
@@ -726,6 +727,7 @@ mod buffer {
                 ..config(&host, Size::MEBIBYTE, Box::new(heap))
             });
             assert_eq!(host.shard_starts(), [], "{shown}");
+            assert_eq!(fate(&probe(&node)), Fate::Dropped, "{shown}");
             assert_eq!(sim.run(), Ok(()));
             let e = node.join().unwrap_err();
             assert_eq!(
@@ -1854,9 +1856,9 @@ mod hub {
         assert_eq!(node.join(), Ok(()));
     }
 
-    /// Tasks start in the order of their calls, given before or after the opens.
+    /// Tasks are called in the order of their calls, given before or after the opens.
     #[test]
-    fn tasks_start_in_the_order_of_their_calls() {
+    fn tasks_are_called_in_the_order_of_their_calls() {
         for seed in 0..16 {
             let mut sim = sim::Sim::new(sim::Config {
                 seed,
@@ -1866,7 +1868,10 @@ mod hub {
             let started = Arc::new(Mutex::new(Vec::new()));
             let spawn = |n: usize| {
                 let started = Arc::clone(&started);
-                node.spawn(move |_| async move { started.lock().unwrap().push(n) });
+                node.spawn(move |_| {
+                    started.lock().unwrap().push(n);
+                    async {}
+                });
             };
             (0..8).for_each(spawn);
             assert_eq!(sim.run_for(Span::HOUR), Ok(()), "seed {seed}");
@@ -1894,6 +1899,42 @@ mod hub {
             [&before, &after, &late].map(|p| fate(p)),
             [Fate::Dropped; 3]
         );
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    /// A task given once the hub runs, and still in the inbox at a stop, is dropped
+    /// unrun.
+    #[test]
+    fn a_task_given_with_a_stop_after_the_opens_is_dropped_unrun() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (_host, node) = node(&mut sim, 2);
+        let ran = probe(&node);
+        assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+        assert_eq!(fate(&ran), Fate::Ran);
+        let given = probe(&node);
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(fate(&given), Fate::Dropped);
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    /// A task that completes drops what it holds, before the node stops.
+    #[test]
+    fn a_task_that_completes_drops_what_it_holds() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (_host, node) = node(&mut sim, 2);
+        let dropped = Arc::new(Mutex::new(false));
+        let held = Dropped(Arc::clone(&dropped));
+        node.spawn(move |_| {
+            std::future::poll_fn(move |_| {
+                let _held = &held;
+                std::task::Poll::Ready(())
+            })
+        });
+        assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+        assert!(*dropped.lock().unwrap(), "the task dropped what it held");
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
     }
 

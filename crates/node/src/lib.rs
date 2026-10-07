@@ -16,12 +16,9 @@ mod task;
 mod tests;
 
 use std::fmt;
-use std::future::poll_fn;
 use std::iter;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::task::Poll;
 
 use env::thread::Handle;
 use types::frame::key_set::Interner;
@@ -83,7 +80,7 @@ pub struct Node {
     shards: Vec<Shard>,
     failed: Option<Error>,
     /// The tasks for shard 0's hub.
-    tasks: task::Queue<task::Task>,
+    queue: task::Queue<task::Task>,
 }
 
 /// A started shard, with its error once it fails.
@@ -146,7 +143,7 @@ impl Node {
                     stop: Stop::default(),
                     shards: Vec::new(),
                     failed: Some(error),
-                    tasks: task::pair().0,
+                    queue: task::pair().0,
                 }
             }
         }
@@ -169,16 +166,19 @@ impl Node {
         } = config;
         let stop = Stop::default();
         let cores = shards.cores().get();
-        let (give, interner, ends) = ring(cores);
+        let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
-        let serve = Serve { interner, inbox };
+        let serve = Serve {
+            interner: last,
+            inbox,
+        };
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
-        let roles = Role::all(mesh, wall, give, serve, cores);
+        let roles = Role::all(mesh, wall, first, serve, cores);
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
         for (core, ((((config, layout), number), role), (take, give))) in
-            parts.zip(roles).zip(ends).enumerate()
+            parts.zip(roles).zip(links).enumerate()
         {
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
@@ -220,22 +220,24 @@ impl Node {
             stop,
             shards: started,
             failed: error,
-            tasks: queue,
+            queue,
         }
     }
 
-    /// Runs `task` with the node's hub on shard 0, once each shard has opened its
-    /// buffer. Tasks start in the order of their calls. Does not wait. A node that
-    /// stops or fails before a task starts drops it unrun. A task runs on shard 0's
-    /// thread, so it may hold values that are not `Send`, such as sessions; it sends
-    /// its result back through a value it owns. It runs until its future completes or
-    /// shard 0 ends, which drops it. A panic in it ends shard 0 and fails the node:
-    /// [`Node::join`] gives [`Error::Panicked`].
+    /// Calls `task` with the node's hub on shard 0, once each shard has opened its
+    /// buffer, then runs its future. Tasks are called in the order of the calls, so
+    /// what a task does before it gives its future, such as a define, is in that
+    /// order. Does not wait. A node that stops or fails before it calls a task drops
+    /// it uncalled. A task runs on shard 0's thread, so it may hold values that are
+    /// not `Send`, such as sessions; it sends its result back through a value it owns.
+    /// Its future runs until it completes or shard 0 ends, which drops it. A panic in
+    /// a task ends shard 0 and fails the node: [`Node::join`] gives
+    /// [`Error::Panicked`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
         F: Future<Output = ()> + 'static,
     {
-        self.tasks.push(Box::new(move |hub| Box::pin(task(hub))));
+        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -347,25 +349,6 @@ impl Role {
     }
 }
 
-/// The ends that pass the interner from shard 0's claim through the open of each of
-/// `cores` shards, in order of core, then back to shard 0: the first give, the last
-/// take, and the take and give of each shard. A shard that does not start drops its
-/// ends, so each later take gives `None`.
-#[expect(clippy::type_complexity, reason = "each end goes to another part")]
-fn ring(
-    cores: usize,
-) -> (
-    Give<Interner>,
-    Take<Interner>,
-    impl Iterator<Item = (Take<Interner>, Give<Interner>)>,
-) {
-    let (gives, takes): (Vec<_>, Vec<_>) = (0..=cores).map(|_| handoff::pair()).unzip();
-    let (mut gives, mut takes) = (gives.into_iter(), takes.into_iter());
-    let first = gives.next().expect("invariant: the ring has an end");
-    let last = takes.next_back().expect("invariant: the ring has an end");
-    (first, last, takes.zip(gives))
-}
-
 /// The pool of each shard from its part of `budget`, and the layout of its ring from
 /// its part of `disk`, in order of core, else the first part that holds no ring.
 fn parts(
@@ -417,29 +400,35 @@ impl Open {
                 } = *first;
                 tasks.spawn(async { mesh.run(wall).await });
                 let lock = self.claim(&files, closed.len() + 1, give).await;
-                self.keep(files, pool, tasks, guard, Some(serve)).await;
+                let shard = tasks.clone();
+                let hold = async move |home, guard| serve.run(home, shard, guard).await;
+                self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
                     shard.await;
                 }
                 drop(lock);
             }
             Role::Next(ended) => {
-                self.keep(files, pool, tasks, guard, None).await;
+                let hold = async |home, guard: Guard| {
+                    guard.await;
+                    drop(home);
+                };
+                self.keep(files, pool, tasks, guard, hold).await;
                 drop(ended);
             }
         }
     }
 
-    /// Opens the shard's buffer and keeps its home until `guard` completes, with
-    /// `serve` on it when given, then returns once its ring has closed. A failed open
-    /// drops `guard`, which stops the node.
+    /// Opens the shard's buffer and gives its home and `guard` to `hold`, which drops
+    /// the home once `guard` completes, then returns once its ring has closed. A
+    /// failed open drops `guard`, which stops the node.
     async fn keep(
         self,
         files: env::files::Files,
         pool: block::Pool,
         tasks: env::tasks::Tasks,
         guard: Guard,
-        serve: Option<Serve>,
+        hold: impl AsyncFnOnce(home::Shard, Guard),
     ) {
         let Some(home) = self.run(files, Rc::new(pool), tasks.clone()).await else {
             // Stops the node, so each other shard ends.
@@ -449,12 +438,7 @@ impl Open {
         // Resolves once the home has dropped and the buffer's task has written what
         // was queued and ended, which closes the ring.
         let commit = home.committed();
-        if let Some(serve) = serve {
-            serve.run(home, tasks, guard).await;
-        } else {
-            guard.await;
-            drop(home);
-        }
+        hold(home, guard).await;
         // Its error reaches no caller (#1329).
         drop(commit.await);
     }
@@ -543,19 +527,8 @@ struct Serve {
 impl Serve {
     /// Runs each task given with a hub over `home` until `guard` completes, then drops
     /// the tasks, the hub, and `home`. Runs no task when a shard did not open.
-    async fn run(self, home: home::Shard, tasks: env::tasks::Tasks, mut guard: Guard) {
-        let Self {
-            mut interner,
-            inbox,
-        } = self;
-        let interner = poll_fn(|cx| match Pin::new(&mut guard).poll(cx) {
-            Poll::Ready(()) => Poll::Ready(None),
-            Poll::Pending => Pin::new(&mut interner).poll(cx),
-        })
-        .await;
-        let Some(interner) = interner else {
-            drop(inbox);
-            guard.await;
+    async fn run(self, home: home::Shard, tasks: env::tasks::Tasks, guard: Guard) {
+        let Some(interner) = self.interner.await else {
             return;
         };
         let hub = hub::Hub::new(hub::Config {
@@ -563,20 +536,7 @@ impl Serve {
             interner,
             tasks: tasks.clone(),
         });
-        let runner = task::Runner::new(hub, tasks);
-        poll_fn(|cx| {
-            if Pin::new(&mut guard).poll(cx).is_ready() {
-                return Poll::Ready(());
-            }
-            while let Poll::Ready(given) = inbox.poll(cx) {
-                for task in given {
-                    runner.spawn(task);
-                }
-            }
-            Poll::Pending
-        })
-        .await;
-        drop(inbox);
+        self.inbox.serve(hub, tasks, guard).await;
     }
 }
 
