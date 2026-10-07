@@ -2195,10 +2195,12 @@ How to read this record:
   applies at least one time: a member that got no answer forwards it again, and the
   leader then appends a second entry. A try of `set_home` that gives up resets its
   stream. A proposal that the network delivers late, before the reset, can still apply
-  after a later call returned and set the older home, until #1273 refuses it. This
-  replaces the sentence that a repeat of `Change::Home` gives the state of a call that
-  took effect last (ruled by the architect, 2026-10-07T20:58:20Z:
+  after a later call returned and set the older home, until #1273 refuses it (ruled by
+  the architect, 2026-10-07T20:58:20Z:
   https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  Supersedes the sentence that a repeat of `Change::Home` gives the state of a call
+  that took effect last:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025.
   `Change::Join` is safe to repeat while no
   change removes a member: a repeat finds its node a member and is refused
   (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
@@ -2343,10 +2345,12 @@ How to read this record:
   `NoVote` check reads the configuration of this node's log, which changes when the node
   appends a change of voters, before the commit. A promoted node gets `NoVote` until it
   appends that change, and a new leader that replaces the entry changes the result back.
-  `NotMember` reads what this node applied. This replaces the sentence "A node that a
-  voter promoted gets `NoVote` until it applies that change" (ruled by the architect,
+  `NotMember` reads what this node applied (ruled by the architect,
   2026-10-07T20:58:20Z:
-  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849). `Ok`
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  Supersedes the sentence that a promoted node gets `NoVote` until it applies that
+  change: https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407.
+  `Ok`
   means that the entry at the position of the try applied. That is an entry that sets
   the home only while `State::apply` never refuses a home change. A change kind that
   lets `apply` refuse a home change (such as a removal of a member) must also make
@@ -2354,7 +2358,9 @@ How to read this record:
   doc of `set_home`, and the four points that the plan did not state (a joint
   configuration, `Error::Pool`, the time to a stop in a forward, and `NoVote` before
   `NotMember`) are approved by the architect, 2026-10-07T20:29:07Z:
-  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The two
+  sentences that the doc of `set_home` got after that, on a late proposal and on what
+  `NoVote` reads, are approved in the ruling of 2026-10-07T20:58:20Z above.
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
@@ -2390,10 +2396,11 @@ How to read this record:
   `Debug` text of a `Config` does not show the private key. `Mesh::set_home` is the
   first public call that changes the region (#471), and `Error::NoVote` is public with
   it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
-  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. This
-  replaces the sentence that each call that changes the region stays private. The other
-  calls that change the region and the change records stay private. The surface is
-  approved by the architect, 2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
+  Supersedes, for `set_home`, the sentence that the calls that change the region stay
+  private: https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724.
+  The other calls that change the region and the change records stay private. The
+  surface is approved by the architect, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   surface as built, with the types that the caller builds and the sentence on the key of
   the transport, is approved by the architect, 2026-10-07T19:55:12Z:

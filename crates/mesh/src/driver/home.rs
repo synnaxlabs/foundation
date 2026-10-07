@@ -43,7 +43,7 @@ impl Mesh {
     ) -> Result<(), Error> {
         loop {
             let attempt = self.attempt()?;
-            if self.member(home).is_none() {
+            if self.group.borrow().state.member(home).is_none() {
                 return Err(Error::NotMember(home));
             }
             let Some(at) = self.place(Change::Home { index, home }).await? else {
@@ -132,7 +132,7 @@ pub(super) async fn within<F: Future>(
     .await
 }
 
-// One try of a call of `set_home`. It holds its floor in the group until it drops.
+// One try of a call. It holds its floor in the group until it drops.
 struct Try<'a> {
     mesh: &'a Mesh,
     // The key of the waker of the call in the group.

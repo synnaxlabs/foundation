@@ -725,35 +725,37 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
     ];
     for (case, refusal) in cases {
         let call = |_, mesh| set(mesh);
-        let (set, (changes, gap)) = run(call, |mut leader| async move {
+        let (set, (changes, gap, end)) = run(call, |mut leader| async move {
             let clock = leader.clock();
-            let (
-                first,
-                Asked {
-                    receiver,
-                    mut sender,
-                },
-            ) = leader.proposal().await;
-            match refusal {
-                Refusal::Answer(bytes) => {
-                    sender.send(leader.peer.block(&bytes)).await.unwrap();
-                    sender.finish().unwrap();
-                }
-                Refusal::End => sender.finish().unwrap(),
-                Refusal::Reset => {
-                    sender.reset(Code(16));
-                    receiver.stop(Code(16));
-                }
+            let (first, mut refused) = leader.proposal().await;
+            if let Refusal::Answer(bytes) = &refusal {
+                let answer = leader.peer.block(bytes);
+                refused.sender.send(answer).await.unwrap();
+            }
+            if !matches!(refusal, Refusal::Reset) {
+                refused.sender.finish().unwrap();
             }
             let start = clock.now();
+            let end = match refusal {
+                Refusal::Answer(_) => refused.end().await,
+                Refusal::End => Ok(()),
+                Refusal::Reset => {
+                    let Asked { receiver, sender } = refused;
+                    sender.reset(Code(16));
+                    receiver.stop(Code(16));
+                    Ok(())
+                }
+            };
             let (second, mut asked) = leader.proposal().await;
             let gap = clock.now() - start;
             leader.answer(&mut asked, at(1)).await.unwrap();
             leader.append(&home(1), at(1)).await;
             leader.rest(seconds(2)).await;
-            ([first, second], gap)
+            ([first, second], gap, end)
         });
         assert_eq!(set, (Ok(()), Some(key(1))), "{case}");
+        // Node 1 ends its stream after each answer, also one that refuses.
+        assert_eq!(end, Ok(()), "{case}");
         assert_eq!(changes, [home(1), home(1)], "{case}");
         let ms = gap.nanos() / Span::MILLISECOND.nanos();
         assert!(
@@ -763,13 +765,35 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
     }
 }
 
-/// The session to node 2 that the group of `mesh` holds, when it has one.
-async fn session_to_leader(mesh: &Mesh, clock: &Clock) -> Session {
-    loop {
-        let held = mesh.group.borrow().sessions.get(&key(2)).cloned();
-        if let Some(session) = held {
-            return session;
-        }
+#[test]
+fn an_answer_stands_when_the_leader_stopped_its_half() {
+    let call = |_, mesh| set(mesh);
+    let (set, more) = run(call, |mut leader| async move {
+        let (
+            _,
+            Asked {
+                receiver,
+                mut sender,
+            },
+        ) = leader.proposal().await;
+        receiver.stop(Code(16));
+        leader.rest(HALF).await;
+        let answer = Message::Proposed { at: at(1) }.encode();
+        sender.send(leader.peer.block(&answer)).await.unwrap();
+        sender.finish().unwrap();
+        leader.append(&home(1), at(1)).await;
+        let more = leader.proposal_within(seconds(3)).await;
+        more.map(|(change, _)| change)
+    });
+    assert_eq!(more, None);
+    assert_eq!(set, (Ok(()), Some(key(1))));
+}
+
+/// Waits until the group of `mesh` holds a session to node 2. No public call shows
+/// the session, and with none a try ends before it takes a block, so this reads the
+/// group.
+async fn wait_for_session(mesh: &Mesh, clock: &Clock) {
+    while !mesh.group.borrow().sessions.contains_key(&key(2)) {
         clock.sleep(Span::MILLISECOND).await;
     }
 }
@@ -778,7 +802,7 @@ async fn session_to_leader(mesh: &Mesh, clock: &Clock) -> Session {
 fn no_proposal_goes_to_the_leader_while_the_pool_has_no_block() {
     let call = |node: sim::node::Node, mesh: Mesh| async move {
         let clock = node.clock();
-        session_to_leader(&mesh, &clock).await;
+        wait_for_session(&mesh, &clock).await;
         let held = fill(&mesh.pool);
         let mut call = pin!(set(mesh.clone()));
         let end = clock.now() + seconds(2);
@@ -803,12 +827,9 @@ fn no_proposal_goes_to_the_leader_while_the_pool_has_no_block() {
 
 #[test]
 fn a_proposal_goes_on_the_next_session_when_the_session_to_the_leader_closed() {
-    let call = |node: sim::node::Node, mesh: Mesh| async move {
-        let session = session_to_leader(&mesh, &node.clock()).await;
-        session.close(Code(7));
-        set(mesh).await
-    };
+    let call = |_, mesh| set(mesh);
     let (set, change) = run(call, |mut leader| async move {
+        leader.session.close(Code(7));
         leader.session = leader.peer.session().await;
         let (change, mut asked) = leader.proposal().await;
         leader.answer(&mut asked, at(1)).await.unwrap();
