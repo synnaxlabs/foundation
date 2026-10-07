@@ -26,12 +26,10 @@ use super::stream::Stream;
 /// still gets the answer. A request that breaks HTTP gets 400, or 414 for a URI or
 /// 431 for a head that is too long, and its stream ends. An HTTP/2 preface ends the
 /// stream with no answer. A request with a `content-encoding` other than `identity`
-/// gets 415 and does not reach `answer`. Dropping the future stops only the accepts:
-/// each stream it accepted runs on.
+/// gets 415 and does not reach `answer`.
 ///
-/// # Errors
-///
-/// The error of the first accept that fails. It runs until then.
+/// It runs until the listener fails, and returns that error. Dropping the future stops
+/// only the accepts: each stream it accepted runs on.
 pub async fn serve(
     mut listener: Listener,
     tasks: Tasks,
