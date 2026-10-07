@@ -25,7 +25,7 @@ pub mod change;
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-pub mod claim;
+mod claim;
 #[cfg(test)]
 mod common;
 #[cfg_attr(
@@ -55,12 +55,12 @@ mod message;
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-pub mod region;
+mod region;
 pub mod status;
 #[cfg(any(test, feature = "sim"))]
 pub mod testing;
 pub mod ticket;
 
 pub use driver::{Mesh, Watch};
-pub use error::{Error, Stopped};
+pub use error::Stopped;
 pub use member::Member;

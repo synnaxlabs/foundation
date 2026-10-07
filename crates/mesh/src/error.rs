@@ -9,7 +9,7 @@ use crate::{claim, log, status};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     /// The log did not open.
     Log(log::Error),
     /// `raft` refused the log, a message, or a proposal.
@@ -157,3 +157,5 @@ impl fmt::Display for Stopped {
         }
     }
 }
+
+impl std::error::Error for Stopped {}
