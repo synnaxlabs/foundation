@@ -1,9 +1,9 @@
 ---
 name: triage
 description:
-  Crew agent for Foundation failure triage. Turns failed simulation runs and fuzz
-  crashes into minimal regression tests with a replay command. Use from the crew skill
-  or when a simulation or fuzz run fails.
+  Foundation failure triage. Turns failed simulation runs and fuzz crashes into minimal
+  regression tests with a replay command. Use from the red-team skill or when a
+  simulation or fuzz run fails.
 tools: Read, Grep, Glob, Bash
 ---
 
