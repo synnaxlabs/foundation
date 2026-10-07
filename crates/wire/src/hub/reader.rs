@@ -61,16 +61,20 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// Three checks, in order; the error is that of the first check that fails. The
-    /// bytes: the [`Error`] of a message that does not decode. The order of the
-    /// session, whatever the content of the message: [`Error::Unopened`] for a head
-    /// before `Opened` and [`Error::Reopen`] for a second `Opened`. The content
-    /// against the session: [`Error::Places`] for a head with more series than
-    /// places, [`Error::Run`] for a message with more ends than remain, and
-    /// [`Error::Body`] for a message longer than the rest of the body. A message of
-    /// a run has no kind, so a message where a run continues is read as one. The
-    /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
-    /// caller stops it.
+    /// Three checks, in order; the error is that of the first check that fails.
+    ///
+    /// 1. The bytes: the [`Error`] of a message that does not decode as what the
+    ///    session expects. A message of a run has no kind, so a message where a run
+    ///    continues is read as one.
+    /// 2. The order of the session, whatever the content of a reply:
+    ///    [`Error::Unopened`] for a head before `Opened` and [`Error::Reopen`] for a
+    ///    second `Opened`.
+    /// 3. The content against the session: [`Error::Places`] for a head with more
+    ///    series than places, [`Error::Run`] for a message with more ends than
+    ///    remain, and [`Error::Body`] for a message longer than the rest of the body.
+    ///
+    /// The session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and
+    /// the caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromHome<'m>, Error> {
         let (event, next) = match self.next {
             Next::Opened | Next::Head => self.reply(message)?,
@@ -349,6 +353,10 @@ mod tests {
             .decode(&encode_ends(&[(0, 8)]))
             .expect("the first end decodes");
         assert_eq!(reader.decode(&[0; 9]).err(), Some(Error::Length { len: 9 }));
+        assert_eq!(
+            reader.decode(&[0; 17]).err(),
+            Some(Error::Length { len: 17 })
+        );
         assert_eq!(
             reader.decode(&[0; 16]).err(),
             Some(Error::Run {
