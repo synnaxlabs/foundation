@@ -209,8 +209,9 @@ pub enum Outcome {
         range: frame::Range,
     },
     /// A live group with samples found no room in the ring or the pool. Its seq is a
-    /// gap in the log. The gap is durable only when a later group with samples of the
-    /// index is on disk. A restart before that gives the next frame the same seq.
+    /// gap in the log. The gap is durable only when a later entry of the index, with
+    /// samples or a handoff, is on disk. A restart before that gives the next frame the
+    /// same seq.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -483,9 +484,9 @@ impl Shard {
     /// once when none of them waits for a commit, else at the end of the group commit
     /// that holds the last of them. A lost group, a group with no samples, and a
     /// handoff that found no room are not appended, so it does not wait for them.
-    /// Commits run without this future,
-    /// so a caller may drop it. Call [`woken`](Self::woken) after it resolves.
-    /// [`Commit`] says when one held past the drop of the shard resolves.
+    /// Commits run without this future, so a caller may drop it. Call
+    /// [`woken`](Self::woken) after it resolves. [`Commit`] says when one held past the
+    /// drop of the shard resolves.
     ///
     /// # Errors
     ///
@@ -2364,6 +2365,55 @@ mod tests {
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
             assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn skips_a_lost_range_after_a_power_cut_after_an_empty_write_records_a_handoff() {
+        let (mut sim, node) = create_node(121);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
+            // The lost frame gave its block back.
+            let more = test.fill();
+            // b outranks a; its handoff finds no block and waits.
+            let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(find(&test.ring().await, &[2, b'b']).len(), 0, "b waits");
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
+            drop((blocks, more));
+            // The empty group records the waiting handoff and stores no sample.
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            assert_eq!(shard.write(b, LIVE, empty), Ok(&[applied(0, 2, 0)][..]));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(
+                find(&test.ring().await, &[2, b'b']).len(),
+                1,
+                "the empty write recorded the handoff to b"
+            );
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 2);
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 2, 1)][..]),
+                "the handoff on disk made the lost range durable"
+            );
         })
         .expect("the run after the cut ends");
     }
