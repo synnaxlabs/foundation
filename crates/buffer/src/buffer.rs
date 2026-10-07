@@ -314,10 +314,12 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable tails past the synced `sealed` groups, keeps their records
-    /// as spares, and counts the commit.
+    /// Moves the durable tails past the synced `sealed` groups, tells the writer
+    /// that a trim can free them, keeps their records as spares, and counts the
+    /// commit.
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
+            self.writer.synced(record.ends());
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
                 self.logs
                     .sync(slot, header, record.offset())
@@ -792,8 +794,8 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             mem::swap(&mut state.queue, &mut taken);
         }
         for closed in taken.drain(..) {
-            let (record, next) = closed.seal(chain);
-            chain = next;
+            let record = closed.seal(chain);
+            chain = record.ends().record.chain();
             sealed.push(record);
         }
         let result = write(&shared, &sealed).await;

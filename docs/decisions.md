@@ -275,6 +275,39 @@ How to read this record:
   home opens unnamed readers before the first estimate. A named complete session has a
   `complete::Key`, and the wrong close of an open session panics; the architect decided
   (#1024). Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+- **STORE TRIM (2026-10-06)** Under disk pressure, `buffer` frees its oldest records
+  itself, in the commit task, whatever the floors: a ring frees space only at its tail,
+  so a floor never changes which record goes (B1). The commit writes the new tail in the
+  same sync as its data, and reuses the space only after that sync. A trim never frees a
+  record that a read in progress holds (#510). `buffer` keeps its own headroom (at least
+  two records of `body_max`, or twice the last commit), so a full ring does not refuse a
+  live write under steady pressure. `append` gives `Rejected::Full` only when the
+  records queued since the last commit do not fit after the trim: the full disk queue of
+  B5, which is the commit queue. A read reports the trimmed seqs of a path as
+  `Read::gap`, also when the path holds no entry, and the gap's length is the count of
+  samples lost (B2). An open of a full ring frees the oldest record for its restart
+  record, until segments exist (S4). `set_floor` and `usage` wait for their first
+  effect, the B1 warning (#1080). Lost: a `trim` call from the home (it needs the commit
+  rate, a late trim gives a second gap, and the edge cases of the ring move up into
+  `home`). Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6030836762). The
+  headroom that `buffer` keeps is twice the larger of the largest record and the last
+  commit, plus one largest record. The space of a trim is free only after its sync.
+  Until then the ring takes the next commit, the records that come while that commit
+  syncs, and the blocks that one wrap skips, which are less than one largest record.
+  Twice the last commit alone refused a write at each wrap (#1222). A ring of four of
+  its largest record refuses no write when each commit holds one record. A ring of three
+  of them can refuse one. A trim moves the tail to the boundary after a record of any
+  kind: a wrap record and a restart record also end where a tail can go. An open frees
+  to the same headroom as a commit. A checkpoint never passes the newest record of a
+  path unless a later synced record holds that path's tail (seq and stamp), so a restart
+  continues from the disk (A8). That record syncs before the checkpoint, in a sync of
+  its own: a crash can keep the checkpoint and lose a record of the same sync. The cost
+  of a trim grows with the paths that lose their newest record, not with all paths. A
+  carried tail is no sample: a read gives no entry for it, only the gap up to it. The
+  trim does not turn on without the carried tail, and the PR that builds it records its
+  form on disk here. Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -475,9 +508,12 @@ How to read this record:
   only: the first record of a ring is at offset 0. Lost: the tail in `Unfit`, which is
   also the error of `Layout::new`, where a tail has no value. Decided by the architect
   (#1093, https://github.com/synnaxlabs/foundation/issues/1093#issuecomment-6031034712).
-  The restart record needs one free block: an open of a full ring first moves records at
-  the tail to a segment. The walk holds one pool block at a time and reads a longer
-  record in pieces of the pool's largest block, so the pool puts no bound on `body_max`.
+  The restart record needs one free block: an open of a full ring first frees its oldest
+  records (STORE TRIM). The writer keeps in memory the boundary after each synced record
+  past the tail (its offset and chain value, 16 bytes, at most one for each block of the
+  area), so a trim finds its new tail with no read of the ring. The walk holds one pool
+  block at a time and reads a longer record in pieces of the pool's largest block, so
+  the pool puts no bound on `body_max`.
   An open with no such block free fails with `Pool`, and the next open recovers the
   record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
