@@ -2,6 +2,9 @@
 //! can be cut, simulated devices and stores, and the operator's front ends. Each
 //! method with a `todo!` waits on the issue it names.
 
+mod influx;
+
+use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
@@ -10,8 +13,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use connector_influx::sim::Store;
 use env::net::udp;
 use types::time::Span;
+
+use influx::Record;
 
 /// A whole mesh on one deterministic simulation.
 #[derive(Debug)]
@@ -20,6 +26,10 @@ pub(crate) struct Lab {
     /// The link that [`Lab::heal`] puts back.
     link: sim::link::Config,
     members: Vec<Member>,
+    /// The simulated InfluxDB stores, by address.
+    stores: BTreeMap<String, Store>,
+    /// The samples written, by channel.
+    records: BTreeMap<String, Record>,
 }
 
 #[derive(Debug)]
@@ -98,6 +108,8 @@ impl Lab {
             sim: sim::Sim::new(config),
             link: config.link,
             members: Vec::new(),
+            stores: BTreeMap::new(),
+            records: BTreeMap::new(),
         }
     }
 
@@ -290,9 +302,22 @@ impl Lab {
         todo!("waits on #340")
     }
 
-    /// What the Influx store at `address` received for `measurement`.
-    pub(crate) fn stored(&self, _address: &str, _measurement: &str) -> Received {
-        todo!("waits on #341")
+    /// What the Influx store at `address` holds for `measurement`, the measurement of
+    /// the channel of that name, folded by [`Record::stored`].
+    ///
+    /// # Panics
+    ///
+    /// When no store is at `address`, no sample was written to the channel, or
+    /// [`Record::stored`] panics.
+    pub(crate) fn stored(&self, address: &str, measurement: &str) -> Received {
+        let store = self
+            .stores
+            .get(address)
+            .unwrap_or_else(|| panic!("lab failure: no Influx store at {address}"));
+        let record = self.records.get(measurement).unwrap_or_else(|| {
+            panic!("lab failure: no sample was written to {measurement}")
+        });
+        record.stored(store, measurement)
     }
 
     /// Cuts every link between `a` and `b`. Datagrams in flight still arrive.
@@ -430,4 +455,55 @@ fn a_cut_drops_datagrams_both_ways_until_heal() {
     lab.heal(a, b);
     lab.run(Duration::from_secs(1));
     assert_eq!(counts(), [20, 20], "after the heal");
+}
+
+mod stored {
+    use types::time::Stamp;
+
+    use super::*;
+
+    fn lab() -> Lab {
+        let mut lab = Lab::new(1);
+        let mut store = Store::default();
+        store
+            .write(
+                b"foundation_gaps,connector=influx,index=edge.time,path=live \
+                  count=2i 1020\nedge.value value=2 1020\n",
+            )
+            .unwrap();
+        lab.stores.insert("influx".into(), store);
+        let record = Record {
+            index: "edge.time".into(),
+            seqs: 7..10,
+            stamp: Stamp::from_nanos(1_000),
+            interval: Span::from_nanos(10),
+        };
+        lab.records.insert("edge.value".into(), record);
+        lab
+    }
+
+    #[test]
+    fn folds_the_store_at_the_address_with_the_record_of_the_channel() {
+        assert_eq!(
+            lab().stored("influx", "edge.value"),
+            Received {
+                samples: 1,
+                seqs: Some(9..10),
+                contiguous: true,
+                gaps: vec![Gap { after: 0, count: 2 }],
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "lab failure: no Influx store at other")]
+    fn panics_with_no_store_at_the_address() {
+        lab().stored("other", "edge.value");
+    }
+
+    #[test]
+    #[should_panic(expected = "lab failure: no sample was written to edge.other")]
+    fn panics_with_no_sample_written_to_the_channel() {
+        lab().stored("influx", "edge.other");
+    }
 }
