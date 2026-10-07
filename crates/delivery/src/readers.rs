@@ -55,7 +55,8 @@ pub struct Readers {
     /// complete session is open.
     queue: VecDeque<(Frame, Range<u64>)>,
     /// The key set of each run of queued frames of one key set, oldest first. The
-    /// front may be the set of frames already released.
+    /// front may be the set of frames already released. Each frame in `queue` has its
+    /// set here, in the same order.
     sets: VecDeque<Arc<KeySet>>,
     /// The end of the last live frame queued, or the live seq at start.
     queued: u64,
@@ -328,9 +329,8 @@ impl Readers {
         while let Some((frame, seq)) =
             self.queue.pop_front_if(|(_, seq)| seq.end <= durable)
         {
-            while self.sets[0].key() != frame.key_set() {
-                self.sets.pop_front();
-            }
+            let stale = |set: &mut Arc<KeySet>| set.key() != frame.key_set();
+            while self.sets.pop_front_if(stale).is_some() {}
             let set = &self.sets[0];
             let whole = frame.charge();
             let mut last: Option<&mut VecDeque<Frame>> = None;
@@ -2257,21 +2257,25 @@ pub(super) mod tests {
             }
         }
 
-        /// The bytes that `readers` has spent of its only complete session.
-        fn spent(readers: &Readers) -> u64 {
-            readers.flows[0].credit.spent_bytes
-        }
-
-        /// Opens a session that `charge` charges, with a credit of 1 byte, which lets
-        /// one frame through, gives it `frame`, and gives what it spent.
-        fn charged(charge: Charge, frame: &Frame, set: &Arc<KeySet>) -> u64 {
-            let mut readers = Readers::new(0);
-            let key = readers
-                .open(Reader::Unnamed, Start::At(live(0)), 1, charge)
-                .key;
-            readers.queue(frame, set, 0..1);
-            assert_eq!(readers.release(1), [key]);
-            spent(&readers)
+        /// Asserts that `frames` cost a session that `charge` charges `spent` bytes: a
+        /// frame after them passes a credit of `spent + 1` and not one of `spent`.
+        fn spends(charge: &Charge, frames: &[(&Frame, &Arc<KeySet>)], spent: u64) {
+            for (limit, passes) in [(spent, false), (spent + 1, true)] {
+                let mut readers = Readers::new(0);
+                let key = readers
+                    .open(Reader::Unnamed, Start::At(live(0)), limit, charge.clone())
+                    .key;
+                let after = frames[0];
+                let mut seq = 0..0;
+                for (frame, set) in frames.iter().chain([&after]) {
+                    seq = seq.end..seq.end + 1;
+                    readers.queue(frame, set, seq.clone());
+                }
+                assert_eq!(readers.release(seq.end), [key]);
+                let taken = iter::from_fn(|| readers.take(key.into())).count();
+                assert_eq!(taken, frames.len() + usize::from(passes), "credit {limit}");
+                assert_eq!(readers.behind(key), !passes, "credit {limit}");
+            }
         }
 
         #[test]
@@ -2295,7 +2299,7 @@ pub(super) mod tests {
             let sets = Sets::new();
             let frame = sets.full();
             assert!(frame.charge() > CHARGE);
-            assert_eq!(charged(Charge::Whole, &frame, &sets.wide), frame.charge());
+            spends(&Charge::Whole, &[(&frame, &sets.wide)], frame.charge());
         }
 
         #[test]
@@ -2303,26 +2307,20 @@ pub(super) mod tests {
             let sets = Sets::new();
             let frame = sets.full();
             let places = Charge::Places([sets.slot(3), sets.slot(3)].into());
-            assert_eq!(charged(places, &frame, &sets.wide), CHARGE);
+            spends(&places, &[(&frame, &sets.wide)], CHARGE);
         }
 
         #[test]
         fn finds_the_places_again_in_a_frame_of_another_key_set() {
             let sets = Sets::new();
-            let mut readers = Readers::new(0);
             let places = Charge::Places([sets.slot(9)].into());
-            let key = readers
-                .open(Reader::Unnamed, Start::At(live(0)), 1 << 20, places)
-                .key;
             let first = sets.frame(&sets.wide, &[(0, 400), (9, 8)]);
             // In `narrow`, the slot of entry 9 of `wide` is entry 2.
             let second = sets.frame(&sets.narrow, &[(0, 400), (1, 8), (2, 200)]);
-            readers.queue(&first, &sets.wide, 0..1);
-            readers.queue(&second, &sets.narrow, 1..2);
-            assert_eq!(readers.release(2), [key]);
             let built = built(&sets.pool, &[200]).charge();
-            assert_eq!(spent(&readers), CHARGE + built);
             assert!(built > CHARGE);
+            let frames = [(&first, &sets.wide), (&second, &sets.narrow)];
+            spends(&places, &frames, CHARGE + built);
         }
 
         #[test]
@@ -2390,13 +2388,14 @@ pub(super) mod tests {
                     }
                 }
                 let built = built(&sets.pool, &read);
+                // The parts too, as two errors in them could cancel in the charge.
                 let mut places = complete::Places::new(slots.clone().into());
                 prop_assert_eq!(
                     places.size(&frame, &sets.wide),
                     (read.len(), built.body().len())
                 );
                 let charge = Charge::Places(slots.into());
-                prop_assert_eq!(charged(charge, &frame, &sets.wide), built.charge());
+                spends(&charge, &[(&frame, &sets.wide)], built.charge());
             }
         }
     }

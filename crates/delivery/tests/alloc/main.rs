@@ -43,6 +43,7 @@ fn main() {
     latest(&frame);
     complete(&frame, &set);
     places(&frame, &set);
+    alternating();
     missed(&frame, &set);
 }
 
@@ -246,4 +247,65 @@ fn round(
         .map(|&key| usize::from(readers.take(key.into()).is_some()))
         .sum();
     taken + readers.put(frame()).len() + readers.put(frame()).len()
+}
+
+/// Two writers of two key sets on one index: each key set's first frame is past, so
+/// a release allocates nothing more.
+fn alternating() {
+    const F64: types::sample::Type =
+        types::sample::Type::Scalar(types::sample::Scalar::F64);
+    let mut interner = Interner::new();
+    let index = channel::Key::from_u128(1);
+    let a = interner.intern(&[Group {
+        index,
+        data: &[(channel::Key::from_u128(2), F64)],
+    }]);
+    let b = interner.intern(&[Group {
+        index,
+        data: &[(channel::Key::from_u128(3), F64)],
+    }]);
+    let config = block::Config { budget: 1 << 16 };
+    let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
+    let frame = |set: &KeySet| {
+        Draft::new(&pool, set, Form::Raw, &[(0, 8), (1, 8)])
+            .expect("the pool holds the frame")
+            .freeze(Path::Live)
+    };
+    let mut readers = Readers::new(0);
+    let start = Start::At(Position {
+        live: 0,
+        backfill: None,
+    });
+    let slot = a.entries()[0].slot;
+    let key = readers
+        .open(
+            Reader::Unnamed,
+            start,
+            u64::MAX,
+            complete::Charge::Places([slot].into()),
+        )
+        .key;
+    let mut seq = 0;
+    let step = |readers: &mut Readers, seq: &mut u64| {
+        let (fa, fb) = (frame(&a), frame(&b));
+        readers.queue(&fa, &a, *seq..*seq + 1);
+        readers.queue(&fb, &b, *seq + 1..*seq + 2);
+        *seq += 2;
+        let woken = readers.release(*seq).len();
+        let taken = std::iter::from_fn(|| readers.take(key.into())).count();
+        woken + taken
+    };
+    for _ in 0..2 {
+        step(&mut readers, &mut seq);
+    }
+    let (delivered, allocations) =
+        ALLOCATOR.count(|| (0..4).map(|_| step(&mut readers, &mut seq)).sum::<usize>());
+    assert_eq!(
+        delivered, 12,
+        "each round wakes the session and takes two frames"
+    );
+    assert_eq!(
+        allocations, 0,
+        "a release of frames of two key sets, each seen before, allocated"
+    );
 }

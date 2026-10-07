@@ -5,6 +5,7 @@ use std::fmt;
 use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Frame, Mask, View};
+use types::hash;
 
 use crate::Position;
 
@@ -54,14 +55,14 @@ pub(super) enum Cost {
 #[derive(Debug)]
 pub(super) struct Places {
     slots: Box<[Slot]>,
-    /// The places in the key set of the last frame charged.
-    held: Option<Held>,
+    /// The places in each key set charged. The node builds key sets only from the
+    /// spec, which bounds them.
+    held: hash::Map<key_set::Key, Held>,
 }
 
 /// The places of a session in one key set.
 #[derive(Debug)]
 struct Held {
-    set: key_set::Key,
     mask: Mask,
     /// Each entry that a place names, with the first place that names it, by entry.
     entries: Vec<(u32, u32)>,
@@ -77,7 +78,7 @@ impl Cost {
 
     /// What `frame`, of key set `set` and [`Frame::charge`] `whole`, costs the
     /// session. Time is O(m log(n/m)) for m places in `set` and n series in `frame`.
-    /// Allocates only for the first frame of a key set.
+    /// Allocates only for the first frame of each key set.
     pub(super) fn charge(&mut self, frame: &Frame, set: &KeySet, whole: u64) -> u64 {
         match self {
             Self::Whole => whole,
@@ -91,15 +92,18 @@ impl Cost {
 
 impl Places {
     pub(super) fn new(slots: Box<[Slot]>) -> Self {
-        Self { slots, held: None }
+        Self {
+            slots,
+            held: hash::Map::default(),
+        }
     }
 
     /// The series and the body length of the frame of `frame`'s series at the places.
     pub(super) fn size(&mut self, frame: &Frame, set: &KeySet) -> (usize, usize) {
-        let held = match &mut self.held {
-            Some(held) if held.set == set.key() => held,
-            held => held.insert(Held::new(&self.slots, set)),
-        };
+        let held = self
+            .held
+            .entry(set.key())
+            .or_insert_with(|| Held::new(&self.slots, set));
         // The body holds each series but the last in place order padded, then the last.
         let (mut series, mut others) = (0, 0);
         let mut last: Option<(u32, usize)> = None;
@@ -108,6 +112,7 @@ impl Places {
             .bounds()
             .for_each(|(entry, bounds)| {
                 let entry = to_u32(entry);
+                // The mask adds the index of each group, which no place may list.
                 while entries.next_if(|&&(held, _)| held < entry).is_some() {}
                 let Some(&(_, place)) = entries.next_if(|&&(held, _)| held == entry)
                 else {
@@ -144,7 +149,6 @@ impl Held {
         entries.sort_unstable();
         entries.dedup_by_key(|&mut (entry, _)| entry);
         Self {
-            set: set.key(),
             mask: Mask::new(set, slots.iter().copied()),
             entries,
         }

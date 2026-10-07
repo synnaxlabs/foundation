@@ -3046,6 +3046,35 @@ mod tests {
         }
 
         #[test]
+        fn charges_a_complete_reader_of_places_the_frame_of_its_places() {
+            run(38, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let stamps =
+                    |n: i64| -> Vec<_> { (n * 100 + 1..=(n + 1) * 100).collect() };
+                let probe = complete(&mut shard, Slot::new(0));
+                write(&test, &mut shard, a, &stamps(0));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [probe]);
+                let frame = shard.take(probe).expect("a frame");
+                let (_, index) = frame.ends().next().expect("the index is present");
+                let index = types::frame::charge(1, index);
+                assert!(frame.charge() > index + 1);
+                let places = Charge::Places([Slot::new(0)].into());
+                let session = shard.open_complete(Slot::new(0), index + 1, places);
+                let reader = reader::Key::from(session);
+                for n in 1..4 {
+                    write(&test, &mut shard, a, &stamps(n));
+                }
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [probe, reader]);
+                assert_eq!(iter::from_fn(|| shard.take(reader)).count(), 2);
+                assert!(shard.behind(session));
+            });
+        }
+
+        #[test]
         fn names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting() {
             run(110, |test| async move {
                 let set = two_indexes();
