@@ -953,6 +953,25 @@ How to read this record:
   header has one length (a request then sends 32 zero bytes); `encode` into a
   `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
   for the kind of time (two checks where one kind byte does the work).
+- **HUB WIRE (#561)** A remote reader session is one hub stream of class `Complete` or
+  `Latest`. After the header, the reader's node sends `wire::hub::Open`: the mode and
+  the channels, all on one index. A latest session gets the newest live frame before
+  its commit. A complete session gets each live frame after its commit, and `Open`
+  carries its first grant in bytes (CREDIT RULES). The home answers `Opened`; the
+  reader sends `Credit`, its total grant since the open; the home sends each frame as
+  a `Head` (path, seq, count, and the end of each series in the body), then the body.
+  The body holds only the series of the reader's view, the index series too, written
+  from the frame's block as slices, and both ends charge `View::charge` (M2). A body
+  over the peer's `message_bytes_max` goes as more than one message, back to back with
+  no prefix, and the reader fills one block of the length that `Head` gives. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know) and 17 `NOT_HOME` (the node is
+  not the home of the index). Lost: a `message_bytes_max` of at least the largest pool
+  block (a client or a foreign peer can set 1472, and it ties `transport` to the pool);
+  the whole `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an
+  unnamed open needs no mesh time (READER RULES), and a later named open can add one;
+  grants for many sessions in one message, which wait until a link carries a second
+  session. The coordinator approved the messages (2026-10-05); the architect decided
+  the rest (2026-10-06, #561). The byte form is recorded when it merges.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
