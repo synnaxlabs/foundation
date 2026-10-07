@@ -2241,6 +2241,35 @@ mod tests {
         }
 
         #[test]
+        fn a_step_that_replaces_from_between_two_joins_keeps_only_the_first() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(6)])).await;
+                let at = |index| Position {
+                    term: later(),
+                    index,
+                };
+                let replace = Body::Append {
+                    prev: Position {
+                        term: common::TERM,
+                        index: 1,
+                    },
+                    entries: vec![Entry {
+                        at: at(2),
+                        data: changes(&[home(1)]).remove(0),
+                    }],
+                    commit: 0,
+                };
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = |id| message(id, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply(4)), Ok(()));
+                let spoofed = Error::Spoofed { from: key(6) };
+                assert_eq!(mesh.receive(public(6), reply(6)), Err(spoofed));
+            });
+        }
+
+        #[test]
         fn a_join_that_this_leader_proposes_gives_a_key_before_the_write() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
