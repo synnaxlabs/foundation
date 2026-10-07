@@ -10,6 +10,7 @@ mod handoff;
 )]
 mod status;
 mod stop;
+mod task;
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests;
@@ -78,12 +79,8 @@ pub struct Node {
     stop: Stop,
     shards: Vec<Shard>,
     failed: Option<Error>,
-    /// The node's interner, once every shard has opened its buffer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "hub sessions take the interner (#340)")
-    )]
-    interner: Take<Interner>,
+    /// The tasks for shard 0's hub.
+    queue: task::Queue<task::Task>,
 }
 
 /// A started shard, with its error once it fails.
@@ -132,7 +129,7 @@ impl Node {
                 let Ok(count) = u32::try_from(cores) else {
                     panic!("the host has {cores} cores, more than a node numbers");
                 };
-                Self::spawn(config, parts.into_iter().zip(0..count))
+                Self::launch(config, parts.into_iter().zip(0..count))
             }
             Err(small) => {
                 let count =
@@ -146,14 +143,14 @@ impl Node {
                     stop: Stop::default(),
                     shards: Vec::new(),
                     failed: Some(error),
-                    interner: handoff::pair().1,
+                    queue: task::pair().0,
                 }
             }
         }
     }
 
     /// Starts the shards of `config`, each with its part and its number in `parts`.
-    fn spawn<M: block::Memory + 'static>(
+    fn launch<M: block::Memory + 'static>(
         config: Config<M>,
         parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
@@ -168,16 +165,21 @@ impl Node {
             disk: _,
         } = config;
         let stop = Stop::default();
-        let (give, mut interner) = handoff::pair();
+        let cores = shards.cores().get();
+        let handoff::Chain { first, last, links } = handoff::chain(cores);
+        let (queue, inbox) = task::pair();
+        let serve = Serve {
+            interner: last,
+            inbox,
+        };
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
-        let roles = Role::all(mesh, wall, give, shards.cores().get());
+        let roles = Role::all(mesh, wall, first, serve, cores);
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
-        for (core, (((config, layout), number), role)) in parts.zip(roles).enumerate() {
-            // A shard that does not start drops `give`, so `interner` gives `None`.
-            let (give, take) = handoff::pair();
-            let take = std::mem::replace(&mut interner, take);
+        for (core, ((((config, layout), number), role), (take, give))) in
+            parts.zip(roles).zip(links).enumerate()
+        {
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
                 Err(e) => {
@@ -218,8 +220,24 @@ impl Node {
             stop,
             shards: started,
             failed: error,
-            interner,
+            queue,
         }
+    }
+
+    /// Calls `task` with the node's hub on shard 0, once each shard has opened its
+    /// buffer and after each task given before it, then runs its future. So the code
+    /// in its closure body runs in the order of the calls; the futures that tasks give
+    /// run in no set order. Does not wait. A node that stops or fails before shard 0
+    /// calls a task drops it uncalled. A task runs on shard 0's thread, so it may hold
+    /// values that are not `Send`, such as sessions; it sends its result back through a
+    /// value it owns. Its future runs until it completes or shard 0 ends, which drops
+    /// it. A panic in a task ends shard 0 and fails the node: [`Node::join`] gives
+    /// [`Error::Panicked`].
+    pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -289,12 +307,13 @@ struct Open {
     stop: Stop,
 }
 
-/// Shard 0's own steps: it runs the mesh clock, and gives the first interner once it
-/// has claimed the data directory for the node's shards.
+/// Shard 0's own steps: it runs the mesh clock, gives the first interner once it has
+/// claimed the data directory for the node's shards, and serves the node's tasks.
 struct First {
     mesh: clock::Clock,
     wall: env::wall::Wall,
     give: Give<Interner>,
+    serve: Serve,
     /// One end for each other shard, which ends once that shard has closed its ring.
     closed: Vec<Take<()>>,
 }
@@ -314,6 +333,7 @@ impl Role {
         mesh: clock::Clock,
         wall: env::wall::Wall,
         give: Give<Interner>,
+        serve: Serve,
         cores: usize,
     ) -> impl Iterator<Item = Self> {
         let (ends, closed): (Vec<_>, Vec<_>) =
@@ -322,6 +342,7 @@ impl Role {
             mesh,
             wall,
             give,
+            serve,
             closed,
         };
         iter::once(Self::First(Box::new(first))).chain(ends.into_iter().map(Self::Next))
@@ -374,45 +395,52 @@ impl Open {
                     mesh,
                     wall,
                     give,
+                    serve,
                     closed,
                 } = *first;
                 tasks.spawn(async { mesh.run(wall).await });
                 let lock = self.claim(&files, closed.len() + 1, give).await;
-                self.keep(files, pool, tasks, guard).await;
+                let shard = tasks.clone();
+                let hold = async move |home, guard| serve.run(home, shard, guard).await;
+                self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
                     shard.await;
                 }
                 drop(lock);
             }
             Role::Next(ended) => {
-                self.keep(files, pool, tasks, guard).await;
+                let hold = async |home, guard: Guard| {
+                    guard.await;
+                    drop(home);
+                };
+                self.keep(files, pool, tasks, guard, hold).await;
                 drop(ended);
             }
         }
     }
 
-    /// Opens the shard's buffer and keeps its home until `guard` completes, then
-    /// returns once its ring has closed. A failed open drops `guard`, which stops
-    /// the node.
+    /// Opens the shard's buffer and gives its home and `guard` to `hold`, which drops
+    /// the home once `guard` completes, then returns once its ring has closed. A
+    /// failed open drops `guard`, which stops the node.
     async fn keep(
         self,
         files: env::files::Files,
         pool: block::Pool,
         tasks: env::tasks::Tasks,
         guard: Guard,
+        hold: impl AsyncFnOnce(home::Shard, Guard),
     ) {
-        match self.run(files, Rc::new(pool), tasks).await {
-            Some(home) => {
-                guard.await;
-                let commit = home.committed();
-                drop(home);
-                // Resolves once the buffer's task has written what was queued and
-                // ended, which closes the ring. Its error reaches no caller (#1329).
-                drop(commit.await);
-            }
+        let Some(home) = self.run(files, Rc::new(pool), tasks.clone()).await else {
             // Stops the node, so each other shard ends.
-            None => drop(guard),
-        }
+            drop(guard);
+            return;
+        };
+        // Resolves once the home has dropped and the buffer's task has written what
+        // was queued and ended, which closes the ring.
+        let commit = home.committed();
+        hold(home, guard).await;
+        // Its error reaches no caller (#1329).
+        drop(commit.await);
     }
 
     /// Claims the data directory for `cores` shards, gives the node's first interner,
@@ -486,6 +514,29 @@ impl Open {
                 None
             }
         }
+    }
+}
+
+/// What shard 0 serves the node's tasks with: the interner, once the last shard has
+/// opened its buffer, and the tasks given to the node.
+struct Serve {
+    interner: Take<Interner>,
+    inbox: task::Inbox<task::Task>,
+}
+
+impl Serve {
+    /// Runs each task given with a hub over `home` until `guard` completes, then drops
+    /// the tasks, the hub, and `home`. Runs no task when a shard did not open.
+    async fn run(self, home: home::Shard, tasks: env::tasks::Tasks, guard: Guard) {
+        let Some(interner) = self.interner.await else {
+            return;
+        };
+        let hub = hub::Hub::new(hub::Config {
+            home,
+            interner,
+            tasks: tasks.clone(),
+        });
+        self.inbox.serve(hub, tasks, guard).await;
     }
 }
 
