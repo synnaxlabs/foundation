@@ -1430,9 +1430,11 @@ mod tests {
         Change::Join(Box::new(Join {
             ticket: public(7),
             at: Stamp::from_nanos(0),
-            key: key(id),
-            card: card.card().clone(),
-            signature: *card.signature(),
+            card: card::Unchecked {
+                key: key(id),
+                card: card.card().clone(),
+                signature: *card.signature(),
+            },
             admission: common::ticket(7).admission(&card),
             status: BTreeMap::new(),
         }))
@@ -1460,7 +1462,7 @@ mod tests {
             let Change::Join(mut forged) = join(3) else {
                 unreachable!()
             };
-            forged.signature[0] ^= 1;
+            forged.card.signature[0] ^= 1;
             mesh.propose(&Change::Join(forged)).unwrap();
             mesh.propose(&join(4)).unwrap();
             mesh.propose(&home(1)).unwrap();

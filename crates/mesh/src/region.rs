@@ -12,7 +12,7 @@ use crate::bytes::{
     put_channel, put_key, put_name, put_optional_span, put_status, take, take_channel,
     take_key, take_name, take_optional_span, take_present, take_status,
 };
-use crate::card::{self, Card};
+use crate::card;
 use crate::member::Member;
 use crate::ticket::{self, Options, Record};
 
@@ -89,8 +89,7 @@ impl State {
 
     // Admits the node of `join`. The ticket counts a use only when all checks pass.
     fn join(&mut self, join: Join) -> Result<(), Refused> {
-        let card = card::Signed::check(join.key, join.card, join.signature)
-            .map_err(Refused::Forged)?;
+        let card = join.card.check().map_err(Refused::Forged)?;
         self.fits(&card, &join.status)?;
         let record =
             self.tickets
@@ -107,7 +106,7 @@ impl State {
             ephemeral: record.options.ephemeral,
             status: join.status,
         };
-        self.members.insert(join.key, member);
+        self.members.insert(member.card.key(), member);
         Ok(())
     }
 
@@ -195,12 +194,8 @@ pub(crate) struct Join {
     pub(crate) ticket: PublicKey,
     /// The mesh time of the join: the later edge of the proposing voter's mesh time.
     pub(crate) at: Stamp,
-    /// The node.
-    pub(crate) key: node::Key,
-    /// The node's first card.
-    pub(crate) card: Card,
-    /// The node's signature over `card`.
-    pub(crate) signature: [u8; 64],
+    /// The node's first card, signed by the node.
+    pub(crate) card: card::Unchecked,
     /// The ticket's signature over the card.
     pub(crate) admission: [u8; 64],
     /// The node's status channel keys, by name under the node's name.
@@ -233,9 +228,7 @@ impl Change {
                 out.push(JOIN);
                 out.extend(join.ticket.to_bytes());
                 out.extend(join.at.nanos().to_le_bytes());
-                put_key(join.key, out);
                 join.card.encode(out);
-                out.extend(join.signature);
                 out.extend(join.admission);
                 put_status(&join.status, out);
             }
@@ -286,9 +279,7 @@ fn take_join(bytes: &mut &[u8]) -> Option<Change> {
     Some(Change::Join(Box::new(Join {
         ticket: PublicKey::new(take(bytes)?).ok()?,
         at: take_stamp(bytes)?,
-        key: take_key(bytes)?,
-        card: Card::decode(bytes)?,
-        signature: take(bytes)?,
+        card: card::Unchecked::decode(bytes)?,
         admission: take(bytes)?,
         status: take_status(bytes)?,
     })))
@@ -466,9 +457,11 @@ mod tests {
         Join {
             ticket: public(ticket_id),
             at: BEFORE_EXPIRY,
-            key: node(id),
-            card: card.card().clone(),
-            signature: *card.signature(),
+            card: card::Unchecked {
+                key: node(id),
+                card: card.card().clone(),
+                signature: *card.signature(),
+            },
             admission: ticket(ticket_id).admission(&card),
             status: BTreeMap::from([(name("disk"), index(9))]),
         }
@@ -605,7 +598,7 @@ mod tests {
         let mut state = state();
         let before = state.clone();
         let mut join = join(7, 3, "plant.edge.a");
-        join.signature[0] ^= 1;
+        join.card.signature[0] ^= 1;
         assert_eq!(
             state.apply(Change::Join(Box::new(join))),
             Err(Refused::Forged(card::Forged { node: node(3) }))
@@ -748,7 +741,7 @@ mod tests {
     fn a_join_refusal_names_the_first_check_that_fails() {
         let mut state = state();
         let mut forged = join(7, 1, "plant.@a");
-        forged.signature[0] ^= 1;
+        forged.card.signature[0] ^= 1;
         let mut outside = join(7, 1, "plants.edge.a");
         outside.status = BTreeMap::from([(long_status(256 - 14), index(9))]);
         let mut long = join(7, 1, "plant.edge.a");
@@ -864,8 +857,8 @@ mod tests {
         expected.extend(public(7).to_bytes());
         expected.extend(999_i64.to_le_bytes());
         expected.extend(3_u128.to_le_bytes());
-        join.card.encode(&mut expected);
-        expected.extend(join.signature);
+        join.card.card.encode(&mut expected);
+        expected.extend(join.card.signature);
         expected.extend(join.admission);
         expected.extend(1_u64.to_le_bytes());
         expected.push(4);
@@ -941,7 +934,7 @@ mod tests {
     #[test]
     fn decode_keeps_a_join_whose_signatures_do_not_hold() {
         let mut join = join(7, 3, "plant.edge.a");
-        join.signature[0] ^= 1;
+        join.card.signature[0] ^= 1;
         join.admission[0] ^= 1;
         let change = Change::Join(Box::new(join));
         assert_eq!(Change::decode(&encoded(&change)), Ok(change));
@@ -1057,8 +1050,8 @@ mod tests {
                 match (applied, step) {
                     (Err(_), _) => prop_assert_eq!(&state, &before),
                     (Ok(_), Change::Join(join)) => {
-                        prop_assert!(before.member(join.key).is_none());
-                        prop_assert!(state.member(join.key).is_some());
+                        prop_assert!(before.member(join.card.key).is_none());
+                        prop_assert!(state.member(join.card.key).is_some());
                     }
                     (Ok(_), _) => {}
                 }

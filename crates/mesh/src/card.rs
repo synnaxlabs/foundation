@@ -69,11 +69,7 @@ impl Card {
 /// key in the card signed it. That the node owns the public key comes from its
 /// admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Signed {
-    key: node::Key,
-    card: Card,
-    signature: [u8; 64],
-}
+pub struct Signed(Unchecked);
 
 impl Signed {
     /// Signs `card` of node `key`.
@@ -89,11 +85,11 @@ impl Signed {
             "the card's public key is not the public half of the private key"
         );
         let signature = ed25519::sign(&pair, &statement(TAG, key, &card));
-        Self {
+        Self(Unchecked {
             key,
             card,
             signature,
-        }
+        })
     }
 
     /// Checks `signature` over `card` of node `key`.
@@ -106,22 +102,17 @@ impl Signed {
         card: Card,
         signature: [u8; 64],
     ) -> Result<Self, Forged> {
-        if !ed25519::holds(card.public_key, &statement(TAG, key, &card), &signature) {
-            return Err(Forged { node: key });
-        }
-        Ok(Self {
+        Unchecked {
             key,
             card,
             signature,
-        })
+        }
+        .check()
     }
 
-    /// Adds the one byte form of the signed card to `out`: the node key as 16
-    /// little-endian bytes, the card, then the signature.
+    /// Adds the byte form of [`Unchecked::encode`] to `out`.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
-        put_key(self.key, out);
-        self.card.encode(out);
-        out.extend(self.signature);
+        self.0.encode(out);
     }
 
     /// Takes one signed card from the start of `bytes`. `None` when the bytes do not
@@ -132,27 +123,71 @@ impl Signed {
         expect(dead_code, reason = "the join answer of #336 is the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
-        let key = take_key(bytes)?;
-        let card = Card::decode(bytes)?;
-        Self::check(key, card, take(bytes)?).ok()
+        Unchecked::decode(bytes)?.check().ok()
     }
 
     /// The node that the card is signed for. The signature covers it.
     #[must_use]
     pub const fn key(&self) -> node::Key {
-        self.key
+        self.0.key
     }
 
     /// The card.
     #[must_use]
     pub const fn card(&self) -> &Card {
-        &self.card
+        &self.0.card
     }
 
     /// The signature over the card.
     #[must_use]
     pub const fn signature(&self) -> &[u8; 64] {
-        &self.signature
+        &self.0.signature
+    }
+}
+
+/// A signed card whose signature is not yet checked, such as one in a change record
+/// that each node checks at apply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unchecked {
+    /// The node that the card is for.
+    pub(crate) key: node::Key,
+    /// The card.
+    pub(crate) card: Card,
+    /// The signature over `key` and `card`.
+    pub(crate) signature: [u8; 64],
+}
+
+impl Unchecked {
+    /// Adds the one byte form of a signed card to `out`: the node key as 16
+    /// little-endian bytes, the card, then the signature.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_key(self.key, out);
+        self.card.encode(out);
+        out.extend(self.signature);
+    }
+
+    /// Takes what [`Unchecked::encode`] gives from the start of `bytes`, and checks no
+    /// signature. `None` when the bytes do not start with that form; `bytes` is then at
+    /// no known place.
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        Some(Self {
+            key: take_key(bytes)?,
+            card: Card::decode(bytes)?,
+            signature: take(bytes)?,
+        })
+    }
+
+    /// The signed card, when the signature holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Forged`] when it does not hold for `card.public_key`.
+    pub(crate) fn check(self) -> Result<Signed, Forged> {
+        let statement = statement(TAG, self.key, &self.card);
+        if !ed25519::holds(self.card.public_key, &statement, &self.signature) {
+            return Err(Forged { node: self.key });
+        }
+        Ok(Signed(self))
     }
 }
 
