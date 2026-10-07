@@ -97,10 +97,10 @@ How to read this record:
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
   tie (`a.*` and `*.a`); a tie between the most specific setting policies on one name
-  is the S12 plan error, and for node settings a tie between the most specific to set
-  one budget (X25). A tie below them decides nothing, because only the most specific
-  value is used. Access has no ties (X25). The tie rule is the reading of S12 by
-  `laptop.architect-2` (2026-10-07T15:16:46Z:
+  is the S12 plan error; for node settings, it is a tie between the most specific
+  policies that set one budget (X25). A tie below them decides nothing, because only the
+  most specific value is used. Access has no ties (X25). The tie rule is the reading of
+  S12 by `laptop.architect-2` (2026-10-07T15:16:46Z:
   https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6040858277), and
   `laptop.director` agrees that it changes no rule (2026-10-07T15:27:12Z:
   https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6041077733).
@@ -269,16 +269,15 @@ How to read this record:
   each sample that `buffer` trims before the reader gets it. Most specific wins as a
   whole policy (X25), a tie between the most specific policies is a plan error (S12,
   SPECIFICITY), and a data channel takes its index's policy (X26). Lost: a finite
-  default `keep` (5.3), a value for "no cap",
-  a size cap per index, and a read that reports each sample past `keep` as a gap while
-  its bytes are on disk. That read does not depend on disk pressure, but at `0s` a
-  reader a few milliseconds behind loses each sample it reads from disk, and each read
-  needs `keep` and a clock. Stale commands are the job of `max_age` (A20), not of
-  retention. In `config`, `select` and `keep` are both required. `keep` reads with
-  `document::read::span` (`document.bad-span`), where a negative span reads, and
-  `config` refuses it with `config.negative-span` at the `keep` value. The code names
-  the defect, so a later span bound (a reader `hold`, S10) uses it too. Ruling and
-  answers:
+  default `keep` (5.3), a value for "no cap", a size cap per index, and a read that
+  reports each sample past `keep` as a gap while its bytes are on disk. That read does
+  not depend on disk pressure, but at `0s` a reader a few milliseconds behind loses each
+  sample it reads from disk, and each read needs `keep` and a clock. Stale commands are
+  the job of `max_age` (A20), not of retention. In `config`, `select` and `keep` are
+  both required. `keep` reads with `document::read::span` (`document.bad-span`), where a
+  negative span reads, and `config` refuses it with `config.negative-span` at the `keep`
+  value. The code names the defect, so a later span bound (a reader `hold`, S10) uses it
+  too. Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. The cap
@@ -2769,12 +2768,12 @@ How to read this record:
 - **S12 + C8 amendment** Settings are policies that select names. One `Selector`
   (patterns with `*`, `**`, and `!` exclusions) serves subscriptions, readers,
   connectors, policies, and access. Most specific pattern wins; equal specificity is a
-  plan error, which is a tie between the most specific policies (SPECIFICITY);
-  `explain` shows each effective value and its source. A rename can move a channel
-  under other policies, and `plan` shows it. Current policy kinds: retention,
-  placement, transmission, compression, reduction, time, access, secret store, and node
-  settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
-  SPECIFICITY (#3).
+  plan error; `explain` shows each effective value and its source. Equal specificity
+  means a tie between the most specific policies, per budget for node settings
+  (SPECIFICITY). A rename can move a channel under other policies, and `plan` shows it.
+  Current policy kinds: retention, placement, transmission, compression, reduction,
+  time, access, secret store, and node settings (NODE SETTINGS). Targets and combination
+  rules: X25, X26. Specificity: SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
   that selects node names: `node_settings "<name>" { select, disk, pool }`, such as
   `select = "site_a.*"` and `disk = "200GiB"`. Each budget is optional and above zero.
@@ -3984,15 +3983,15 @@ conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
 placement, transmission, compression, reduction, time, secret store, node settings).
 For node settings, each budget resolves on its own: a policy that leaves a budget unset
-gives that budget to a less specific policy. Two policies that tie as the most
-specific to set one budget for one node are a plan error, and a tie below them decides
-nothing (SPECIFICITY); two that set different budgets do not conflict. Per-budget
-resolution holds only because `disk` and `pool` are
-independent. It does not extend to kinds whose fields go together (such as placement),
-where values from different policies could make a combination nobody wrote. Access is
-evaluated only in `access`, as the union of matching allows; the authority cap is the
-highest authority among matching allows that grant `write`. Both use the one selector
-matcher in `types`. Basis: C8, SRP PASS (`access` split).
+gives that budget to a less specific policy. A tie between the most specific policies
+that set one budget for one node is a plan error, and a tie below them decides nothing
+(SPECIFICITY); two policies that set different budgets do not conflict. Per-budget
+resolution holds only because `disk` and `pool` are independent. It does not extend to
+kinds whose fields go together (such as placement), where values from different policies
+could make a combination nobody wrote. Access is evaluated only in `access`, as the
+union of matching allows; the authority cap is the highest authority among matching
+allows that grant `write`. Both use the one selector matcher in `types`. Basis: C8, SRP
+PASS (`access` split).
 
 **X26. Policy targets and reach.**
 Conflict: S12 says "policies apply to whole indexes; data channels follow". Reduction
