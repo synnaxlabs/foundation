@@ -1157,9 +1157,10 @@ mod tests {
             .collect()
     }
 
-    /// A frame that no block of the shard holds: indexes 0 and 1 with stamps from
-    /// `first`, and the series of `more`. The shard's largest block is 1835008 bytes.
-    /// The writer's pool has larger blocks, and scattered values do not compress.
+    /// A frame that no block of the shard holds: entry 0 with stamps from `first`,
+    /// entry 1 with as many scattered values, and the series of `more`. The shard's
+    /// largest block is 1835008 bytes. The writer's pool has larger blocks, and
+    /// scattered values do not compress.
     fn create_large(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
         let len = 240_000;
         let stamps: Vec<i64> = (first..).take(len).collect();
@@ -2225,6 +2226,33 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, second), Ok(&[applied(0, 1, 1)][..]));
             let failed = failed_sync(&shard).await;
             write(&test, &mut shard, a, &Error::Disk(failed));
+        });
+    }
+
+    #[test]
+    fn fails_a_frame_whose_handoff_waits_after_a_failed_sync() {
+        run(114, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            test.node.fail_file(FilePath::new(RING), Operation::Sync);
+            let write = frame(&test.pool, &set, &[(0, &[500_000]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 1)][..]));
+            let disk = Error::Disk(failed_sync(&shard).await);
+            let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
+            let writers = create_pool(4 * POOL);
+            let small = |stamp: i64| frame(&writers, &set, &[(0, &[stamp]), (1, &[1])]);
+            // The append of the handoff fails, then the pool has no block for it.
+            let mut blocks = Vec::new();
+            for state in ["append", "no block"] {
+                let live = shard.write(b, LIVE, small(600_000));
+                assert_eq!(live, Err(disk.clone()), "{state}");
+                let backfill = shard.write(b, BACKFILL, small(100));
+                assert_eq!(backfill, Err(disk.clone()), "{state}");
+                blocks.extend(test.fill());
+            }
+            let large = create_large(&set, 100, &[]);
+            assert_eq!(shard.write(b, BACKFILL, large), Err(disk));
         });
     }
 
