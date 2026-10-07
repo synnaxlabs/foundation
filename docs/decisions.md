@@ -2437,14 +2437,21 @@ How to read this record:
   #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
   to the types of other crates. `Config` and `serve` add types that the caller builds:
   `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
-  `env::tasks::Tasks`, `clock::Reader`, `block::Pool`, `transport::Transport`,
+  `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
-  So a crate that opens a region has `env`, `clock`, `block`, and `transport` in its
-  line of the crate map. `open` panics when `Config.transport` proves a key that is not
-  the public half of `Config.private_key`. `node` builds both from the one key that it
-  loads, so a mismatch is a defect in `node`, not bad outside input. `Error::WrongKey`
-  stays for a key that is not the key of the member record (ruled by the architect,
-  2026-10-07T19:55:13Z:
+  So a crate that opens a region has `env`, `block`, and `transport` in its line of the
+  crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
+  `Status`: no public call reads the one or gives the two. The join answer of #336
+  decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
+  Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, in
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
+  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
+  key that is not the public half of `Config.private_key`. `node` builds both from the
+  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
+  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
+  the architect, 2026-10-07T19:55:13Z:
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
   Supersedes the sentence that `open` does not check the key of the transport:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
@@ -2597,8 +2604,16 @@ How to read this record:
   checks the expiry against the stamp, not against the time of the commit, so a join
   that commits after the expiry still admits its node, and every node checks the same
   stamp at every replay. A voter with no mesh time with a known error at or after the
-  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
-  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  Unix epoch stamps no join: a guess at the expiry is the case that the later edge
+  stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. The stamp
+  is crate-private. Until the join answer of #336 calls it, it takes the mesh time as an
+  argument and gives its own type, `driver::Unstamped`, so `mesh::Config` has no mesh
+  time and `mesh::Error` has no case for a join that no voter stamps. #336 decides with
+  its caller whether such a join goes out of `Mesh` as an `Error`, or back to the node
+  as a stop code or an answer. Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, for the type that `stamp` gives, the `Error::Unsynced` of
   https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
   region whose voters all have an unknown clock error admits no node by ticket, and the
   operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
