@@ -30,7 +30,7 @@ pub(crate) enum Error {
         /// The key that the peer proved.
         peer: PublicKey,
     },
-    /// A message carries a grant or a change that does not hold.
+    /// A message carries a claim that does not hold.
     Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),

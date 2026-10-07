@@ -40,13 +40,13 @@ const LOG: &str = "log";
 pub(crate) struct Config {
     /// This node.
     pub(crate) key: node::Key,
-    /// This node's private key. It signs the node's grants.
+    /// This node's private key. It signs the node's claims.
     pub(crate) private_key: PrivateKey,
     /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
     pub(crate) region: Prefix,
     /// Each member of the region, this node included, one record for each node. A
     /// member's peer proves the public key of its card, and that key signs the member's
-    /// grants.
+    /// claims.
     pub(crate) members: Vec<Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
@@ -1765,7 +1765,7 @@ mod tests {
         }
 
         #[test]
-        fn checks_the_peer_then_the_voter_then_the_grants() {
+        fn checks_the_peer_then_the_voter_then_the_claims() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
                 let forged = |leader| {
