@@ -3574,6 +3574,7 @@ How to read this record:
 | MERGE RULE, C9c "a person merges every PR" | MERGE QUEUE |
 | REMOTE CONTROL, `inbox:<name>` issues | MESSAGES |
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
+| 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 
 ---
 
@@ -4433,10 +4434,11 @@ a bad link:
   connector against a stub `libnidaqmx.so` (R7 loads the library at run time). NI's
   simulated devices run only on the factory host, if NI's driver builds for its kernel.
 - Store-and-forward: an edge node writes 1M samples/s (1% of P1) while its link to the
-  cloud is cut for one hour. With a disk budget that covers the hour, the InfluxDB out
-  connector (a named reader whose hold covers the cut) receives every sample, in seq
-  order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
-  equals the trimmed samples. The `acceptance` tests run both.
+  cloud is cut for one minute. With a disk budget that covers the minute, the InfluxDB
+  out connector (a named reader whose hold covers the cut) receives every sample, in
+  seq order. With a budget that covers 30 seconds, it receives exactly one gap, whose
+  count equals the trimmed samples. The `acceptance` tests run both. The cut was one
+  hour until 2026-10-07 (STORE AND FORWARD, amendment).
 - A time error bound on every sample. The bound must hold the true offset, and the
   MVP target is at most 1 s. A tighter target waits for the x86 and Pi 4 run (#260).
   The person accepted on 2026-10-05 ("as long as you've evaluated the performance
@@ -4476,6 +4478,22 @@ the system is solid.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
 scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
-for one hour, and the `acceptance` tests run both disk budgets. It runs beside FIRST
-SLICE, which keeps priority. The person decided on 2026-10-06 ("Yes that is fine I
-approve", relayed by `monitor`).
+for one hour (one minute since the amendment below), and the `acceptance` tests run
+both disk budgets. It runs beside FIRST SLICE, which keeps priority. The person decided
+on 2026-10-06 ("Yes that is fine I approve", relayed by `monitor`).
+
+Amendment (2026-10-07): the cut is one minute, not one hour, at the same rate.
+Supersedes the one-hour cut of 5.5 and of this entry (#1072). The hour writes 3.6e9
+samples, and its edge buffer alone does not fit in `sim` on a CI runner
+(https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6034058219). The
+simulated InfluxDB store gets a compact form first (#1419). No scheduled run on a
+rented host runs the hour. The person decided ("Let's do a smaller scenario. It can
+still prove a significant amount of the behavior." and "Copy, yes I can agree with
+that"), relayed by `laptop.monitor` at 2026-10-07T14:10:57Z:
+https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221.
+
+5.5 sets no drain rate. Before the two tests lose `#[ignore]`, the lab runs a drain span
+after the heal in place of `OUTAGE`: two times the sum of the delay before the drain
+starts and the time to send `WRITTEN` at the drain rate measured in the lab.
+`laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
+https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
