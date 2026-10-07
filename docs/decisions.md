@@ -1676,7 +1676,9 @@ How to read this record:
   are an oracle in `oracles/conformance/document/`. A new format takes a new version
   byte. Decided by the `config` builder; approved by the coordinator (#62). `Checked`
   decided by the architect (#828,
-  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030763787).
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030763787, and
+  for `write` and `update`,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
