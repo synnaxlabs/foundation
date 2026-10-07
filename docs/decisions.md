@@ -1838,6 +1838,9 @@ How to read this record:
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
   #342. The `config` builder added the label and the bound above zero (#474).
+  Each shard's part of the pool budget must hold the largest block its buffer takes;
+  a smaller part stops the node at start (`node::Error::Buffer`). `config` cannot
+  check it, because the shard count belongs to the node (architect, #1062).
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
@@ -2240,6 +2243,19 @@ How to read this record:
   seam. The purge timer and `reclaim` on each loop turn land with the first PR that
   allocates from a pool, since no test can see either before then (#410). Proposed
   by `ops` in #410; approved by the coordinator on #806.
+- **SHARD BUFFERS (2026-10-06)** Each shard opens its buffer in directory `shard-<i>`
+  of the node's data directory. `node::Config::files` makes the files of that
+  directory; each shard calls it once on its own thread, because a `Files` stays on
+  the thread that made it, and only `node` names `shard-<i>`. `node::Config::entropy`
+  gives the shards their randomness. A ring has a 64 MiB area and bodies of at most
+  1 MiB until the disk budget sets them (#342). A buffer that does not open stops the
+  node: later shards do not open, and `join` gives `Error::Buffer` with the core. A
+  data directory made for another shard count, more or fewer, is `Error::Shards`
+  before any buffer opens (#1076): a ring that no shard opens loses its data, and an
+  index must stay in the shard that holds its data (C2). `node` stores the count
+  before the first buffer opens. Lost: running the stored count on another core count
+  (it bends C2, which the person locked). A reshard at start is the long-term path
+  (#1077). Proposed by `integrator-1`; decided by the architect (#585, #1062).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -2955,6 +2971,11 @@ at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
 floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
 slot to each index it recovers; `node` opens every buffer before it opens sessions
 (#219, 2026-10-05). Approved by the coordinator on PR #449.
+The shards open their buffers one after another, in order of core, and pass the
+interner along; a failed open keeps it, so no later shard opens. Start time is the sum
+of the opens. When that is too slow, `Buffer::open` splits in two: recover in
+parallel, then assign slots in one short step. Proposed by `integrator-1`; decided by
+the architect (#1062).
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
