@@ -1341,11 +1341,36 @@ fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
 }
 
 #[test]
+fn decodes_the_channel_fuzz_inputs_to_the_channel_reader() {
+    let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/channel");
+    let unit =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/channel_bool_unit");
+    let scalar = |element| DataType::Sample(sample::Type::Scalar(element));
+    let kpa = Unit::new("kPa").unwrap();
+    let data = Data::new(key(9), None, scalar(Scalar::F64), Some(kpa)).unwrap();
+    let channel = Channel {
+        key: key(7),
+        kind: channel::Kind::Data(data),
+    };
+    assert_eq!(Definition::decode(valid), Ok(Definition::Channel(channel)));
+    assert_eq!(
+        Definition::decode(unit),
+        Err(Error::Channel {
+            at: DATA_TYPE_AT,
+            error: channel::Error::Unit {
+                data_type: scalar(Scalar::Bool),
+            },
+        })
+    );
+}
+
+#[test]
 fn decodes_the_placement_and_unknown_kind_fuzz_inputs_to_their_readers() {
     let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/placement");
     let overlap =
         include_bytes!("../../../../oracles/fuzz/spec_definition/placement_overlap");
-    let unknown = include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind");
+    let unknown =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind");
     let nodes = placement::Nodes {
         home: None,
         standby: Some(name("n_1")),
