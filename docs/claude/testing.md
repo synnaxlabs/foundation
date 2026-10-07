@@ -115,7 +115,8 @@ again once to prove that the failure replays (r16 59).
   compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask
   shuttle` does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each
   crate whose source names `unsafe_code`, and fails when such a crate runs no tests.
-- **Hot paths** run under a counting allocator that fails on any allocation.
+- **Hot paths** of product code run under a counting allocator that fails on any
+  allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
   and condition with nested modules. Name each test as the behavior it checks, with
   no `test_` prefix (r16 48):

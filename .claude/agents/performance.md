@@ -23,11 +23,10 @@ For each changed function a frame or sample passes through, answer:
 
 Run the benchmarks for the crates touched (`cargo bench -p <crate>`) on `main` and on
 the change, and report both numbers with the machine. Never infer a number you did not
-measure. A report without both numbers is not a review. For code that no product path
-runs but that runs in the timed loop of a benchmark, such as a `GlobalAlloc` that a
-benchmark holds, also run each benchmark that holds it, in each crate. The allocation
-and lock rules of `docs/claude/performance.md` and the counting allocator of
-`docs/claude/testing.md` are for product code, not for that code.
+measure. A report without both numbers is not a review. For code in a crate's `src/`
+that no product path runs but that a benchmark runs in its timed loop, such as a
+`GlobalAlloc` that a benchmark holds, also run each benchmark that holds it, in each
+crate.
 
 A stub has no numbers. For each stub on the path, answer the six questions for what its
 surface makes each call cost (allocations, copies, count changes, locks), read from the

@@ -55,12 +55,11 @@ Check:
   test that now fails when a call changes it. A part with no test is a finding. When the
   PR exists to remove work, which test fails if it is reverted? For a bug fix, revert
   the fix, run its regression test, and name the call chain through which it fails. A
-  test that passes, or that fails only through a call chain other than the cause that
-  the PR names, is a finding. Do this again in each round whose range changes the fix or
-  that test. Does each new `.cargo/mutants.toml` entry meet the rule in `testing.md`?
-  Does an entry skip code that the PR adds or changes, when the entry is wider than one
-  function or its reason ends with the PR (a stub that it fills)? The PR narrows or
-  removes that entry.
+  test that passes, or whose call chain does not reach the cause that the PR names, is a
+  finding. Do this again in each round whose range changes the fix or that test. Does
+  each new `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an entry skip
+  code that the PR adds or changes, when the entry is wider than one function or its
+  reason ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a

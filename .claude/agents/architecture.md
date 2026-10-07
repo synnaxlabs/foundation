@@ -55,8 +55,9 @@ signature or doc) and crate dependency that the PR changes, with file and line. 
 `Hot path: none`, or each changed function that runs once per sample, series, frame, or
 data message, with the loop that runs it, whatever the PR body says. A function that a
 crate benchmark measures per frame, sample, series, or message is one. So is a stub that
-its caller on record will run so, and code that no product path runs but that runs in
-the timed loop of a benchmark, such as a `GlobalAlloc` that a benchmark holds.
+its caller on record will run so, and code in a crate's `src/` that no product path runs
+but that a benchmark runs in its timed loop, such as a `GlobalAlloc` that a benchmark
+holds. A change to a bench file alone is not one.
 
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.

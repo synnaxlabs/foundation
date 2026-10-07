@@ -13,6 +13,10 @@ x86-64 (pinned cores) and on a Pi 4 before you rely on them.
 
 ## Rules
 
+The rules are for product code. Code in a crate's `src/` that no product path runs but
+that a benchmark runs in its timed loop, such as a `GlobalAlloc` that a benchmark holds,
+needs only measured numbers (rule 12).
+
 1. **No heap allocation on the hot path.** Frames come from the shard's pool (alloc and
    free 1.1 ns, against 4.2 ns for mimalloc and 9.2 ns for macOS malloc). A counting
    allocator in tests fails any hot-path allocation.
