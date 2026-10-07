@@ -2,8 +2,10 @@
 //! side that opens a stream starts it with its class byte. The other side queues it
 //! for accept at the first byte of its first message.
 
+use std::cell::OnceCell;
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::rc::Rc;
 use std::task::Poll;
 use std::{mem, slice};
 
@@ -39,6 +41,7 @@ pub(crate) struct Key {
 pub(crate) struct Sender {
     key: Key,
     ended: bool,
+    closed: Closed,
     /// The peer's largest message.
     bytes_max: usize,
 }
@@ -92,7 +95,12 @@ pub(crate) struct Receiver {
     /// The receive budget of the message in the reader.
     claim: Claim,
     end: Option<End>,
+    closed: Closed,
 }
+
+/// The error of a connection's [`Event::Closed`], once it ended. Each handle of the
+/// connection keeps it, so it outlives the drain.
+type Closed = Rc<OnceCell<Error>>;
 
 /// How a stream that a [`Receiver`] reads ended.
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +136,7 @@ pub(super) struct Streams {
     sending: Sending,
     /// The messages that hold a block and have not gone to the caller.
     receiving: Budget,
+    closed: Closed,
 }
 
 /// A stream the peer opened whose first message has not started to arrive.
@@ -231,10 +240,11 @@ const LATEST_COST: isize = 3;
 
 impl Sender {
     /// A sender for `key`, to a peer whose largest message is `bytes_max`.
-    fn new(key: Key, bytes_max: usize) -> Self {
+    fn new(key: Key, bytes_max: usize, closed: &Closed) -> Self {
         Self {
             key,
             ended: false,
+            closed: Rc::clone(closed),
             bytes_max,
         }
     }
@@ -253,6 +263,11 @@ impl Sender {
     /// [`Endpoint::reset`](super::Endpoint::reset) took it.
     pub(crate) fn ended(&self) -> bool {
         self.ended
+    }
+
+    /// The error of the connection's [`Event::Closed`], once it ended.
+    pub(super) fn closed(&self) -> Option<&Error> {
+        self.closed.get()
     }
 
     /// Marks the stream finished or reset.
@@ -368,12 +383,13 @@ pub(super) fn check_size(bytes: usize, bytes_max: usize) -> Result<(), Error> {
 
 impl Receiver {
     /// A receiver for `key`, a stream of `class`, that reads with `reader`.
-    pub(super) fn new(key: Key, class: Class, reader: Reader) -> Self {
+    fn new(key: Key, class: Class, reader: Reader, closed: &Closed) -> Self {
         Self {
             key,
             reader,
             claim: Claim::new(class),
             end: None,
+            closed: Rc::clone(closed),
         }
     }
 
@@ -398,6 +414,11 @@ impl Receiver {
             End::Finished => Some(Ok(Poll::Ready(None))),
             End::Reset(code) => Some(Err(Error::Reset { code })),
         }
+    }
+
+    /// The error of the connection's [`Event::Closed`], once it ended.
+    pub(super) fn closed(&self) -> Option<&Error> {
+        self.closed.get()
     }
 }
 
@@ -790,7 +811,18 @@ impl Streams {
                 woken: VecDeque::new(),
             },
             receiving: Budget::new(window_bytes.saturating_add(bytes_max)),
+            closed: Closed::default(),
         }
+    }
+
+    /// Gives `error` to each handle of the connection, for each later stream call.
+    ///
+    /// # Panics
+    ///
+    /// When the connection closed before.
+    pub(super) fn end(&self, error: Error) {
+        let set = self.closed.set(error);
+        assert!(set.is_ok(), "invariant: a connection closes once");
     }
 
     /// Sends this side's hello on `inner`, on this side's first one-way stream, ahead
@@ -837,8 +869,10 @@ impl Streams {
 
     /// Queues in `events` what `event` of `inner`, the connection of `key`, means to
     /// the caller, if anything. The same event in a row merges, as noq-proto repeats
-    /// one for each frame. Until the peer's hello arrives, every event goes to the
-    /// hello. A stream that the peer stops resets here with the stop's code.
+    /// one for each frame. Until the peer's hello arrives, every event but a stop of
+    /// this side's stream goes to the hello. A stream that the peer stops resets here
+    /// with the stop's code, except a stream it opened before the hello, which resets
+    /// at the hello.
     ///
     /// # Errors
     ///
@@ -851,6 +885,14 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) -> Result<(), Fault> {
         if self.peer.hello().is_none() {
+            // Before the hello, this side's only stream is its hello stream.
+            // noq-proto drops its stop once the peer has the whole hello.
+            if let StreamEvent::Stopped { id, error_code } = *event
+                && id.initiator() == inner.side()
+            {
+                reset_stopped(inner, id, error_code)?;
+                return Ok(());
+            }
             if let Some(peer) = self.peer.read(inner, event)? {
                 self.arrive(inner, key, peer, events)?;
             }
@@ -944,21 +986,25 @@ impl Streams {
     }
 
     /// Opens a stream of `class` of `connection`'s `inner` in `dir`, and gives its
-    /// sender. `None` until the peer's hello, and when the peer allows no more now.
+    /// sender, and its receiver when it goes both ways. `None` until the peer's
+    /// hello, and when the peer allows no more now.
     pub(super) fn open(
         &mut self,
         inner: &mut noq_proto::Connection,
         connection: connection::Key,
         dir: Dir,
         class: Class,
-    ) -> Option<Sender> {
+    ) -> Option<(Sender, Option<Receiver>)> {
         let peer = self.peer.hello()?;
         let id = inner.streams().open(dir)?;
         let prioritized = inner.send_stream(id).set_priority(priority(class));
         prioritized.expect("invariant: a stream that opens has a send half");
         let key = Key { connection, id };
         self.halves.insert(id, Half::new(key, class));
-        Some(Sender::new(key, peer.message_bytes_max))
+        let sender = Sender::new(key, peer.message_bytes_max, &self.closed);
+        let reader = || Reader::new(self.own.message_bytes_max);
+        let receiver = || Receiver::new(key, class, reader(), &self.closed);
+        Some((sender, (dir == Dir::Bi).then(receiver)))
     }
 
     /// The next stream the peer opened, highest class first.
@@ -974,11 +1020,11 @@ impl Streams {
         let class = class(byte).expect("invariant: a queued stream has a class byte");
         let peer = self.peer.hello();
         let peer = peer.expect("invariant: streams queue after the peer's hello");
-        let reply = || Sender::new(key, peer.message_bytes_max);
+        let reply = || Sender::new(key, peer.message_bytes_max, &self.closed);
         let reader = Reader::started(self.own.message_bytes_max, first);
         Some(Incoming {
             class,
-            receiver: Receiver::new(key, class, reader),
+            receiver: Receiver::new(key, class, reader, &self.closed),
             sender: (id.dir() == Dir::Bi).then(reply),
         })
     }
@@ -1209,6 +1255,7 @@ impl Streams {
             reader,
             claim,
             end,
+            ..
         } = receiver;
         let receiving = &mut self.receiving;
         let mut recv = inner.recv_stream(key.id);
@@ -1227,9 +1274,10 @@ impl Streams {
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
             });
         }
-        // The reader takes no bytes while it waits for room or a block, so only this
-        // finds a reset.
-        if (missed || receiving.waits(claim))
+        // The reader takes no bytes while it waits for room or a block, or for an
+        // empty first message, whose one byte accept took, so only this finds a reset.
+        let empty = matches!(&result, Ok(Poll::Ready(Some(block))) if block.is_empty());
+        if (missed || empty || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
             result = Err(reset_error(error));
@@ -1450,7 +1498,6 @@ fn reset(inner: &mut noq_proto::Connection, id: StreamId, code: Code) {
 mod tests {
     use std::iter;
     use std::num::NonZeroUsize;
-    use std::rc::Rc;
     use std::time::Duration;
 
     use block::{Heap, Pool};
@@ -3611,6 +3658,106 @@ mod tests {
         });
     }
 
+    /// Runs `pair` until the resent stop of stream `id` reaches the side that sends
+    /// on it, the server when `at_server`, after the stream is freed there. Asserts
+    /// that no side closed and that that side sent no reset after the stream was
+    /// freed.
+    fn assert_ignored_late_stop(pair: &mut Pair, at_server: bool, id: StreamId) {
+        fn side(pair: &mut Pair, server: bool) -> &mut Side {
+            if server {
+                &mut pair.server
+            } else {
+                &mut pair.client
+            }
+        }
+        let mut freed = None;
+        for _ in 0..2000 {
+            pair.run(Duration::from_micros(100));
+            let connection = side(pair, at_server).connection();
+            let stats = connection.stats();
+            if freed.is_none() && connection.send_stream(id).stopped().is_err() {
+                freed = Some(stats.frame_tx.reset_stream);
+            }
+            if stats.frame_rx.stop_sending > 0 {
+                break;
+            }
+        }
+        let resets = freed.expect("the stream is freed before the stop arrives");
+        pair.run(RUN);
+        let stats = side(pair, at_server).connection().stats();
+        assert!(stats.frame_rx.stop_sending > 0, "the stop arrived");
+        assert_eq!(stats.frame_tx.reset_stream, resets);
+        let closed = |event: &&Event| matches!(event, Event::Closed { .. });
+        assert!(!events(&pair.server).iter().any(closed));
+        assert!(!events(&pair.client).iter().any(closed));
+    }
+
+    #[test]
+    fn ignore_a_stop_over_32_bits_after_the_reset_of_an_empty_reply_is_acknowledged() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let bytes = [byte(Class::Complete)];
+            let id = raw(pair.client.connection(), Dir::Bi, &bytes, false);
+            pair.run(RUN);
+            let finished = pair.client.connection().send_stream(id).finish();
+            finished.expect("finished");
+            pair.run(Duration::ZERO);
+            // The stop goes before the server's reset arrives, and the link loses it.
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.client.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            pair.client.drops = 1;
+            pair.run(Duration::ZERO);
+            assert_ignored_late_stop(&mut pair, true, id);
+        });
+    }
+
+    #[test]
+    fn ignore_a_stop_over_32_bits_after_a_caller_reset_is_acknowledged() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let id = sender.key().id;
+            let now = pair.now();
+            pair.client.endpoint.reset(now, &mut sender, Code(9));
+            // The stop goes before the client's reset arrives, and the link loses it.
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.server.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            pair.server.drops = 1;
+            pair.run(Duration::ZERO);
+            assert_ignored_late_stop(&mut pair, false, id);
+        });
+    }
+
+    #[test]
+    fn ignore_a_stop_over_32_bits_after_a_cancel_reset_is_acknowledged() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let message = shard.block(&[0xc; 100]);
+            spend(&mut pair, shard, &mut sender, message::prefix(100).len());
+            let now = pair.now();
+            let written = pair.client.endpoint.write(now, &sender, &mut Some(message));
+            assert_eq!(written, Ok(Poll::Pending));
+            pair.run(RUN);
+            let id = sender.key().id;
+            let now = pair.now();
+            pair.client.endpoint.cancel(now, &sender);
+            // The stop goes before the client's reset arrives. The link loses it and
+            // the next datagram, so the resent stop comes after the reset's ACK.
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.server.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            pair.server.drops = 2;
+            pair.run(Duration::ZERO);
+            assert_ignored_late_stop(&mut pair, false, id);
+        });
+    }
+
     #[test]
     fn a_stop_after_only_the_class_byte_resets_the_reply() {
         testing::run(1, |shard| {
@@ -3738,6 +3885,79 @@ mod tests {
     }
 
     #[test]
+    fn ended_streams_give_their_own_end_after_the_connection_drains() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut reset = reset(&mut pair, VarInt::from_u32(7));
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
+            pair.run(RUN);
+            let mut finished = accept(&mut pair.server).receiver;
+            let now = pair.now();
+            let drained = drain(&mut pair.server, now, &mut finished);
+            assert_eq!(drained, (vec![b"a".to_vec()], true));
+            let read = next(&mut pair.server, now, &mut reset);
+            let stream_reset = Err(Error::Reset { code: Code(7) });
+            assert_eq!(read, stream_reset);
+            let server = key(&pair.server);
+            pair.server.endpoint.close(now, server, Code(9));
+            pair.run(Duration::from_secs(3));
+            assert!(pair.server.endpoint.drained());
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut finished);
+            assert_eq!(read, Ok(Poll::Ready(None)));
+            assert_eq!(next(&mut pair.server, now, &mut reset), stream_reset);
+        });
+    }
+
+    #[test]
+    fn give_the_end_of_the_connection_ahead_of_a_reset_no_read_took() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut receiver = reset(&mut pair, VarInt::from_u32(7));
+            let (now, server) = (pair.now(), key(&pair.server));
+            pair.server.endpoint.close(now, server, Code(9));
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Err(Error::Closed { code: Code(9) }));
+        });
+    }
+
+    #[test]
+    fn give_the_end_of_the_connection_ahead_of_a_message_no_read_took() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
+            pair.run(RUN);
+            let mut receiver = accept(&mut pair.server).receiver;
+            let (now, server) = (pair.now(), key(&pair.server));
+            pair.server.endpoint.close(now, server, Code(9));
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Err(Error::Closed { code: Code(9) }));
+        });
+    }
+
+    #[test]
+    fn reset_by_the_peer_fail_the_read_of_an_empty_message_no_read_took() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let id = raw(pair.client.connection(), Dir::Uni, &[2, 0], false);
+            pair.run(RUN);
+            let mut receiver = accept(&mut pair.server).receiver;
+            let reset = pair.client.connection().send_stream(id).reset(7u32.into());
+            reset.expect("reset");
+            pair.run(RUN);
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(7) }));
+        });
+    }
+
+    #[test]
     fn reset_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
@@ -3745,8 +3965,12 @@ mod tests {
             let mut receiver = reset(&mut pair, code);
             let now = pair.now();
             let read = next(&mut pair.server, now, &mut receiver);
-            assert_eq!(read, Ok(Poll::Pending));
-            assert_broken(&mut pair, true, "a reset code over 32 bits: 4294967296");
+            let reason = "a reset code over 32 bits: 4294967296";
+            let broken = Error::Broken {
+                reason: reason.into(),
+            };
+            assert_eq!(read, Err(broken));
+            assert_broken(&mut pair, true, reason);
         });
     }
 
@@ -3762,6 +3986,21 @@ mod tests {
         stopped.expect("stopped");
         pair.run(RUN);
         sender
+    }
+
+    #[test]
+    fn stopped_by_the_peer_give_the_end_of_the_connection_once_it_ended() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = stop(&mut pair, shard, VarInt::from_u32(7));
+            let (now, key) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, key, Code(9));
+            let mut message = Some(shard.block(b"b"));
+            let written = pair.client.endpoint.write(now, &sender, &mut message);
+            assert_eq!(written, Err(Error::Closed { code: Code(9) }));
+            let finished = pair.client.endpoint.finish(now, &mut sender);
+            assert_eq!(finished, Err(Error::Closed { code: Code(9) }));
+        });
     }
 
     #[test]
@@ -3875,23 +4114,26 @@ mod tests {
     }
 
     /// Sends `bytes` and the end on a raw stream from the client, and reads it on the
-    /// server, which finds a fault.
-    fn misframe(pair: &mut Pair, bytes: &[u8]) {
+    /// server, which finds the fault of `reason`.
+    fn misframe(pair: &mut Pair, bytes: &[u8], reason: &str) {
         raw(pair.client.connection(), Dir::Uni, bytes, true);
         pair.run(RUN);
         let mut incoming = accept(&mut pair.server);
         let now = pair.now();
         let read = next(&mut pair.server, now, &mut incoming.receiver);
-        assert_eq!(read, Ok(Poll::Pending));
+        let broken = Error::Broken {
+            reason: reason.into(),
+        };
+        assert_eq!(read, Err(broken));
+        assert_broken(pair, true, reason);
     }
 
     #[test]
     fn with_a_message_over_the_limit_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            misframe(&mut pair, &[2, 0x80, 1, 0, 1]);
             let reason = "a message of 65537 bytes is over the limit of 65536";
-            assert_broken(&mut pair, true, reason);
+            misframe(&mut pair, &[2, 0x80, 1, 0, 1], reason);
         });
     }
 
@@ -3899,36 +4141,38 @@ mod tests {
     fn that_end_inside_a_message_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            misframe(&mut pair, &[2, 3, b'a']);
-            assert_broken(&mut pair, true, "the stream ended inside a message");
+            misframe(
+                &mut pair,
+                &[2, 3, b'a'],
+                "the stream ended inside a message",
+            );
         });
     }
 
     #[test]
-    fn after_the_connection_ends_give_its_error_until_it_drains_then_nothing() {
+    fn after_the_connection_ends_give_its_error_also_after_it_drains() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let (now, key) = (pair.now(), key(&pair.client));
             let opened = pair.client.endpoint.open(now, key, Class::Complete);
             let (mut sender, mut receiver) = opened.expect("a stream");
             let mut other = open_sender(&mut pair, Class::Latest);
-            let mut finishing = [Class::Latest, Class::Latest]
-                .map(|class| open_sender(&mut pair, class));
+            let mut finishing = open_sender(&mut pair, Class::Latest);
             pair.client.endpoint.close(now, key, Code(7));
             let closed = Error::Closed { code: Code(7) };
-            for (finished, (run, ended)) in finishing.iter_mut().zip([
-                (Duration::ZERO, Err(closed.clone())),
-                (Duration::from_secs(3), Ok(())),
-            ]) {
-                pair.run(run);
+            for drained in [false, true] {
+                if drained {
+                    pair.run(Duration::from_secs(3));
+                }
+                assert_eq!(pair.client.endpoint.drained(), drained);
                 let now = pair.now();
                 let read = next(&mut pair.client, now, &mut receiver);
-                assert_eq!(read, ended.clone().map(|()| Poll::Pending));
+                assert_eq!(read, Err(closed.clone()));
                 let endpoint = &mut pair.client.endpoint;
                 assert!(endpoint.open(now, key, Class::Command).is_none());
                 assert!(endpoint.accept(key).is_none());
                 let flushed = endpoint.write(now, &sender, &mut None);
-                assert_eq!(flushed, ended.clone().map(|()| Poll::Pending));
+                assert_eq!(flushed, Err(closed.clone()));
                 let large = Error::TooLarge {
                     bytes: MESSAGE_MAX + 1,
                     bytes_max: MESSAGE_MAX,
@@ -3941,12 +4185,12 @@ mod tests {
                 let endpoint = &mut pair.client.endpoint;
                 let mut message = Some(shard.block(b"a"));
                 let written = endpoint.write(now, &sender, &mut message);
-                assert_eq!(written, ended.clone().map(|()| Poll::Pending));
+                assert_eq!(written, Err(closed.clone()));
                 assert!(message.is_some());
-                assert_eq!(endpoint.finish(now, finished), ended.clone());
-                let given = ended.map(|()| Some(b"b".to_vec()));
+                assert_eq!(endpoint.finish(now, &mut finishing), Err(closed.clone()));
                 let block = shard.block(b"b");
-                assert_eq!(try_write(&mut pair.client, now, &mut other, block), given);
+                let given = try_write(&mut pair.client, now, &mut other, block);
+                assert_eq!(given, Err(closed.clone()));
             }
             let now = pair.now();
             let endpoint = &mut pair.client.endpoint;
@@ -3956,7 +4200,7 @@ mod tests {
     }
 
     #[test]
-    fn after_a_peer_close_or_a_fault_give_its_error_until_it_drains() {
+    fn after_a_peer_close_or_a_fault_give_its_error_also_after_it_drains() {
         let broken = Error::Broken {
             reason: "a stream of class 4".into(),
         };
@@ -3979,20 +4223,27 @@ mod tests {
                 while !events(&pair.client).iter().any(ended) {
                     pair.run(STEP);
                 }
+                for drained in [false, true] {
+                    if drained {
+                        pair.run(Duration::from_secs(3));
+                    }
+                    assert_eq!(pair.client.endpoint.drained(), drained);
+                    let now = pair.now();
+                    let read = next(&mut pair.client, now, &mut receiver);
+                    assert_eq!(read, Err(error.clone()));
+                    let endpoint = &mut pair.client.endpoint;
+                    let flushed = endpoint.write(now, &sender, &mut None);
+                    assert_eq!(flushed, Err(error.clone()));
+                    let mut message = Some(shard.block(b"a"));
+                    let written = endpoint.write(now, &sender, &mut message);
+                    assert_eq!(written, Err(error.clone()));
+                    let finished = endpoint.finish(now, &mut finishing);
+                    assert_eq!(finished, Err(error.clone()));
+                    let block = shard.block(b"b");
+                    let given = try_write(&mut pair.client, now, &mut other, block);
+                    assert_eq!(given, Err(error.clone()));
+                }
                 let now = pair.now();
-                let read = next(&mut pair.client, now, &mut receiver);
-                assert_eq!(read, Err(error.clone()));
-                let endpoint = &mut pair.client.endpoint;
-                let flushed = endpoint.write(now, &sender, &mut None);
-                assert_eq!(flushed, Err(error.clone()));
-                let written =
-                    endpoint.write(now, &sender, &mut Some(shard.block(b"a")));
-                assert_eq!(written, Err(error.clone()));
-                let finished = endpoint.finish(now, &mut finishing);
-                assert_eq!(finished, Err(error.clone()));
-                let block = shard.block(b"b");
-                let given = try_write(&mut pair.client, now, &mut other, block);
-                assert_eq!(given, Err(error.clone()));
                 let endpoint = &mut pair.client.endpoint;
                 endpoint.reset(now, &mut sender, Code(9));
                 endpoint.stop(now, receiver, Code(9));
@@ -5804,6 +6055,7 @@ mod tests {
         use rustls::crypto::aws_lc_rs::{default_provider, kx_group};
 
         use super::*;
+        use crate::quic::packet::Log;
         use crate::quic::pair::Foreign;
 
         /// The limits of a node with the [`Shard::config`] limits.
@@ -5839,6 +6091,34 @@ mod tests {
 
         fn foreign(pair: &mut Pair) -> &mut noq_proto::Connection {
             pair.foreign.as_mut().expect("a foreign peer").connection()
+        }
+
+        /// A pair whose server a foreign peer dialed with a [`Log::client`], after a
+        /// run, and its log.
+        fn logged_dial(shard: &Shard) -> (Pair, Arc<Log>) {
+            let log = Arc::new(Log::default());
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            let mut foreign = Foreign::new(shard, |_| {});
+            let tls = log.client(tls::public(&pair::SERVER_KEY));
+            foreign.dial_with(pair.now(), tls, pair::SERVER);
+            pair.foreign = Some(foreign);
+            pair.run(RUN);
+            (pair, log)
+        }
+
+        /// The code of each reset of stream `id` that the server sent to the
+        /// foreign peer of [`logged_dial`], read from the wire.
+        fn reset_codes(pair: &Pair, log: &Log, id: StreamId) -> Vec<u64> {
+            let sent = pair.server.sent.iter();
+            let datagrams = sent
+                .filter(|(_, to, _)| *to == pair::FOREIGN)
+                .map(|(_, _, datagram)| &datagram[..]);
+            let stream = VarInt::from(id).into_inner();
+            let resets = log.resets(datagrams).into_iter();
+            resets
+                .filter(|reset| reset.stream == stream)
+                .map(|reset| reset.code)
+                .collect()
         }
 
         /// The bytes of the next one-way stream the node opened on the foreign peer,
@@ -6070,6 +6350,166 @@ mod tests {
                 let written =
                     pair.server.endpoint.write(now, &reply, &mut Some(message));
                 assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+            });
+        }
+
+        #[test]
+        fn reset_at_the_hello_with_the_code_of_a_stop_before_it() {
+            // The stream has no byte, waits for its first message byte, or queues.
+            let streams: [(&[u8], bool); 3] =
+                [(&[], false), (&[1], false), (&[1, 1, b'b'], true)];
+            for (bytes, end) in streams {
+                testing::run(1, move |shard| {
+                    let (mut pair, log) = logged_dial(shard);
+                    let connection = foreign(&mut pair);
+                    let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                    let id = raw(connection, Dir::Bi, bytes, end);
+                    let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                    stopped.expect("stopped");
+                    pair.run(RUN);
+                    assert!(reset_codes(&pair, &log, id).is_empty());
+                    let mut send = foreign(&mut pair).send_stream(hello);
+                    let own = OWN.encode();
+                    assert_eq!(send.write(&own), Ok(own.len()));
+                    send.finish().expect("finished");
+                    pair.run(RUN);
+                    assert_eq!(reset_codes(&pair, &log, id), [9]);
+                });
+            }
+        }
+
+        #[test]
+        fn reset_an_accepted_stream_with_the_code_of_a_stop() {
+            testing::run(1, |shard| {
+                let (mut pair, log) = logged_dial(shard);
+                let connection = foreign(&mut pair);
+                raw(connection, Dir::Uni, &OWN.encode(), true);
+                let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
+                pair.run(RUN);
+                let incoming = accept(&mut pair.server);
+                let stopped =
+                    foreign(&mut pair).recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                pair.run(RUN);
+                assert_eq!(reset_codes(&pair, &log, id), [9]);
+                let reply = incoming.sender.expect("a two-way stream");
+                let (now, message) = (pair.now(), shard.block(b"b"));
+                let written =
+                    pair.server.endpoint.write(now, &reply, &mut Some(message));
+                assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+            });
+        }
+
+        #[test]
+        fn reset_an_arriving_stream_with_the_code_of_a_stop() {
+            // The stream has no byte, or waits for its first message byte.
+            let streams: [&[u8]; 2] = [&[], &[1]];
+            for bytes in streams {
+                testing::run(1, move |shard| {
+                    let (mut pair, log) = logged_dial(shard);
+                    let connection = foreign(&mut pair);
+                    raw(connection, Dir::Uni, &OWN.encode(), true);
+                    // A frame of the later stream opens the earlier one with no byte.
+                    let id = raw(connection, Dir::Bi, bytes, false);
+                    raw(connection, Dir::Bi, &[1, 1, b'z'], true);
+                    pair.run(RUN);
+                    let stopped =
+                        foreign(&mut pair).recv_stream(id).stop(VarInt::from_u32(9));
+                    stopped.expect("stopped");
+                    pair.run(RUN);
+                    assert_eq!(reset_codes(&pair, &log, id), [9], "{bytes:?}");
+                });
+            }
+        }
+
+        /// A pair whose server a foreign peer dialed with a [`Log::client`], its log,
+        /// and the server's hello stream, which the peer stopped with `code`. The
+        /// stop arrived before the ACK of the hello, and the peer sent no hello.
+        fn stopped_hello(shard: &Shard, code: VarInt) -> (Pair, Arc<Log>, StreamId) {
+            let log = Arc::new(Log::default());
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            let mut peer = Foreign::new(shard, |_| {});
+            let tls = log.client(tls::public(&pair::SERVER_KEY));
+            peer.dial_with(pair.now(), tls, pair::SERVER);
+            pair.foreign = Some(peer);
+            let mut steps = 0;
+            let id = loop {
+                pair.run(Duration::from_micros(100));
+                if let Some(id) = foreign(&mut pair).streams().accept(Dir::Uni) {
+                    break id;
+                }
+                steps += 1;
+                assert!(steps < 10_000, "no hello stream");
+            };
+            let stopped = foreign(&mut pair).recv_stream(id).stop(code);
+            stopped.expect("stopped");
+            // noq-proto frees the stream, and drops the stop, at the ACK.
+            let mut state = Ok(None);
+            for _ in 0..200 {
+                pair.run(Duration::from_micros(100));
+                if pair.server.key.is_some() {
+                    state = pair.server.connection().send_stream(id).stopped();
+                    if state != Ok(None) {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(state, Ok(Some(code)));
+            (pair, log, id)
+        }
+
+        #[test]
+        fn reset_its_own_hello_stream_at_a_stop_before_the_peer_hello() {
+            testing::run(1, |shard| {
+                let (mut pair, log, id) = stopped_hello(shard, VarInt::from_u32(9));
+                pair.run(RUN);
+                let freed = pair.server.connection().send_stream(id).stopped();
+                assert!(matches!(freed, Err(ClosedStream { .. })), "{freed:?}");
+                assert_eq!(reset_codes(&pair, &log, id), [9]);
+                raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
+                pair.run(RUN);
+                assert!(available(&pair.server));
+                assert_eq!(reset_codes(&pair, &log, id), [9]);
+            });
+        }
+
+        #[test]
+        fn break_at_a_stop_of_its_own_hello_stream_with_a_code_over_32_bits() {
+            testing::run(1, |shard| {
+                let over = VarInt::from_u64(1 << 32).expect("a varint");
+                let (mut pair, _, _) = stopped_hello(shard, over);
+                assert_refused(&mut pair, "a stop code over 32 bits: 4294967296");
+            });
+        }
+
+        #[test]
+        fn ignore_a_stop_with_a_code_over_32_bits_after_all_is_acknowledged() {
+            testing::run(1, |shard| {
+                let (mut pair, log) = logged_dial(shard);
+                raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
+                pair.run(RUN);
+                let (now, key) = (pair.now(), key(&pair.server));
+                let sender =
+                    pair.server.endpoint.open_sender(now, key, Class::Complete);
+                let mut sender = sender.expect("a stream");
+                write(&mut pair.server, now, &mut sender, &[shard.block(b"a")]);
+                assert_eq!(pair.server.endpoint.finish(now, &mut sender), Ok(()));
+                let id = sender.key().id;
+                pair.run(RUN);
+                let freed = pair.server.connection().send_stream(id).stopped();
+                assert!(matches!(freed, Err(ClosedStream { .. })), "{freed:?}");
+                let over = VarInt::from_u64(1 << 32).expect("a varint");
+                let stopped = foreign(&mut pair).recv_stream(id).stop(over);
+                stopped.expect("stopped");
+                pair.run(RUN);
+                let stats = pair.server.connection().stats();
+                assert_eq!(stats.frame_rx.stop_sending, 1);
+                let now = pair.now();
+                let next = pair.server.endpoint.open_sender(now, key, Class::Complete);
+                assert!(next.is_some(), "the connection stays up");
+                let closed = |event: &&Event| matches!(event, Event::Closed { .. });
+                assert!(!events(&pair.server).iter().any(closed));
+                assert!(reset_codes(&pair, &log, id).is_empty());
             });
         }
 

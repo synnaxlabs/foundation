@@ -1,14 +1,18 @@
 //! A write and `next` make no heap allocation once the hub has taken a few frames: for
 //! a complete reader when frames wait for it and when it waits for them, and for latest
 //! readers that the write wakes, also two writes in one commit and readers replaced.
-//! The commit task is not counted. This binary has no test harness: the count covers
-//! each thread, and a harness allocates on its own thread at any time.
+//! The commit task is not counted. The home's `woken` after a commit, which that task
+//! calls, is counted on its own: it makes none once its keys are sized, while a
+//! complete reader takes each frame, and when a complete reader falls behind again to
+//! a depth it reached before. This binary has no test harness: the count covers each
+//! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::path::PathBuf;
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use block::{Heap, Pool};
@@ -18,8 +22,8 @@ use hub::writer::{self, Writer};
 use hub::{Channel, Hub};
 use types::authority::Authority;
 use types::channel;
-use types::frame::key_set::Interner;
-use types::frame::{Form, Label, Path};
+use types::frame::key_set::{Group, Interner, KeySet};
+use types::frame::{Draft, Form, Label, Path};
 use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
@@ -93,9 +97,9 @@ fn wait(reader: &mut Reader) -> u64 {
     allocations
 }
 
-/// A hub on a new ring of `node`, with `time` and `value` defined, and the node's
-/// mesh time now once it has one.
-async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
+/// A home shard on a new ring of `node`, its interner, and the node's mesh time now
+/// once it has one.
+async fn shard(node: &sim::node::Node, tasks: Tasks) -> (home::Shard, Interner, i64) {
     let config = block::Config { budget: 1 << 23 };
     let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
     let (clock, mesh) = clock::Clock::new(node.clock());
@@ -107,7 +111,7 @@ async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         dir: PathBuf::from("shard-0"),
         pool: Rc::clone(&pool),
         clock: node.clock(),
-        tasks: tasks.clone(),
+        tasks,
         entropy: node.entropy(),
         // A frame takes 4 KiB of the ring, and a full ring loses each later live
         // frame (#160), so the test writes fewer than 1024.
@@ -117,7 +121,7 @@ async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
     let buffer = buffer::Buffer::open(config, interner.slots())
         .await
         .expect("opens");
-    let home = home::Shard::new(home::Config {
+    let shard = home::Shard::new(home::Config {
         shard: 0,
         buffer,
         clock: mesh.clone(),
@@ -126,6 +130,17 @@ async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
             ahead: Span::from_nanos(1_000_000_000),
         },
     });
+    loop {
+        if let Some(now) = mesh.now().mesh {
+            return (shard, interner, now.latest.nanos());
+        }
+        node.clock().sleep(Span::from_nanos(1)).await;
+    }
+}
+
+/// A hub on [`shard`], with `time` and `value` defined, and the node's mesh time now.
+async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
+    let (home, interner, now) = shard(node, tasks.clone()).await;
     let hub = Hub::new(hub::Config {
         home,
         interner,
@@ -141,12 +156,7 @@ async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
             index: channel::Key::from_u128(1),
         });
     }
-    loop {
-        if let Some(now) = mesh.now().mesh {
-            return (hub, now.latest.nanos());
-        }
-        node.clock().sleep(Span::from_nanos(1)).await;
-    }
+    (hub, now)
 }
 
 /// Writes that each wake five latest readers, `latest` and four more it opens, from
@@ -220,12 +230,152 @@ async fn replaced(
     assert_eq!((waited, written, taken), (0, 0, 0), "replaced");
 }
 
+/// A shard with one writer and one complete reader on the index of channel 1, for
+/// the counts of `woken`.
+struct Woken {
+    shard: home::Shard,
+    set: Arc<KeySet>,
+    writer: home::writer::Key,
+    reader: home::reader::Key,
+    /// The entries of the index and of channel 2 in `set`.
+    time: usize,
+    value: usize,
+    keys: Vec<home::reader::Key>,
+    now: i64,
+}
+
+impl Woken {
+    async fn new(node: &sim::node::Node, tasks: Tasks) -> Self {
+        let (mut shard, mut interner, now) = shard(node, tasks).await;
+        let (time, value) = (channel::Key::from_u128(1), channel::Key::from_u128(2));
+        let slot = interner.slots().assign(time);
+        shard.carry(slot);
+        let data = vec![(value, Type::Scalar(Scalar::I64))];
+        let set = interner.intern(&[Group {
+            index: time,
+            data: &data,
+        }]);
+        let writer = shard
+            .open_writer(home::writer::Writer {
+                subject: name("a"),
+                authority: Authority(1),
+                lease: None,
+                set: Arc::clone(&set),
+            })
+            .expect("opens");
+        let reader = shard.open_complete(slot, u64::MAX).into();
+        let entry = |key| {
+            set.entries()
+                .iter()
+                .position(|entry| entry.key == key)
+                .expect("the key set holds the channel")
+        };
+        let (time, value) = (entry(time), entry(value));
+        Self {
+            shard,
+            set,
+            writer,
+            reader,
+            time,
+            value,
+            keys: Vec::new(),
+            now,
+        }
+    }
+
+    /// Writes frame `n`, waits for its commit, and calls `woken`. Returns the number
+    /// of keys it gave and the allocations it made.
+    async fn commit(&mut self, n: i64) -> (usize, u64) {
+        let (time, value) = (self.time, self.value);
+        let mut draft = Draft::new(
+            self.shard.pool(),
+            &self.set,
+            Form::Raw,
+            &[(time, 8), (value, 8)],
+        )
+        .expect("a frame");
+        for entry in [time, value] {
+            let bytes = draft.series_mut(entry).expect("the series is present");
+            bytes.copy_from_slice(&(self.now + n).to_le_bytes());
+        }
+        draft.set_count(self.set.entries()[time].group, 1);
+        let written = self
+            .shard
+            .write(self.writer, Label::Path(Path::Live), draft);
+        assert!(written.is_ok(), "the home applies frame {n}");
+        self.shard.committed().await.expect("commits");
+        let keys = &mut self.keys;
+        let ((), allocations) = ALLOCATOR.count(|| self.shard.woken(keys));
+        (keys.len(), allocations)
+    }
+}
+
+/// The home's `woken` with one complete reader that takes each frame: each call
+/// after the first names the reader and allocates nothing.
+fn woken_of_a_reader_that_takes_each_frame() {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        let mut woken = Woken::new(&node, tasks).await;
+        let mut calls = Vec::new();
+        for n in 0..20 {
+            calls.push(woken.commit(n).await);
+            assert!(
+                woken.shard.take(woken.reader).is_some(),
+                "frame {n} waits for the reader"
+            );
+        }
+        assert_eq!(
+            calls[1..],
+            [(1, 0); 19],
+            "(keys given, allocations) of each call after the first: {calls:?}"
+        );
+    })
+    .expect("the run ends");
+}
+
+/// The home's `woken` with one complete reader that falls 64 frames behind, takes
+/// each, then falls 64 frames behind again: no call of the second lag allocates.
+fn woken_of_a_reader_that_falls_behind_again() {
+    /// Deep enough that the waiting list of the reader grows more than once.
+    const DEPTH: usize = 64;
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        let mut woken = Woken::new(&node, tasks).await;
+        let (mut lags, mut frame) = (Vec::new(), 0);
+        for lag in 0..2 {
+            let mut calls = Vec::new();
+            for _ in 0..DEPTH {
+                calls.push(woken.commit(frame).await);
+                frame += 1;
+            }
+            let taken = std::iter::from_fn(|| woken.shard.take(woken.reader)).count();
+            assert_eq!(taken, DEPTH, "lag {lag}");
+            lags.push(calls);
+        }
+        let grown = lags[0][1..]
+            .iter()
+            .filter(|&&(_, allocations)| allocations > 0);
+        assert!(grown.count() > 1, "the first lag grows the list: {lags:?}");
+        let mut expected = [(0, 0); DEPTH];
+        expected[0] = (1, 0);
+        assert_eq!(
+            lags[1], expected,
+            "(keys given, allocations) of each call of the second lag: {lags:?}"
+        );
+    })
+    .expect("the run ends");
+}
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
         1,
         "the allocator counts"
     );
+    woken_of_a_reader_that_takes_each_frame();
+    woken_of_a_reader_that_falls_behind_again();
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, |node, tasks| async move {

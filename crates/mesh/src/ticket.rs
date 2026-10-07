@@ -125,10 +125,6 @@ impl fmt::Debug for Ticket {
 }
 
 /// The region's record of a ticket. Its key is `public_key`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the streams of #471 are the first user")
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
     /// The public half of the ticket's key pair.

@@ -1,0 +1,4 @@
+retention "r" {
+  select = "edge.**"
+  keep = "3d"
+}

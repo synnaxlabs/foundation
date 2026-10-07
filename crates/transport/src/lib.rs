@@ -95,6 +95,7 @@ const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
 pub struct Transport {
     carrier: quic::Carrier,
     clock: env::clock::Clock,
+    public_key: PublicKey,
 }
 
 impl Transport {
@@ -117,10 +118,24 @@ impl Transport {
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         config.check()?;
         let clock = config.clock.clone();
+        let public_key = tls::public(&config.private_key);
         Ok(Self {
             carrier: quic::Carrier::new(config, part),
             clock,
+            public_key,
         })
+    }
+
+    /// The public key that this transport proves to each peer.
+    ///
+    /// ```
+    /// fn key(transport: &transport::Transport) -> types::node::PublicKey {
+    ///     transport.public_key()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn public_key(&self) -> PublicKey {
+        self.public_key
     }
 
     /// Connects to `peer` at one of `addresses`, and checks that the peer holds
@@ -303,7 +318,7 @@ mod tests {
     use super::{Config, Error, Transport};
     use crate::testing::{self, Shard};
     use crate::tls::public;
-    use crate::{Code, Peer, Port};
+    use crate::{Address, Code, Peer, Port};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -424,6 +439,44 @@ mod tests {
             assert_eq!(new.err(), Some(IDLE));
             assert_eq!(Port::bind(shard.net(), at).err(), None);
         });
+    }
+
+    #[test]
+    fn a_transport_proves_its_public_key_to_each_peer() {
+        let (mut sim, _, node) = testing::nodes(0);
+        testing::shard(&node, SERVER, |config, node| async move {
+            let at = [
+                testing::address(&node),
+                SocketAddr::new(node.addresses()[0], 1),
+            ];
+            let server = Config {
+                private_key: SERVER,
+                clock: config.clock.clone(),
+                entropy: config.entropy.clone(),
+                tasks: config.tasks.clone(),
+                pool: Rc::clone(&config.pool),
+                ..config
+            };
+            let client = Config {
+                private_key: CLIENT,
+                ..config
+            };
+            let [a, b] = [(client, at[0]), (server, at[1])].map(|(config, at)| {
+                Transport::new(config, testing::part(&node.net(), at))
+                    .expect("a transport")
+            });
+            let addresses = [Address::Udp(at[1])];
+            let dial = a.dial(b.public_key(), &addresses);
+            let (accepted, dialed) = testing::join(b.accept(), dial).await;
+            let accepted = accepted.expect("a session");
+            assert_eq!(
+                dialed.expect("a session").peer(),
+                Peer::Node(b.public_key())
+            );
+            assert_eq!(accepted.peer(), Peer::Node(a.public_key()));
+            assert_ne!(a.public_key(), b.public_key());
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
