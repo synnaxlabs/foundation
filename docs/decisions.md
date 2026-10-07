@@ -2454,42 +2454,40 @@ How to read this record:
   not depend on `transport`. `transport` owns the carriers and the session model, and
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
-  session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
-  as when the OS breaks it, until the socket drops: each receive first gives the
-  datagrams queued before the fault, then `EIO`; the datagrams that arrive at it after
-  the fault are lost, and a send still works. A broken socket still holds its receive
-  queue, so the queue stays readable. A pulled serial adapter takes its buffer with it,
-  so `Node::fail_serial` loses its unread bytes. Approved by the coordinator on #907;
-  the queue before `EIO` approved by laptop.architect-2 on 2026-10-07
-  (https://github.com/synnaxlabs/foundation/issues/1255). Built by `simulation` in
-  #926. Amended (2026-10-06, #943):
-  `link::Config::rate` limits a link to that many bytes per second, counted as IP
-  packets with their IP and UDP or TCP headers. Each direction of a link sends one
-  packet at a time: a packet starts when it is sent or when the packet before it has
-  left, whichever is later, and leaves after its bytes at the rate. Packets sent back
-  to back at one rate leave at the rate of their total bytes, so the rounding of each
-  to a nanosecond does not add up. A packet sent after the rate is removed still waits
-  for the packets before it. Then it takes the delay and the jitter. A power cut drops
-  the packets of the node that wait to leave. With no rate, a link adds no events and
-  no draws, so the digest of a run does not change. A UDP datagram takes its length
-  plus 768 bytes of its socket's send buffer until it leaves its link or a power cut
-  drops it. As on Linux, a send goes whole while the send buffer is empty or takes
-  less than `send_buffer_bytes`, and is pending from then. When a datagram leaves and
-  the send buffer is no longer full, each send that waits wakes in the same step.
-  Approved by the coordinator. Amended (2026-10-07, #995): `Net::resolve` gives the
-  addresses of a host name. An IP literal gives its one address with no lookup, and
-  no lookup is cached. `Sim::name` sets the answer to each lookup of a name in the
-  run, on any node: its addresses in order, none (`NotFound`), or a failure (`Io`
-  with `EAGAIN`), after a delay on the clock of the node. A lookup reads the answer
-  at its first poll and sends no packet, so a partition does not stop it. Decided by
-  the architect, #995
-  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
-  From the review of #1018: a name matches in any ASCII case and with or without one
-  final dot, as in DNS. An IP literal as a name panics, because no lookup reads it.
-  A lookup that would end past the end of the clock never answers. The match in any
-  case and with a final dot was confirmed by the architect on #1018, in place of its
-  earlier exact match
-  (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649).
+  session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail as
+  when the OS breaks it, until the socket drops: each receive first gives the datagrams
+  queued before the fault, then `EIO`; the datagrams that arrive at it after the fault
+  are lost, and a send still works. A broken socket still holds its receive queue, so
+  the queue stays readable. A pulled serial adapter takes its buffer with it, so
+  `Node::fail_serial` loses its unread bytes. Approved by the coordinator on #907; the
+  queue before `EIO` approved by laptop.architect-2 on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/issues/1255). Built by `simulation` in #926.
+  Amended (2026-10-06, #943): `link::Config::rate` limits a link to that many bytes per
+  second, counted as IP packets with their IP and UDP or TCP headers. Each direction of
+  a link sends one packet at a time: a packet starts when it is sent or when the packet
+  before it has left, whichever is later, and leaves after its bytes at the rate.
+  Packets sent back to back at one rate leave at the rate of their total bytes, so the
+  rounding of each to a nanosecond does not add up. A packet sent after the rate is
+  removed still waits for the packets before it. Then it takes the delay and the jitter.
+  A power cut drops the packets of the node that wait to leave. With no rate, a link
+  adds no events and no draws, so the digest of a run does not change. A UDP datagram
+  takes its length plus 768 bytes of its socket's send buffer until it leaves its link
+  or a power cut drops it. As on Linux, a send goes whole while the send buffer is empty
+  or takes less than `send_buffer_bytes`, and is pending from then. When a datagram
+  leaves and the send buffer is no longer full, each send that waits wakes in the same
+  step. Approved by the coordinator. Amended (2026-10-07, #995): `Net::resolve` gives
+  the addresses of a host name. An IP literal gives its one address with no lookup, and
+  no lookup is cached. `Sim::name` sets the answer to each lookup of a name in the run,
+  on any node: its addresses in order, none (`NotFound`), or a failure (`Io` with
+  `EAGAIN`), after a delay on the clock of the node. A lookup reads the answer at its
+  first poll and sends no packet, so a partition does not stop it. Decided by the
+  architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608). From
+  the review of #1018: a name matches in any ASCII case and with or without one final
+  dot, as in DNS. An IP literal as a name panics, because no lookup reads it. A lookup
+  that would end past the end of the clock never answers. The match in any case and with
+  a final dot was confirmed by the architect on #1018, in place of its earlier exact
+  match (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649).
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the

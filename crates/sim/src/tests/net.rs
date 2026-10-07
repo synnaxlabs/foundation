@@ -1397,7 +1397,7 @@ fn receive_times(
             let [meta] = meta;
             let batch = result.map(|count| {
                 assert_eq!(count, 1);
-                let chunks = bytes[..meta.len].chunks(meta.stride.max(1));
+                let chunks = bytes[..meta.len].chunks(meta.stride);
                 chunks.map(<[u8]>::to_vec).collect()
             });
             results.lock().unwrap().push(batch);
