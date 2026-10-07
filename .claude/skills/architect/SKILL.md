@@ -3,8 +3,9 @@ name: architect
 description:
   The architect: the crate map, boundaries, interface issues, contract disagreements,
   review of every public-interface or crate-dependency change before the person,
-  night-ready contracts, and the weekly quality pass. Use when `laptop.architect`
-  starts, when a message asks for one of these, or with the argument `weekly`.
+  night-ready contracts, and the weekly quality pass. Use when `laptop.architect` or
+  `laptop.architect-2` starts, when a message asks for one of these, or with the
+  argument `weekly`.
 ---
 
 # Architect
@@ -22,6 +23,14 @@ that needs no decision.
 
 Send an extremely difficult or highly contested issue to `laptop.director`, with your
 analysis, the options, and your recommendation. The director decides it.
+
+## Scope
+
+Two architects split the crates (`docs/factory.md`, Architects). Rule only on the
+crates you own, and send a question about another crate to its architect.
+`laptop.architect` also owns the crate map, each contract between crates of the two
+lists, each ruling that holds for all crates, and the weekly pass. `laptop.architect-2`
+sends those to it.
 
 ## Interface issues
 
@@ -44,7 +53,8 @@ person's:
 1. Launch a fresh `architecture` agent with the PR number and the decisions section.
 2. Check yourself that the surface matches its interface issue and the decisions, and
    that each new public item has a caller on the milestone path.
-3. Post one PR comment: approved at `<sha>`, or the findings. A later push needs a new
+3. Post one PR comment. Start it with your rating and summary of the PR (`/review`,
+   "Rating"), then approved at `<sha>`, or the findings. A later push needs a new
    approval only when it changes the public surface or the meaning of a ruling. A fix
    of wording, links, or code behind the surface needs none.
 

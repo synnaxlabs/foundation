@@ -4,8 +4,9 @@ use std::fmt;
 
 use types::name::Name;
 
-/// The epoch and the first voters of a child region. Its prefix is the tree key, so it
-/// is not part of the record. The current voters live in the region's own Raft config.
+/// The epoch and the first voters of a child region. Its tree key holds the prefix, so
+/// the prefix is not part of the record. The current voters live in the region's own
+/// Raft config.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delegation {
     epoch: u64,

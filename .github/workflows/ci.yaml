@@ -5,6 +5,21 @@ on:
   merge_group:
   push:
     branches: [main]
+    paths:
+      - 'crates/**'
+      - 'bench/**'
+      - 'fuzz/**'
+      - 'xtask/**'
+      - 'oracles/**'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'clippy.toml'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - '.github/workflows/**'
 
 # Each commit on main gets its own group, so a later merge never cancels its run.
 concurrency:

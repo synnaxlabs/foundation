@@ -111,7 +111,7 @@ take the next issue meanwhile.
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
-  to `laptop.architect`.
+  to the crate's architect (`docs/factory.md`).
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling
   to the crate's section of `docs/decisions.md` in your PR, with who decided and the
   comment link.

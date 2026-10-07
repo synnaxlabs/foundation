@@ -146,7 +146,14 @@ How to read this record:
 - **S5** `Channel { key, name, kind: Kind }`, with
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
-  or virtual flag.
+  or virtual flag. Amended: no `name` field, because the name is the tree key, and
+  `Kind::Data(Data)` has private fields. An array or list of size 0 is valid: no
+  caller divides by its width, and a refusal, when one is needed, goes in
+  `sample::Type`, which every format reads. The spec numbers its scalar codes in its
+  own table, apart from STORED BODY, so a change to one format does not change the
+  other. Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
+  https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -281,26 +288,26 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  costs its length plus the header and at most 64 bytes or a quarter of its length
-  more, and a frame with only empty series still costs its headers. The charge depends
-  only on the frame's length, so the home and the `hub` compute the same charge for
-  the same frame. A remote complete reader gets only the series of its view (M2): the
-  home sends a frame of those series, and both ends charge that frame. The person
-  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
-  charge is part of the wire contract: a change to `block`'s header or size classes
-  needs a new wire version (C9d). The classes changed to four per doubling under wire
-  version 1 (#188), because no release carries that version. The window counts
-  charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
-  and does not count. Credits apply only to complete delivery, which is reliable: a lost
-  frame would leak credit. The `hub` raises the limit only after it releases a frame,
-  and it bounds its decoded copies itself, since a small encoded frame can decode to
-  much more. It sends a `Credit` only when the room it has not announced reaches half
-  the window, and puts the grants for all sessions on one link into one message. It
-  sizes one window per reader from the link's bandwidth-delay product, adapts it, and
-  divides it among the indexes the reader reads. Each session with room can pass its
-  limit by one frame, so the `hub` counts one largest frame per such session against the
-  window, and a reader pins at most its window. Replaces r11 5.2 (a window beyond the
-  acknowledged position): flow control stays apart from durable acks.
+  costs its length plus the header and at most 64 bytes or a quarter of its length more,
+  and a frame with only empty series still costs its headers. The charge depends only on
+  the frame's length, so the home and the `hub` compute the same charge for the same
+  frame. A remote complete reader gets only the series of its view (M2): the home sends
+  a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
+  that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
+  frames"), #267. The charge is part of the wire contract: a change to `block`'s header
+  or size classes needs a new wire version (C9d). The classes changed to four per
+  doubling under wire version 1 (#188), because no release carries that version. The
+  window counts charges, not wire bytes. Per-connection framing in `wire` (X35) pins no
+  pool memory and does not count. Credits apply only to complete delivery, which is
+  reliable: a lost frame would leak credit. The `hub` raises the limit only after it
+  releases a frame, and it bounds its decoded copies itself, since a small encoded frame
+  can decode to much more. It sends a `Credit` only when the room it has not announced
+  reaches half the window, and puts the grants for all sessions on one link into one
+  message. It sizes one window per reader from the link's bandwidth-delay product,
+  adapts it, and divides it among the indexes the reader reads. Each session with room
+  can pass its limit by one frame, so the `hub` counts one largest frame per such
+  session against the window, and a reader pins at most its window. Replaces r11 5.2 (a
+  window beyond the acknowledged position): flow control stays apart from durable acks.
   Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
@@ -462,9 +469,12 @@ How to read this record:
   `Invalid` after that write. Each statement about a record holds only when no CRC gives
   a false match. Decided by the architect (#1049,
   https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
-  `Invalid` gives offset 0 for a header block, which is also the offset of the first
-  record of a ring, until #1093 gives the header its own error. Decided by the architect
-  (#1049, https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031051950).
+  `Unaligned` says that the header block that the open takes holds a tail off a block
+  boundary, and gives that tail. An open that gives `Unaligned` also leaves the ring as
+  read. The open does not check the tail of the other block. `Invalid` names a record
+  only: the first record of a ring is at offset 0. Lost: the tail in `Unfit`, which is
+  also the error of `Layout::new`, where a tail has no value. Decided by the architect
+  (#1093, https://github.com/synnaxlabs/foundation/issues/1093#issuecomment-6031034712).
   The restart record needs one free block: an open of a full ring first moves records at
   the tail to a segment. The walk holds one pool block at a time and reads a longer
   record in pieces of the pool's largest block, so the pool puts no bound on `body_max`.
@@ -506,6 +516,12 @@ How to read this record:
   takes the blocks of its entries (#795). It does not check `Limit::Block`, which
   depends on the pool. An entry has no part, one, or two; `append` takes them owned
   and drops them when it fails (#582).
+  `Layout::fit(len, body_max)` gives the largest ring whose file holds at most `len`
+  bytes, or `Small { len, min }` in file bytes, so a caller never learns the area
+  unit. Its `body_max` bounds panic, from the one check that `Layout::new` uses, and
+  `body_max` comes from a constant of `node`, never a config value; if it ever does,
+  the panic becomes an error first. Decided by the architect on #1166:
+  https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -1010,48 +1026,61 @@ How to read this record:
   reader sends `Credit`, its total grant since the open; the home sends each frame as a
   `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
   `Head` has no form. The body holds only the series of the reader's view, the index
-  series too, written from the frame's block as slices, and both ends charge
-  `View::charge` (M2). A series has the place of its first listing in the open, from 0;
-  the index, when the open does not list it, has place `channels`. An open of no channel
-  is not valid. Only the fixed part of `Open` and of `Head` is one message. The rest is
-  one run of bytes, in messages of at most the peer's `message_bytes_max`, back to back
-  with no prefix: after `Open`, the keys; after `Head`, the place and end of each series
-  in the body, then the body. A message never splits a key or an end, so each side
-  decodes each message as it arrives. The keys run holds exactly `channels` keys and the
-  ends run exactly the head's number of series, so each side counts them to find where a
-  run ends, and the body starts a new message. So no count of channels or series has a
-  cap, and the reader fills one block of the length of the last end. A run message with
-  more keys or ends than remain is not valid. A head of no series is not valid, since a
-  frame holds its index. The home checks each key as it arrives and never allocates by
-  the peer's count. A head with more series than places, or an end with a place the
-  session does not have or that repeats in its frame, is not valid; the reader's `hub`
-  checks this when it maps a place to its key. The body is laid out as the series bytes
-  of the frame of only the view's series that `View::charge` charges (FRAME LAYOUT), in
-  the home's entry order, with ends the home computes for those series: the first series
-  starts at 0, and each other at the end before it rounded up to a multiple of 8. An end
-  below the start of its series is not valid; `types::frame::check` refuses it. The
-  padding may hold any bytes (FRAME LAYOUT), and the reader ignores it: the reader
-  copies each series into a frame of its own, whose entry order follows its own slots,
-  and its `Draft` writes zeros in the padding of that frame. Each direction has its own
-  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
-  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
-  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode, comes from the wrong side, or breaks a rule above), which every
-  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
-  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
-  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
-  `Open`, because the home knows its index and a second copy needs a check; the whole
-  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
-  open needs no mesh time (READER RULES), and a later named open can add one; grants for
-  many sessions in one message, which wait until a link carries a second session. The
-  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
-  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
+  series too, written from the frame's block as slices, and both ends charge the frame
+  that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
+  in the open, from 0; the index, when the open does not list it, has place `channels`.
+  The reader's `hub` lists the keys in the entry order of its own frame (its slot
+  order), the index too, so a place is an entry of the reader's frame. An open of no
+  channel is not valid. Only the fixed part of `Open` and of `Head` is one message. The
+  rest is one run of bytes, in messages of at most the peer's `message_bytes_max`, back
+  to back with no prefix: after `Open`, the keys; after `Head`, the place and end of
+  each series in the body, then the body. A message never splits a key or an end, so
+  each side decodes each message as it arrives. The keys run holds exactly `channels`
+  keys and the ends run exactly the head's number of series, so each side counts them to
+  find where a run ends, and the body starts a new message. So no count of channels or
+  series has a cap, and the reader fills one block of its frame's length: the header,
+  the range, a descriptor for each series, and the body to the last end. A run message
+  with more keys or ends than remain is not valid. A head of no series is not valid,
+  since a frame holds its index. The home checks each key as it arrives and never
+  allocates by the peer's count. A head with more series than places, or an end with a
+  place the session does not have or that is not above the place before it, is not
+  valid; the reader's `hub` checks this as the head and each end arrive, so it holds no
+  more ends than it has places. The ends and the body are in place order: the home
+  writes the series of each place it has, from 0, each from the frame's block as a
+  slice, with ends it computes in that order. The first series starts at 0, and each
+  other at the end before it rounded up to a multiple of 8. So the body is the series
+  bytes of the reader's own frame (FRAME LAYOUT), and the reader builds that frame in
+  one block: the header and descriptors that `types` writes, then the body as it
+  arrives, with no copy of a series after the receive. An end below the start of its
+  series is not valid; `types` refuses it, as `frame::check` does. The padding may hold
+  any bytes (FRAME LAYOUT). Each direction has its own messages: the reader sends
+  `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop codes: 16
+  `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not the home
+  of the index), and 2 `wire::header::MALFORMED` (a message that does not decode, comes
+  from the wrong side, or breaks a rule above), which every protocol may use. Lost: a
+  `message_bytes_max` of at least the largest pool block (a client or a foreign peer can
+  set 1472, and it ties `transport` to the pool); a cap of 91 channels a session, the
+  most that fit in 1472 bytes; the index in its own field of `Open`, because the home
+  knows its index and a second copy needs a check; the whole `Frame::body` (a reader
+  gets only its view); an `UNSYNCED` code, because an unnamed open needs no mesh time
+  (READER RULES), and a later named open can add one; grants for many sessions in one
+  message, which wait until a link carries a second session. The coordinator approved
+  the messages (2026-10-05); the architect decided the rest (#561, 2026-10-06) and the
+  run, the index place, and `MALFORMED` on #1064
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
   whole keys and ends and one message type for each direction
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
   open of no channel and the place checks in `hub`
-  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). The byte
-  form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). Amended
+  (2026-10-07, #1068): the body follows the places, not the home's entry order, so an
+  end whose place is not above the place before it is not valid; both ends charge the
+  reader's frame. Lost: a copy of each series at the reader (one per sample at every
+  remote reader at P1 rates, which the home's free order cannot justify,
+  `docs/claude/performance.md` rule 10); a reader key set in the home's order (key sets
+  are sorted by slot); a start in each descriptor (a disk and wire format change, C9d).
+  Decided by the architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359). The
+  byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
   `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
@@ -1164,22 +1193,24 @@ How to read this record:
   budget is the peer's `window_bytes`. A value over what the node can count counts as
   the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
-  `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
-  transport parameters cannot take this node's whole hello at once (no one-way stream,
-  or a stream or connection window under the hello) also breaks it, with the reason `a
-  peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
-  `Connected` before it, and an accept gives the caller no event. Before the handshake
-  is confirmed, QUIC gives the peer no reason, only APPLICATION_ERROR. A Foundation node
-  always has room: `streams_max` is at least 1, and `window_bytes` is at least
-  `message_bytes_max`, which is at least 1472. A compile-time assertion holds 1472 at or
-  above the hello limit, so only a foreign peer gets this. Lost: send the hello later
-  when credit comes, because `open` then needs a second gate and a state that only a
-  foreign peer reaches. `Endpoint::write` gives `Error::TooLarge` for a message over the
-  peer's limit; a caller that forwards a writer's frame gives the writer `Large`, and
-  the writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by
-  the coordinator on PR #407. The budgets: proposed by `network` in #228. The room
-  order: approved by the advisor on #611. The hello: proposed by `network` in #55;
-  settled by the advisor and the coordinator under the person's delegation (#55).
+  `message_bytes_max` below 1472 (architect, #1198:
+  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it, or
+  resets. A peer whose QUIC transport parameters cannot take this node's whole hello at
+  once (no one-way stream, or a stream or connection window under the hello) also breaks
+  it, with the reason `a peer with no room for the hello`. A dial that breaks so gets
+  `Error::Broken` with no `Connected` before it, and an accept gives the caller no
+  event. Before the handshake is confirmed, QUIC gives the peer no reason, only
+  APPLICATION_ERROR. A Foundation node always has room: `streams_max` is at least 1, and
+  `window_bytes` is at least `message_bytes_max`, which is at least 1472. A compile-time
+  assertion holds 1472 at or above the hello limit, so only a foreign peer gets this.
+  Lost: send the hello later when credit comes, because `open` then needs a second gate
+  and a state that only a foreign peer reaches. `Endpoint::write` gives
+  `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
+  writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
+  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
+  budgets: proposed by `network` in #228. The room order: approved by the advisor on
+  #611. The hello: proposed by `network` in #55; settled by the advisor and the
+  coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
@@ -1248,6 +1279,15 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
   connected attempt: proposed by `box2.builder-5`, decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
+- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` future that drops before
+  it completes resets the stream with `Code(0)`. After that, each `send`, `try_send`,
+  and `finish` on the sender gives `Error::Reset { code: Code(0) }`, and the
+  `Error::Reset` doc names both causes: the peer, or a dropped `send` future. A dropped
+  future is a normal cancel in async code, such as a timeout in a select, so it must not
+  panic; in both cases the caller opens a new stream. Rejected: a panic, as after
+  `finish` (a timeout the caller handles would become a crash). Proposed by
+  `box2.builder-5`, decided by the architect, #68
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1648,6 +1688,38 @@ How to read this record:
   voters record membership, and the join is logged on the changes channel. Files name
   nodes only where they matter (voters, placement). Ephemeral nodes are removed after a
   set time offline. Tickets are secrets.
+- **MEMBER RECORD (#242)** The region's record of a node is a `mesh::Member`: a
+  `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
+  node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
+  byte form), the join ticket's signature over the first card, an ephemeral expiry, and
+  the key of each status channel (X27) by its name relative to the node's name
+  (`clock.offset`, never the full name); `card.name` is the one copy of the node's name.
+  The joining node gives its own release's names; the voters assign the keys at join
+  (X27). A status name keeps its meaning and data type in every release, and a change
+  takes a new name, so `hub` resolves a status channel from the record alone. The byte
+  form (#336) writes the status entries in name order. A list in the order of a table in
+  `node` lost, because `hub` cannot read that table and a new release would change what
+  a stored position means. Cost: about 40 bytes of names per member (architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
+  card's byte form is the name behind a length byte, the public key (32 bytes), the seal
+  key (32 bytes), a count of addresses (8 bytes), each address, and the version (8
+  bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the relay's
+  public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in network
+  order), and the port (2 bytes). An IPv6 address has no flow info and no scope, because
+  each means something only on the node that sets it. Every number but the IP is little
+  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
+  configuration is the one source) and no lease. The seal key is inside the signed card
+  (S8). A join is one `Join` change. Every node that applies it checks the card, and the
+  admission against the ticket's public key, scope, uses, and expiry at the change's
+  mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a
+  join answers with the founding voters and their cards, and the node opens with them as
+  `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
+  cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
+  and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
+  rotation that only the node signs lets a stolen key lock the node out. Lost: a record
+  that only the admitting voter checks (a voter that lies admits any key, against BQ12).
+  Decided by the architect, #242
+  (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
@@ -1750,25 +1822,38 @@ How to read this record:
   turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
   person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
-  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an
-  `httparse` reader) closed: the person told `connector` to use the `hyper` client on
-  2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
-  HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
-  HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
-  Decided by the coordinator with `advisor` on 2026-10-06 (#341). The client keeps one
-  idle connection for each origin. It does not reuse one that is idle longer than 90 s
-  (the `hyper-util` default), read on the `env` clock, and the next send closes it: the
-  client sends no keep-alive, and a firewall or NAT may drop the state of an idle
-  stream. Decided by the coordinator with `advisor` on 2026-10-06
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an `httparse`
+  reader) closed: the person told `connector` to use the `hyper` client on 2026-10-06.
+  `httparse` comes in only as a dependency of `hyper`. The client is HTTP/1.1 only for
+  now: `h2` 0.4 reads the OS clock to expire a reset stream, so HTTP/2 turns on only
+  when `h2` takes its clock through `env`, by an upstream change. Decided by the
+  coordinator with `advisor` on 2026-10-06 (#341). The client keeps one idle connection
+  for each origin. It does not reuse one that is idle longer than 90 s (the `hyper-util`
+  default), read on the `env` clock, and the next send closes it: the client sends no
+  keep-alive, and a firewall or NAT may drop the state of an idle stream. Decided by the
+  coordinator with `advisor` on 2026-10-06
   (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). A
-  request that fails on a reused connection before its response goes once more on a
-  new connection, when the connection did not write it, or when its method is
-  idempotent and no byte of a response came (RFC 9112, as in Go). The pool key is the
-  origin: scheme, host, and port. Today the client takes only `http` with an IP
-  address, so the socket address is the origin. With TLS or name lookup, the key keeps
-  the host name, because a TLS connection is verified for one name and must never
+  request that fails on a reused connection before its response goes once more on a new
+  connection, when the connection did not write it, or when its method is idempotent and
+  no byte of a response came (RFC 9112, as in Go). The pool key is the origin, and it
+  keeps the host name, because a TLS connection is verified for one name and must never
   carry a request for another. Decided by the architect on #1111
-  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223).
+  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223). The key
+  is the host name in lower case and the port. `influx.` and `influx` are two keys,
+  because a resolver may expand a name with no final dot. The client takes only `http`
+  today; with TLS, the key also holds the scheme. A new connection looks up the host
+  through `env` and tries each address in order, as Go does: each address gets an equal
+  share of the time left to the deadline, but at least 2 s or all that is left. A
+  refused address moves the dial to the next at once, and no connect starts once the
+  time is up. A reused connection does no lookup. Lost: Happy Eyeballs (RFC 8305), which
+  needs more code and streams; a separate error variant for a failed lookup, which a
+  caller handles as a failed connect; no limit for each address, where one that drops
+  the SYN uses the whole timeout. Decided by `connector` in the plan on #341
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051) and in
+  the review of #1135 on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1939,6 +2024,12 @@ How to read this record:
   `config` builder; approved by the coordinator (#330). `write` and `update` take a
   `Checked`, and `read` does not change: decided by the architect (#828,
   https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
+  Trigger for `read` to give a `Checked`: the first production code that calls
+  `Checked::new` on a `read` result, or writes one back with `write`, files an
+  `interface` issue that names it. Until then no code checks the depth twice, and a
+  checked whole Document does not make a checked connector body. Decided by the
+  architect (#1089,
+  https://github.com/synnaxlabs/foundation/pull/1089#issuecomment-6031438972).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -2018,6 +2109,32 @@ How to read this record:
   would move the policy to other voters silently, and X26 could never fail), and the
   region from the directory (K2 makes the layout a default only; r3 rejected a
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
+  The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
+  `@node_settings`, `@compression` (compression section), `@placement` (S12), and
+  `@time`. No time keyword was on record (C6 shows `[[time]]`, and X36 replaced its
+  content), so the architect decided `time`. A connector has no segment: it is at its
+  own name, and its channels are its children (#758, 2.2, C8). A channel has no segment
+  either: it is at its own name (#756,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
+  check still applies to both names. A region record is at `<prefix>.@region` in the
+  parent's tree (#758). This is not an exception to X2: the region that holds the record
+  is the longest region prefix that contains `<prefix>`, other than `<prefix>` itself.
+  The root region has no record and no key: no parent records it (X3), and its voters
+  live only in its Raft config. The one place that maps a key to its region applies
+  this, so no caller tests for `@region`. Decided by the architect, #1001
+  (https://github.com/synnaxlabs/foundation/issues/1001#issuecomment-6031305302; #758
+  for the connector and the region). The kind is `spec::definition::Kind`, and the
+  module `spec::key` holds the whole key rule: the segments, the `@` rule, the bound,
+  `Kind::key`, and `key::Error`. Lost: a module `spec::kind`, because in `spec` "kind"
+  also names a connector's driver. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031286198 and
+  https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031290037).
+  `Kind::key` takes the label as text and checks it in this order: the bound
+  (`key::Error::Long`, the one length error for every kind, with `Name::MAX_BYTES` for a
+  connector), then the name (`key::Error::Name`), then the `@` rule. So the user gets
+  the true bound in one round. Lost: a `&Name` label, whose parse gives its own length
+  error with the wrong bound. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031559597).
 
 ### 1.12 Access, identity, and secrets
 
@@ -2441,14 +2558,21 @@ How to read this record:
   by `ops` in #410; approved by the coordinator on #806.
 - **SHARD BUFFERS (2026-10-07)** Each shard opens its write-ahead ring in directory
   `shard-<i>` of the node's data directory and keeps it until the node stops.
-  `node::Config::files` makes the files of the data directory with no core; each
-  shard calls it once on its own thread, because `Files` is `Rc`. `node` alone names
-  `shard-<i>`. `node::Config::entropy` gives the shards randomness. A ring that does
-  not open stops the node, and `join` gives `Error::Buffer` with the core, after
-  `Start` and `Memory` and before `Panicked`. A data directory made for another shard
-  count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
-  is the long-term path (#1077). Running the stored count on another core count lost:
-  it bends C2. Decided by the architect on #1062:
+  `node::Config::files` is a maker with no core that `node` calls on the start
+  thread, in order of core, for each shard that gets its memory, just before its
+  start; the shard runs the function it gives on its own thread, because `Files` is
+  `Rc`, and a shard that does not start drops it unrun. A caller on the real OS makes
+  each shard's disk with `os::files` before the start and joins its I/O thread after
+  `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files` only
+  with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
+  randomness. A ring that does not open stops the node, and `join` gives
+  `Error::Buffer` with the core, after `Start` and `Memory` and before `Panicked`. A
+  data directory made for another shard count, more or fewer, is refused before any
+  buffer opens (#1076); a reshard at start is the long-term path (#1077). Running the
+  stored count on another core count lost: it bends C2. Decided by the architect on
+  #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
   count is an empty directory `shards-<n>` in the data directory, made and synced
   before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the
@@ -2625,9 +2749,9 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls it; commits). Two channels with one key are a defect and panic (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
-| Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
+| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
@@ -2662,7 +2786,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, name, public key, seal key, version, ephemeral expiry }` in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |

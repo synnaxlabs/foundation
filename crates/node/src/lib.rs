@@ -41,11 +41,14 @@ pub struct Config<M> {
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
     /// once for each shard, in order of core.
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
-    /// Makes the files of the node's data directory. Each shard calls it once on its
-    /// own thread, because a `Files` cannot leave the thread that made it. `node`
-    /// records the shard count in directory `shards-<n>` inside them, and opens the
-    /// buffer of shard `i` in directory `shard-<i>`.
-    pub files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
+    /// Makes the files of one shard. `node` calls it on the thread that calls
+    /// [`Node::start`], in order of core, once for each shard that gets its memory,
+    /// just before that shard starts. The shard runs the function it gives on its own
+    /// thread, because a `Files` cannot leave the thread that made it; a shard that
+    /// does not start drops it unrun. `node` records the shard count in directory
+    /// `shards-<n>` inside the files, and opens the buffer of shard `i` in directory
+    /// `shard-<i>`.
+    pub files: Box<dyn FnMut() -> Box<dyn FnOnce() -> env::files::Files + Send>>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
 }
@@ -113,7 +116,7 @@ impl Node {
             wall,
             budget,
             mut memory,
-            files,
+            mut files,
             entropy,
         } = config;
         let (mesh, _reader) = clock::Clock::new(monotonic.clone());
@@ -155,9 +158,9 @@ impl Node {
                 failed: Arc::clone(&failed),
             };
             let first = first.take();
-            let files = Arc::clone(&files);
+            let make = files();
             let main = move |tasks: env::tasks::Tasks| {
-                let files = files();
+                let files = make();
                 if let Some((mesh, wall, give)) = first {
                     let failed = Arc::clone(&open.failed);
                     tasks.spawn(async { mesh.run(wall).await });

@@ -1,141 +1,22 @@
-use std::future::poll_fn;
-use std::sync::{Arc, Mutex};
-
 use bytes::Bytes;
 use http::Request;
 
-use env::clock::Clock;
-use env::net::{Tcp, tcp};
 use types::time::{Monotonic, Span};
 
-use super::{BODY_MAX, Network, PORT, Step, get, request, shard, write};
+use super::common::{OK, Reply, all_ok, ok};
+use super::{BODY_MAX, Network, PORT, Step, get};
 use crate::http::Error;
 
-const OK: &str = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
 const IDLE_MAX: Span = Span::from_nanos(90 * Span::SECOND.nanos());
 const OVER: Span = Span::from_nanos(IDLE_MAX.nanos() + 1);
-
-/// What the server does with one request.
-#[derive(Clone)]
-enum Reply {
-    /// Writes the bytes and waits for the next request.
-    Bytes(String),
-    /// Writes the bytes, waits for the span, and closes the stream, as a server
-    /// with a keep-alive timeout does.
-    Close(String, Span),
-    /// Writes nothing and waits for the next request.
-    Nothing,
-}
-
-/// What a server saw.
-#[derive(Default)]
-struct Log {
-    /// The stream of each request, in the order they came, by accept order.
-    requests: Vec<usize>,
-    /// The bytes of each request, in the order they came.
-    bytes: Vec<Vec<u8>>,
-    /// When each stream came and ended, by accept order.
-    streams: Vec<(Monotonic, Option<Monotonic>)>,
-}
-
-impl Network {
-    /// Serves each stream on `port` until it ends. `answer` gets the index of each
-    /// request, counted over all streams.
-    fn serve_each(
-        &mut self,
-        port: u16,
-        answer: impl Fn(usize) -> Reply + Send + Sync + 'static,
-    ) -> Arc<Mutex<Log>> {
-        let listen = tcp::Listen {
-            local: self.remote_on(port),
-            backlog: 4,
-            options: crate::http::OPTIONS,
-        };
-        let mut listener = self.server.net().listen(&listen).expect("the port is free");
-        let clock = self.server.clock();
-        let log = Arc::new(Mutex::new(Log::default()));
-        let slot = Arc::clone(&log);
-        let answer = Arc::new(answer);
-        let handle =
-            self.server
-                .shards()
-                .start(shard("server"), move |tasks| async move {
-                    loop {
-                        let stream = poll_fn(|cx| listener.poll_accept(cx))
-                            .await
-                            .expect("a stream comes");
-                        let index = {
-                            let mut log = slot.lock().expect("no panic under the lock");
-                            log.streams.push((clock.now(), None));
-                            log.streams.len() - 1
-                        };
-                        let (log, answer, clock) =
-                            (Arc::clone(&slot), Arc::clone(&answer), clock.clone());
-                        tasks.spawn(async move {
-                            answer_each(stream, index, &log, &*answer, &clock).await;
-                            log.lock().expect("no panic under the lock").streams
-                                [index]
-                                .1 = Some(clock.now());
-                        });
-                    }
-                });
-        self.handles.push(handle.expect("the shard starts"));
-        log
-    }
-}
-
-/// Answers each request on `stream` until the stream ends.
-async fn answer_each(
-    mut stream: Tcp,
-    index: usize,
-    log: &Mutex<Log>,
-    answer: &(dyn Fn(usize) -> Reply + Send + Sync),
-    clock: &Clock,
-) {
-    loop {
-        let bytes = match request(&mut stream).await {
-            Ok(bytes) if !bytes.is_empty() => bytes,
-            _ended => return,
-        };
-        let count = {
-            let mut log = log.lock().expect("no panic under the lock");
-            log.bytes.push(bytes);
-            log.requests.push(index);
-            log.requests.len() - 1
-        };
-        match answer(count) {
-            Reply::Bytes(bytes) => write(&mut stream, bytes.as_bytes()).await,
-            Reply::Close(bytes, idle) => {
-                write(&mut stream, bytes.as_bytes()).await;
-                clock.sleep(idle).await;
-                poll_fn(|cx| stream.poll_close(cx))
-                    .await
-                    .expect("the close works");
-                return;
-            }
-            Reply::Nothing => {}
-        }
-    }
-}
 
 fn after(time: Monotonic, span: Span) -> Monotonic {
     time.checked_add(span).expect("a short run")
 }
 
-fn ok(_: usize) -> Reply {
-    Reply::Bytes(OK.into())
-}
-
 fn sends(network: &Network, port: u16, n: usize) -> Vec<Step> {
     let url = format!("http://{}/", network.remote_on(port));
     (0..n).map(|_| Step::Send(get(&url))).collect()
-}
-
-fn all_ok(outcomes: &[Result<http::Response<Bytes>, Error>]) {
-    for outcome in outcomes {
-        let response = outcome.as_ref().expect("the server answers");
-        assert_eq!(response.body().as_ref(), b"ok");
-    }
 }
 
 #[test]
@@ -337,16 +218,25 @@ fn post(network: &Network) -> Request<Bytes> {
         .expect("a valid request")
 }
 
-#[test]
-fn sends_a_post_again_when_the_close_came_before_the_write() {
-    // In this run, the FIN reaches the client as the second send starts, so `hyper`
-    // cancels the request and does not write it.
+/// Checks that a POST sent `wait` nanoseconds after the first send, which `hyper`
+/// does not write on the closed idle stream, goes once more on a new stream.
+fn check_post_again(wait: i64) {
     let mut network = Network::new(50);
     let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
     let second = post(&network);
-    let steps = race_at(&mut network, second, RACE_IDLE.nanos());
+    let steps = race_at(&mut network, second, wait);
     all_ok(&network.run(steps));
     assert_eq!(log.lock().expect("no panic").requests, [0, 1]);
+}
+
+#[test]
+fn sends_a_post_again_when_the_fin_arrives_at_the_send() {
+    check_post_again(RACE_IDLE.nanos());
+}
+
+#[test]
+fn sends_a_post_again_after_the_client_read_the_fin() {
+    check_post_again(RACE_IDLE.nanos() + Span::MILLISECOND.nanos());
 }
 
 #[test]
