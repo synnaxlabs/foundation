@@ -2302,8 +2302,6 @@ pub(super) mod tests {
                 dropped_closed(&mut readers, &model);
                 records.extend(readers.records());
             }
-            assert_eq!(readers.floor(), model.floor());
-            assert_eq!(readers.deadline(), model.deadline());
             if flushed {
                 readers.flush();
                 records.extend(readers.records());

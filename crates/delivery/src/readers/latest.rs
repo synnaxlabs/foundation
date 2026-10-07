@@ -315,6 +315,13 @@ mod tests {
             let new = complete(&mut readers, "a", live(0));
             assert_eq!(new, complete::Key(0));
             dropped(&mut readers, old.into());
+            let open = Record {
+                reader: name("a"),
+                position: live(0),
+                hold: Span::from_nanos(10),
+                closed: None,
+            };
+            assert_eq!(readers.records().collect::<Vec<_>>(), [open]);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
         }
     }
