@@ -741,7 +741,7 @@ mod tests {
                 ];
                 let refused = Error::NotVoter { from: key(4) };
                 for body in requests {
-                    let received = mesh.receive(public(4), message(4, 1, body, None));
+                    let received = mesh.receive(public(4), message(4, 1, body));
                     assert_eq!(received, Err(refused.clone()));
                 }
                 assert_eq!(
@@ -766,7 +766,7 @@ mod tests {
                     Body::AppendReject { hint: 0 },
                 ];
                 for body in replies {
-                    let received = mesh.receive(public(4), message(4, 1, body, None));
+                    let received = mesh.receive(public(4), message(4, 1, body));
                     assert_eq!(received, Ok(()));
                 }
             });
@@ -779,7 +779,7 @@ mod tests {
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
-                assert_eq!(reply, message(1, 2, Body::HeartbeatReply, None));
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
         }
 
@@ -797,14 +797,14 @@ mod tests {
                     spoofed.to_string(),
                     format!("a message names node {} {text}", key(2))
                 );
-                let stranger = message(9, 1, Body::HeartbeatReply, None);
+                let stranger = message(9, 1, Body::HeartbeatReply);
                 let received = mesh.receive(public(9), stranger);
                 assert_eq!(received, Err(Error::Spoofed { from: key(9) }));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
-                assert_eq!(reply, message(1, 2, Body::HeartbeatReply, None));
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
         }
 
@@ -832,7 +832,7 @@ mod tests {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let misrouted = Error::Raft(raft::Error::Misrouted { to: key(3) });
                 let received =
-                    mesh.receive(public(2), message(2, 3, Body::HeartbeatReply, None));
+                    mesh.receive(public(2), message(2, 3, Body::HeartbeatReply));
                 assert_eq!(received, Err(misrouted));
             });
         }
@@ -863,7 +863,7 @@ mod tests {
             let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             let reply = mesh.outgoing(key(2)).await.unwrap();
-            assert_eq!(reply, message(1, 2, Body::HeartbeatReply, None));
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             let waited = clock.now() - opened;
             assert!(waited < TICK, "the reply came after {waited}");
         });
@@ -902,7 +902,7 @@ mod tests {
             node.clock().sleep(TICK).await;
             assert_eq!(waiting.take(), Some(Err(stopped.clone())));
             assert_eq!(mesh.propose(home(2)), Err(stopped.clone()));
-            let reply = message(2, 1, Body::HeartbeatReply, None);
+            let reply = message(2, 1, Body::HeartbeatReply);
             assert_eq!(mesh.receive(public(2), reply), Err(stopped));
         });
     }
@@ -947,7 +947,7 @@ mod tests {
     #[test]
     fn a_full_queue_drops_its_oldest_message() {
         let mut queue = Queue::default();
-        let heartbeat = |commit| message(1, 2, Body::Heartbeat { commit }, None);
+        let heartbeat = |commit| message(1, 2, Body::Heartbeat { commit });
         (0..=64)
             .map(heartbeat)
             .for_each(|message| queue.push(message));
