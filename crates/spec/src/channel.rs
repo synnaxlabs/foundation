@@ -7,6 +7,10 @@ use types::sample::{self, Scalar};
 
 use crate::unit::Unit;
 
+mod check;
+
+pub use check::{Edge, Problem, check};
+
 /// A channel. Its name is the tree key, so it is not part of the definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {

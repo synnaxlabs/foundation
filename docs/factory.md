@@ -15,6 +15,7 @@ the person's laptop and runs its launcher line there: `cmux new-workspace --name
 | --- | --- | --- | --- | --- |
 | `laptop.coordinator` | laptop | the person | `/coordinate` | `~/.factory/bin/factory-agent laptop.coordinator` |
 | `laptop.architect` | laptop | the person | `/architect` | `~/.factory/bin/factory-agent laptop.architect` |
+| `laptop.architect-2` | laptop | the person | `/architect` | `~/.factory/bin/factory-agent laptop.architect-2` |
 | `laptop.integrator-1` | laptop | the person | `/build` | `~/.factory/bin/factory-agent laptop.integrator-1` |
 | `laptop.integrator-2` | laptop | the person | `/build` | `~/.factory/bin/factory-agent laptop.integrator-2` |
 | `laptop.director` | laptop | the person | `/direct` | `~/.factory/bin/factory-agent laptop.director` |
@@ -33,9 +34,9 @@ the person's laptop and runs its launcher line there: `cmux new-workspace --name
 The launcher sources `~/.factory/env`, so `gh` and `git` act as the GitHub App
 `synnax-foundation-factory[bot]` (one private key per machine). It makes the worktree
 `~/Desktop/synnaxlabs/foundation-wt/<role>`, sets `FACTORY_NAME`, and starts Claude
-Code with `--name <role>`, the factory mod, and the role's skill. The architect and the
+Code with `--name <role>`, the factory mod, and the role's skill. The architects and the
 director run at `xhigh` effort, the others at `high`. The director owns the quality bar
-and the issue queue, decides the hard calls the architect sends it, and approves each
+and the issue queue, decides the hard calls an architect sends it, and approves each
 red-team PR. The monitor keeps the work moving: it unblocks sessions and watches
 efficiency.
 
@@ -56,6 +57,17 @@ budget. One issue is in progress per crate. The coordinator keeps this table cur
 
 The risk crates are `raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`,
 `home`, and `replica` on box1, and `transport` on box2. The red-teams aim at them.
+
+## Architects
+
+Two architects split the crates by load. "The crate's architect" in the skills is the
+one that owns the crate. `laptop.architect` also owns the crate map, each contract
+between crates of the two lists, and each ruling that holds for all crates.
+
+| Architect | Crates |
+| --- | --- |
+| `laptop.architect` | `types`, `hub`, `control`, `delivery`, `home`, `mesh`, `raft`, `access`, `blob`, `buffer`, `replica`, `block`, `ring`, `codec`, `wire`, `counting` |
+| `laptop.architect-2` | `spec`, `node`, `config`, `config-hcl`, `document`, `ops`, `acceptance`, `transport`, `clock`, `estimate`, `sim`, `env`, `os`, `secret`, `connector`, `connector-<kind>`, `daqmx-stub` |
 
 ## Milestones
 

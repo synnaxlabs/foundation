@@ -73,9 +73,9 @@ state on `main`.
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
   byte arrives). A connection now holds at most its receive budget (#467), and a
-  size takes the budget of a size with no block in use (#270). Still open: a test
-  that a stream on another connection reads while one connection holds its budget,
-  and many connections before admission (#563).
+  size takes the budget of a size with no block in use (#270). A stream on another
+  connection reads while one connection holds its budget (RECV WAITS). Still open:
+  many connections before admission (#563).
 - Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
   reset to each address it spoofs, with no limit), #620 (a stop after the peer's
   reset gives the peer the stream's window twice, so a peer grows the connection's
@@ -286,7 +286,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
-| `wire_hub` | `wire::hub::Open::decode`, `Credit::decode`, `Reply::decode`, `keys::decode`, `ends::decode` | Encodes to the same bytes |
+| `wire_hub` | `wire::hub::Open::decode`, `Credit::decode`, `Reply::decode`, `keys::decode`, `ends::decode`, `Open::encode`, `Credit::encode`, `Reply::encode`, `keys::encode`, `ends::encode` | Encodes to the same bytes; each valid message made from the input decodes to itself |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -304,7 +304,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
-| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; each path reads by the read rules, the same in one read, in steps, and after a reopen |
+| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`

@@ -15,4 +15,4 @@ pub use buffer::{Buffer, Commit, Config, Error, Rejected};
 pub use entry::{Entry, PARTS_MAX, Parts};
 pub use log::{Mark, Tail};
 pub use read::{Read, Stored};
-pub use wal::{Layout, Limit, Unfit};
+pub use wal::{Layout, Limit, Small, Unfit};

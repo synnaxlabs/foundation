@@ -4,6 +4,7 @@
 use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
 use super::connection::Fault;
+use crate::MESSAGE_BYTES_MIN;
 use crate::varint::{self, Varint};
 
 /// The most bytes a hello takes.
@@ -42,8 +43,8 @@ impl Hello {
     /// # Errors
     ///
     /// The fault when the hello is over [`BYTES_MAX`], ends inside a pair, has an id
-    /// at or below the one before it, misses id 0 or 1, has a `message_bytes_max` of
-    /// 0, or has a `window_bytes` below its `message_bytes_max`.
+    /// at or below the one before it, misses id 0 or 1, has a `message_bytes_max`
+    /// below 1472, or has a `window_bytes` below its `message_bytes_max`.
     pub(super) fn decode(mut bytes: &[u8]) -> Result<Self, Fault> {
         if bytes.len() > BYTES_MAX {
             return Err(Fault(format!("a hello over {BYTES_MAX} bytes")));
@@ -70,8 +71,11 @@ impl Hello {
             window.ok_or_else(|| Fault("a hello with no window_bytes".to_owned()))?;
         let message_bytes_max = message
             .ok_or_else(|| Fault("a hello with no message_bytes_max".to_owned()))?;
-        if message_bytes_max == 0 {
-            return Err(Fault("a hello with a message_bytes_max of 0".to_owned()));
+        if message_bytes_max < MESSAGE_BYTES_MIN {
+            return Err(Fault(format!(
+                "a hello with a message_bytes_max of {message_bytes_max}, below \
+                 {MESSAGE_BYTES_MIN}"
+            )));
         }
         if window_bytes < message_bytes_max {
             return Err(Fault(format!(
@@ -207,8 +211,8 @@ mod tests {
     proptest! {
         #[test]
         fn decode_gives_what_encode_sent(
-            a in 1..=VarInt::MAX.into_inner(),
-            b in 1..=VarInt::MAX.into_inner(),
+            a in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner(),
+            b in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner(),
         ) {
             let hello = Hello {
                 window_bytes: usize::try_from(a.max(b)).expect("64 bits"),
@@ -348,11 +352,20 @@ mod tests {
     }
 
     #[test]
-    fn decode_refuses_a_message_bytes_max_of_0() {
+    fn decode_refuses_a_message_bytes_max_below_1472() {
         assert_eq!(
             Hello::decode(&encode(&[(0, 2_000), (1, 0)])),
-            fault("a hello with a message_bytes_max of 0")
+            fault("a hello with a message_bytes_max of 0, below 1472")
         );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 2_000), (1, 1_471)])),
+            fault("a hello with a message_bytes_max of 1471, below 1472")
+        );
+        let hello = Hello {
+            window_bytes: 2_000,
+            message_bytes_max: 1_472,
+        };
+        assert_eq!(Hello::decode(&encode(&[(0, 2_000), (1, 1_472)])), Ok(hello));
     }
 
     #[test]
