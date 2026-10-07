@@ -122,9 +122,13 @@ skips `breaker` adds the line
 ``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
 range of the last round: each `.rs` line it adds or removes, trimmed, must be empty or
 start with `//`, and it must change no `Cargo.toml` or `Cargo.lock` line. A moved file
-counts as each of its lines removed and added. A head that is the range end plus clean
-merges of the base needs no new round. A red-team PR labeled `oracle` also needs the
-director's verdict with the line ``Director: approved at `<sha>` `` at the head.
+counts as each of its lines removed and added. The check reads the range against the
+tree that `git merge-tree` makes of its start and the newest base commit that its end
+holds, so the base's code does not count. A conflict in that tree in a `.rs`,
+`Cargo.toml`, or `Cargo.lock` file counts as a code change, and so does an end that
+holds more than one newest base commit. A head that is the range end plus clean merges
+of the base needs no new round. A red-team PR labeled `oracle` also needs the director's
+verdict with the line ``Director: approved at `<sha>` `` at the head.
 
 ## Second round
 
@@ -152,8 +156,11 @@ nothing checked again. So when round 1 led to fix commits:
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge, whose
 `git show --remerge-diff <merge>` is empty, needs no round. A merge with a resolution
-gets a round on that diff. When it changes no `.rs` line, the round runs `reviewer`
-alone, and its comment says so. Otherwise it runs as step 1 says.
+gets a round on that diff. When the merge has a conflict in a `.rs`, `Cargo.toml`, or
+`Cargo.lock` file (`git merge-tree`), the round runs `reviewer` and `breaker`, also when
+the resolution changes only comments. When it has no such conflict and the diff changes
+no `.rs` line, the round runs `reviewer` alone, and its comment says so. Otherwise it
+runs as step 1 says.
 
 ## Done
 
