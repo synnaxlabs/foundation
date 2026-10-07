@@ -37,7 +37,7 @@ pub struct Config<M> {
     /// The most bytes the node's pools may commit, split evenly across its shards.
     /// Each shard's part must hold the largest block its buffer reads, else
     /// [`Node::join`] gives [`Error::Buffer`].
-    pub budget: usize,
+    pub budget: types::byte::Size,
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it in
     /// order of core, once for each shard, until a shard gets no memory or does not
     /// start.
@@ -123,10 +123,8 @@ impl Node {
     /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
-        let budget =
-            u64::try_from(config.budget).expect("invariant: a usize fits a u64");
         let cores = config.shards.cores().get();
-        match parts(budget, config.disk, cores) {
+        match parts(config.budget, config.disk, cores) {
             Ok(parts) => {
                 let Ok(count) = u32::try_from(cores) else {
                     panic!("the host has {cores} cores, more than a node numbers");
@@ -301,14 +299,16 @@ struct Open {
 /// The pool of each shard from its part of `budget`, and the layout of its ring from
 /// its part of `disk`, in order of core, else the first part that holds no ring.
 fn parts(
-    budget: u64,
+    budget: types::byte::Size,
     disk: types::byte::Size,
     cores: usize,
 ) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
     (0..cores)
         .map(|core| {
-            let budget = usize::try_from(part(budget, cores, core))
-                .expect("invariant: a part is at most its whole");
+            let budget = part(budget.bytes(), cores, core);
+            let Ok(budget) = usize::try_from(budget) else {
+                panic!("pool budget {budget} is past the address space");
+            };
             let layout =
                 buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
             Ok((block::Config { budget }, layout))

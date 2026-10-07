@@ -46,11 +46,7 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
 
 /// The seams of `host`, with a pool budget of `budget` from `memory`, and a disk
 /// budget of [`DISK`].
-fn config(
-    host: &sim::node::Node,
-    budget: usize,
-    memory: Memory,
-) -> Config<block::Heap> {
+fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block::Heap> {
     Config {
         shards: host.shards(),
         clock: host.clock(),
@@ -71,14 +67,14 @@ fn config(
 
 /// Starts a node on `cores` cores of a `sim` host, after `faults` aim at its shards.
 fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
-    start_with(seed, cores, faults, 1 << 20, Box::new(heap))
+    start_with(seed, cores, faults, Size::MEBIBYTE, Box::new(heap))
 }
 
 fn start_with(
     seed: u64,
     cores: usize,
     faults: &[(usize, Fault)],
-    budget: usize,
+    budget: Size,
     memory: Memory,
 ) -> Run {
     let host = sim::node::Config {
@@ -92,7 +88,7 @@ fn start_on(
     seed: u64,
     host: sim::node::Config,
     faults: &[(usize, Fault)],
-    budget: usize,
+    budget: Size,
     memory: Memory,
 ) -> Run {
     let mut sim = sim::Sim::new(sim::Config {
@@ -284,7 +280,7 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     let record = Arc::clone(&calls);
     // Each part is a multiple of the pool's alignment, so only the remainder moves
     // core 0 to a larger reservation.
-    let budget = (9 << 20) + 2;
+    let budget = Size::from_bytes((9 << 20) + 2);
     let mut run = start_with(
         7,
         3,
@@ -298,8 +294,8 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
-    let part = budget / 3;
-    assert_eq!(part * 3 + 2, budget);
+    let part = usize::try_from(budget.bytes() / 3).unwrap();
+    assert_eq!(part * 3 + 2, (9 << 20) + 2);
     let reservation = |budget| block::Config { budget }.reservation();
     assert_eq!(
         *calls.lock().unwrap(),
@@ -311,7 +307,7 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
 fn a_shard_with_no_memory_stops_the_node_before_later_shards_start() {
     for seed in 0..32 {
         let refused = os::memory::Error::Refused;
-        let mut run = start_with(seed, 3, &[], 1 << 20, refuse(1, refused));
+        let mut run = start_with(seed, 3, &[], Size::MEBIBYTE, refuse(1, refused));
         assert_eq!(starts(&run), named(&[0]));
         assert_eq!(run.sim.run(), Ok(()), "seed {seed}");
         let e = run.node.join().unwrap_err();
@@ -338,8 +334,13 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
         }
         .reservation();
         let error = os::memory::Error::Reserve { len, code: 12 };
-        let mut run =
-            start_with(seed, 3, &[(0, Fault::Panic)], 1 << 20, refuse(2, error));
+        let mut run = start_with(
+            seed,
+            3,
+            &[(0, Fault::Panic)],
+            Size::MEBIBYTE,
+            refuse(2, error),
+        );
         assert_eq!(starts(&run), named(&[0, 1]));
         assert_eq!(panics(&mut run), ["shard-0"], "seed {seed}");
         assert_eq!(
@@ -354,13 +355,13 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
 fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let host = sim.node(sim::node::Config::default());
-    let config = config(&host, 4096, Box::new(heap));
+    let config = config(&host, Size::from_bytes(4096), Box::new(heap));
     let (clock, wall, entropy) = (&config.clock, &config.wall, &config.entropy);
     assert_eq!(
         format!("{config:?}"),
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
-             budget: 4096, entropy: {entropy:?}, disk: {DISK:?}, .. }}"
+             budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, .. }}"
         )
     );
 }
@@ -368,7 +369,13 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
 #[test]
 #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
 fn a_budget_past_the_address_space_panics_at_start() {
-    drop(start_with(7, 1, &[], usize::MAX, Box::new(heap)));
+    drop(start_with(
+        7,
+        1,
+        &[],
+        Size::from_bytes(u64::MAX),
+        Box::new(heap),
+    ));
 }
 
 #[test]
@@ -378,7 +385,7 @@ fn a_host_that_cannot_pin_starts_shards_on_no_core() {
         unpinnable: true,
         ..sim::node::Config::default()
     };
-    let mut run = start_on(7, host, &[], 1 << 20, Box::new(heap));
+    let mut run = start_on(7, host, &[], Size::MEBIBYTE, Box::new(heap));
     assert_eq!(
         starts(&run),
         [("shard-0".to_string(), None), ("shard-1".to_string(), None)]
@@ -404,7 +411,7 @@ fn run_on_disk(
 ) -> Result<(), Error> {
     let node = Node::start(Config {
         disk: Size::from_bytes(disk),
-        ..config(host, 1 << 20, Box::new(heap))
+        ..config(host, Size::MEBIBYTE, Box::new(heap))
     });
     assert_eq!(sim.run_for(Span::HOUR), Ok(()));
     node.stop();
@@ -559,7 +566,7 @@ mod buffer {
         let host = host(&mut sim, 2);
         write(&mut sim, &host, 0, 1);
         write(&mut sim, &host, 1, 2);
-        let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+        let mut node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
         let Poll::Ready(Some(mut interner)) = taken(&mut node) else {
             panic!("the last shard gave the interner");
@@ -576,7 +583,7 @@ mod buffer {
     /// takes first. A shard that waits for the interner does not open after it.
     #[test]
     fn a_shard_part_too_small_for_the_buffer_stops_the_node() {
-        let mut run = start_with(7, 32, &[], 1 << 20, Box::new(heap));
+        let mut run = start_with(7, 32, &[], Size::MEBIBYTE, Box::new(heap));
         assert_eq!(run.sim.run(), Ok(()));
         let e = run.node.join().unwrap_err();
         let pool = block::Error::TooLarge {
@@ -667,7 +674,7 @@ mod buffer {
             let disk = Size::from_bytes(bytes);
             let node = Node::start(Config {
                 disk,
-                ..config(&host, 1 << 20, Box::new(heap))
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
             });
             assert_eq!(host.shard_starts(), [], "{shown}");
             assert_eq!(sim.run(), Ok(()));
@@ -705,7 +712,7 @@ mod buffer {
             let host = host(&mut sim, cores);
             let node = Node::start(Config {
                 disk,
-                ..config(&host, 1 << 20, Box::new(heap))
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
             });
             assert_eq!(host.shard_starts(), []);
             assert_eq!(node.join(), Err(Error::Disk { disk, cores, min }));
@@ -735,7 +742,7 @@ mod buffer {
                     })
                 })
             },
-            ..config(&host, 1 << 20, Box::new(heap))
+            ..config(&host, Size::MEBIBYTE, Box::new(heap))
         });
         assert_eq!(*made.borrow(), [0, 1, 2], "shards started before each call");
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
@@ -774,7 +781,7 @@ mod buffer {
                     })
                 })
             },
-            ..config(&host, 1 << 20, memory)
+            ..config(&host, Size::MEBIBYTE, memory)
         });
         assert_eq!(sim.run(), Ok(()));
         (node.join(), *made.borrow(), *ran.lock().unwrap())
@@ -815,7 +822,7 @@ mod buffer {
         for step in 0..200 {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 3);
-            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             let after = Span::from_nanos(step * 10_000);
             assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
             node.stop();
@@ -844,7 +851,7 @@ mod buffer {
             for step in 0..60 {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
-                let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
                 let after = Span::from_nanos(step * 25_000);
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
                 sim.crash(&host, crash);
@@ -908,7 +915,7 @@ mod buffer {
     #[test]
     fn a_shard_with_no_memory_keeps_the_interner_from_the_node() {
         let refused = os::memory::Error::Refused;
-        let mut run = start_with(7, 3, &[], 1 << 20, refuse(1, refused));
+        let mut run = start_with(7, 3, &[], Size::MEBIBYTE, refuse(1, refused));
         assert_eq!(run.sim.run(), Ok(()));
         assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
     }
@@ -1251,7 +1258,7 @@ mod directory {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         let refused = os::memory::Error::Refused;
-        let node = Node::start(config(&host, 1 << 20, refuse(1, refused)));
+        let node = Node::start(config(&host, Size::MEBIBYTE, refuse(1, refused)));
         assert_eq!(sim.run(), Ok(()));
         let e = node.join();
         assert_eq!(
@@ -1284,7 +1291,7 @@ mod directory {
             let host = host(&mut sim, 3);
             record(&mut sim, &host, 2);
             host.fail_shard(2, Fault::Panic);
-            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             let mut run = Run {
                 seed,
                 sim,
