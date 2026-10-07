@@ -476,7 +476,7 @@ How to read this record:
   view. laptop.architect decided this on 2026-10-07T22:47:54Z:
   https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
   `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
-  it, so `hub` does not depend on `delivery`. The `Charge` adds about 8 ns per frame to
+  it, so `hub` does not depend on `delivery`. The `Charge` adds about 7 ns per frame to
   `release` with one `Whole` session; that is accepted, with the `Places` state boxed,
   so that a `Whole` session grows by one pointer and not by the size of `Places`.
   laptop.architect decided both on 2026-10-07T23:13:16Z:
