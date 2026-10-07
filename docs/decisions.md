@@ -4107,8 +4107,9 @@ How to read this record:
   every peer that completes the handshake until the mesh states its rule. At the stop,
   each session and stream future drops, then the transport. The bound on the wait for a
   header is #1628. A transport that stops with an error ends the routing and the node
-  runs on with no port, until #1647 stops the node. Decided by `laptop.architect-2`
-  (2026-10-07):
+  runs on with no port, until #1647 stops the node. #1647 merges before the first
+  protocol in `route` gets a server. Decided by `laptop.architect-2`
+  (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
