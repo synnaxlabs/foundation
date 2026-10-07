@@ -5,6 +5,10 @@ use std::fmt;
 
 use types::name::{Name, Selector};
 
+mod place;
+
+pub use place::{Placed, Unplaced, place};
+
 /// Places the connectors and indexes that `select` matches: a home node, a standby node
 /// that takes over when the home fails, and copy nodes that are never promoted.
 #[derive(Clone, Debug, PartialEq, Eq)]

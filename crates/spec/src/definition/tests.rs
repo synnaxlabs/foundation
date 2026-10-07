@@ -1339,3 +1339,96 @@ fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
         })
     );
 }
+
+#[test]
+fn decodes_the_channel_fuzz_inputs_to_the_channel_reader() {
+    let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/channel");
+    let unit =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/channel_bool_unit");
+    let scalar = |element| DataType::Sample(sample::Type::Scalar(element));
+    let kpa = Unit::new("kPa").unwrap();
+    let data = Data::new(key(9), None, scalar(Scalar::F64), Some(kpa)).unwrap();
+    let channel = Channel {
+        key: key(7),
+        kind: channel::Kind::Data(data),
+    };
+    assert_eq!(Definition::decode(valid), Ok(Definition::Channel(channel)));
+    assert_eq!(
+        Definition::decode(unit),
+        Err(Error::Channel {
+            at: DATA_TYPE_AT,
+            error: channel::Error::Unit {
+                data_type: scalar(Scalar::Bool),
+            },
+        })
+    );
+}
+
+#[test]
+fn decodes_the_placement_fuzz_inputs_to_the_placement_reader() {
+    let policy = |home: Option<&str>, standby: Option<&str>, copies: &[&str]| {
+        let nodes = placement::Nodes {
+            home: home.map(name),
+            standby: standby.map(name),
+            copies: copies.iter().copied().map(name).collect(),
+        };
+        Ok(Definition::Placement(
+            placement::Policy::new(selector(&["site_a.**"]), nodes).unwrap(),
+        ))
+    };
+    let overlap = |node| {
+        Err(Error::Placement {
+            at: 28,
+            error: placement::Error::Overlap(name(node)),
+        })
+    };
+    let cases: [(&[u8], Result<Definition, Error>); 6] = [
+        (
+            include_bytes!("../../../../oracles/fuzz/spec_definition/placement"),
+            policy(None, Some("n_1"), &["n_2", "n_3"]),
+        ),
+        (
+            include_bytes!("../../../../oracles/fuzz/spec_definition/placement_home"),
+            policy(Some("n_4"), Some("n_1"), &["n_2", "n_3"]),
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/placement_home_copy"
+            ),
+            overlap("n_2"),
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/placement_home_standby"
+            ),
+            overlap("n_1"),
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/placement_overlap"
+            ),
+            overlap("n_2"),
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/placement_standby_copy"
+            ),
+            overlap("n_2"),
+        ),
+    ];
+    for (i, (bytes, expected)) in cases.into_iter().enumerate() {
+        assert_eq!(Definition::decode(bytes), expected, "case {i}");
+    }
+}
+
+#[test]
+fn decodes_the_unknown_kind_fuzz_inputs_to_the_kind_check() {
+    let low = include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind");
+    let high =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind_high");
+    assert_eq!(Definition::decode(low), Err(Error::Kind { at: 1, tag: 0 }));
+    assert_eq!(
+        Definition::decode(high),
+        Err(Error::Kind { at: 1, tag: 0xff })
+    );
+}
