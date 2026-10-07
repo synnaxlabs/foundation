@@ -161,7 +161,8 @@ impl Mesh {
     /// The group does not see a message that fails a check.
     ///
     /// - [`Error::Stopped`] when the group stopped.
-    /// - [`Error::Pool`] while a write of the log waits for a block.
+    /// - [`Error::Pool`] from a write of the log that finds no block until that write
+    ///   ends.
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
@@ -203,7 +204,8 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::Pool`] while an earlier write of the log waits for a block.
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block until
+    ///   that write ends.
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead, or when a new leader replaces the entry before a write holds it.
     pub(crate) async fn propose(&self, change: Change) -> Result<Position, Error> {
@@ -245,8 +247,8 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::Pool`] while an earlier write of the log waits for a block. The group
-    ///   does not see the change.
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block until
+    ///   that write ends. The group does not see the change.
     /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
     ///   configuration. The group does not see the change.
     pub(crate) async fn answer(
@@ -366,7 +368,7 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
-    // Why the write of the log waits for a block, while it does.
+    // Why a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
 }
 
@@ -1375,17 +1377,6 @@ mod tests {
             });
         }
 
-        /// The positions that the node gave for `home(3)`.
-        fn positions(answers: &Answers) -> Vec<Position> {
-            let position = |answer| match answer {
-                Ok(Message::Proposed { at }) => Some(at),
-                Ok(Message::NotLeader { leader: None })
-                | Err(Error::Pool(block::Error::Exhausted { .. })) => None,
-                other => panic!("the node answered {other:?}"),
-            };
-            answers.take().into_iter().filter_map(position).collect()
-        }
-
         /// Opens node 1 again after the power cut, and gives the position of the
         /// entry that sets the home to node 1, once the node has that home.
         fn lead_again(sim: &mut Sim, node: &sim::node::Node) -> Position {
@@ -1400,48 +1391,39 @@ mod tests {
         }
 
         // The lone voter leads in memory while the write of its term waits for a
-        // block. After a power cut the node leads the same term again, and a
-        // position that it gave for `home(3)` before would hold `home(1)`.
+        // block. After a power cut the node leads the same term again, so a position
+        // that it gave now would then hold another change.
         #[test]
-        fn a_position_in_an_answer_names_no_other_change_when_the_pool_is_full() {
-            let mut sim = Sim::new(sim::Config::default());
-            let node = sim.node(sim::node::Config::default());
-            let answered = sim
-                .run_on(&node, |node, tasks| async move {
-                    let pool = small_pool();
-                    let config = Config {
-                        pool: Rc::clone(&pool),
-                        ..config(&node, &tasks, 1, &[1], &[1])
-                    };
-                    let mesh = Mesh::open(config).await.unwrap();
-                    // No write of the log ends from here on.
-                    let _held = ManuallyDrop::new(fill(&pool));
-                    let answers = Answers::default();
-                    // Longer than each election timeout.
-                    for _ in 0..30 {
-                        node.clock().sleep(TICK).await;
-                        forward(&mesh, &tasks, &answers);
-                    }
+        fn a_node_gives_no_position_while_the_write_of_its_term_waits() {
+            solo(|node, tasks| async move {
+                let pool = small_pool();
+                let config = Config {
+                    pool: Rc::clone(&pool),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::open(config).await.unwrap();
+                // No write of the log ends from here on.
+                let _held = ManuallyDrop::new(fill(&pool));
+                let answers = Answers::default();
+                // Longer than each election timeout.
+                for _ in 0..30 {
                     node.clock().sleep(TICK).await;
-                    let full = Err(exhausted(200));
-                    let came = answers.borrow().contains(&full);
-                    assert!(came, "no change came while the write waits");
-                    positions(&answers)
-                })
-                .unwrap();
-            sim.crash(&node, Crash::Power);
-            let taken = lead_again(&mut sim, &node);
-            assert!(
-                !answered.contains(&taken),
-                "the node answered that {taken:?} holds the home {}, and after the \
-                 power cut that position holds the home {}; it gave {answered:?}",
-                key(3),
-                key(1),
-            );
+                    forward(&mesh, &tasks, &answers);
+                }
+                node.clock().sleep(TICK).await;
+                let answers = answers.take();
+                let full = Err(exhausted(200));
+                let waits = answers.iter().position(|answer| *answer == full);
+                let (before, from) = answers.split_at(waits.unwrap());
+                let follows = Ok(Message::NotLeader { leader: None });
+                assert_eq!(before, vec![follows; before.len()]);
+                assert_eq!(from, vec![full; from.len()]);
+                assert_eq!(answers.len(), 30);
+            });
         }
 
-        // The same with no fault but the power cut: the change comes while the node
-        // writes the term that it now leads. A disk call takes 100 us at most, so the
+        // The change comes while the node writes the term that it now leads, and a
+        // power cut follows. A disk call takes 100 us at most, so the
         // voter gives the change each 10 us for 500 us before and after each tick.
         #[test]
         fn a_position_in_an_answer_names_no_other_change_after_a_power_cut() {
@@ -1917,6 +1899,35 @@ mod tests {
             // The change that the group refused took no position.
             assert_eq!(mesh.propose(home(4)).await, Ok(after(first, 2)));
             assert_eq!(watch.next().await, Ok(Some(key(4))));
+        });
+    }
+
+    // The write that gets its block is in disk calls for a time.
+    #[test]
+    fn a_group_that_waited_for_a_block_takes_no_change_until_its_write_ends() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            let held = fill(&pool);
+            let mut waits = pin!(mesh.propose(home(2)));
+            assert!(now(waits.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
+            drop(held);
+            let ended = loop {
+                if let Poll::Ready(ended) = now(waits.as_mut()).await {
+                    break ended;
+                }
+                let refused = started(&mesh, home(3)).await;
+                assert_eq!(refused, Poll::Ready(Err(exhausted(93))));
+                node.clock().sleep(Span::from_nanos(10_000)).await;
+            };
+            assert_eq!(ended, Ok(after(first, 1)));
+            assert_eq!(mesh.propose(home(4)).await, Ok(after(first, 2)));
         });
     }
 

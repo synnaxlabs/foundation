@@ -40,7 +40,8 @@ pub(crate) enum Error {
     WrongKey,
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
     /// write of the log, the group takes no proposal and no message until the write
-    /// ends. For the answer to a forwarded proposal, the group did not see the proposal.
+    /// ends. For the answer to a forwarded proposal, the group did not see the
+    /// proposal.
     Pool(block::Error),
     /// The group stopped.
     Stopped(Stopped),
