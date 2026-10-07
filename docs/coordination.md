@@ -125,8 +125,9 @@ Two cases skip the interface issue:
 
 Only `laptop.monitor` rents and ends machines. Test machines stay within the test budget
 (`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day, and at most 15
-USD a day for #1139. The ARM RUNNER hosts stay under AWS CEILING. No other session holds
-AWS credentials. The person decided this
+USD a day for #1139. The ARM RUNNER hosts stay under AWS CEILING, outside the test
+budget, its limits, and step 3. Step 4 checks each by its instance, because they have no
+`issue` tag. No other session holds AWS credentials. The person decided this
 (https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
 2026-10-07T16:48:27Z).
 

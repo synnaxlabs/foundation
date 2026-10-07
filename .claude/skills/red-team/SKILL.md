@@ -45,7 +45,7 @@ Take the commits merged to your crates since your log's last commit, and attack 
 
 End each run by starting one campaign on your crates (fault simulation, fuzz, or
 mutants) as one background command. Its exit wakes you for the next run. Never poll.
-A mutants run caps each test process as `docs/claude/testing.md` says.
+A mutants run runs in the memory cgroup that `docs/claude/testing.md` gives.
 Shrink each failure with the `triage` agent, and file it as an issue with the reduced
 repro and the replay command.
 
