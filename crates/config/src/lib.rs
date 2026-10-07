@@ -1145,6 +1145,23 @@ mod tests {
         }
 
         #[test]
+        fn skips_a_later_home_or_standby_that_does_not_name_the_node() {
+            for (role, other) in [("standby", "home"), ("home", "standby")] {
+                let attributes = [
+                    ("select", string("edge.*")),
+                    (role, string("n_1")),
+                    ("copies", list(50, &[string("n_1")])),
+                    (other, string("n_9")),
+                ];
+                assert_eq!(
+                    check(&placement(&attributes)),
+                    Err(overlap("n_1", at(0, 15))),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
         fn names_the_home_when_the_home_has_two_roles() {
             let attributes = [
                 ("select", string("edge.*")),

@@ -9,9 +9,8 @@ const EMPTY_PLACEMENT: Code = Code::new("config.empty-placement");
 const ROLE_OVERLAP: Code = Code::new("config.role-overlap");
 const KEYS: [&str; 4] = ["select", "home", "standby", "copies"];
 
-/// Checks a `placement` block and adds its policy to the entries.
-pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
-    let key = found.key(block);
+/// Checks a `placement` block and gives its policy.
+pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
     let select = found.select(block, "connectors and indexes that it places");
@@ -21,7 +20,7 @@ pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
     let (Ok(()), Ok(select), Ok(home), Ok(standby), Ok(copies)) =
         (unknown, select, home, standby, copies)
     else {
-        return;
+        return None;
     };
     let nodes = Nodes {
         home,
@@ -29,8 +28,11 @@ pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
         copies: copies.unwrap_or_default(),
     };
     match Policy::new(select, nodes.clone()) {
-        Ok(policy) => found.add(key, Definition::Placement(policy)),
-        Err(error) => refuse(found, block, &nodes, &error),
+        Ok(policy) => Some(Definition::Placement(policy)),
+        Err(error) => {
+            refuse(found, block, &nodes, &error);
+            None
+        }
     }
 }
 
