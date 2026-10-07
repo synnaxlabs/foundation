@@ -116,8 +116,14 @@ impl Queue {
     /// Ends the wait of the read of `stream`, if it waits. When it waited first, the
     /// next read gets its turn now.
     pub(super) fn leave(&mut self, now: Monotonic, stream: stream::Key) {
+        // Each read leaves, so skip the hash when none waits.
+        if self.places.is_empty() {
+            return;
+        }
         if let Some(place) = self.places.remove(&stream) {
-            self.remove(now, |read_place, _| *read_place == place);
+            let first = self.reads.keys().next() == Some(&place);
+            self.reads.remove(&place);
+            self.settle(now, first);
         }
     }
 
@@ -125,13 +131,16 @@ impl Queue {
     pub(super) fn end(&mut self, now: Monotonic, connection: connection::Key) {
         self.places
             .retain(|stream, _| stream.connection != connection);
-        self.remove(now, |_, read| {
+        let first = self.reads.keys().next().copied();
+        self.reads.retain(|_, read| {
             let ends = read.stream.connection == connection;
             if ends {
                 read.waker.wake_by_ref();
             }
-            ends
+            !ends
         });
+        let moved = self.reads.keys().next().copied() != first;
+        self.settle(now, moved);
     }
 
     /// Wakes the read that waits first, so it tries again.
@@ -155,12 +164,10 @@ impl Queue {
         }
     }
 
-    /// Removes each read that `ends` picks. Wakes the new first read when the first
-    /// left, and stops the wait time when none waits.
-    fn remove(&mut self, now: Monotonic, mut ends: impl FnMut(&Place, &Read) -> bool) {
-        let first = self.reads.keys().next().copied();
-        self.reads.retain(|place, read| !ends(place, read));
-        if self.reads.keys().next().copied() != first {
+    /// After reads left: wakes the new first read when the first left, and stops the
+    /// wait time when none waits.
+    fn settle(&mut self, now: Monotonic, first_left: bool) {
+        if first_left {
             self.wake_first();
         }
         if self.reads.is_empty()
