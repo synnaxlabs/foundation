@@ -53,6 +53,9 @@ exclude_re = [
   # what the body returns.
   'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
   'crates/connector-influx/src/sim/server\.rs:.*<impl Write for Stream>::poll_flush',
+  # A cache of the last key set. Without it, each frame looks its set up again and
+  # gets the same `Arc`; only the atomics per frame differ.
+  'crates/hub/src/reader\.rs:.*replace match guard set\.key\(\) == key with false',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
 ]
