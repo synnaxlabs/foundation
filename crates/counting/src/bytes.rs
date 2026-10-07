@@ -64,7 +64,8 @@ impl fmt::Debug for Bytes {
 }
 
 // SAFETY: each call passes its arguments to `System` under the same contract, and
-// `held` changes no memory that `System` gives out.
+// `held` changes no memory that `System` gives out. `realloc` is the trait's own,
+// which calls `alloc` and `dealloc`.
 unsafe impl GlobalAlloc for Bytes {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
@@ -74,17 +75,6 @@ unsafe impl GlobalAlloc for Bytes {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc_zeroed`.
         self.counted(unsafe { System.alloc_zeroed(layout) }, layout.size())
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: the caller keeps the contract of `GlobalAlloc::realloc`, and every
-        // pointer this allocator returns comes from `System`.
-        let new =
-            self.counted(unsafe { System.realloc(ptr, layout, new_size) }, new_size);
-        if !new.is_null() {
-            self.held.fetch_sub(layout.size(), Relaxed);
-        }
-        new
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
