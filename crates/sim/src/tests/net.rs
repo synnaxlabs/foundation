@@ -1412,7 +1412,7 @@ fn uneven() -> Vec<Vec<u8>> {
 }
 
 /// Fails the socket of `b` on port 4433 `faults` times after [`uneven`] from `a`
-/// arrive at it, then gives the results of four receives.
+/// arrive at it, then gives the results of five receives.
 fn results_after(faults: usize) -> Vec<Result<Vec<Vec<u8>>, Net>> {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
@@ -1423,7 +1423,7 @@ fn results_after(faults: usize) -> Vec<Result<Vec<Vec<u8>>, Net>> {
         b.fail_udp(at(&b, 4433));
     }
     let results = Results::default();
-    let _receive = receive_times(&b, receiver, &results, 4);
+    let _receive = receive_times(&b, receiver, &results, 5);
     sim.run_for(Span::SECOND).unwrap();
     results.lock().unwrap().clone()
 }
@@ -1433,8 +1433,25 @@ fn a_failed_socket_gives_its_queue_then_eio() {
     let batches = uneven().into_iter().map(|datagram| Ok(vec![datagram]));
     let mut expected: Vec<_> = batches.collect();
     assert_eq!(results_after(0), expected);
-    expected.push(Err(EIO));
+    expected.extend([Err(EIO), Err(EIO)]);
     assert_eq!(results_after(1), expected);
+}
+
+#[test]
+fn a_datagram_that_arrives_after_the_fault_is_lost_behind_the_queue() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (before, _a) = udp(&a, 4433);
+    let (after, _a2) = udp(&a, 4434);
+    let (_b, receiver) = udp(&b, 4433);
+    let _send = send(&a, before, at(&b, 4433), vec![vec![0]]);
+    sim.run_for(Span::SECOND).unwrap();
+    b.fail_udp(at(&b, 4433));
+    let _send = send(&a, after, at(&b, 4433), vec![vec![1, 1]]);
+    sim.run_for(Span::SECOND).unwrap();
+    let results = Results::default();
+    let _receive = receive_times(&b, receiver, &results, 2);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*results.lock().unwrap(), [Ok(vec![vec![0]]), Err(EIO)]);
 }
 
 #[test]
