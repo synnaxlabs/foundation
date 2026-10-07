@@ -15,12 +15,13 @@ mod stop;
 mod tests;
 
 use std::fmt;
+use std::iter;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use env::thread::Handle;
 use types::frame::key_set::Interner;
-use types::time::Span;
+use types::time::{Span, Stamp};
 
 use crate::handoff::{Give, Take};
 use crate::stop::{Guard, Stop};
@@ -37,7 +38,7 @@ pub struct Config<M> {
     /// The most bytes the node's pools may commit, split evenly across its shards.
     /// Each shard's part must hold the largest block its buffer reads, else
     /// [`Node::join`] gives [`Error::Buffer`].
-    pub budget: usize,
+    pub budget: types::byte::Size,
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it in
     /// order of core, once for each shard, until a shard gets no memory or does not
     /// start.
@@ -96,32 +97,43 @@ struct Shard {
 const BODY_MAX: usize = 1 << 20;
 /// The longest an entry waits for its group commit to start.
 const COMMIT: Span = Span::from_nanos(2_000_000);
+/// The stamps each home accepts, a patch until they are settings (#1285).
+const LIMITS: home::order::Limits = home::order::Limits {
+    earliest: Stamp::from_nanos(946_684_800_000_000_000),
+    ahead: Span::from_nanos(10_000_000_000),
+};
 
 impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
     /// Each shard owns a `block::Pool` with an even part of the budget, and a ring
     /// with an even part of the disk budget; shard 0 also takes each remainder.
-    /// Unless the node stops first, the start records the shard count in the data
-    /// directory, or checks the one there, and each shard opens its buffer in
-    /// directory `shard-<i>` of its files, and makes it there when it is not there.
-    /// The shards open their buffers one after another, in order of core. Returns
-    /// once each shard runs or one has failed to start. When the disk budget holds no
-    /// ring on each shard, no shard starts, and [`Node::join`] gives [`Error::Disk`]
-    /// with the budget, the shard count, and the least budget. A failed start, a shard
-    /// with no memory, a data directory made for another shard count, or a buffer that
+    /// Unless the node stops first, shard 0 locks the data directory with the file
+    /// `lock`, which it holds until each shard has closed its ring, then records the
+    /// shard count in the data directory, or checks the one there, and each shard
+    /// opens its buffer in directory `shard-<i>` of its files, and makes it there
+    /// when it is not there. The shards open their buffers one after another, in
+    /// order of core. Returns once each shard runs or one has failed to start. When
+    /// the disk budget holds no ring on each shard, no shard starts, and
+    /// [`Node::join`] gives [`Error::Disk`] with the budget, the shard count, and the
+    /// least budget. A failed start, a shard with no memory, a data directory that
+    /// another node holds or that was made for another shard count, or a buffer that
     /// does not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
-    /// If a shard's part of the budget needs more address space than a `usize` holds.
+    /// If a shard's part of the budget needs more address space than a `usize` holds,
+    /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
-        let budget =
-            u64::try_from(config.budget).expect("invariant: a usize fits a u64");
         let cores = config.shards.cores().get();
-        match parts(budget, config.disk, cores) {
-            Ok(parts) => Self::spawn(config, parts),
+        match parts(config.budget, config.disk, cores) {
+            Ok(parts) => {
+                let Ok(count) = u32::try_from(cores) else {
+                    panic!("the host has {cores} cores, more than a node numbers");
+                };
+                Self::spawn(config, parts.into_iter().zip(0..count))
+            }
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
@@ -140,10 +152,10 @@ impl Node {
         }
     }
 
-    /// Starts the shards of `config`, each with its part in `parts`.
+    /// Starts the shards of `config`, each with its part and its number in `parts`.
     fn spawn<M: block::Memory + 'static>(
         config: Config<M>,
-        parts: Vec<(block::Config, buffer::Layout)>,
+        parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
         let Config {
             shards,
@@ -157,18 +169,17 @@ impl Node {
         } = config;
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
-        let cores = shards.cores().get();
-        let (mesh, _reader) = clock::Clock::new(monotonic.clone());
-        // Shard 0 runs the mesh clock, and gives the first interner once it has
-        // claimed the data directory.
-        let mut first = Some((mesh, wall, give));
+        let (mesh, clock) = clock::Clock::new(monotonic.clone());
+        let (first, mut ends) = First::new(mesh, wall, give, shards.cores().get());
+        let mut first = Some(first);
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
-        for (core, (config, layout)) in parts.into_iter().enumerate() {
+        for (core, ((config, layout), number)) in parts.enumerate() {
             // A shard that does not start drops `give`, so `interner` gives `None`.
             let (give, take) = handoff::pair();
             let take = std::mem::replace(&mut interner, take);
+            let ended = ends.next().flatten();
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
                 Err(e) => {
@@ -184,10 +195,11 @@ impl Node {
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
             let open = Open {
-                core,
+                shard: number,
                 take,
                 give,
-                clock: monotonic.clone(),
+                monotonic: monotonic.clone(),
+                clock: clock.clone(),
                 entropy: entropy.clone(),
                 layout,
                 failed: Arc::clone(&failed),
@@ -195,14 +207,7 @@ impl Node {
             };
             let first = first.take();
             let make = files();
-            let main = move |tasks: env::tasks::Tasks| {
-                let files = make();
-                if let Some((mesh, wall, give)) = first {
-                    tasks.spawn(async { mesh.run(wall).await });
-                    tasks.spawn(open.claim(files.clone(), cores, give));
-                }
-                open.serve(files, Rc::new(pool), tasks, guard)
-            };
+            let main = move |tasks| open.main(first, make(), pool, tasks, guard, ended);
             match shards.start(shard, main) {
                 Ok(handle) => started.push(Shard { handle, failed }),
                 Err(e) => {
@@ -269,32 +274,72 @@ fn error(
     first.or(panicked).map_or(Ok(()), Err)
 }
 
-/// The disk steps of a shard, made before the shard starts: shard 0's claim of the
-/// data directory, and the open of the shard's buffer. The shards open one after
-/// another, in order of core, because each open assigns slots in the node's one
-/// interner.
+/// A shard's steps, made before the shard starts: shard 0's claim of the data
+/// directory, then the open of the shard's buffer, with the shard's home over it, held
+/// until the node stops. The shards open one after another, in order of core, because
+/// each open assigns slots in the node's one interner.
 struct Open {
-    core: usize,
+    /// The shard's number on its node: its core.
+    shard: u32,
     take: Take<Interner>,
     give: Give<Interner>,
-    clock: env::clock::Clock,
+    monotonic: env::clock::Clock,
+    /// The node's clocks, for the shard's home.
+    clock: clock::Reader,
     entropy: env::entropy::Entropy,
     layout: buffer::Layout,
     failed: Arc<OnceLock<Error>>,
     stop: Stop,
 }
 
+/// Shard 0's own steps: it runs the mesh clock, and gives the first interner once it
+/// has claimed the data directory for the node's `cores`.
+struct First {
+    mesh: clock::Clock,
+    wall: env::wall::Wall,
+    give: Give<Interner>,
+    cores: usize,
+    /// One end for each other shard, which ends once that shard has closed its ring.
+    closed: Vec<Take<()>>,
+}
+
+impl First {
+    /// Shard 0's steps, and the end that each shard drops once its ring has closed,
+    /// in order of core. Shard 0 gets none: it waits for the others.
+    fn new(
+        mesh: clock::Clock,
+        wall: env::wall::Wall,
+        give: Give<Interner>,
+        cores: usize,
+    ) -> (Self, impl Iterator<Item = Option<Give<()>>>) {
+        let (ends, closed): (Vec<_>, Vec<_>) =
+            (1..cores).map(|_| handoff::pair()).unzip();
+        let first = Self {
+            mesh,
+            wall,
+            give,
+            cores,
+            closed,
+        };
+        (first, iter::once(None).chain(ends.into_iter().map(Some)))
+    }
+}
+
 /// The pool of each shard from its part of `budget`, and the layout of its ring from
 /// its part of `disk`, in order of core, else the first part that holds no ring.
 fn parts(
-    budget: u64,
+    budget: types::byte::Size,
     disk: types::byte::Size,
     cores: usize,
 ) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
     (0..cores)
         .map(|core| {
-            let budget = usize::try_from(part(budget, cores, core))
-                .expect("invariant: a part is at most its whole");
+            let budget = part(budget.bytes(), cores, core);
+            let Ok(budget) = usize::try_from(budget) else {
+                panic!(
+                    "pool budget {budget} of shard-{core} is past the address space"
+                );
+            };
             let layout =
                 buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
             Ok((block::Config { budget }, layout))
@@ -310,63 +355,100 @@ fn part(total: u64, cores: usize, core: usize) -> u64 {
 }
 
 impl Open {
-    /// Claims the data directory for `cores` shards, then gives the node's first
-    /// interner. A failed claim goes into `failed` and gives none, so no ring opens.
-    /// So does a stop raised before the claim, but it is not a failure.
-    fn claim(
-        &self,
-        files: env::files::Files,
-        cores: usize,
-        give: Give<Interner>,
-    ) -> impl Future<Output = ()> + 'static {
-        let (failed, stop) = (Arc::clone(&self.failed), self.stop.clone());
-        async move {
-            if stop.raised() {
-                return;
-            }
-            match directory::claim(&files, cores).await {
-                Ok(()) => give.give(Interner::new()),
-                Err(error) => failed
-                    .set(error)
-                    .expect("invariant: shard 0 opens no ring after a failed claim"),
-            }
-        }
-    }
-
-    /// Opens the shard's buffer and keeps it until `guard` completes. A failed open
-    /// drops `guard`, which stops the node.
-    async fn serve(
+    /// Runs the shard to its end. With `first`, the shard first runs the mesh clock
+    /// and claims the data directory. Then it opens its buffer and keeps its home
+    /// until `guard` completes; a failed open drops `guard`, which stops the node.
+    /// Drops `ended` once its ring has closed. Shard 0 holds the lock of the data
+    /// directory until each shard's ring has closed, so a node that takes the lock
+    /// finds no ring open.
+    async fn main(
         self,
+        first: Option<First>,
         files: env::files::Files,
-        pool: Rc<block::Pool>,
+        pool: block::Pool,
         tasks: env::tasks::Tasks,
         guard: Guard,
+        ended: Option<Give<()>>,
     ) {
-        if let Some(buffer) = self.run(files, pool, tasks).await {
-            guard.await;
-            drop(buffer);
+        let (lock, closed) = match first {
+            Some(First {
+                mesh,
+                wall,
+                give,
+                cores,
+                closed,
+            }) => {
+                tasks.spawn(async { mesh.run(wall).await });
+                (self.claim(&files, cores, give).await, closed)
+            }
+            None => (None, Vec::new()),
+        };
+        match self.run(files, Rc::new(pool), tasks).await {
+            Some(home) => {
+                guard.await;
+                let commit = home.committed();
+                drop(home);
+                // Resolves once the buffer's task has written what was queued and
+                // ended, which closes the ring. Its error reaches no caller (#1329).
+                drop(commit.await);
+            }
+            // Stops the node, so each other shard ends.
+            None => drop(guard),
+        }
+        for shard in closed {
+            shard.await;
+        }
+        drop((ended, lock));
+    }
+
+    /// Claims the data directory for `cores` shards, gives the node's first interner,
+    /// and gives the lock of the data directory. A failed claim goes into `failed`
+    /// and gives no interner, so no ring opens. So does a stop raised before the
+    /// claim, but it is not a failure.
+    async fn claim(
+        &self,
+        files: &env::files::Files,
+        cores: usize,
+        give: Give<Interner>,
+    ) -> Option<env::files::File> {
+        if self.stop.raised() {
+            return None;
+        }
+        match directory::claim(files, cores).await {
+            Ok(lock) => {
+                give.give(Interner::new());
+                Some(lock)
+            }
+            Err(error) => {
+                self.failed
+                    .set(error)
+                    .expect("invariant: shard 0 opens no ring after a failed claim");
+                None
+            }
         }
     }
 
-    /// Waits for the interner, opens the shard's buffer on the shard's thread, and
-    /// gives the interner to the next shard. A failed open is kept for
-    /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
-    /// So does a stop raised before the open, but it is not a failure.
+    /// Waits for the interner, opens the shard's buffer on the shard's thread, gives
+    /// the interner to the next shard, and gives the shard's home over the buffer. A
+    /// failed open is kept for [`Node::join`], keeps the interner from the shards
+    /// after it, and gives `None`. So does a stop raised before the open, but it is
+    /// not a failure.
     async fn run(
         self,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
-    ) -> Option<buffer::Buffer> {
+    ) -> Option<home::Shard> {
         let mut interner = self.take.await?;
         if self.stop.raised() {
             return None;
         }
+        let core = usize::try_from(self.shard).expect("invariant: a u32 fits a usize");
         let config = buffer::Config {
             files,
-            dir: directory::shard(self.core),
+            dir: directory::shard(core),
             pool,
-            clock: self.clock,
+            clock: self.monotonic,
             tasks,
             entropy: self.entropy,
             layout: self.layout,
@@ -375,13 +457,15 @@ impl Open {
         match buffer::Buffer::open(config, interner.slots()).await {
             Ok(buffer) => {
                 self.give.give(interner);
-                Some(buffer)
+                Some(home::Shard::new(home::Config {
+                    shard: self.shard,
+                    buffer,
+                    clock: self.clock,
+                    limits: LIMITS,
+                }))
             }
             Err(error) => {
-                let error = Error::Buffer {
-                    core: self.core,
-                    error,
-                };
+                let error = Error::Buffer { core, error };
                 self.failed
                     .set(error)
                     .expect("invariant: a shard opens its buffer once");
@@ -420,8 +504,9 @@ pub enum Error {
         /// The shard count of this start.
         cores: usize,
     },
-    /// A file call that reads or records the shard count of the data directory
-    /// failed.
+    /// A file call that locks the data directory, or reads or records its shard
+    /// count, failed. [`env::files::Error::Busy`] on `lock` is another node that runs
+    /// on the data directory.
     Directory(env::files::Error),
     /// The disk budget holds no ring on each of `cores` shards.
     Disk {
@@ -451,10 +536,9 @@ impl fmt::Display for Error {
                 "the data directory holds {stored} shards, but this node starts \
                  {cores}; start it on {stored} cores"
             ),
-            Self::Directory(error) => write!(
-                f,
-                "cannot read or record the shard count of the data directory: {error}"
-            ),
+            Self::Directory(error) => {
+                write!(f, "cannot claim the data directory: {error}")
+            }
             Self::Disk { disk, cores, min } => write!(
                 f,
                 "the disk budget {disk} holds no ring on each of {cores} shards; it \

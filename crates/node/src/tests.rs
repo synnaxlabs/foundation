@@ -46,11 +46,7 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
 
 /// The seams of `host`, with a pool budget of `budget` from `memory`, and a disk
 /// budget of [`DISK`].
-fn config(
-    host: &sim::node::Node,
-    budget: usize,
-    memory: Memory,
-) -> Config<block::Heap> {
+fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block::Heap> {
     Config {
         shards: host.shards(),
         clock: host.clock(),
@@ -71,14 +67,14 @@ fn config(
 
 /// Starts a node on `cores` cores of a `sim` host, after `faults` aim at its shards.
 fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
-    start_with(seed, cores, faults, 1 << 20, Box::new(heap))
+    start_with(seed, cores, faults, Size::MEBIBYTE, Box::new(heap))
 }
 
 fn start_with(
     seed: u64,
     cores: usize,
     faults: &[(usize, Fault)],
-    budget: usize,
+    budget: Size,
     memory: Memory,
 ) -> Run {
     let host = sim::node::Config {
@@ -92,7 +88,7 @@ fn start_on(
     seed: u64,
     host: sim::node::Config,
     faults: &[(usize, Fault)],
-    budget: usize,
+    budget: Size,
     memory: Memory,
 ) -> Run {
     let mut sim = sim::Sim::new(sim::Config {
@@ -284,7 +280,7 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     let record = Arc::clone(&calls);
     // Each part is a multiple of the pool's alignment, so only the remainder moves
     // core 0 to a larger reservation.
-    let budget = (9 << 20) + 2;
+    let budget = Size::from_bytes((9 << 20) + 2);
     let mut run = start_with(
         7,
         3,
@@ -298,8 +294,8 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
-    let part = budget / 3;
-    assert_eq!(part * 3 + 2, budget);
+    let part = usize::try_from(budget.bytes() / 3).unwrap();
+    assert_eq!(part * 3 + 2, usize::try_from(budget.bytes()).unwrap());
     let reservation = |budget| block::Config { budget }.reservation();
     assert_eq!(
         *calls.lock().unwrap(),
@@ -311,7 +307,7 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
 fn a_shard_with_no_memory_stops_the_node_before_later_shards_start() {
     for seed in 0..32 {
         let refused = os::memory::Error::Refused;
-        let mut run = start_with(seed, 3, &[], 1 << 20, refuse(1, refused));
+        let mut run = start_with(seed, 3, &[], Size::MEBIBYTE, refuse(1, refused));
         assert_eq!(starts(&run), named(&[0]));
         assert_eq!(run.sim.run(), Ok(()), "seed {seed}");
         let e = run.node.join().unwrap_err();
@@ -338,8 +334,13 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
         }
         .reservation();
         let error = os::memory::Error::Reserve { len, code: 12 };
-        let mut run =
-            start_with(seed, 3, &[(0, Fault::Panic)], 1 << 20, refuse(2, error));
+        let mut run = start_with(
+            seed,
+            3,
+            &[(0, Fault::Panic)],
+            Size::MEBIBYTE,
+            refuse(2, error),
+        );
         assert_eq!(starts(&run), named(&[0, 1]));
         assert_eq!(panics(&mut run), ["shard-0"], "seed {seed}");
         assert_eq!(
@@ -354,13 +355,13 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
 fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let host = sim.node(sim::node::Config::default());
-    let config = config(&host, 4096, Box::new(heap));
+    let config = config(&host, Size::from_bytes(4096), Box::new(heap));
     let (clock, wall, entropy) = (&config.clock, &config.wall, &config.entropy);
     assert_eq!(
         format!("{config:?}"),
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
-             budget: 4096, entropy: {entropy:?}, disk: {DISK:?}, .. }}"
+             budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, .. }}"
         )
     );
 }
@@ -368,7 +369,13 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
 #[test]
 #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
 fn a_budget_past_the_address_space_panics_at_start() {
-    drop(start_with(7, 1, &[], usize::MAX, Box::new(heap)));
+    drop(start_with(
+        7,
+        1,
+        &[],
+        Size::from_bytes(u64::MAX),
+        Box::new(heap),
+    ));
 }
 
 #[test]
@@ -378,7 +385,7 @@ fn a_host_that_cannot_pin_starts_shards_on_no_core() {
         unpinnable: true,
         ..sim::node::Config::default()
     };
-    let mut run = start_on(7, host, &[], 1 << 20, Box::new(heap));
+    let mut run = start_on(7, host, &[], Size::MEBIBYTE, Box::new(heap));
     assert_eq!(
         starts(&run),
         [("shard-0".to_string(), None), ("shard-1".to_string(), None)]
@@ -404,7 +411,7 @@ fn run_on_disk(
 ) -> Result<(), Error> {
     let node = Node::start(Config {
         disk: Size::from_bytes(disk),
-        ..config(host, 1 << 20, Box::new(heap))
+        ..config(host, Size::MEBIBYTE, Box::new(heap))
     });
     assert_eq!(sim.run_for(Span::HOUR), Ok(()));
     node.stop();
@@ -574,7 +581,7 @@ mod buffer {
         let host = host(&mut sim, 2);
         write(&mut sim, &host, 0, 1);
         write(&mut sim, &host, 1, 2);
-        let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+        let mut node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
         let Poll::Ready(Some(mut interner)) = taken(&mut node) else {
             panic!("the last shard gave the interner");
@@ -591,7 +598,7 @@ mod buffer {
     /// takes first. A shard that waits for the interner does not open after it.
     #[test]
     fn a_shard_part_too_small_for_the_buffer_stops_the_node() {
-        let mut run = start_with(7, 32, &[], 1 << 20, Box::new(heap));
+        let mut run = start_with(7, 32, &[], Size::MEBIBYTE, Box::new(heap));
         assert_eq!(run.sim.run(), Ok(()));
         let e = run.node.join().unwrap_err();
         let pool = block::Error::TooLarge {
@@ -618,7 +625,7 @@ mod buffer {
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let shards = ["shard-0", "shard-1"];
-        let made = ["shard-0", "shard-1", "shards-2"];
+        let made = ["lock", "shard-0", "shard-1", "shards-2"];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
@@ -682,7 +689,7 @@ mod buffer {
             let disk = Size::from_bytes(bytes);
             let node = Node::start(Config {
                 disk,
-                ..config(&host, 1 << 20, Box::new(heap))
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
             });
             assert_eq!(host.shard_starts(), [], "{shown}");
             assert_eq!(sim.run(), Ok(()));
@@ -720,7 +727,7 @@ mod buffer {
             let host = host(&mut sim, cores);
             let node = Node::start(Config {
                 disk,
-                ..config(&host, 1 << 20, Box::new(heap))
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
             });
             assert_eq!(host.shard_starts(), []);
             assert_eq!(node.join(), Err(Error::Disk { disk, cores, min }));
@@ -750,7 +757,7 @@ mod buffer {
                     })
                 })
             },
-            ..config(&host, 1 << 20, Box::new(heap))
+            ..config(&host, Size::MEBIBYTE, Box::new(heap))
         });
         assert_eq!(*made.borrow(), [0, 1, 2], "shards started before each call");
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
@@ -789,7 +796,7 @@ mod buffer {
                     })
                 })
             },
-            ..config(&host, 1 << 20, memory)
+            ..config(&host, Size::MEBIBYTE, memory)
         });
         assert_eq!(sim.run(), Ok(()));
         (node.join(), *made.borrow(), *ran.lock().unwrap())
@@ -825,29 +832,30 @@ mod buffer {
     /// leaves the claim alone.
     #[test]
     fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
-        let all = ["shard-0", "shard-1", "shard-2", "shards-3"].map(PathBuf::from);
-        let mut seen = [false; 5];
+        let all = ["lock", "shard-0", "shard-1", "shard-2", "shards-3"];
+        let all = all.map(PathBuf::from);
+        let mut seen = [false; 6];
         for step in 0..200 {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 3);
-            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             let after = Span::from_nanos(step * 10_000);
             assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
             node.stop();
             assert_eq!(sim.run(), Ok(()), "at {after:?}");
             assert_eq!(node.join(), Ok(()), "at {after:?}");
             let listed = listed(&mut sim, &host, "");
-            let rings = listed.len().saturating_sub(1);
             let made: Vec<PathBuf> = if listed.is_empty() {
                 Vec::new()
             } else {
-                all[..rings].iter().chain(&all[3..]).cloned().collect()
+                let held = listed.len() - 1;
+                all[..held].iter().chain(&all[4..]).cloned().collect()
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
             assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
         }
-        assert_eq!(seen[1..], [true; 4], "a stop after each step");
+        assert_eq!(seen[2..], [true; 4], "a stop after each step");
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -858,7 +866,8 @@ mod buffer {
             for after in (0..).step_by(25_000).map(Span::from_nanos) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
-                let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+                let mut node =
+                    Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
                 let opened = all_opened(&mut node, after);
                 sim.crash(&host, crash);
@@ -881,7 +890,8 @@ mod buffer {
             for after in (0..).step_by(25_000).map(Span::from_nanos) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
-                let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+                let mut node =
+                    Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
                 let opened = all_opened(&mut node, after);
                 sim.crash(&host, crash);
@@ -948,14 +958,14 @@ mod buffer {
         assert_eq!(panics(&mut run), Vec::<String>::new());
         assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
         assert_eq!(run.node.join(), Err(opened(1)));
-        let made = ["shard-0", "shards-3"].map(PathBuf::from);
+        let made = ["lock", "shard-0", "shards-3"].map(PathBuf::from);
         assert_eq!(listed(&mut run.sim, &run.host, ""), made);
     }
 
     #[test]
     fn a_shard_with_no_memory_keeps_the_interner_from_the_node() {
         let refused = os::memory::Error::Refused;
-        let mut run = start_with(7, 3, &[], 1 << 20, refuse(1, refused));
+        let mut run = start_with(7, 3, &[], Size::MEBIBYTE, refuse(1, refused));
         assert_eq!(run.sim.run(), Ok(()));
         assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
     }
@@ -1032,7 +1042,8 @@ mod directory {
             assert_eq!(e, Error::Shards { stored: 3, cores });
             assert_eq!(e.to_string(), text);
             let listed = listed(&mut sim, &host, "");
-            assert_eq!(listed, [PathBuf::from("shards-3")], "{cores} cores");
+            let made = ["lock", "shards-3"].map(PathBuf::from);
+            assert_eq!(listed, made, "{cores} cores");
         }
     }
 
@@ -1074,6 +1085,7 @@ mod directory {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
         let made = [
+            "lock",
             "other-3",
             "shard-0",
             "shard-1",
@@ -1131,20 +1143,21 @@ mod directory {
 
     #[test]
     fn a_failed_file_call_of_the_claim_stops_the_node_before_any_ring() {
-        use env::files::Operation::{CreateDir, List, SyncDir};
+        use env::files::Operation::{CreateDir, List, Open, SyncDir};
         for (path, operation, text, made) in [
-            ("", List, "list of  failed with OS error 5", &[][..]),
+            ("lock", Open, "open of lock failed with OS error 5", &[][..]),
+            ("", List, "list of  failed with OS error 5", &["lock"][..]),
             (
                 "shards-2",
                 CreateDir,
                 "create_dir of shards-2 failed with OS error 5",
-                &[][..],
+                &["lock"][..],
             ),
             (
                 "",
                 SyncDir,
                 "sync_dir of  failed with OS error 5",
-                &["shards-2"][..],
+                &["lock", "shards-2"][..],
             ),
         ] {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -1159,10 +1172,7 @@ mod directory {
             assert_eq!(e, Error::Directory(io), "{operation:?}");
             assert_eq!(
                 e.to_string(),
-                format!(
-                    "cannot read or record the shard count of the data directory: \
-                     {text}"
-                )
+                format!("cannot claim the data directory: {text}")
             );
             let made: Vec<PathBuf> = made.iter().map(PathBuf::from).collect();
             assert_eq!(listed(&mut sim, &host, ""), made, "{operation:?}");
@@ -1185,7 +1195,7 @@ mod directory {
         .expect("the run ends");
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
-        let made = ["shard-0", "shard-1", &name, "shards-2"];
+        let made = ["lock", "shard-0", "shard-1", &name, "shards-2"];
         assert_eq!(listed, made.map(PathBuf::from));
     }
 
@@ -1207,7 +1217,7 @@ mod directory {
             })
             .expect("the run ends");
             assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
-            let mut made = ["shard-0", "shard-1", &name, "shards-2"];
+            let mut made = ["lock", "shard-0", "shard-1", &name, "shards-2"];
             made.sort_unstable();
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "{name}");
@@ -1273,7 +1283,7 @@ mod directory {
         };
         for (crash, kept) in [
             (sim::Crash::Power, &[][..]),
-            (sim::Crash::Process, &["shards-2"][..]),
+            (sim::Crash::Process, &["lock", "shards-2"][..]),
         ] {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
@@ -1286,7 +1296,7 @@ mod directory {
             host.fail_file(Path::new(""), SyncDir);
             let e = run_on(&mut sim, &host);
             assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
-            let made = [PathBuf::from("shards-2")];
+            let made = ["lock", "shards-2"].map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
         }
     }
@@ -1298,7 +1308,7 @@ mod directory {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         let refused = os::memory::Error::Refused;
-        let node = Node::start(config(&host, 1 << 20, refuse(1, refused)));
+        let node = Node::start(config(&host, Size::MEBIBYTE, refuse(1, refused)));
         assert_eq!(sim.run(), Ok(()));
         let e = node.join();
         assert_eq!(
@@ -1331,7 +1341,7 @@ mod directory {
             let host = host(&mut sim, 3);
             record(&mut sim, &host, 2);
             host.fail_shard(2, Fault::Panic);
-            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             let mut run = Run {
                 seed,
                 sim,
@@ -1348,5 +1358,320 @@ mod directory {
             seen, [true; 2],
             "a panic before and after the claim started"
         );
+    }
+}
+
+mod home {
+    use std::rc::Rc;
+    use std::sync::OnceLock;
+
+    use ::home::{Outcome, Refusal, order, writer};
+    use types::authority::Authority;
+    use types::channel::{Key, Slot};
+    use types::frame::key_set::{Group, Interner};
+    use types::frame::{Draft, Form, Label, Path as Stream, Range};
+    use types::sample::{Scalar, Type};
+    use types::time::Stamp;
+
+    use super::*;
+    use crate::stop::Stop;
+    use crate::{BODY_MAX, Open, handoff};
+
+    /// What the home that `Open::run` gives for shard `shard` of `host` does: the key
+    /// of a writer of one index, at `slot`, and the outcomes of a frame of one sample
+    /// at each stamp that `stamps` gives for mesh time `now`.
+    struct Written {
+        key: writer::Key,
+        slot: Slot,
+        now: Stamp,
+        outcomes: Vec<Vec<Outcome>>,
+    }
+
+    fn written(
+        sim: &mut sim::Sim,
+        host: &sim::node::Node,
+        shard: u32,
+        stamps: fn(Stamp) -> Vec<Stamp>,
+    ) -> Written {
+        sim.run_on(host, move |host, tasks| async move {
+            let (driver, clock) = clock::Clock::new(host.clock());
+            let wall = host.wall();
+            tasks.spawn(async move { driver.run(wall).await });
+            let (give, take) = handoff::pair();
+            give.give(Interner::new());
+            let (give, next) = handoff::pair();
+            let config = block::Config { budget: 1 << 22 };
+            let memory = block::Heap::new(config.reservation());
+            let pool = block::Pool::new(config, memory);
+            let open = Open {
+                shard,
+                take,
+                give,
+                monotonic: host.clock(),
+                clock: clock.clone(),
+                entropy: host.entropy(),
+                layout: ::buffer::Layout::new(64 << 20, BODY_MAX).expect("a ring"),
+                failed: Arc::new(OnceLock::new()),
+                stop: Stop::default(),
+            };
+            let opened = open.run(host.files(), Rc::new(pool), tasks).await;
+            let mut home = opened.expect("the buffer opens");
+            let mut interner = next.await.expect("the open gives the interner");
+            let (index, values) = (Key::from_u128(1), Key::from_u128(2));
+            let slot = interner.slots().assign(index);
+            interner.slots().assign(values);
+            let set = interner.intern(&[Group {
+                index,
+                data: &[(values, Type::Scalar(Scalar::I64))],
+            }]);
+            home.carry(slot);
+            let now = mesh_now(&clock, &host.clock()).await;
+            let key = home
+                .open_writer(writer::Writer {
+                    subject: "a".parse().expect("a name"),
+                    authority: Authority(1),
+                    lease: None,
+                    set: Arc::clone(&set),
+                })
+                .expect("the writer opens");
+            let mut outcomes = Vec::new();
+            for stamp in stamps(now) {
+                let mut frame =
+                    Draft::new(home.pool(), &set, Form::Raw, &[(0, 8), (1, 8)])
+                        .expect("a frame");
+                for (entry, sample) in [(0, stamp.nanos()), (1, 7)] {
+                    let series =
+                        frame.series_mut(entry).expect("the series is present");
+                    series.copy_from_slice(&sample.to_le_bytes());
+                }
+                frame.set_count(0, 1);
+                let written = home.write(key, Label::Path(Stream::Live), frame);
+                outcomes.push(written.expect("the write runs").to_vec());
+            }
+            Written {
+                key,
+                slot,
+                now,
+                outcomes,
+            }
+        })
+        .expect("the run ends")
+    }
+
+    /// The midpoint of mesh time, once `clock` has one.
+    async fn mesh_now(clock: &clock::Reader, monotonic: &env::clock::Clock) -> Stamp {
+        loop {
+            if let Some(mesh) = clock.now().mesh {
+                let (earliest, latest) = (mesh.earliest.nanos(), mesh.latest.nanos());
+                return Stamp::from_nanos(earliest.midpoint(latest));
+            }
+            monotonic.sleep(Span::MILLISECOND).await;
+        }
+    }
+
+    /// Each shard's home numbers its writers with the shard's core, and accepts
+    /// stamps from 2000-01-01 to 10 s past mesh time.
+    #[test]
+    fn each_shard_builds_its_home_with_its_core_and_the_stamp_limits() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let earliest = Stamp::from_nanos(946_684_800_000_000_000);
+        let ahead = Span::from_nanos(10 * Span::SECOND.nanos());
+        let at = |now: Stamp| {
+            let latest = now.checked_add(Span::from_nanos(10 * Span::SECOND.nanos()));
+            let latest = latest.expect("mesh time is far from the end");
+            let past = latest.checked_add(Span::NANOSECOND).expect("in range");
+            let early = Stamp::from_nanos(946_684_800_000_000_000 - 1);
+            vec![early, past, latest]
+        };
+        let zero = written(&mut sim, &host, 0, at);
+        let one = written(&mut sim, &host, 1, at);
+        // The first writer of each shard, which differ only by the shard's number.
+        assert_ne!(zero.key, one.key);
+        let latest = one.now.checked_add(ahead).expect("in range");
+        let refused = |error| Outcome::Refused {
+            slot: one.slot,
+            refusal: Refusal::Order(error),
+        };
+        let early = Stamp::from_nanos(earliest.nanos() - 1);
+        let past = latest.checked_add(Span::NANOSECOND).expect("in range");
+        assert_eq!(
+            one.outcomes,
+            [
+                vec![refused(order::Error::Early {
+                    stamp: early,
+                    earliest,
+                })],
+                vec![refused(order::Error::Ahead {
+                    stamp: past,
+                    latest,
+                })],
+                vec![Outcome::Applied {
+                    slot: one.slot,
+                    range: Range { seq: 0, count: 1 },
+                }],
+            ]
+        );
+    }
+}
+
+mod lock {
+    use super::*;
+
+    /// The error of a start on a data directory that another node holds.
+    fn busy() -> Error {
+        Error::Directory(env::files::Error::Busy {
+            path: PathBuf::from("lock"),
+        })
+    }
+
+    /// Starts a node on the cores and the data directory of `host`.
+    fn start_on(host: &sim::node::Node) -> Node {
+        Node::start(config(host, Size::MEBIBYTE, Box::new(heap)))
+    }
+
+    #[test]
+    fn a_second_node_on_the_data_directory_of_a_running_node_is_refused() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let first = start_on(&host);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        let second = start_on(&host);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        let e = second.join();
+        assert_eq!(e, Err(busy()));
+        assert_eq!(
+            busy().to_string(),
+            "cannot claim the data directory: file lock is open for writing in \
+             another handle"
+        );
+        first.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(first.join(), Ok(()));
+        let made = ["lock", "shard-0", "shard-1", "shards-2"].map(PathBuf::from);
+        assert_eq!(listed(&mut sim, &host, ""), made);
+    }
+
+    /// Two nodes that start at once on a new data directory: one claims it, and the
+    /// other stops before it reads a name or opens a ring.
+    #[test]
+    fn of_two_nodes_that_start_at_once_one_claims_the_data_directory() {
+        let mut seen = [false; 2];
+        for seed in 0..16 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            let nodes = [start_on(&host), start_on(&host)];
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "seed {seed}");
+            for node in &nodes {
+                node.stop();
+            }
+            assert_eq!(sim.run(), Ok(()), "seed {seed}");
+            let joined = nodes.map(Node::join);
+            let claimed = usize::from(joined[0].is_err());
+            assert_eq!(joined[claimed], Ok(()), "seed {seed}");
+            assert_eq!(joined[1 - claimed], Err(busy()), "seed {seed}");
+            seen[claimed] = true;
+            let made = ["lock", "shard-0", "shard-1", "shards-2"].map(PathBuf::from);
+            assert_eq!(listed(&mut sim, &host, ""), made, "seed {seed}");
+        }
+        assert_eq!(seen, [true; 2]);
+    }
+
+    /// A stop at any point of the claim and the opens, then a second node at once:
+    /// a node holds the lock until each of its rings has closed, so the other never
+    /// finds a ring open.
+    #[test]
+    fn the_lock_outlives_each_ring() {
+        let mut seen = [false; 3];
+        // The opens end at about 1.3 ms; a stop at 760 us finds `shard-1` opening.
+        for step in 0..400 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let first = start_on(&host);
+            let after = Span::from_nanos(step * 5_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            first.stop();
+            let second = start_on(&host);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "at {after:?}");
+            second.stop();
+            assert_eq!(sim.run(), Ok(()), "at {after:?}");
+            let joined = [first.join(), second.join()];
+            let outcome = [
+                [Ok(()), Ok(())],
+                [Ok(()), Err(busy())],
+                [Err(busy()), Ok(())],
+            ]
+            .iter()
+            .position(|o| *o == joined);
+            let Some(outcome) = outcome else {
+                panic!("at {after:?}: {joined:?}");
+            };
+            seen[outcome] = true;
+        }
+        assert_eq!(seen, [true; 3]);
+    }
+
+    /// A stop at any point of the opens of three shards, then a probe that takes the
+    /// lock as soon as it is free: each ring has closed by then.
+    #[test]
+    fn the_lock_outlives_the_ring_of_each_shard() {
+        let mut held = false;
+        for step in 0..500 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 3);
+            let node = start_on(&host);
+            let after = Span::from_nanos(step * 5_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            node.stop();
+            let (waited, rings) = sim
+                .run_on(&host, |host, _| async move {
+                    let files = host.files();
+                    let clock = host.clock();
+                    let mut waited = false;
+                    let lock = loop {
+                        let mode = env::files::Mode::Create { len: 0 };
+                        match files.open(Path::new("lock"), mode).await {
+                            Err(env::files::Error::Busy { .. }) => {
+                                waited = true;
+                                clock.sleep(Span::from_nanos(1_000)).await;
+                            }
+                            opened => break opened.expect("the lock opens"),
+                        }
+                    };
+                    let mut rings = Vec::new();
+                    for core in 0..3 {
+                        let ring = crate::directory::shard(core).join("ring");
+                        let opened = files.open(&ring, env::files::Mode::Write).await;
+                        rings.push(opened.map(drop));
+                    }
+                    drop(lock);
+                    (waited, rings)
+                })
+                .expect("the probe ends");
+            held |= waited;
+            for ring in rings {
+                let busy = matches!(ring, Err(env::files::Error::Busy { .. }));
+                assert!(!busy, "at {after:?}: {ring:?}");
+            }
+            // A probe that takes the lock before the claim refuses the node.
+            let joined = node.join();
+            assert!(joined == Ok(()) || joined == Err(busy()), "at {after:?}");
+        }
+        assert!(held);
+    }
+
+    /// A process crash frees the lock, so the next start claims the data directory.
+    #[test]
+    fn a_restart_after_a_process_crash_claims_the_data_directory() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = start_on(&host);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        sim.crash(&host, sim::Crash::Process);
+        drop(node);
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
     }
 }

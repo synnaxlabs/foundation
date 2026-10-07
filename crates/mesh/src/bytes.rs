@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use raft::{Grant, Position, Proof, Signature, Term};
+use types::channel;
+use types::name::Name;
 use types::node;
 
 /// Takes `N` bytes.
@@ -24,6 +26,31 @@ pub(crate) fn put_key(key: node::Key, out: &mut Vec<u8>) {
 /// Takes a node key.
 pub(crate) fn take_key(bytes: &mut &[u8]) -> Option<node::Key> {
     take(bytes).map(|key| node::Key::from_u128(u128::from_le_bytes(key)))
+}
+
+/// Adds a channel key as 16 little-endian bytes.
+pub(crate) fn put_channel(key: channel::Key, out: &mut Vec<u8>) {
+    out.extend(key.as_u128().to_le_bytes());
+}
+
+/// Takes a channel key.
+pub(crate) fn take_channel(bytes: &mut &[u8]) -> Option<channel::Key> {
+    take(bytes).map(|key| channel::Key::from_u128(u128::from_le_bytes(key)))
+}
+
+/// Adds a name behind a length byte.
+pub(crate) fn put_name(name: &Name, out: &mut Vec<u8>) {
+    let name = name.as_str().as_bytes();
+    out.push(u8::try_from(name.len()).expect("invariant: a name is at most 255 bytes"));
+    out.extend(name);
+}
+
+/// Takes what [`put_name`] gives. `None` when the bytes are not a valid name.
+pub(crate) fn take_name(bytes: &mut &[u8]) -> Option<Name> {
+    let [len] = take(bytes)?;
+    let (name, rest) = bytes.split_at_checked(usize::from(len))?;
+    *bytes = rest;
+    std::str::from_utf8(name).ok()?.parse().ok()
 }
 
 /// Adds a position as its term, then its index.
@@ -50,7 +77,7 @@ pub(crate) fn put_keys(keys: &BTreeSet<node::Key>, out: &mut Vec<u8>) {
 /// Takes what [`put_keys`] gives. `None` when the keys are not in rising order.
 pub(crate) fn take_keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
     let mut keys = BTreeSet::new();
-    take_rising(bytes, |key, _| {
+    take_rising(bytes, take_key, |key, _| {
         keys.insert(key);
         Some(())
     })?;
@@ -68,21 +95,22 @@ pub(crate) fn take_count(bytes: &mut &[u8]) -> Option<u64> {
     take(bytes).map(u64::from_le_bytes)
 }
 
-// Takes a count, then that many keys in rising order. After each key, `each` takes
-// what follows it. `None` when the keys are not in rising order or `each` gives
-// `None`.
-fn take_rising(
+/// Takes a count, then that many keys in rising order, each with `take_one`. After each
+/// key, `each` takes what follows it. `None` when the keys are not in rising order or
+/// `each` gives `None`.
+pub(crate) fn take_rising<K: Ord + Clone>(
     bytes: &mut &[u8],
-    mut each: impl FnMut(node::Key, &mut &[u8]) -> Option<()>,
+    take_one: impl Fn(&mut &[u8]) -> Option<K>,
+    mut each: impl FnMut(K, &mut &[u8]) -> Option<()>,
 ) -> Option<()> {
     let count = take_count(bytes)?;
-    let mut last = None;
+    let mut last: Option<K> = None;
     for _ in 0..count {
-        let key = take_key(bytes)?;
-        if last.is_some_and(|last| last >= key) {
+        let key = take_one(bytes)?;
+        if last.as_ref().is_some_and(|last| *last >= key) {
             return None;
         }
-        last = Some(key);
+        last = Some(key.clone());
         each(key, bytes)?;
     }
     Some(())
@@ -170,7 +198,7 @@ pub(crate) fn take_proof(bytes: &mut &[u8]) -> Option<Proof> {
     };
     let candidate = take_key(bytes)?;
     let mut voters = BTreeMap::new();
-    take_rising(bytes, |voter, bytes| {
+    take_rising(bytes, take_key, |voter, bytes| {
         voters.insert(voter, Some(take_signature(bytes)?));
         Some(())
     })?;
