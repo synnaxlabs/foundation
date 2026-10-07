@@ -7,39 +7,24 @@ use types::channel;
 
 #[cfg(test)]
 mod common;
-#[cfg_attr(not(test), expect(dead_code, reason = "the shard is the first user"))]
 mod handoff;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the frame path is the first user")
-)]
 mod index;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the frame path is the first user")
-)]
-mod order;
-#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
-mod reader;
-#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+pub mod order;
+pub mod reader;
 mod shard;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the frame path is the first user")
-)]
 mod split;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the frame path is the first user")
+    expect(dead_code, reason = "the read of an entry is the first user")
 )]
 mod stored;
-#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
-mod writer;
+pub mod writer;
+
+pub use shard::{Commit, Config, Error, Outcome, Shard};
 
 /// Why the home refused a group of a writer's frame.
-#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Refusal {
+pub enum Refusal {
     /// Another writer holds control.
     Waiting,
     /// Control is held for the writer from before a restart, until it reopens or

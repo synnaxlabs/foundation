@@ -11,7 +11,7 @@ use types::time::Stamp;
 
 /// An open reader on its shard, in either mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Key {
+pub struct Key {
     /// The slot of the reader's index.
     pub(crate) slot: Slot,
     /// The reader's session on the index.
@@ -19,13 +19,13 @@ pub(crate) struct Key {
 }
 
 /// The key of a reader that takes every frame.
-pub(crate) mod complete {
+pub mod complete {
     use types::channel::Slot;
 
     /// An open complete reader on its shard. It converts into a
     /// [`reader::Key`](super::Key).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    pub(crate) struct Key {
+    pub struct Key {
         /// The slot of the reader's index.
         pub(crate) slot: Slot,
         /// The reader's session on the index.

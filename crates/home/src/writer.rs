@@ -11,22 +11,22 @@ use types::time::Span;
 
 /// What a writer opens with.
 #[derive(Clone, Debug)]
-pub(crate) struct Writer {
+pub struct Writer {
     /// The subject that opened the writer.
-    pub(crate) subject: Name,
+    pub subject: Name,
     /// The writer's authority. The home does not cap it by access yet.
-    pub(crate) authority: Authority,
+    pub authority: Authority,
     /// The control lease, or `None` for no limit. It runs on each index apart: from
     /// when the writer takes control there, and again from each group applied or
     /// lost there. When it runs out, the writer loses control of that index.
-    pub(crate) lease: Option<Span>,
+    pub lease: Option<Span>,
     /// The key set of every frame the writer writes.
-    pub(crate) set: Arc<KeySet>,
+    pub set: Arc<KeySet>,
 }
 
 /// An open writer on its shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Key {
+pub struct Key {
     /// The number of the shard that opened the writer.
     pub(crate) shard: u32,
     /// The writer's number on its shard.
@@ -52,7 +52,7 @@ impl Key {
 
 /// Why a writer did not open. Nothing changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The node has no mesh time yet. Open the writer again later.
     Unsynced,
     /// A control lease must be longer than zero.

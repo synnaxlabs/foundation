@@ -25,7 +25,7 @@ use crate::{handoff, order, split, stored};
 /// The indexes of one shard, with their writers and readers. It is not `Send`: each
 /// call is on the shard's thread.
 #[derive(Debug)]
-pub(crate) struct Shard {
+pub struct Shard {
     /// The shard's number on its node.
     number: u32,
     buffer: Buffer,
@@ -44,17 +44,17 @@ pub(crate) struct Shard {
 
 /// What a shard is built from.
 #[derive(Debug)]
-pub(crate) struct Config {
+pub struct Config {
     /// The shard's number on its node. Each writer key the shard gives carries it.
-    pub(crate) shard: u32,
+    pub shard: u32,
     /// The shard's buffer. Index frames, stored headers, and handoff bodies come
     /// from its pool.
-    pub(crate) buffer: Buffer,
+    pub buffer: Buffer,
     /// The node's clocks. Control leases expire on its monotonic clock. Stamp
     /// checks, handoffs, stored entries, and readers read its mesh time.
-    pub(crate) clock: clock::Reader,
+    pub clock: clock::Reader,
     /// The stamps each index accepts.
-    pub(crate) limits: order::Limits,
+    pub limits: order::Limits,
 }
 
 /// The shard's state for an open writer.
@@ -88,7 +88,7 @@ struct Scratch {
 
 /// What became of one group of a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// Queued for the next group commit.
     Applied {
         /// The slot of the group's index.
@@ -115,7 +115,7 @@ pub(crate) enum Outcome {
 
 /// Why a write or a reader open failed. No seq moves for any of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The node has no mesh time yet, so the shard opens no reader. Open it again
     /// later.
     Unsynced,
@@ -156,7 +156,7 @@ impl std::error::Error for Error {}
 /// with the error that ended the buffer first. It does not borrow the shard, and it
 /// holds the shard's ring open until it drops.
 #[derive(Debug)]
-pub(crate) struct Commit(buffer::Commit);
+pub struct Commit(buffer::Commit);
 
 impl Future for Commit {
     type Output = Result<(), env::files::Error>;
@@ -168,7 +168,7 @@ impl Future for Commit {
 
 impl Shard {
     /// A shard over `config.buffer` that carries no index yet.
-    pub(crate) fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         let Config {
             shard,
             buffer,
@@ -195,7 +195,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard carries `slot` already.
-    pub(crate) fn carry(&mut self, slot: Slot) {
+    pub fn carry(&mut self, slot: Slot) {
         let tail = |path| {
             let tail = self.buffer.tail(slot, path);
             order::Tail {
@@ -225,7 +225,7 @@ impl Shard {
     /// # Panics
     ///
     /// If an index of the key set is not carried, in a call that gives no error.
-    pub(crate) fn open_writer(
+    pub fn open_writer(
         &mut self,
         writer: Writer,
     ) -> Result<writer::Key, writer::Error> {
@@ -262,7 +262,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the writer is not open, or `key` is of another shard.
-    pub(crate) fn close_writer(&mut self, key: writer::Key) {
+    pub fn close_writer(&mut self, key: writer::Key) {
         let number = key.on(self.number);
         let Some(session) = self.writers.remove(&number) else {
             panic!("writer {number} is not open");
@@ -293,7 +293,7 @@ impl Shard {
     /// the frame is not of the writer's key set or holds a series of a type the home
     /// does not write, unless it is labeled resend: the shard does not read a resend
     /// frame.
-    pub(crate) fn write(
+    pub fn write(
         &mut self,
         key: writer::Key,
         label: Label,
@@ -368,13 +368,13 @@ impl Shard {
     /// Commits run without this future, so a caller may drop it. Call
     /// [`woken`](Self::woken) after it resolves.
     /// Gives the error that ended the buffer when it ended before they were on disk.
-    pub(crate) fn committed(&self) -> Commit {
+    pub fn committed(&self) -> Commit {
         Commit(self.buffer.committed())
     }
 
     /// The first seq on `path` of the index at `slot` that is not on disk. A writer's
     /// range is stored when this passes its end.
-    pub(crate) fn stored(&self, slot: Slot, path: Path) -> u64 {
+    pub fn stored(&self, slot: Slot, path: Path) -> u64 {
         self.buffer.durable(slot, path).seq
     }
 
@@ -389,7 +389,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard does not carry `slot`, in a call that gives no error.
-    pub(crate) fn open_complete(
+    pub fn open_complete(
         &mut self,
         slot: Slot,
         limit_bytes: u64,
@@ -414,7 +414,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard does not carry `slot`, in a call that gives no error.
-    pub(crate) fn open_latest(&mut self, slot: Slot) -> Result<reader::Key, Error> {
+    pub fn open_latest(&mut self, slot: Slot) -> Result<reader::Key, Error> {
         let (_, mesh) = self.now().ok_or(Error::Unsynced)?;
         let session = self.readers.open_latest(self.place(slot), mesh).into();
         Ok(reader::Key { slot, session })
@@ -427,7 +427,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard never gave `key`.
-    pub(crate) fn grant(&mut self, key: reader::complete::Key, limit_bytes: u64) {
+    pub fn grant(&mut self, key: reader::complete::Key, limit_bytes: u64) {
         let place = self.place(key.slot);
         self.readers.grant(place, key.session, limit_bytes);
     }
@@ -438,7 +438,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard never gave `key`.
-    pub(crate) fn take(&mut self, key: reader::Key) -> Option<Frame> {
+    pub fn take(&mut self, key: reader::Key) -> Option<Frame> {
         self.readers.take(self.place(key.slot), key.session)
     }
 
@@ -449,7 +449,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard never gave `key`.
-    pub(crate) fn close_reader(&mut self, key: reader::Key) {
+    pub fn close_reader(&mut self, key: reader::Key) {
         let (_, mesh) = self.time();
         self.readers.close(self.place(key.slot), key.session, mesh);
     }
@@ -462,7 +462,7 @@ impl Shard {
     /// queued for complete readers; else it reads none. Pass the same `keys` each
     /// time: the shard swaps it for its own, so neither allocates once both are large
     /// enough.
-    pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
+    pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
 
