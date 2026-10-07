@@ -1,23 +1,13 @@
 //! Stores chunks by digest on the node's disk, through `env::files`, and reads them
-//! back only when their bytes hash to the digest.
-//!
-//! A chunk is one file in the store's directory, named by the 64 hex digits of its
-//! digest, with the chunk's bytes and nothing else. `env::files` has no rename, so
-//! the bytes on disk are checked instead: a get reads the file whole and hashes it,
-//! and only bytes that hash to the name are the chunk. Each state a crash leaves at
-//! the name (no file, an empty file, a file with some of its sectors) reads as
+//! back only when their bytes hash to the digest. A chunk torn by a crash reads as
 //! absent.
-//!
-//! The open lists the directory and trusts no name: a crash can leave a durable entry
-//! over torn bytes, or a process crash can leave whole bytes that no sync covered. A
-//! get of a listed digest reads and checks the bytes, and a put of one writes them
-//! again, so a put returns only after its own sync.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
@@ -91,7 +81,6 @@ impl From<block::Error> for Error {
 }
 
 /// What the store knows of one digest.
-#[derive(Debug)]
 enum State {
     /// A file of the name was listed at open, or a dropped put left one. Its bytes
     /// may be torn or not durable.
@@ -100,9 +89,20 @@ enum State {
     Held,
     /// A put is in flight, and these calls wait for its end.
     Writing(Vec<Waker>),
-    /// A dropped put left this file, whose last call may be in flight. A write open
-    /// of the path is `Busy` until the file closes.
-    Closing(File),
+    /// The close of the file of a dropped put. A write open of the path is `Busy`
+    /// until it ends, so a call of the digest drives it to its end first.
+    Closing(Pin<Box<dyn Future<Output = ()>>>),
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Listed => f.write_str("Listed"),
+            Self::Held => f.write_str("Held"),
+            Self::Writing(wakers) => f.debug_tuple("Writing").field(wakers).finish(),
+            Self::Closing(_) => f.write_str("Closing(..)"),
+        }
+    }
 }
 
 /// The chunks of one node, by digest. One shard owns a store; its calls may overlap
@@ -113,13 +113,12 @@ pub struct Store {
     dir: PathBuf,
     pool: Rc<Pool>,
     chunks: RefCell<BTreeMap<Digest, State>>,
-    corrupted: Cell<u64>,
+    corruptions: Cell<u64>,
 }
 
 impl Store {
     /// Opens the store in `config.dir`, making the directory when it is not there.
-    /// It reads no chunk: a get of a listed chunk checks its bytes, and a put of one
-    /// writes it again.
+    /// It reads no chunk.
     ///
     /// # Errors
     ///
@@ -127,17 +126,12 @@ impl Store {
     /// the directory is not named by a digest.
     pub async fn open(config: Config) -> Result<Self, Error> {
         let Config { files, dir, pool } = config;
-        let names = match files.list(&dir).await {
-            Ok(names) => names,
-            Err(files::Error::NotFound { .. }) => {
-                files.create_dir(&dir).await?;
-                files
-                    .sync_dir(dir.parent().unwrap_or(Path::new("")))
-                    .await?;
-                Vec::new()
-            }
-            Err(error) => return Err(error.into()),
-        };
+        // An earlier open can have made the directory and stopped before this sync.
+        files.create_dir(&dir).await?;
+        files
+            .sync_dir(dir.parent().unwrap_or(Path::new("")))
+            .await?;
+        let names = files.list(&dir).await?;
         let mut chunks = BTreeMap::new();
         for name in names {
             let Some(digest) = digest(&name) else {
@@ -151,7 +145,7 @@ impl Store {
             dir,
             pool,
             chunks: RefCell::new(chunks),
-            corrupted: Cell::new(0),
+            corruptions: Cell::new(0),
         })
     }
 
@@ -159,14 +153,21 @@ impl Store {
     /// crash after the return keeps it. A put of a chunk the store holds makes no file
     /// call. A second put of one digest while the first is in flight waits for it.
     /// A put whose future is dropped before it returns stores nothing that a get gives
-    /// unchecked: the next put or get of the digest reads the file first.
+    /// unchecked: the next get of the digest reads and checks the file, and the next
+    /// put writes it again.
     ///
     /// # Errors
     ///
-    /// [`Error::Mismatch`] when `chunk` does not hash to `digest`; nothing is written.
-    /// [`Error::Files`] when a file call fails, among them `Full` when the disk has no
-    /// room; the chunk then reads as absent.
+    /// [`Error::Pool`] when `chunk` is longer than the largest block of the pool, and
+    /// [`Error::Mismatch`] when `chunk` does not hash to `digest`; nothing is written
+    /// in either case. [`Error::Files`] when a file call fails, among them `Full` when
+    /// the disk has no room; the chunk then reads as absent.
     pub async fn put(&self, digest: Digest, chunk: &Block) -> Result<(), Error> {
+        let largest = self.pool.largest();
+        if chunk.len() > largest {
+            let requested = chunk.len();
+            return Err(block::Error::TooLarge { requested, largest }.into());
+        }
         let found = Digest::of(chunk);
         if found != digest {
             return Err(Error::Mismatch { digest, found });
@@ -207,8 +208,8 @@ impl Store {
 
     /// The reads since the open whose bytes did not hash to their digest.
     #[cfg(test)]
-    fn corrupted(&self) -> u64 {
-        self.corrupted.get()
+    fn corruptions(&self) -> u64 {
+        self.corruptions.get()
     }
 
     fn peek(&self, digest: Digest) -> Peek {
@@ -267,18 +268,16 @@ impl Store {
         if Digest::of(&block) == digest {
             return Ok(Some(block));
         }
-        self.corrupted.set(self.corrupted.get().saturating_add(1));
+        self.corruptions
+            .set(self.corruptions.get().saturating_add(1));
         self.forget(digest, seen);
         Ok(None)
     }
 
-    /// Closes the file of a dropped put of `digest`, so that the calls of the put
-    /// end before the next open of the file. The digest is `Listed` after it.
+    /// Ends the close of the file of a dropped put of `digest`, so that the calls of
+    /// the put end before the next open of the file. The digest is `Listed` after it.
     async fn settle(&self, digest: Digest) {
-        let mut flight = Flight::new(self, digest);
-        if let Some(file) = flight.file.take() {
-            file.close().await;
-        }
+        Flight::new(self, digest).close().await;
     }
 
     fn path(&self, digest: Digest) -> PathBuf {
@@ -309,12 +308,14 @@ impl Peek {
 }
 
 /// A put in flight. It holds [`State::Writing`] for its digest, and its drop sets the
-/// next state and wakes the calls that waited. A drop with the file still open keeps
-/// the file in [`State::Closing`], so its calls end before the next write open.
+/// next state and wakes the calls that waited. The file never drops with the flight:
+/// a drop keeps its close in [`State::Closing`], so that the file's calls end before
+/// the next write open of the path.
 struct Flight<'a> {
     store: &'a Store,
     digest: Digest,
     file: Option<File>,
+    closing: Option<Pin<Box<dyn Future<Output = ()>>>>,
     /// The state after the flight, when the file is closed. `None` is absent.
     after: Option<State>,
 }
@@ -326,17 +327,18 @@ impl<'a> Flight<'a> {
             .chunks
             .borrow_mut()
             .insert(digest, State::Writing(Vec::new()));
-        let file = match before {
+        let closing = match before {
             Some(State::Writing(_)) => {
                 panic!("invariant: one put of a digest is in flight at a time")
             }
-            Some(State::Closing(file)) => Some(file),
+            Some(State::Closing(close)) => Some(close),
             Some(State::Listed | State::Held) | None => None,
         };
         Flight {
             store,
             digest,
-            file,
+            file: None,
+            closing,
             after: Some(State::Listed),
         }
     }
@@ -347,25 +349,54 @@ impl<'a> Flight<'a> {
         let path = store.path(self.digest);
         let len =
             u64::try_from(chunk.len()).expect("invariant: a length fits in 64 bits");
-        let file = store.files.open(&path, Mode::Create { len }).await?;
+        let mode = Mode::Create { len };
+        let file = match store.files.open(&path, mode).await {
+            // A file of another length at the name is not the chunk.
+            Err(files::Error::Length { .. }) => {
+                store.files.remove(&path).await?;
+                store.files.open(&path, mode).await?
+            }
+            opened => opened?,
+        };
         let file = self.file.insert(file);
         let written = async {
             file.write_at(0, std::slice::from_ref(chunk)).await?;
             file.sync().await
         }
         .await;
-        let file = self.file.take().expect("invariant: the file is open");
-        file.close().await;
+        self.close().await;
         written?;
         store.files.sync_dir(&store.dir).await?;
         Ok(())
+    }
+
+    /// Closes the file, when one is open or closing. A drop during the close keeps
+    /// the close future, so the file's calls still end before the next open.
+    async fn close(&mut self) {
+        if let Some(file) = self.file.take() {
+            self.closing = Some(Box::pin(file.close()));
+        }
+        if self.closing.is_none() {
+            return;
+        }
+        poll_fn(|cx| {
+            let close = self.closing.as_mut().expect("invariant: a close is set");
+            close.as_mut().poll(cx)
+        })
+        .await;
+        self.closing = None;
     }
 }
 
 impl Drop for Flight<'_> {
     fn drop(&mut self) {
-        let after = match self.file.take() {
-            Some(file) => Some(State::Closing(file)),
+        let closing: Option<Pin<Box<dyn Future<Output = ()>>>> = match self.file.take()
+        {
+            Some(file) => Some(Box::pin(file.close())),
+            None => self.closing.take(),
+        };
+        let after = match closing {
+            Some(close) => Some(State::Closing(close)),
             None => self.after.take(),
         };
         let mut chunks = self.store.chunks.borrow_mut();
@@ -465,6 +496,13 @@ mod tests {
         Path::new(DIR).join(digest.to_string())
     }
 
+    fn too_large(requested: usize) -> block::Error {
+        block::Error::TooLarge {
+            requested,
+            largest: 1792,
+        }
+    }
+
     fn io(path: &Path, operation: Operation) -> Error {
         Error::Files(files::Error::Io {
             path: path.to_path_buf(),
@@ -503,6 +541,17 @@ mod tests {
         file.write_at(offset, &[block.freeze()]).await.unwrap();
         file.sync().await.unwrap();
         file.close().await;
+    }
+
+    /// Makes a file at `path` with the bytes of `block`, durably, as a defect would.
+    async fn create_file(node: &sim::node::Node, path: &Path, block: &Block) {
+        let files = node.files();
+        let len = u64::try_from(block.len()).unwrap();
+        let file = files.open(path, Mode::Create { len }).await.unwrap();
+        file.write_at(0, std::slice::from_ref(block)).await.unwrap();
+        file.sync().await.unwrap();
+        file.close().await;
+        files.sync_dir(Path::new(DIR)).await.unwrap();
     }
 
     /// Makes an empty file at `path`, durably, as a crash in a create leaves.
@@ -565,7 +614,7 @@ mod tests {
                 store.put(digest, &block).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
-                assert_eq!(store.corrupted(), 0);
+                assert_eq!(store.corruptions(), 0);
             })
             .unwrap();
         }
@@ -586,7 +635,7 @@ mod tests {
                 let store = open(&node).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert!(got.is_empty());
-                assert_eq!(store.corrupted(), 0);
+                assert_eq!(store.corruptions(), 0);
             })
             .unwrap();
         }
@@ -603,6 +652,65 @@ mod tests {
                 store.put(digest, &block).await.unwrap();
                 assert_no_open(&node, &path(digest)).await;
                 assert_no_sync_dir(&node).await;
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn of_a_chunk_longer_than_the_largest_block_writes_nothing() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open_with(&node, create_pool(2048)).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                node.fail_file(&path(digest), Operation::Open);
+                let error = store.put(digest, &block).await.unwrap_err();
+                assert_eq!(error, Error::Pool(too_large(3000)));
+                assert_absent(&store, digest).await;
+                assert_no_open(&node, &path(digest)).await;
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn over_a_file_of_another_length_removes_it() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(7, 512);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                assert_absent(&store, digest).await;
+                assert_eq!(store.corruptions(), 1);
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        // The first put drops with its write in flight. A get starts the close of
+        // its file and drops while the close waits. The next put must not find the
+        // file busy.
+        #[test]
+        fn after_a_get_dropped_in_a_settle_is_not_busy() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                {
+                    let mut put = pin!(store.put(digest, &block));
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                }
+                {
+                    let mut get = pin!(store.get(digest));
+                    assert!(poll_once(&mut get).await.is_pending());
+                }
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
             })
             .unwrap();
         }
@@ -740,7 +848,7 @@ mod tests {
             sim.run_on(&node, move |node, _| async move {
                 let store = open(&node).await.unwrap();
                 store.put(digest, &put).await.unwrap();
-                assert_eq!(store.corrupted(), 0);
+                assert_eq!(store.corruptions(), 0);
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
@@ -844,17 +952,17 @@ mod tests {
                 store.put(digest, &block).await.unwrap();
                 put_bytes(&node, digest, 2999, &[8]).await;
                 assert_absent(&store, digest).await;
-                assert_eq!(store.corrupted(), 1);
+                assert_eq!(store.corruptions(), 1);
                 // The digest is absent now: no second read, no second count.
                 node.fail_file(&path(digest), Operation::Open);
                 assert_absent(&store, digest).await;
-                assert_eq!(store.corrupted(), 1);
+                assert_eq!(store.corruptions(), 1);
                 assert_no_open(&node, &path(digest)).await;
                 // A put goes over the changed bytes.
                 store.put(digest, &block).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
-                assert_eq!(store.corrupted(), 1);
+                assert_eq!(store.corruptions(), 1);
             })
             .unwrap();
         }
@@ -867,7 +975,7 @@ mod tests {
                 create_empty(&node, &path(digest)).await;
                 let store = open(&node).await.unwrap();
                 assert_absent(&store, digest).await;
-                assert_eq!(store.corrupted(), 1);
+                assert_eq!(store.corruptions(), 1);
                 store.put(digest, &block).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
@@ -884,7 +992,7 @@ mod tests {
                 store.put(digest, &block).await.unwrap();
                 node.files().remove(&path(digest)).await.unwrap();
                 assert_absent(&store, digest).await;
-                assert_eq!(store.corrupted(), 0);
+                assert_eq!(store.corruptions(), 0);
                 store.put(digest, &block).await.unwrap();
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
@@ -907,24 +1015,25 @@ mod tests {
                 assert_eq!(error, io(&path(digest), Operation::ReadAt));
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
-                assert_eq!(store.corrupted(), 0);
+                assert_eq!(store.corruptions(), 0);
             })
             .unwrap();
         }
 
         #[test]
-        fn with_a_pool_too_small_for_the_chunk_gives_pool() {
+        fn of_a_listed_file_too_large_for_the_pool_gives_pool() {
             let (mut sim, node) = create_default_node(0);
-            sim.run_on(&node, |node, _| async move {
-                let store = open_with(&node, create_pool(2048)).await.unwrap();
-                let (digest, block) = chunk(7, 3000);
+            let (digest, block) = chunk(7, 3000);
+            sim.run_on(&node, move |node, _| async move {
+                let store = open(&node).await.unwrap();
                 store.put(digest, &block).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            sim.run_on(&node, move |node, _| async move {
+                let store = open_with(&node, create_pool(2048)).await.unwrap();
                 let error = store.get(digest).await.unwrap_err();
-                let expected = block::Error::TooLarge {
-                    requested: 3000,
-                    largest: 1792,
-                };
-                assert_eq!(error, Error::Pool(expected));
+                assert_eq!(error, Error::Pool(too_large(3000)));
             })
             .unwrap();
         }
@@ -932,6 +1041,41 @@ mod tests {
 
     mod open {
         use super::*;
+
+        #[test]
+        fn whose_list_fails_gives_io() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                node.fail_file(Path::new(DIR), Operation::List);
+                let error = open(&node).await.unwrap_err();
+                assert_eq!(error, io(Path::new(DIR), Operation::List));
+            })
+            .unwrap();
+        }
+
+        // The first open makes the directory and stops before the sync of its
+        // parent. The second lists it from the cache and must sync the parent too.
+        #[test]
+        fn after_an_open_that_stopped_before_its_sync_keeps_a_put() {
+            let (mut sim, node) = create_default_node(0);
+            let (digest, block) = chunk(7, 3000);
+            let put = block.clone();
+            sim.run_on(&node, move |node, _| async move {
+                node.fail_file(Path::new(""), Operation::SyncDir);
+                let error = open(&node).await.unwrap_err();
+                assert_eq!(error, io(Path::new(""), Operation::SyncDir));
+                let store = open(&node).await.unwrap();
+                store.put(digest, &put).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            sim.run_on(&node, move |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
 
         #[test]
         fn makes_the_directory_durably() {
@@ -984,7 +1128,7 @@ mod tests {
                     let got = store.get(digest).await.unwrap().unwrap();
                     assert_eq!(&got[..], &block[..], "chunk {index}");
                 }
-                assert_eq!(store.corrupted(), 0);
+                assert_eq!(store.corruptions(), 0);
             })
             .unwrap();
         }

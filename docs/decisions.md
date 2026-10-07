@@ -2155,7 +2155,8 @@ How to read this record:
   needs it. `env::files` has no rename, so a torn chunk must read as absent, never as
   a short chunk. A get or a put holds at most one chunk in memory. `put` borrows its
   chunk (`&Block`). A put whose future is dropped stores nothing that a get gives
-  unchecked: the next put or get of the digest reads the file first. Layout: one flat
+  unchecked: the next get of the digest reads and checks the file, and the next put
+  writes it again. Layout: one flat
   directory, one file per chunk named by the 64 hex digits of its digest, with the
   chunk's bytes and nothing else, so the bytes are their own check and the layout
   needs no header, no check field, and no rename. The open lists the directory and
@@ -2164,8 +2165,10 @@ How to read this record:
   no sync covers, and a put that trusted a read of them would return before they are
   durable. A pack file with an index lost: it needs record headers, a scan of every
   byte at open, and compaction for removal. Removal of chunks that no kept root reaches
-  is a follow-up. Architect:
-  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789.
+  is a follow-up. Decided by `laptop.architect` (2026-10-07T17:23:56Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The
+  write of a listed chunk, in place of the read the ruling approved, waits for the
+  architect's OK on PR #1515.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
