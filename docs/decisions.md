@@ -2442,9 +2442,9 @@ How to read this record:
   on a CI runner (#1149). `Point::fields` is a `Fields` view of the chunk.
   `tests/memory.rs` counts the heap bytes with `counting` and asserts at most 32 a
   point after 1e6 points of the lab's line. Lost: runs of points on a fixed time step,
-  as mesh slew moves each time off any grid (MESH SLEW); and RSS in place of a byte
-  count, as RSS depends on the allocator and the OS. Decided by the architect
-  (`laptop.architect-2`) on 2026-10-07T14:23:09Z, #1419
+  as mesh slew moves each time off any grid (MESH SLEW); and the resident set size
+  (RSS) in place of a byte count, as RSS depends on the allocator and the OS. Decided
+  by the architect (`laptop.architect-2`) on 2026-10-07T14:23:09Z, #1419
   (https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661).
   Implementation, not a ruling: a chunk holds at most 4096 points. A column holds
   only the points that set its key, each as an index and a value. A point past the
