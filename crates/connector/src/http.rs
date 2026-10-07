@@ -112,7 +112,7 @@ impl Client {
     ///   as each says, checked in that order.
     /// - [`Error::Connect`] when the name lookup failed, or no address of the host
     ///   took the connection.
-    /// - [`Error::TimedOut`] when the whole exchange took the timeout or longer.
+    /// - [`Error::TimedOut`] when the whole exchange was not done at the timeout.
     /// - [`Error::TooLarge`] when the response body is larger than the cap.
     /// - [`Error::Protocol`] when the stream failed, the server broke HTTP, or the
     ///   server closed early.
@@ -302,10 +302,7 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
         return Err(Error::UserInfo);
     }
     // `http` takes any text after `]`; it is part of the host up to a `:`.
-    let after = match text.strip_prefix('[') {
-        Some(_) => text.find(']').unwrap_or(text.len()),
-        None => 0,
-    };
+    let after = text.find(']').unwrap_or(0);
     let (host, port) = match text[after..].find(':') {
         Some(colon) => (&text[..after + colon], &text[after + colon + 1..]),
         None => (text, ""),
@@ -390,7 +387,7 @@ pub enum Error {
     },
     /// The name lookup failed, or no address of the host took the connection.
     Connect(net::Error),
-    /// The exchange took the timeout or longer.
+    /// The exchange was not done at the timeout.
     TimedOut,
     /// The response body is larger than the cap.
     TooLarge {

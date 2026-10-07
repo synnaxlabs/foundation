@@ -554,8 +554,9 @@ fn refuses_a_host_that_is_not_valid() {
         ("http://[fd00::2]x/", "[fd00::2]x"),
         ("http://[fd00::2]8086/", "[fd00::2]8086"),
         ("http://[fd00::2]x:80/", "[fd00::2]x"),
-        ("http://a[::1]/", "a["),
-        ("http://a[::1]:80/", "a["),
+        ("http://a[::1]/", "a[::1]"),
+        ("http://a[::1]:80/", "a[::1]"),
+        ("http://a:8[0]/", "a:8[0]"),
     ] {
         let error = refused(uri);
         assert!(
