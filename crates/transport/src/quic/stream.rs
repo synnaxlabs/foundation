@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::task::Poll;
 use std::{mem, slice};
 
-use block::{Block, Pool};
+use block::{Block, Unique};
 use bytes::Bytes;
 use noq_proto::{
     ClosedStream, Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId,
@@ -20,7 +20,7 @@ use crate::message::{self, Reader};
 use crate::{Class, Code, Error, varint};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Key {
     pub(super) connection: connection::Key,
     pub(super) id: StreamId,
@@ -307,6 +307,11 @@ impl Receiver {
     /// The stream this receiver reads.
     pub(crate) fn key(&self) -> Key {
         self.key
+    }
+
+    /// The stream's class.
+    pub(crate) fn class(&self) -> Class {
+        self.claim.class
     }
 
     /// What each read gives after the stream ended, once it has.
@@ -985,16 +990,16 @@ impl Streams {
     }
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
-    /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
-    /// yet, or the next has no room in the receive budget or waits behind a stream of
-    /// its class or a higher class. The receivers that get the freed room get
-    /// [`Event::Readable`] in `events`.
+    /// that `take(len)` gives, as [`Reader::read`]. `Ready(None)` at the end.
+    /// `Pending` when no whole message is here yet, the next has no room in the
+    /// receive budget or waits behind a stream of its class or a higher class, or
+    /// `take` gives no block for it. A message with no block holds no room. The
+    /// receivers that get the freed room get [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
-    /// [`Error::Reset`] when the peer reset the stream, [`Error::Pool`] when `pool`
-    /// has no room now, and [`Error::Broken`] when the peer broke the framing or
-    /// reset with a code over 32 bits.
+    /// [`Error::Reset`] when the peer reset the stream, and [`Error::Broken`] when the
+    /// peer broke the framing or reset with a code over 32 bits.
     #[expect(
         clippy::unwrap_in_result,
         reason = "a receiver never reads its stream after the end"
@@ -1003,7 +1008,7 @@ impl Streams {
         &mut self,
         inner: &mut noq_proto::Connection,
         receiver: &mut Receiver,
-        pool: &Pool,
+        mut take: impl FnMut(usize) -> Option<Unique>,
         events: &mut VecDeque<Event>,
     ) -> Result<Poll<Option<Block>>, Error> {
         let Receiver {
@@ -1014,23 +1019,31 @@ impl Streams {
         } = receiver;
         let receiving = &mut self.receiving;
         let mut recv = inner.recv_stream(key.id);
-        let mut result = Ok(Poll::Pending);
+        let (mut result, mut missed) = (Ok(Poll::Pending), false);
         if !receiving.waits(claim) {
             let mut chunks = recv.read(true).expect(RECEIVING);
-            let admit = |len| receiving.charge(*key, len, claim, Order::RANK);
-            result = reader.read(pool, admit, |max| match chunks.next(max) {
+            let take = |len| {
+                if !receiving.charge(*key, len, claim, Order::RANK) {
+                    return None;
+                }
+                let block = take(len);
+                missed = block.is_none();
+                block
+            };
+            result = reader.read(take, |max| match chunks.next(max) {
                 Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
                 Err(ReadError::Blocked) => Ok(Poll::Pending),
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
             });
         }
-        // The reader takes no bytes while it waits, so only this finds a reset.
-        if receiving.waits(claim)
+        // The reader takes no bytes while it waits for room or a block, so only this
+        // finds a reset.
+        if (missed || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
             result = Err(reset_error(error));
         }
-        if !matches!(result, Ok(Poll::Pending)) {
+        if !matches!(result, Ok(Poll::Pending)) || missed {
             receiving.release(claim, Order::RANK, |stream| {
                 events.push_back(Event::Readable { stream });
             });
@@ -1211,7 +1224,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use block::Heap;
+    use block::{Heap, Pool};
     use types::time::{Monotonic, Span};
 
     use super::*;
@@ -1303,8 +1316,25 @@ mod tests {
         now: Monotonic,
         receiver: &mut Receiver,
     ) -> Result<Poll<Option<Vec<u8>>>, Error> {
-        let read = side.endpoint.read(now, receiver)?;
+        let read = side.endpoint.read(now, receiver, testing::alloc)?;
         Ok(read.map(|message| message.map(|message| message.to_vec())))
+    }
+
+    /// Whether a read of `receiver` on `side` asked the pool for a block and got
+    /// none.
+    ///
+    /// # Panics
+    ///
+    /// When the read is not `Pending`.
+    fn missed(side: &mut Side, now: Monotonic, receiver: &mut Receiver) -> bool {
+        let mut missed = false;
+        let read = side.endpoint.read(now, receiver, |pool, len| {
+            let block = testing::alloc(pool, len);
+            missed = block.is_none();
+            block
+        });
+        assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+        missed
     }
 
     /// Writes `bytes` on a new stream of `connection` in `dir`, and finishes it when
@@ -1601,7 +1631,7 @@ mod tests {
     }
 
     #[test]
-    fn with_a_full_pool_fail_the_read_until_a_block_frees() {
+    fn with_a_full_pool_a_read_waits_until_a_block_frees() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             // A 100-byte block takes 192 bytes of the budget, and `_filled` leaves 300.
@@ -1636,12 +1666,7 @@ mod tests {
             let mut incoming = accept(&mut pair.server);
             let held = pool.alloc(100).expect("room");
             let now = pair.now();
-            let full = Error::Pool {
-                bytes: 100,
-                available: 108,
-            };
-            let read_full = next(&mut pair.server, now, &mut incoming.receiver);
-            assert_eq!(read_full, Err(full));
+            assert!(missed(&mut pair.server, now, &mut incoming.receiver));
             drop(held);
             let read = drain(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, (vec![vec![9; 100]], true));
@@ -1785,12 +1810,21 @@ mod tests {
             for receiver in &mut receivers[..2] {
                 assert_eq!(next(&mut pair.server, now, receiver), Ok(Poll::Pending));
             }
-            let full = Err(Error::Pool {
-                bytes: MESSAGE_MAX,
-                available: block::footprint(MESSAGE_MAX) - 1,
-            });
-            assert_eq!(next(&mut pair.server, now, &mut receivers[2]), full);
-            assert_eq!(next(&mut pair.server, now, &mut receivers[2]), full);
+            for _ in 0..2 {
+                assert!(missed(&mut pair.server, now, &mut receivers[2]));
+            }
+            // The budget holds three of the largest messages, so a fourth message
+            // reads only when the third gave back its room.
+            let message = [7; 100];
+            let prefix = message::prefix(message.len());
+            let bytes =
+                [[byte(Class::Complete)].as_slice(), &*prefix, &message].concat();
+            raw(pair.client.connection(), Dir::Uni, &bytes, true);
+            pair.run(RUN);
+            let mut fourth = accept(&mut pair.server);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut fourth.receiver);
+            assert_eq!(read, (vec![message.to_vec()], true));
         });
     }
 
