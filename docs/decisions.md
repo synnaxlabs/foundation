@@ -575,16 +575,56 @@ How to read this record:
   `clock::Reader::now` gives both at one instant, so a control lease and a stamp check
   in one call see the same time, and a lease never compares readings of two clocks
   (approved by the coordinator on 2026-10-06, #964). Before the node first has mesh
-  time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
-  so it never meets that case. This is a patch: #523 decides where samples wait before
-  the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. Lost: time as
-  arguments of each call, because each caller repeats the same two reads and can pass an
-  old one. Approved by the coordinator on 2026-10-05 (#191). Mesh time in the home (the
-  ahead limit and the stamp of each entry) is the midpoint of the mesh time of
-  `clock::Reader::now`, which never goes back. Lost: the latest edge, because it goes
-  back when the error shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500
-  days ahead, so the ahead limit stops nothing and one bad stamp makes each later true
-  stamp `Backwards` (#952 review, 2026-10-06).
+  time, it opens no writer, with `writer::Error::Unsynced`. A write needs an open
+  writer, so it never meets that case. A reader opens with no mesh time: its open and
+  its close take no stamp (#1024; decided by the architect, #963). This is a patch: #523
+  decides where samples wait before the first estimate (CLOCK PEER ANSWER), and removes
+  or keeps `Unsynced`. Lost: time as arguments of each call, because each caller repeats
+  the same two reads and can pass an old one. Approved by the coordinator on 2026-10-05
+  (#191). Mesh time in the home (the ahead limit and the stamp of each entry) is the
+  midpoint of the mesh time of `clock::Reader::now`, which never goes back. Lost: the
+  latest edge, because it goes back when the error shrinks, and with an unknown error
+  (OS CLOCK BOUND) it is 36500 days ahead, so the ahead limit stops nothing and one bad
+  stamp makes each later true stamp `Backwards` (#952 review, 2026-10-06).
+- **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
+  `codec`, and `home` items, apart from two. `Config`, which only `node` builds, names
+  `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
+  shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool,
+  so `hub` takes no pool of its own and the two cannot differ (architect,
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051). `Config`
+  takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
+  for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
+  the caller gives it with no entry that waits for a commit. The condition is stated,
+  not checked: `node` appends nothing before `Shard::new`, and `Config` takes the
+  buffer by value, so no later append can come from outside (architect,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6033691871; lost: a
+  check in `Shard::new`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
+  PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
+  Until then, the shard is the only writer (architect,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6034204295).
+  `home::Error` holds only what `write` gives, and each other call has its own error.
+  Conversions from `control` errors are private. The `hub` row stays as it is. `Shard`
+  gives no stored seq until a caller needs one (architect review,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6031908363). Lost:
+  `control` and `delivery` in the `hub` row, because `hub` then knows how the home is
+  built and a `control` change becomes a `hub` change. Lost: no call surface, with
+  requests through a ring, because on one shard a call costs nothing and a message costs
+  a copy and a wake, and it adds a second protocol beside `wire`. Lost: one reader key
+  and a panic at a grant to a latest reader, because the precondition is not in the
+  type. Lost: one `home::Error` for every call, because `write` would list `Unsynced`
+  and `Lease`, which it never gives. The plan has the full text
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
+  by the architect, #963
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
+- **HOME TYPE REFUSAL (#963)** `Shard::open_writer` refuses a key set with a series of
+  a type the home does not write yet, with `writer::Error::Type` (the slot and the type
+  of the first such series). It decides after `Unsynced` and `Lease`, and changes no
+  state. `hub` adds no check of its own; it maps the variant to its own error and names
+  the channel. This is a patch: #1145 makes the home write every `sample::Type` and
+  removes the variant. Lost: a documented precondition on `hub` (a user can break it,
+  and each `hub` caller must keep it); a refusal in `config check` (a second place that
+  must track the home). Decided by the architect, #963
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1636,15 +1676,18 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
-  the first cause, and a watch gives it also after each `Mesh` drops. A stopped group
-  does not start again: the node opens the mesh again (#1066 for an open after a failed
-  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
-  and a write that waits for a block ends at the next tick; until then a new open gives
-  `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
-  does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
-  node or a voter that is not a member (`Error::NotMember`), and a private key that is
-  not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
-  decided by the architect (#471):
+  the first cause, and a watch gives it also after each `Mesh` drops. `member` has no
+  error (#562): it gives the record that the node holds, also after a stop (approved by
+  the architect, 2026-10-07T08:07:48Z:
+  https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
+  group does not start again: the node opens the mesh again (#1066 for an open after a
+  failed sync). The task ends soon after the last `Mesh` drops, a write in progress ends
+  first, and a write that waits for a block ends at the next tick; until then a new open
+  gives `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A
+  watch does not keep the group running, and a dropped watch leaves no waker. `open`
+  refuses a node or a voter that is not a member (`Error::NotMember`), and a private key
+  that is not the key of this node's member (`Error::WrongKey`). Proposed by
+  box1.builder-3, decided by the architect (#471):
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
@@ -1712,17 +1755,22 @@ How to read this record:
   a stored position means. Cost: about 40 bytes of names per member (architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
   card's byte form is the name behind a length byte, the public key (32 bytes), the seal
-  key (32 bytes), a count of addresses (8 bytes), each address, and the version (8
-  bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the relay's
-  public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in network
-  order), and the port (2 bytes). An IPv6 address has no flow info and no scope, because
-  each means something only on the node that sets it. Every number but the IP is little
-  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
-  configuration is the one source) and no lease. The seal key is inside the signed card
-  (S8). A join is one `Join` change. Every node that applies it checks the card, and the
-  admission against the ticket's public key, scope, uses, and expiry at the change's
-  mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a
-  join answers with the founding voters and their cards, and the node opens with them as
+  key (32 bytes), a count of addresses (8 bytes), at most 32, each address, and the
+  version (8 bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the
+  relay's public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in
+  network order), and the port (2 bytes). An IPv6 address has no flow info and no scope,
+  because each means something only on the node that sets it. Every number but the IP is
+  little endian. The cap is part of the byte form because every member keeps every card:
+  without it, one node sets the size of each member's state. Lost: a bound from a MESH
+  WIRE frame limit, which ties what a valid card is to a link setting and bounds no
+  region state. Decided by the architect, #336
+  (https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6032881587). It
+  lives only in `mesh` region state (X1), with no voter flag (the raft configuration is
+  the one source) and no lease. The seal key is inside the signed card (S8). A join is
+  one `Join` change. Every node that applies it checks the card, and the admission
+  against the ticket's public key, scope, uses, and expiry at the change's mesh time
+  (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a join
+  answers with the founding voters and their cards, and the node opens with them as
   `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
   cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
   and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
@@ -2195,6 +2243,28 @@ How to read this record:
   it, because the shard count belongs to the node, so the buffer is the one place
   that refuses it. Decided by the architect on #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
+- **SHARD DISK (2026-10-07)** Until segments exist, `node` gives each shard's ring
+  `disk / n` of the node's disk budget (`node::Config::disk`, a `types::byte::Size`),
+  and shard 0 also gets the remainder, as SHARD POOLS does. The budget bounds each new
+  ring file: `node` takes the largest ring whose file fits each part
+  (`buffer::Layout::fit`), so the format stays in `buffer`. When a part holds no ring,
+  no shard starts, and `join` gives `Error::Disk` with the budget, the shard count, and
+  the least budget (`n` times the least ring that `fit` gives, capped at the largest
+  `Size`); `config` cannot check it, as for the pool part (NODE SETTINGS). The ring is
+  the whole store. A ring already there keeps its size, which can be more than its part,
+  until `Buffer::resize` exists (#451). So oldest first (B1) holds per shard, not per
+  node. This is a patch. The long-term path is small rings for commits, then segments
+  that draw from one node-wide allowance (#1081). The 5.5 lab sizes the budget for the
+  shard that holds the index. With `Buffer::resize`, `node` computes the `Layout` with
+  `fit` and calls `Buffer::resize`, nothing more: `buffer` sets the file length itself,
+  so `node` never extends or cuts the ring file and does not learn the format (after
+  https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843).
+  Decided by the architect, #342:
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672, and
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a

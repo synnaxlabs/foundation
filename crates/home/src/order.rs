@@ -8,11 +8,11 @@ use types::time::{Span, Stamp};
 
 /// The stamps an index accepts.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Limits {
+pub struct Limits {
     /// The earliest stamp accepted. A clock that was never set reads near 1970.
-    pub(crate) earliest: Stamp,
+    pub earliest: Stamp,
     /// How far past mesh time a stamp may be.
-    pub(crate) ahead: Span,
+    pub ahead: Span,
 }
 
 /// A frame whose stamps passed a [`Check`] on one path.
@@ -235,7 +235,7 @@ fn stamp(bytes: [u8; 8]) -> Stamp {
 
 /// A frame's stamps break a rule. The frame is rejected whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// A stamp is not after the stamp before it on its path.
     Backwards {
         /// The path of the frame.
