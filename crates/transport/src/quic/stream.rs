@@ -4221,6 +4221,32 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_reply_that_the_peer_stopped_after_it_opened_and_before_its_class_fails() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let first = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut sender, receiver) = first.expect("a stream");
+            let second = pair.client.endpoint.open(now, key, Class::Command);
+            let (_, later) = second.expect("a stream");
+            // The stop of the later stream opens both on the server.
+            pair.client.endpoint.stop(now, later, Code(9));
+            pair.run(RUN);
+            let now = pair.now();
+            pair.client.endpoint.stop(now, receiver, Code(7));
+            pair.run(RUN);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let reply = incoming.sender.expect("a two-way stream");
+            let (now, message) = (pair.now(), shard.block(b"b"));
+            let written = pair.server.endpoint.write(now, &reply, &mut Some(message));
+            assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
+        });
+    }
+
     mod share {
         use super::*;
 
