@@ -144,7 +144,8 @@ impl Mesh {
     }
 
     /// The member with `key` in this node's view of the region, or `None` when the
-    /// region has no such member.
+    /// region has no such member. It answers also after the group stops, from the view
+    /// at the stop.
     pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
     }
