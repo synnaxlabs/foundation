@@ -1369,15 +1369,26 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
   connected attempt: proposed by `box2.builder-5`, decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
-- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` future that drops before
-  it completes resets the stream with `Code(0)`. After that, each `send`, `try_send`,
-  and `finish` on the sender gives `Error::Reset { code: Code(0) }`, and the
+- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` or `send_parts` future
+  that drops after the stream took its message, and before it completes, resets the
+  stream with `Code(0)`. One that drops before the stream took its message, such as
+  before its first poll or while it waits behind an earlier message, sends nothing and
+  changes nothing. After a reset, each `send`, `try_send`, and `finish` on the sender
+  gives `Error::Reset { code: Code(0) }`, and the
   `Error::Reset` doc names both causes: the peer, or a dropped `send` future. A dropped
   future is a normal cancel in async code, such as a timeout in a select, so it must not
   panic; in both cases the caller opens a new stream. Rejected: a panic, as after
   `finish` (a timeout the caller handles would become a crash). Proposed by
   `box2.builder-5`, decided by the architect, #68
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313).
+  Amended by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035156093): reset
+  only when bytes of the message may have gone. `send`, `try_send`, `send_parts`, and
+  `try_send_parts` check in this order: the range panic (`*_parts`), the panic after
+  `finish`, `Error::TooLarge`, then the state errors (`Reset` after a dropped send
+  future, `Stopped`, or the error that ended the session). The limit is fixed for the
+  session, so a size defect shows in every state of the stream
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035220831).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
