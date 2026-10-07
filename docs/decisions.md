@@ -3092,15 +3092,18 @@ How to read this record:
   `Full` promises no file; a flock, stat, or name check error after `openat` can leave
   the empty file that the create made. Lost: a promise that any failed create leaves no
   file it made.
-  Amended (2026-10-07, #1310): a drop of the future of `Files::remove` does not stop the
-  remove, which can still remove what the path names when it ends. Count the room of a
+  Amended (2026-10-07, #1310): a call of `Files` whose future drops can still run. A
+  remove left so removes what the path names when it ends. Count the room of a
   removed file as used until `sync_dir` on its directory ends, and while a handle holds
   the file (#1301). Lost: `File::remove`, a remove through the write handle, which the
   handle rule would cover with `Busy`; after #1441 it had no caller. Decided by
   `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
   (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245).
   Supersedes
-  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491.
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
+  sentence on a dropped call: `laptop.architect-2`, 2026-10-07T16:23:52Z
+  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6042117395). Lost:
+  "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that

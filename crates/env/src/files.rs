@@ -23,6 +23,8 @@ pub const SECTOR: usize = 512;
 /// absolute path or a `..` segment. The handle cannot leave the thread that made it,
 /// so each shard has its own. Clones use the same directory.
 ///
+/// A call whose future drops can still run, and then it ends as it would have.
+///
 /// ```
 /// use std::path::Path;
 ///
@@ -155,11 +157,10 @@ impl Files {
         self.0.create_dir(dir).await
     }
 
-    /// Removes the file at `path`. A file that is not there counts as removed. A drop
-    /// of the future does not stop the remove, which can still remove what the path
-    /// names when it ends. The removal is not durable until [`Files::sync_dir`] on its
-    /// directory ends. Count the file's room as used until then, and while a handle
-    /// holds the file.
+    /// Removes the file at `path`. A file that is not there counts as removed. A remove
+    /// that a drop leaves to run removes what the path names when it ends. The removal
+    /// is not durable until [`Files::sync_dir`] on its directory ends. Count the file's
+    /// room as used until then, and while a handle holds the file.
     ///
     /// # Errors
     ///
