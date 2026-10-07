@@ -68,7 +68,8 @@ returns (`git worktree remove --force <path>`).
    `laptop.director`. A refusal that names a trigger for later work is a deferral: file
    its issue with the trigger, or write the trigger in the decisions entry that the
    ruling cites. So is an answer that a later PR does the work, also a later PR of the
-   same issue.
+   same issue. When the trigger is the work of another open issue, also comment the
+   deferral issue and its trigger on that issue.
 
 ## Rating
 
