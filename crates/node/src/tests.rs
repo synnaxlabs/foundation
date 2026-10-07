@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use env::thread;
@@ -39,6 +40,34 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
     })
 }
 
+type Files = Box<dyn FnMut(usize) -> Box<dyn FnOnce() -> env::files::Files + Send>>;
+
+/// The files of `host` for each shard.
+fn files(host: &sim::node::Node) -> Files {
+    let host = host.clone();
+    Box::new(move |_| {
+        let host = host.clone();
+        Box::new(move || host.files())
+    })
+}
+
+/// The seams of `host`, with a pool budget of `budget` from `memory`.
+fn config(
+    host: &sim::node::Node,
+    budget: usize,
+    memory: Memory,
+) -> Config<block::Heap> {
+    Config {
+        shards: host.shards(),
+        clock: host.clock(),
+        wall: host.wall(),
+        budget,
+        memory,
+        files: files(host),
+        entropy: host.entropy(),
+    }
+}
+
 /// Starts a node on `cores` cores of a `sim` host, after `faults` aim at its shards.
 fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
     start_with(seed, cores, faults, 1 << 20, Box::new(heap))
@@ -73,13 +102,7 @@ fn start_on(
     for &(core, fault) in faults {
         host.fail_shard(core, fault);
     }
-    let node = Node::start(Config {
-        shards: host.shards(),
-        clock: host.clock(),
-        wall: host.wall(),
-        budget,
-        memory,
-    });
+    let node = Node::start(config(&host, budget, memory));
     Run {
         seed,
         sim,
@@ -327,21 +350,17 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
 }
 
 #[test]
-fn a_config_shows_its_budget_but_not_its_memory() {
+fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let host = sim.node(sim::node::Config::default());
-    let (clock, wall) = (host.clock(), host.wall());
-    let parts = format!("clock: {clock:?}, wall: {wall:?}");
-    let config = Config {
-        shards: host.shards(),
-        clock,
-        wall,
-        budget: 4096,
-        memory: Box::new(heap),
-    };
+    let config = config(&host, 4096, Box::new(heap));
+    let (clock, wall, entropy) = (&config.clock, &config.wall, &config.entropy);
     assert_eq!(
         format!("{config:?}"),
-        format!("Config {{ shards: Shards {{ .. }}, {parts}, budget: 4096, .. }}")
+        format!(
+            "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
+             budget: 4096, entropy: {entropy:?}, .. }}"
+        )
     );
 }
 
@@ -368,4 +387,122 @@ fn a_host_that_cannot_pin_starts_shards_on_no_core() {
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
+}
+
+/// Starts a node on `host`, runs it for an hour, stops it, and gives what `join`
+/// gives.
+fn run_on(sim: &mut sim::Sim, host: &sim::node::Node) -> Result<(), Error> {
+    let node = Node::start(config(host, 1 << 20, Box::new(heap)));
+    assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+    node.stop();
+    assert_eq!(sim.run(), Ok(()));
+    node.join()
+}
+
+/// The entries of directory `dir` of `host`'s data directory, sorted.
+fn listed(sim: &mut sim::Sim, host: &sim::node::Node, dir: &str) -> Vec<PathBuf> {
+    let dir = PathBuf::from(dir);
+    let mut listed = sim
+        .run_on(host, move |host, _| async move {
+            host.files().list(&dir).await.expect("the directory lists")
+        })
+        .expect("the run ends");
+    listed.sort();
+    listed
+}
+
+fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
+    sim.node(sim::node::Config {
+        cores: NonZeroUsize::new(cores).unwrap(),
+        ..sim::node::Config::default()
+    })
+}
+
+mod buffer {
+    use super::*;
+
+    #[test]
+    fn each_shard_opens_a_ring_in_its_own_directory() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
+        let shards = ["shard-0", "shard-1"];
+        assert_eq!(listed(&mut sim, &host, ""), shards.map(PathBuf::from));
+        for shard in shards {
+            assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
+        }
+    }
+
+    #[test]
+    fn a_restart_opens_the_rings_it_left() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
+        // A ring that was not there would need its directory made.
+        for core in 0..2 {
+            let dir = format!("shard-{core}");
+            host.fail_file(Path::new(&dir), env::files::Operation::CreateDir);
+        }
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
+    }
+
+    /// Starts a node of `cores` shards whose ring on `core` does not open, after
+    /// `faults` aim at its shards, and gives what `join` gives.
+    fn refused(
+        seed: u64,
+        cores: usize,
+        core: usize,
+        faults: &[(usize, Fault)],
+    ) -> Error {
+        let mut run = start(seed, cores, faults);
+        let ring = format!("shard-{core}/ring");
+        run.host
+            .fail_file(Path::new(&ring), env::files::Operation::Open);
+        while run.sim.run().is_err() {}
+        run.node.join().unwrap_err()
+    }
+
+    fn opened(core: usize) -> Error {
+        Error::Buffer {
+            core,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: PathBuf::from(format!("shard-{core}/ring")),
+                operation: env::files::Operation::Open,
+                code: 5,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_ring_that_does_not_open_stops_the_node() {
+        for seed in 0..32 {
+            let e = refused(seed, 3, 1, &[]);
+            assert_eq!(e, opened(1), "seed {seed}");
+            assert_eq!(
+                e.to_string(),
+                "cannot open the buffer of shard-1: a file call failed: open of \
+                 shard-1/ring failed with OS error 5"
+            );
+        }
+    }
+
+    #[test]
+    fn join_gives_a_ring_that_did_not_open_over_a_shard_that_panicked() {
+        for seed in 0..32 {
+            let e = refused(seed, 3, 2, &[(0, Fault::Panic)]);
+            assert_eq!(e, opened(2), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn join_gives_a_shard_that_could_not_start_over_a_ring_that_did_not_open() {
+        for seed in 0..32 {
+            let e = refused(seed, 3, 1, &[(2, Fault::Start)]);
+            let start = thread::Error::Start {
+                name: "shard-2".into(),
+                reason: "injected".into(),
+            };
+            assert_eq!(e, Error::Start(start), "seed {seed}");
+        }
+    }
 }

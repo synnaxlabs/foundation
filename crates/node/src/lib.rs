@@ -13,8 +13,13 @@ mod stop;
 mod tests;
 
 use std::fmt;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
 
 use env::thread::Handle;
+use types::channel::Slots;
+use types::time::Span;
 
 use crate::stop::Stop;
 
@@ -32,6 +37,13 @@ pub struct Config<M> {
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
     /// once for each shard, in order of core.
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
+    /// Makes the files of shard `core` under the node's data directory. `node` calls
+    /// it once for each shard, in order of core, and calls the function it gives on
+    /// that shard's thread, because a `Files` cannot leave the thread that made it.
+    pub files: Box<dyn FnMut(usize) -> Box<dyn FnOnce() -> env::files::Files + Send>>,
+    /// Randomness. Each shard's buffer draws the chain value of its restart record
+    /// from it.
+    pub entropy: env::entropy::Entropy,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -41,6 +53,7 @@ impl<M> fmt::Debug for Config<M> {
             .field("clock", &self.clock)
             .field("wall", &self.wall)
             .field("budget", &self.budget)
+            .field("entropy", &self.entropy)
             .finish_non_exhaustive()
     }
 }
@@ -49,17 +62,32 @@ impl<M> fmt::Debug for Config<M> {
 #[derive(Debug)]
 pub struct Node {
     stop: Stop,
-    handles: Vec<Handle>,
+    shards: Vec<Shard>,
     failed: Option<Error>,
 }
+
+/// A started shard, with the error of its buffer's open once that open fails.
+#[derive(Debug)]
+struct Shard {
+    handle: Handle,
+    failed: Arc<OnceLock<buffer::Error>>,
+}
+
+/// The size of each shard's write-ahead ring, until the disk budget sets it (#342).
+const AREA: u64 = 64 << 20;
+/// The largest record body of each shard's ring: one group commit.
+const BODY_MAX: usize = 1 << 20;
+/// The longest an entry waits for its group commit to start.
+const COMMIT: Span = Span::from_nanos(2_000_000);
 
 impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
     /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
-    /// takes the remainder. Returns once each shard runs or one has failed to start. A
-    /// failed start, or a shard with no memory, stops the node, and [`Node::join`]
-    /// returns its error.
+    /// takes the remainder. Each shard opens its buffer in directory `shard-<i>` of
+    /// its files, and makes it there when it is not there. Returns once each shard
+    /// runs or one has failed to start. A failed start, a shard with no memory, or a
+    /// buffer that does not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -72,13 +100,15 @@ impl Node {
             wall,
             budget,
             mut memory,
+            mut files,
+            entropy,
         } = config;
-        let (mesh, _reader) = clock::Clock::new(monotonic);
+        let (mesh, _reader) = clock::Clock::new(monotonic.clone());
         let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
-            handles: Vec::new(),
+            shards: Vec::new(),
             failed: None,
         };
         let pinnable = shards.pinnable();
@@ -101,17 +131,27 @@ impl Node {
             // Only the first shard gets the mesh clock.
             let mesh = mesh.take();
             let guard = stop.guard();
+            let failed = Arc::new(OnceLock::new());
+            let open = Open {
+                core,
+                files: files(core),
+                clock: monotonic.clone(),
+                entropy: entropy.clone(),
+                failed: Arc::clone(&failed),
+            };
             let main = move |tasks: env::tasks::Tasks| {
                 if let Some((mesh, wall)) = mesh {
                     tasks.spawn(async { mesh.run(wall).await });
                 }
                 async move {
-                    guard.await;
-                    drop(pool);
+                    if let Some(buffer) = open.run(Rc::new(pool), tasks).await {
+                        guard.await;
+                        drop(buffer);
+                    }
                 }
             };
             match shards.start(shard, main) {
-                Ok(handle) => node.handles.push(handle),
+                Ok(handle) => node.shards.push(Shard { handle, failed }),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
                     node.failed = Some(Error::Start(e));
@@ -133,16 +173,64 @@ impl Node {
     /// # Errors
     ///
     /// The first failure: [`Error::Start`] for a shard that could not start or pin,
-    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Panicked`] for
-    /// the first shard by core that panicked. Any failed shard stops the node.
+    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Buffer`] for
+    /// the first shard by core whose buffer did not open, else [`Error::Panicked`]
+    /// for the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let mut first = self.failed;
-        for handle in self.handles {
-            if let Err(e) = handle.join() {
-                first.get_or_insert(Error::Panicked(e));
+        let mut panicked = None;
+        for (core, shard) in self.shards.into_iter().enumerate() {
+            if let Err(e) = shard.handle.join() {
+                panicked.get_or_insert(Error::Panicked(e));
+            }
+            if let Some(error) = shard.failed.get() {
+                first.get_or_insert_with(|| Error::Buffer {
+                    core,
+                    error: error.clone(),
+                });
             }
         }
-        first.map_or(Ok(()), Err)
+        first.or(panicked).map_or(Ok(()), Err)
+    }
+}
+
+/// The open of a shard's buffer, made before the shard starts.
+struct Open {
+    core: usize,
+    files: Box<dyn FnOnce() -> env::files::Files + Send>,
+    clock: env::clock::Clock,
+    entropy: env::entropy::Entropy,
+    failed: Arc<OnceLock<buffer::Error>>,
+}
+
+impl Open {
+    /// Opens the shard's buffer on the shard's thread. A failed open is kept for
+    /// [`Node::join`] and gives `None`.
+    async fn run(
+        self,
+        pool: Rc<block::Pool>,
+        tasks: env::tasks::Tasks,
+    ) -> Option<buffer::Buffer> {
+        let config = buffer::Config {
+            files: (self.files)(),
+            dir: PathBuf::from(format!("shard-{}", self.core)),
+            pool,
+            clock: self.clock,
+            tasks,
+            entropy: self.entropy,
+            layout: buffer::Layout::new(AREA, BODY_MAX)
+                .expect("invariant: the ring sizes of node make a ring"),
+            commit: COMMIT,
+        };
+        let mut slots = Slots::new();
+        match buffer::Buffer::open(config, &mut slots).await {
+            Ok(buffer) => Some(buffer),
+            Err(error) => {
+                (self.failed.set(error))
+                    .expect("invariant: a shard opens its buffer once");
+                None
+            }
+        }
     }
 }
 
@@ -160,6 +248,13 @@ pub enum Error {
         /// Why the OS gave none.
         error: os::memory::Error,
     },
+    /// The buffer of the shard on `core` did not open.
+    Buffer {
+        /// The core of the shard.
+        core: usize,
+        /// Why it did not open.
+        error: buffer::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -169,6 +264,9 @@ impl fmt::Display for Error {
             Self::Panicked(e) => write!(f, "{e}"),
             Self::Memory { core, error } => {
                 write!(f, "no memory for the pool of shard-{core}: {error}")
+            }
+            Self::Buffer { core, error } => {
+                write!(f, "cannot open the buffer of shard-{core}: {error}")
             }
         }
     }
