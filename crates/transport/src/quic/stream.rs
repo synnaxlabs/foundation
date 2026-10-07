@@ -3388,9 +3388,15 @@ mod tests {
             let bytes = [byte(Class::Complete), 1, b'z'];
             let later = raw(pair.client.connection(), Dir::Bi, &bytes, true);
             pair.run(RUN);
+            let resets = |pair: &mut Pair| {
+                let stats = pair.client.connection().stats();
+                stats.frame_rx.reset_stream
+            };
+            let before = resets(&mut pair);
             let stopped = pair.client.connection().recv_stream(id).stop(7u32.into());
             stopped.expect("stopped");
             pair.run(RUN);
+            assert_eq!(resets(&mut pair) - before, 1, "a reset at the stop");
             let bytes = [byte(Class::Complete), 1, b'a'];
             let mut send = pair.client.connection().send_stream(id);
             assert_eq!(send.write(&bytes), Ok(3));
@@ -3416,6 +3422,20 @@ mod tests {
             pair.run(RUN);
             let streams = pair.server.connection().streams();
             assert_eq!(streams.remote_open_streams(Dir::Bi), 0);
+        });
+    }
+
+    #[test]
+    fn a_stop_after_only_the_class_byte_with_a_code_over_32_bits_breaks() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let bytes = [byte(Class::Complete)];
+            let id = raw(pair.client.connection(), Dir::Bi, &bytes, false);
+            pair.run(RUN);
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.client.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            assert_broken(&mut pair, true, "a stop code over 32 bits: 4294967296");
         });
     }
 
@@ -5882,18 +5902,47 @@ mod tests {
         }
 
         #[test]
-        fn reset_at_the_hello_a_reply_stopped_before_it() {
+        fn break_at_the_hello_on_a_stop_before_it_with_a_code_over_32_bits() {
             testing::run(1, |shard| {
                 let mut pair = foreign_dial(shard, |_| {});
                 let connection = foreign(&mut pair);
                 let hello = connection.streams().open(Dir::Uni).expect("a stream");
                 let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
-                let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                let over = VarInt::from_u64(1 << 32).expect("a varint");
+                let stopped = connection.recv_stream(id).stop(over);
                 stopped.expect("stopped");
                 pair.run(RUN);
                 let mut send = foreign(&mut pair).send_stream(hello);
                 let own = OWN.encode();
                 assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                assert_refused(&mut pair, "a stop code over 32 bits: 4294967296");
+            });
+        }
+
+        #[test]
+        fn reset_at_the_hello_a_reply_stopped_before_it() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let connection = foreign(&mut pair);
+                let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                let id = raw(connection, Dir::Bi, &[1], false);
+                let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                pair.run(RUN);
+                let resets = |pair: &mut Pair| {
+                    let stats = foreign(pair).stats();
+                    stats.frame_rx.reset_stream
+                };
+                let before = resets(&mut pair);
+                let mut send = foreign(&mut pair).send_stream(hello);
+                let own = OWN.encode();
+                assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                assert_eq!(resets(&mut pair) - before, 1, "a reset at the hello");
+                let mut send = foreign(&mut pair).send_stream(id);
+                assert_eq!(send.write(&[1, b'b']), Ok(2));
                 send.finish().expect("finished");
                 pair.run(RUN);
                 let mut incoming = accept(&mut pair.server);
