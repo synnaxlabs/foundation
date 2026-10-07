@@ -91,7 +91,7 @@ pub(crate) fn status<const N: usize>(entries: [(Name, channel::Key); N]) -> Stat
     Status::new(entries.into()).unwrap()
 }
 
-pub(crate) fn members(ids: &[u8]) -> Vec<Member> {
+pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
     ids.iter().map(|&id| member(id)).collect()
 }
 

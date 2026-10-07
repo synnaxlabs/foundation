@@ -57,8 +57,8 @@ fn edges(kind: &Kind) -> [Option<(Edge, channel::Key)>; 2] {
             control.map(|to| (Edge::Control, to)),
         ],
         Kind::Data(data) => [
-            Some((Edge::Index, data.index())),
-            data.quality().map(|to| (Edge::Quality, to)),
+            Some((Edge::Index, *data.index())),
+            data.quality().map(|to| (Edge::Quality, *to)),
         ],
     }
 }
@@ -134,7 +134,7 @@ impl Edge {
             (Self::Quality, Kind::Data(data)) => {
                 matches!(data.data_type(), DataType::Quality)
             }
-            (Self::Control, Kind::Data(data)) => data.index() != from,
+            (Self::Control, Kind::Data(data)) => *data.index() != from,
             (Self::Index, Kind::Index { .. }) | (Self::Error, Kind::Data(_)) => true,
             _ => false,
         }

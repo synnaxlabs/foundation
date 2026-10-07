@@ -248,19 +248,6 @@ impl Sender {
         self.finished = true;
     }
 
-    /// # Errors
-    ///
-    /// [`Error::TooLarge`] when `message` is over the peer's largest message.
-    pub(super) fn check_size(&self, message: &Block) -> Result<(), Error> {
-        if message.len() > self.bytes_max {
-            return Err(Error::TooLarge {
-                bytes: message.len(),
-                bytes_max: self.bytes_max,
-            });
-        }
-        Ok(())
-    }
-
     /// # Panics
     ///
     /// After `end`.
@@ -338,6 +325,19 @@ impl Half {
             }
         }
     }
+}
+
+/// The size rule of every send.
+///
+/// # Errors
+///
+/// [`Error::TooLarge`] when a message of `bytes` is over `bytes_max`, the peer's
+/// largest message.
+pub(crate) fn check_size(bytes: usize, bytes_max: usize) -> Result<(), Error> {
+    if bytes > bytes_max {
+        return Err(Error::TooLarge { bytes, bytes_max });
+    }
+    Ok(())
 }
 
 impl Receiver {

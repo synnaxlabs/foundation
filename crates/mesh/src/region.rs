@@ -528,7 +528,9 @@ mod tests {
 
     use super::*;
     use crate::common::ticket;
-    use crate::common::{key as node, members, public, signed, status, status_bytes};
+    use crate::common::{
+        create_members, key as node, public, signed, status, status_bytes,
+    };
 
     const EXPIRY: Stamp = Stamp::from_nanos(1_000);
     const BEFORE_EXPIRY: Stamp = Stamp::from_nanos(999);
@@ -576,7 +578,7 @@ mod tests {
 
     // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
     fn state() -> State {
-        let mut state = State::new(name("plant"), members(&[1, 2])).unwrap();
+        let mut state = State::new(name("plant"), create_members(&[1, 2])).unwrap();
         let recorded = state.apply(record(7, options("plant.edge", false)));
         assert_eq!(recorded, Ok(None));
         state
@@ -609,7 +611,7 @@ mod tests {
 
     #[test]
     fn new_refuses_two_members_with_one_key() {
-        let error = State::new(name("plant"), members(&[1, 2, 1])).unwrap_err();
+        let error = State::new(name("plant"), create_members(&[1, 2, 1])).unwrap_err();
         assert_eq!(error, Unfit::Duplicate { key: node(1) });
         assert_eq!(
             error.to_string(),
@@ -619,7 +621,7 @@ mod tests {
 
     #[test]
     fn new_refuses_a_member_that_the_region_cannot_hold() {
-        let mut reserved = members(&[1, 2]);
+        let mut reserved = create_members(&[1, 2]);
         reserved[1].card = signed(2, "plant.@changes");
         assert_eq!(
             State::new(name("plant"), reserved),
@@ -627,7 +629,7 @@ mod tests {
                 name: name("plant.@changes")
             })
         );
-        let mut outside = members(&[1, 2]);
+        let mut outside = create_members(&[1, 2]);
         outside[1].card = signed(2, "factory.node2");
         assert_eq!(
             State::new(name("plant"), outside),
@@ -636,7 +638,7 @@ mod tests {
                 region: name("plant")
             })
         );
-        let mut long = members(&[1, 2]);
+        let mut long = create_members(&[1, 2]);
         long[1].status = status([(long_status(256 - 12), index(1))]);
         assert_eq!(
             State::new(name("plant"), long).unwrap_err(),
@@ -993,7 +995,7 @@ mod tests {
 
     #[test]
     fn new_refuses_two_members_with_one_name_or_one_status_key() {
-        let mut taken = members(&[1, 2]);
+        let mut taken = create_members(&[1, 2]);
         taken[1].card = signed(2, "plant.NODE1");
         assert_eq!(
             State::new(name("plant"), taken),
@@ -1002,7 +1004,7 @@ mod tests {
                 key: node(1)
             })
         );
-        let mut reused = members(&[1, 2]);
+        let mut reused = create_members(&[1, 2]);
         reused[0].status = status([(name("disk"), index(20))]);
         reused[1].status = status([(name("disk"), index(20))]);
         assert_eq!(
@@ -1368,7 +1370,7 @@ mod tests {
         fn a_refused_change_changes_nothing(
             steps in prop::collection::vec(steps(), 0..16),
         ) {
-            let mut state = State::new(name("plant"), members(&[1, 2])).unwrap();
+            let mut state = State::new(name("plant"), create_members(&[1, 2])).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());

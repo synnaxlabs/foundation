@@ -1,10 +1,13 @@
-//! The names in the data directory: the record of the shard count, and the
-//! directory of each shard's ring.
+//! The names in the data directory: the lock, the record of the shard count, and
+//! the directory of each shard's ring.
 
 use std::path::{Path, PathBuf};
 
 use crate::Error;
 
+/// The file a running node holds open to write, so a second node gets `Busy`. The
+/// node never removes it, so an open cannot race with a remove.
+const LOCK: &str = "lock";
 /// The prefix of the record: an empty directory `shards-<n>`. A crash leaves the
 /// whole name or none, so the record has no bytes to tear.
 const RECORD: &str = "shards-";
@@ -16,14 +19,19 @@ pub(crate) fn shard(core: usize) -> PathBuf {
     PathBuf::from(format!("{SHARD}{core}"))
 }
 
-/// Records `cores` in the data directory when no count is there, and syncs the
-/// record before any ring is made. Refuses a directory that records another count.
-/// With no record, rings up to `shard-<k>` are a record of `k + 1`. Reads names
-/// only, so a file named as a record or a ring counts as one.
+/// Locks the data directory, then records `cores` in it when no count is there, and
+/// syncs the record before any ring is made. Refuses a directory that records
+/// another count. With no record, rings up to `shard-<k>` are a record of `k + 1`.
+/// Reads names only, so a file named as a record or a ring counts as one. Gives the
+/// lock, which keeps out other nodes until it drops.
 pub(crate) async fn claim(
     files: &env::files::Files,
     cores: usize,
-) -> Result<(), Error> {
+) -> Result<env::files::File, Error> {
+    let lock = files
+        .open(Path::new(LOCK), env::files::Mode::Create { len: 0 })
+        .await
+        .map_err(Error::Directory)?;
     let root = Path::new("");
     let names = files.list(root).await.map_err(Error::Directory)?;
     let mut counts: Vec<usize> = names
@@ -49,7 +57,8 @@ pub(crate) async fn claim(
         files.create_dir(&record).await.map_err(Error::Directory)?;
     }
     // Also when the record is there: a crash may have left it unsynced.
-    files.sync_dir(root).await.map_err(Error::Directory)
+    files.sync_dir(root).await.map_err(Error::Directory)?;
+    Ok(lock)
 }
 
 /// The number after `prefix` in `name`, in plain decimal that fits a `usize`, so

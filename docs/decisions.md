@@ -154,6 +154,10 @@ How to read this record:
   other. Decided by the architect, #756
   (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
   https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
+  Amended: `Kind` and `Data` take the edge form as a parameter, with `channel::Key`
+  as the default: `config` gives each edge as a name, and `plan` gives each name its
+  key. `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -1152,48 +1156,51 @@ How to read this record:
   `Head` has no form. The body holds only the series of the reader's view, the index
   series too, written from the frame's block as slices, and both ends charge the frame
   that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
-  in the open, from 0; the index, when the open does not list it, has place `channels`.
-  The reader's `hub` lists the keys in the entry order of its own frame (its slot
-  order), the index too, so a place is an entry of the reader's frame. An open of no
-  channel is not valid. Only the fixed part of `Open` and of `Head` is one message. The
-  rest is one run of bytes, in messages of at most the peer's `message_bytes_max`, back
-  to back with no prefix: after `Open`, the keys; after `Head`, the place and end of
-  each series in the body, then the body. A message never splits a key or an end, so
-  each side decodes each message as it arrives. The keys run holds exactly `channels`
-  keys and the ends run exactly the head's number of series, so each side counts them to
-  find where a run ends, and the body starts a new message. So no count of channels or
-  series has a cap, and the reader fills one block of its frame's length: the header,
-  the range, a descriptor for each series, and the body to the last end. A run message
-  with more keys or ends than remain is not valid. A head of no series is not valid,
-  since a frame holds its index. The home checks each key as it arrives and never
-  allocates by the peer's count. A head with more series than places, or an end with a
-  place the session does not have or that is not above the place before it, is not
-  valid; the reader's `hub` checks this as the head and each end arrive, so it holds no
-  more ends than it has places. The ends and the body are in place order: the home
-  writes the series of each place it has, from 0, each from the frame's block as a
-  slice, with ends it computes in that order. At the open it makes the list of each
-  place and its home entry, sorted by place, and writes each ends message from it with
-  `wire::hub::ends::encode`, which sizes the message by its buffer, so no scratch buffer
-  holds the ends (the architect, #1146,
+  in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
+  frame (its slot order), the index too, so a place is an entry of the reader's frame
+  and a session has `channels` places. An open whose keys do not hold the index is not
+  valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
+  `UNKNOWN`; the architect, 2026-10-07,
+  https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
+  of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
+  message. The rest is one run of bytes, in messages of at most the peer's
+  `message_bytes_max`, back to back with no prefix: after `Open`, the keys; after
+  `Head`, the place and end of each series in the body, then the body. A message never
+  splits a key or an end, so each side decodes each message as it arrives. The keys run
+  holds exactly `channels` keys and the ends run exactly the head's number of series, so
+  each side counts them to find where a run ends, and the body starts a new message. So
+  no count of channels or series has a cap, and the reader fills one block of its
+  frame's length: the header, the range, a descriptor for each series, and the body to
+  the last end. A run message with more keys or ends than remain is not valid. A head of
+  no series is not valid, since a frame holds its index. The home checks each key as it
+  arrives and never allocates by the peer's count. A head with more series than places,
+  or an end with a place the session does not have or that is not above the place before
+  it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
+  the ends, so the reader holds no more ends than it has places. The ends and the body
+  are in place order: the home writes the series of each place it has, from 0, each from
+  the frame's block as a slice, with ends it computes in that order. At the open it
+  makes the list of each place and its home entry, sorted by place, and writes each ends
+  message from it with `wire::hub::ends::encode`, which sizes the message by its buffer,
+  so no scratch buffer holds the ends (the architect, #1146,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
   takes exactly the ends the buffer holds and no more, so one iterator passed with
   `by_ref()` splits a run into messages; the caller owns the count of the run (the
   architect,
-  https://github.com/synnaxlabs/foundation/pull/1258#issuecomment-6033667563). The
-  first series starts at 0, and each other at the end before it rounded up to a multiple
-  of 8. So the body is the series bytes of the reader's own frame (FRAME LAYOUT), and
-  the reader builds that frame in one block: the header and descriptors that `types`
-  writes, then the body as it arrives, with no copy of a series after the receive. An
-  end below the start of its series is not valid; `types` refuses it, as `frame::check`
-  does. The padding may hold any bytes (FRAME LAYOUT). Each direction has its own
-  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
-  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
-  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode, comes from the wrong side, or breaks a rule above), which every
-  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
-  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
-  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
-  `Open`, because the home knows its index and a second copy needs a check; the whole
+  https://github.com/synnaxlabs/foundation/pull/1258#issuecomment-6033667563). The first
+  series starts at 0, and each other at the end before it rounded up to a multiple of 8.
+  So the body is the series bytes of the reader's own frame (FRAME LAYOUT), and the
+  reader builds that frame in one block: the header and descriptors that `types` writes,
+  then the body as it arrives, with no copy of a series after the receive. An end below
+  the start of its series is not valid; `types` refuses it, as `frame::check` does. The
+  padding may hold any bytes (FRAME LAYOUT). Each direction has its own messages: the
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
+  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
+  decode, comes from the wrong side, or breaks a rule above), which every protocol may
+  use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
+  a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
+  because the home knows its index and a second copy needs a check; the whole
   `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
   open needs no mesh time (READER RULES), and a later named open can add one; grants for
   many sessions in one message, which wait until a link carries a second session; a
@@ -1218,7 +1225,12 @@ How to read this record:
   byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
-  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
+  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`. Amended
+  (2026-10-07, #1196): the message order, the runs, and the head bound move from `hub`
+  to two stateful decoders in `wire`, `hub::Home` at the home and `hub::Reader` at the
+  reader's node, each with an exact error for each broken rule, so `hub` checks no wire
+  rule. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
@@ -1447,15 +1459,26 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
   connected attempt: proposed by `box2.builder-5`, decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
-- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` future that drops before
-  it completes resets the stream with `Code(0)`. After that, each `send`, `try_send`,
-  and `finish` on the sender gives `Error::Reset { code: Code(0) }`, and the
-  `Error::Reset` doc names both causes: the peer, or a dropped `send` future. A dropped
-  future is a normal cancel in async code, such as a timeout in a select, so it must not
-  panic; in both cases the caller opens a new stream. Rejected: a panic, as after
-  `finish` (a timeout the caller handles would become a crash). Proposed by
-  `box2.builder-5`, decided by the architect, #68
-  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313).
+- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` or `send_parts` future
+  that drops after the stream took its message, and before it completes, resets the
+  stream with `Code(0)`. One that drops before the stream took its message, such as
+  before its first poll or while it waits behind an earlier message, sends nothing and
+  changes nothing. After a reset, each `send`, `try_send`, `send_parts`,
+  `try_send_parts`, and `finish` on the sender gives `Error::Reset { code: Code(0) }`
+  after the checks below, and the `Error::Reset` doc names both causes: the peer, or a
+  dropped `send` future. A dropped future is a normal cancel in async code, such as a
+  timeout in a select, so it must not panic; in both cases the caller opens a new
+  stream. Rejected: a panic, as after `finish` (a timeout the caller handles would
+  become a crash). Proposed by `box2.builder-5`, decided by the architect, #68
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313). Amended
+  by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035156093): reset
+  only when bytes of the message may have gone. `send`, `try_send`, `send_parts`, and
+  `try_send_parts` check in this order: the range panic (`*_parts`), the panic after
+  `finish`, `Error::TooLarge`, then the state errors (`Reset` after a dropped send
+  future, `Stopped`, or the error that ended the session). The limit is fixed for the
+  session, so a size defect shows in every state of the stream
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035220831).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1743,14 +1766,24 @@ How to read this record:
   so a power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
-  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
-  proposal that a follower forwards to the leader, and its two answers (the position
-  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
-  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
-  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
-  format version. A message has one byte form, and a decode takes nothing else. The
-  log (MESH LOG) and the messages share the byte form of an entry. Decided by
-  `consensus`, approved by the coordinator (#471).
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
+  that a follower forwards to the leader, and its two answers (the position of the
+  entry, or "not the leader" with the leader the receiver knows). `wire` does not carry
+  them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and `wire` must
+  not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the format
+  version. A `raft` message travels on a one-way stream. A member forwards a proposal as
+  one two-way stream of `Class::Command`: the stream carries one proposal, the leader
+  writes one answer on its reply half, and then both halves end. So a proposal and its
+  answers name no sender and carry no request number (#779): a request number makes the
+  node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
+  and HUB WIRE already answers on the stream that asks. A two-way stream whose first
+  message is not a proposal, or a proposal on a one-way stream, breaks the protocol, and
+  the receiver ends the stream with code 2 (`wire::header::MALFORMED`) (decided by the
+  architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
+  has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
+  messages share the byte form of an entry. Decided by `consensus`, approved by the
+  coordinator (#471).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
   the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
@@ -1766,7 +1799,34 @@ How to read this record:
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242:
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
+  `propose` returns the position of its entry only after the write that holds the entry
+  ends: a lone voter leads before its term is on disk, and after a power cut the same
+  position can hold another change. A second call that waits for the write lost: no
+  caller needs a position that is not on disk, and a caller that skips the wait gets
+  that defect again (decided by the architect, 2026-10-07T08:18:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033920665). When the
+  append of a new leader replaces the entry before a write holds it, `propose` gives
+  "not the leader": the task tells each proposal whether the `Ready` that it wrote held
+  the entry, by index and term, and the first `Ready` after the call decides (approved
+  by the architect, 2026-10-07T10:17:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035860357). A node
+  that gets a forwarded proposal (MESH WIRE) proposes the change, and its answer is the
+  position, or "not the leader" with the leader that it knows. A proposal from a peer
+  whose key no voter of this node's configuration holds is refused
+  (`Error::PeerNotVoter`, with the key of the peer, because a forwarded change names no
+  sender; `Error::NotVoter` names the sender of a message; decided by the architect,
+  2026-10-07T10:38:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6036181809); a
+  member that is not a voter proposes with join (#336). The leader does not check the
+  home of a forwarded change: `Error::NotMember` checks only the argument of a local
+  caller, and the check of a home at apply on each node is #1273. A forwarded change
+  applies at least one time: a member that got no answer forwards it again, and the
+  leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
+  state of a call that took effect last. A later `Change` kind that is not safe to
+  repeat needs a ruling before a member forwards it (decided by the architect,
+  2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
   system refuses memory for (`Refused`), does not stop the group, because each may
@@ -1775,8 +1835,8 @@ How to read this record:
   bounds the proposals and the messages that the group takes in that time, and a write
   whose blocks the pool can never hold at one time waits with no end (#1091). A free
   block of a size with a block in use keeps its budget (#291), so a write can also wait
-  while the budget has room for its blocks: with no end when the block in use is its
-  own (#1091), and else until the other user of the pool drops its block (#1134). A pool
+  while the budget has room for its blocks: with no end when the block in use is its own
+  (#1091), and else until the other user of the pool drops its block (#1134). A pool
   whose largest block is less than one sector does not open (MESH LOG), so no write
   gives `TooLarge` and the group does not stop for it (decided by the architect,
   2026-10-07T06:32:47Z:
@@ -2391,7 +2451,11 @@ How to read this record:
   beside them, so `config`, `ops`, and `node` never match a producer's variants. An
   error from a crate below `document` that a producer shows as a diagnostic gives its
   message with `Display` and its fix with `fix()`; the producer adds the code and the
-  span. `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
+  span. A fix that shows a value in a Document shows it as the file writes it, so
+  `document.bad-size` quotes the size for `Syntax` and `Range` (`Use at most
+  "16777215TiB"`), while `byte::Error::fix` stays bare for a flag (architect,
+  https://github.com/synnaxlabs/foundation/issues/1070#issuecomment-6032077046).
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
   breaks no producer. No severity field: the warnings in K2 and R13-10 belong to plan
   output.
   `ops` operation error codes use `Code` too, so the grammar has one home. A code
@@ -2982,6 +3046,18 @@ How to read this record:
   `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
   architect on #1062 (#1174):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+- **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory.
+  Before the claim reads a name, shard 0 opens the file `lock` in the data directory
+  to write (`Mode::Create { len: 0 }`), and drops it after each shard of the node has
+  closed its ring. `Busy` on `lock` stops the start with `Error::Directory`, before
+  any name is read. The node never removes `lock`, so an open cannot race with a
+  remove. A crash frees the lock (`env::files`, #392). Lost: no lock, with the `Busy`
+  of each ring only, because two nodes with two core counts can each record a count,
+  and the loser's record then refuses every later start. Also lost: an atomic claim
+  with no lock, because an exclusive create guards one name, and two counts are two
+  names.
+  Decided by the architect, #1297:
+  https://github.com/synnaxlabs/foundation/issues/1297#issuecomment-6034758419 (#1300).
 - **SHARD HOMES (2026-10-07)** Each shard builds its `home::Shard` over its buffer
   once the buffer opens, with the node's `clock::Reader`, and keeps the home until the
   node stops. Its number is its core. It carries no index until the hub picks them

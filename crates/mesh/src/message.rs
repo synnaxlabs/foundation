@@ -34,25 +34,22 @@ const APPEND_REJECT: u8 = 9;
 pub(crate) enum Message {
     /// A message of the `raft` group.
     Raft(raft::Message),
-    /// Asks the leader to propose `change`.
+    /// Asks the leader to propose `change`. It is the one message of its stream, and
+    /// the answer comes on the reply half. A sender that gets no answer sends the
+    /// change again on a new stream, so a change applies at least one time.
     Propose {
-        /// Pairs the answer with this message. The sender picks it.
-        request: u64,
         /// The change.
         change: Change,
     },
     /// Answers a [`Message::Propose`] that the receiver proposed.
     Proposed {
-        /// The `request` of the [`Message::Propose`].
-        request: u64,
-        /// The position of the entry. A new leader can replace it.
+        /// The position of the entry, which is on the receiver's disk. A new leader
+        /// can replace it.
         at: Position,
     },
-    /// Answers a [`Message::Propose`] that the receiver did not propose, because it
-    /// does not lead.
+    /// Answers a [`Message::Propose`] whose change the receiver holds in no entry,
+    /// because it does not lead.
     NotLeader {
-        /// The `request` of the [`Message::Propose`].
-        request: u64,
         /// The leader that the receiver knows.
         leader: Option<node::Key>,
     },
@@ -75,19 +72,16 @@ impl Message {
                 put_optional_proof(message.proof.as_ref(), &mut out);
                 body(&message.body, &mut out);
             }
-            Self::Propose { request, change } => {
+            Self::Propose { change } => {
                 out.push(PROPOSE);
-                out.extend(request.to_le_bytes());
                 change.encode(&mut out);
             }
-            Self::Proposed { request, at } => {
+            Self::Proposed { at } => {
                 out.push(PROPOSED);
-                out.extend(request.to_le_bytes());
                 put_position(*at, &mut out);
             }
-            Self::NotLeader { request, leader } => {
+            Self::NotLeader { leader } => {
                 out.push(leader.map_or(NOT_LEADER, |_| NOT_LEADER_WITH_LEADER));
-                out.extend(request.to_le_bytes());
                 if let Some(leader) = leader {
                     put_key(*leader, &mut out);
                 }
@@ -118,21 +112,15 @@ impl Message {
                     proof,
                 })
             }
-            PROPOSE => {
-                let request = u64::from_le_bytes(take(bytes)?);
-                let change = Change::decode(std::mem::take(bytes)).ok()?;
-                Self::Propose { request, change }
-            }
+            PROPOSE => Self::Propose {
+                change: Change::decode(std::mem::take(bytes)).ok()?,
+            },
             PROPOSED => Self::Proposed {
-                request: u64::from_le_bytes(take(bytes)?),
                 at: take_position(bytes)?,
             },
-            kind @ (NOT_LEADER | NOT_LEADER_WITH_LEADER) => Self::NotLeader {
-                request: u64::from_le_bytes(take(bytes)?),
-                leader: match kind {
-                    NOT_LEADER => None,
-                    _ => Some(take_key(bytes)?),
-                },
+            NOT_LEADER => Self::NotLeader { leader: None },
+            NOT_LEADER_WITH_LEADER => Self::NotLeader {
+                leader: Some(take_key(bytes)?),
             },
             _ => return None,
         };
@@ -357,23 +345,18 @@ mod tests {
                 proof,
             })
         });
-        let propose = (any::<u64>(), any::<u128>(), any::<u128>()).prop_map(
-            |(request, index, home)| Message::Propose {
-                request,
+        let propose =
+            (any::<u128>(), any::<u128>()).prop_map(|(index, home)| Message::Propose {
                 change: Change::Home {
                     index: channel::Key::from_u128(index),
                     home: node(home),
                 },
-            },
-        );
-        let proposed = (any::<u64>(), a_position())
-            .prop_map(|(request, at)| Message::Proposed { request, at });
-        let not_leader = (any::<u64>(), prop::option::of(any::<u128>())).prop_map(
-            |(request, leader)| Message::NotLeader {
-                request,
+            });
+        let proposed = a_position().prop_map(|at| Message::Proposed { at });
+        let not_leader =
+            prop::option::of(any::<u128>()).prop_map(|leader| Message::NotLeader {
                 leader: leader.map(node),
-            },
-        );
+            });
         prop_oneof![4 => raft, 1 => propose, 1 => proposed, 1 => not_leader]
     }
 
@@ -479,36 +462,25 @@ mod tests {
     #[test]
     fn a_proposal_and_its_answers_have_a_fixed_byte_form() {
         let propose = Message::Propose {
-            request: 9,
             change: Change::Home {
                 index: channel::Key::from_u128(7),
                 home: node(8),
             },
         };
-        let expected = [&[2][..], &le(9), &[1], &key(7), &key(8)].concat();
-        assert_eq!(propose.encode(), expected);
-        assert_eq!(Message::decode(&expected), Some(propose));
-        let proposed = Message::Proposed {
-            request: 9,
-            at: at(2, 4),
-        };
-        let expected = [&[3][..], &le(9), &le(2), &le(4)].concat();
-        assert_eq!(proposed.encode(), expected);
-        assert_eq!(Message::decode(&expected), Some(proposed));
-        let none = Message::NotLeader {
-            request: 9,
-            leader: None,
-        };
-        let expected = [&[4][..], &le(9)].concat();
-        assert_eq!(none.encode(), expected);
-        assert_eq!(Message::decode(&expected), Some(none));
         let known = Message::NotLeader {
-            request: 9,
             leader: Some(node(7)),
         };
-        let expected = [&[5][..], &le(9), &key(7)].concat();
-        assert_eq!(known.encode(), expected);
-        assert_eq!(Message::decode(&expected), Some(known));
+        let cases: [(Message, &[&[u8]]); 4] = [
+            (propose, &[&[2, 1], &key(7), &key(8)]),
+            (Message::Proposed { at: at(2, 4) }, &[&[3], &le(2), &le(4)]),
+            (Message::NotLeader { leader: None }, &[&[4]]),
+            (known, &[&[5], &key(7)]),
+        ];
+        for (message, expected) in cases {
+            let expected = expected.concat();
+            assert_eq!(message.encode(), expected, "{message:?}");
+            assert_eq!(Message::decode(&expected), Some(message));
+        }
     }
 
     #[test]
@@ -557,7 +529,7 @@ mod tests {
         twice.swap(len - 40, len - 24);
         twice[len - 40] = 2;
         twice[len - 24] = 2;
-        let cases: [(&str, &[u8]); 14] = [
+        let cases: [(&str, &[u8]); 13] = [
             ("no bytes", &[]),
             ("an unknown kind", &[0]),
             ("a cut message", &heartbeat[..heartbeat.len() - 1]),
@@ -569,10 +541,6 @@ mod tests {
             ("a grant that is not 0 or 1", &grant),
             ("proof voters that do not rise", &proven([2, 1])),
             ("a proof voter twice", &proven([1, 1])),
-            (
-                "a change that is not valid",
-                &[2, 0, 0, 0, 0, 0, 0, 0, 0, 9],
-            ),
             ("voters that do not rise", &falling),
             ("a voter twice", &twice),
         ];
@@ -582,6 +550,27 @@ mod tests {
         assert!(Message::decode(&voters([1, 2])).is_some());
         assert!(Message::decode(&proven([1, 2])).is_some());
         assert!(Message::decode(&granted).is_some());
+    }
+
+    #[test]
+    fn decode_refuses_what_is_not_a_proposal_or_an_answer() {
+        let home = [&[2, 1][..], &key(7), &key(8)].concat();
+        let cases: [(&str, &[u8]); 7] = [
+            ("a proposal with no change", &[2]),
+            ("a change of an unknown kind", &[2, 9]),
+            ("a cut change", &home[..home.len() - 1]),
+            ("a byte after a change", &[&home[..], &[0]].concat()),
+            ("a cut position", &[&[3][..], &le(2), &le(4)[..7]].concat()),
+            (
+                "a leader after \"not the leader\"",
+                &[&[4][..], &key(7)].concat(),
+            ),
+            ("a cut leader", &[&[5][..], &key(7)[..15]].concat()),
+        ];
+        for (name, bytes) in cases {
+            assert_eq!(Message::decode(bytes), None, "{name}");
+        }
+        assert!(Message::decode(&home).is_some());
     }
 
     #[test]

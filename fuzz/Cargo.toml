@@ -175,8 +175,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "wire_hub"
-path = "fuzz_targets/wire_hub.rs"
+name = "wire_hub_reader"
+path = "fuzz_targets/wire_hub_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_hub_home"
+path = "fuzz_targets/wire_hub_home.rs"
 test = false
 doc = false
 bench = false
