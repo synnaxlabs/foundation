@@ -21,7 +21,7 @@ use types::node;
 pub use config::{Config, Start};
 pub use log::{Change, Data, Entry};
 pub use machine::{Raft, Ready, Role};
-pub use message::{Answer, Body, Claim, Grant, Message, Proof, Signature};
+pub use message::{Answer, Body, Claim, Grant, Link, Message, Proof, Signature};
 pub use voters::Voters;
 
 /// An election term. A term has at most one leader.
@@ -144,8 +144,9 @@ pub enum Error {
     },
     /// A message that claims a term this node is not in, or a leader of its term
     /// while this node knows none, with no proof that a quorum of this node's
-    /// configuration, in force or last committed, granted it. The sender is faulty,
-    /// or it holds a configuration this node lacks.
+    /// configuration, in force or last committed, or of a configuration entry that
+    /// the message's chain proves, granted it. The sender is faulty, or it holds a
+    /// configuration this node cannot reach from its own.
     Unproven {
         /// The term the message claims.
         term: Term,

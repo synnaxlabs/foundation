@@ -63,6 +63,13 @@ state on `main`.
   it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
+- `types::hash` maps hash with no key (R16-7), so a peer that chooses keys freely can
+  make them collide. A peer must use its QUIC stream IDs in order, and `streams_max`
+  limits how many are open in each session, so a lookup in a stream map of one session
+  costs at most that many compares. Open: #1506 (the map of reads that wait for a block
+  holds the streams of each session of a carrier, so that bound does not hold for it). A
+  map whose keys a peer picks is a `BTreeMap`, unless the node limits those keys to a
+  small count, as `streams_max` does for the streams of one session (R16-7).
 - A key of small order needs no private key. `types::node::PublicKey::new` refuses
   each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
   `types`; the TLS check uses it.
@@ -134,41 +141,57 @@ state on `main`.
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
-  authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). Before it acts, `raft` checks the index a heartbeat or an append
-  answer names, the order of an append's entries, and that no entry is above the
-  append's term. A node that a change removed and that missed its release can win
-  an election once no voter has a lease, and lead until it commits the leave
-  (#483).
+  authenticates the sender and decides which nodes may send (RAFT SURFACE).
+  `Mesh::receive` refuses a message whose sender is not the peer that holds the
+  stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
+  `raft` checks the index a heartbeat or an append answer names, the order of an
+  append's entries, and that no entry is above the append's term. A node that a
+  change removed and that missed its release can win an election once no voter has
+  a lease, and lead until it commits the leave (#483).
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
   granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
   proof of the refuser's term, so a node that is behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
-  message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
+  message in term `u64::MAX`. Now that message needs a quorum of grants of a
+  configuration the node holds, or of one that a chain of signed configuration
+  entries proves (#750, #881). A link carries only its leader's signature and the
+  votes of its term, so a voter that led a term at or above the node's committed one
+  can sign a configuration entry it never wrote, to a configuration of itself alone,
+  put it in a chain, prove any term with its own grant, and so stop the group for
+  good. `raft` trusts its voters until #882, which gives a link the signed acks of
+  a quorum; `crates/raft/tests/it/hostile.rs` pins the gap (architect,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
-  VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
-  voter that lies can still break safety, because a false `AppendReply` counts as held,
-  so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed `AppendReply` is
-  #882.
+  VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
+  refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
+  A voter that lies can still break safety, because a false `AppendReply` counts as
+  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed
+  `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
-  A second leader of a term whose leader it knows is `Error::SecondLeader`.
-  `raft` counts the keys of a proof, and `mesh::claim` checks each signature
-  against the voter's public key. Until the driver (#471) runs that check before
-  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
-- A voter that was down through a configuration change holds the old configuration
-  and refuses a leader it cannot prove. It rejoins at the next election whose grants
-  are a quorum of what it holds. When a second node fails before that, the group
-  waits for an operator: wipe the voter's state and start it with no configuration.
-  The chain of proofs over configuration entries closes it (#881, a release
-  blocker). Its first PR gives each configuration entry the votes and the signature
-  of the leader that wrote it (`raft::Change`); the chain and its check are the
-  second PR (architect, #881,
+  A second leader of a term whose leader it knows is `Error::SecondLeader`. The
+  exception is a voter that led a term at or above the node's committed one: it can
+  forge a link until #882 (the bullet above). `raft` counts the keys of a proof, and
+  `mesh::claim` checks each signature against the voter's public key.
+  `Mesh::receive` runs that check before `step`, and `Mesh::serve` runs it for each
+  `raft` message of a one-way stream. No node serves mesh streams yet (#471).
+  `raft/tests/it/hostile.rs` pins the refusal and the gap.
+- A voter that was down through a configuration change holds the old configuration.
+  The new leader's message carries the chain of configuration entries below its
+  term, each with the votes and the signature of the leader that wrote it
+  (`raft::Change`). The voter reads the chain up to the entry whose configuration
+  the leader's votes are a quorum of, checks each signature it reads, and follows
+  the leader; it keeps nothing from the chain. A forged link, or one whose votes are
+  no quorum of the configuration before it, is refused, and the voter does not
+  change (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
-  `raft/tests/it/behind.rs` pins both.
+  `raft/tests/it/behind.rs` and `mesh::claim` pin it. The chain does not cover a
+  leader that the missed change made a voter (#1096), and it cannot prove a term that
+  no configuration entry stands behind: a node that a leave removed can reach such a
+  term, and a change that adds it back then stalls the group (#1485).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -198,7 +221,8 @@ state on `main`.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
   `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
-  it must come before); the `block_before_kept` inputs hold it.
+  it must come before); the `block_before_kept` inputs hold it. `config::check`
+  reads the documents into definitions. Fuzzed: `config_check`.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -303,7 +327,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
-| `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
+| `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -311,6 +335,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, and each definition decodes to itself; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
@@ -328,5 +353,5 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages, `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
+messages (#1470), `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
 tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.

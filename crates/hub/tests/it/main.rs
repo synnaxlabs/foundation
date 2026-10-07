@@ -33,7 +33,7 @@ const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
 const BODY_MAX: usize = 1 << 16;
 /// The area and body max of a ring that takes a frame past the window of a reader.
-const WIDE_AREA: u64 = 1 << 24;
+const WIDE_AREA: u64 = 1 << 25;
 const WIDE_BODY_MAX: usize = 1 << 22;
 /// Samples per series of a frame whose charge is past the window of a reader.
 const PAST_WINDOW: i64 = 140_000;
@@ -70,6 +70,10 @@ struct Test {
     clock: Clock,
     mesh: clock::Reader,
     tasks: Tasks,
+    /// How many tasks of the hub have ended.
+    ended: Rc<Cell<usize>>,
+    /// How many polls the hub's tasks have had.
+    polls: Rc<Cell<usize>>,
     /// The node's mesh clock until [`Test::sync`] runs it.
     unsynced: Option<clock::Clock>,
     hub: Hub,
@@ -101,10 +105,15 @@ impl Test {
             clock: mesh.clone(),
             limits: LIMITS,
         });
+        let (ended, polls) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
         let hub = Hub::new(hub::Config {
             home,
             interner,
-            tasks: tasks.clone(),
+            tasks: Tasks::new(Counted {
+                tasks: tasks.clone(),
+                ended: Rc::clone(&ended),
+                polls: Rc::clone(&polls),
+            }),
         });
         for (key, channel, data_type, index) in CHANNELS {
             hub.define(Channel {
@@ -120,6 +129,8 @@ impl Test {
             pool,
             mesh,
             tasks,
+            ended,
+            polls,
             unsynced: Some(unsynced),
             hub,
         }
@@ -170,6 +181,28 @@ impl Test {
             len -= len.div_ceil(16);
         }
         blocks
+    }
+}
+
+/// Spawns on `tasks`, and counts each poll in `polls` and each task that completes in
+/// `ended`.
+struct Counted {
+    tasks: Tasks,
+    ended: Rc<Cell<usize>>,
+    polls: Rc<Cell<usize>>,
+}
+
+impl env::tasks::Driver for Counted {
+    fn spawn(&self, mut task: env::tasks::Task) {
+        let (ended, polls) = (Rc::clone(&self.ended), Rc::clone(&self.polls));
+        self.tasks.spawn(async move {
+            std::future::poll_fn(|cx| {
+                polls.set(polls.get() + 1);
+                task.as_mut().poll(cx)
+            })
+            .await;
+            ended.set(ended.get() + 1);
+        });
     }
 }
 
@@ -463,6 +496,91 @@ fn gives_control_to_a_waiting_writer_when_a_writer_drops() {
     });
 }
 
+/// The commit task does not hold the home, so the home and its buffer end with the
+/// hub and its sessions, and the task ends.
+#[test]
+fn drops_the_home_once_the_hub_and_each_session_drop() {
+    run(23, |test| async move {
+        let reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        write(&mut writer, &[test.now()], &[1]);
+        let Test {
+            pool,
+            clock,
+            hub,
+            ended,
+            ..
+        } = test;
+        drop(writer);
+        clock.sleep(SETTLE).await;
+        assert_eq!(ended.get(), 0, "the hub holds the home");
+        drop((hub, reader));
+        clock.sleep(SETTLE).await;
+        assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+        assert_eq!(ended.get(), 1, "the commit task ended");
+    });
+}
+
+/// Writes during a commit do not wake the commit task, which the commit wakes.
+#[test]
+fn does_not_wake_the_commit_task_for_the_writes_during_a_commit() {
+    run(23, |test| async move {
+        let _reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        let before = test.polls.get();
+        for value in 0..20 {
+            write(&mut writer, &[test.now()], &[value]);
+            test.clock.sleep(Span::from_nanos(1)).await;
+        }
+        assert_eq!(
+            test.polls.get() - before,
+            1,
+            "one wake, for the first write"
+        );
+    });
+}
+
+/// A commit task that waits for a commit when the hub and its sessions drop ends at
+/// once, and so drops the commit, which holds the ring open.
+#[test]
+fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
+    run(23, |test| async move {
+        let reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[1]);
+        let Test {
+            pool,
+            clock,
+            hub,
+            ended,
+            ..
+        } = test;
+        clock.sleep(Span::from_nanos(1)).await;
+        drop((hub, reader, writer));
+        clock.sleep(Span::from_nanos(1)).await;
+        assert_eq!(ended.get(), 1, "the commit task ended before the commit");
+        clock.sleep(SETTLE).await;
+        assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+    });
+}
+
+/// The commit task that went back to sleep after a commit wakes for the next write.
+#[test]
+fn wakes_the_commit_task_for_a_write_after_a_commit() {
+    run(23, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[1]);
+        assert_eq!(samples(&reader.next().await.expect("a frame"), 2), [1]);
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[2]);
+        assert_eq!(samples(&reader.next().await.expect("a frame"), 2), [2]);
+    });
+}
+
 #[test]
 fn frees_the_frames_of_a_reader_when_it_drops() {
     run(7, |test| async move {
@@ -513,6 +631,8 @@ fn gives_each_reader_the_error_of_a_failed_sync_on_each_later_call() {
             assert_eq!(complete.next().await.err(), Some(failed.clone()));
             assert_eq!(latest.next().await.err(), Some(failed.clone()));
         }
+        test.clock.sleep(SETTLE).await;
+        assert_eq!(test.ended.get(), 1, "the commit task ended with the buffer");
         assert_eq!(
             failed.to_string(),
             "the buffer of the shard failed: sync of shard-0/ring failed with OS error 5"

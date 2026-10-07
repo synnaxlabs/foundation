@@ -31,6 +31,8 @@ pub(crate) enum Cause {
     Full,
     /// A write descriptor or its calls hold the file.
     Busy,
+    /// The new name of a rename is taken.
+    Exists(PathBuf),
     Code(i32),
 }
 
@@ -51,6 +53,14 @@ pub(crate) struct Disk {
     /// or a hold keeps.
     used: u64,
     inodes: BTreeMap<u64, Inode>,
+}
+
+/// What an open finds.
+enum Target<'a> {
+    /// The file `inode` at the path.
+    File(u64),
+    /// No entry: a create makes `name` in directory `dir` with `len` bytes.
+    New { dir: u64, name: &'a OsStr, len: u64 },
 }
 
 enum Inode {
@@ -174,15 +184,9 @@ impl Disk {
         path: &Path,
         mode: Mode,
     ) -> Result<(Handle, u64), Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
-            return Err(Cause::Code(DIRECTORY));
-        };
-        let dir = self.dir(parent)?;
-        let inode = match (self.dir_mut(dir).entries.get(*name).copied(), mode) {
-            (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
-            (Some(inode), _) => inode,
-            (None, Mode::Create { len }) => {
+        let inode = match self.target(path, mode)? {
+            Target::File(inode) => inode,
+            Target::New { dir, name, len } => {
                 self.take(len)?;
                 self.dir_mut(dir).entries.insert(name.into(), key);
                 let file = File {
@@ -197,16 +201,11 @@ impl Disk {
                 self.inodes.insert(key, Inode::File(file));
                 key
             }
-            (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
-        let file = self.named(inode, slashed)?;
         let writable = mode != Mode::Read;
-        if writable && file.writers > 0 {
-            return Err(Cause::Busy);
-        }
         // A crash between the create and the allocation leaves an empty file on `os`.
         if let Mode::Create { len } = mode
-            && file.len == 0
+            && self.file(inode).len == 0
         {
             if let Err(cause) = self.take(len) {
                 self.remove(path)?;
@@ -273,6 +272,32 @@ impl Disk {
         Ok(())
     }
 
+    /// Moves the entry of file `inode` from `from` to `to`, both in one directory.
+    /// `NotFound` when `from` no longer names it; `Exists` when `to` is taken.
+    pub(crate) fn rename(
+        &mut self,
+        inode: u64,
+        from: &Path,
+        to: &Path,
+    ) -> Result<(), Cause> {
+        let from = segments(from);
+        let (old, parent) =
+            from.split_last().expect("invariant: a rename is of a file");
+        let new = segments(to)
+            .pop()
+            .expect("invariant: a rename is to a name");
+        let dir = self.dir_mut(self.dir(parent)?);
+        if dir.entries.get(*old) != Some(&inode) {
+            return Err(Cause::NotFound);
+        }
+        if dir.entries.contains_key(new) {
+            return Err(Cause::Exists(to.to_path_buf()));
+        }
+        dir.entries.remove(*old);
+        dir.entries.insert(new.to_owned(), inode);
+        Ok(())
+    }
+
     /// Adds one hold of the file of `handle`.
     pub(crate) fn hold(&mut self, handle: Handle) {
         let file = self.file(handle.inode);
@@ -328,12 +353,57 @@ impl Disk {
             }
         }
         for inode in old.into_values().filter(|inode| !new.contains(inode)) {
-            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
-                file.durable = false;
-                self.collect(inode);
-            }
+            self.forget(inode);
         }
         Ok(())
+    }
+
+    /// Ends the durable entry that kept `inode`, and frees it when it is a file that
+    /// nothing else keeps.
+    fn forget(&mut self, inode: u64) {
+        if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+            file.durable = false;
+            self.collect(inode);
+        }
+    }
+
+    /// Whether a [`Mode::Create`] open of `path` makes its file when the disk has
+    /// room: the open succeeds, and finds no entry or a file with no bytes.
+    pub(crate) fn makes(&self, path: &Path) -> bool {
+        match self.target(path, Mode::Create { len: 0 }) {
+            Ok(Target::New { .. }) => true,
+            Ok(Target::File(inode)) => {
+                matches!(&self.inodes[&inode], Inode::File(file) if file.len == 0)
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// What an open of `path` by `mode` finds, with each fault it gives before it
+    /// takes space.
+    fn target<'a>(&self, path: &'a Path, mode: Mode) -> Result<Target<'a>, Cause> {
+        let (segments, slashed) = (segments(path), slashed(path));
+        let Some((name, parent)) = segments.split_last() else {
+            return Err(Cause::Code(DIRECTORY));
+        };
+        let dir = self.dir(parent)?;
+        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
+            unreachable!("invariant: inode {dir} is a directory");
+        };
+        let inode = match (entries.get(*name), mode) {
+            (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
+            (Some(&inode), _) => inode,
+            (None, Mode::Create { len }) => return Ok(Target::New { dir, name, len }),
+            (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
+        };
+        match &self.inodes[&inode] {
+            Inode::File(_) if slashed => Err(Cause::Code(NOT_DIRECTORY)),
+            Inode::File(file) if mode != Mode::Read && file.writers > 0 => {
+                Err(Cause::Busy)
+            }
+            Inode::File(_) => Ok(Target::File(inode)),
+            Inode::Dir(_) => Err(Cause::Code(DIRECTORY)),
+        }
     }
 
     /// Cuts the power, as [`Disk::crash`] says.

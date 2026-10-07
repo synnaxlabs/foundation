@@ -136,6 +136,29 @@ impl Node {
         waker.wake();
     }
 
+    /// Makes the TCP listener of the node at `local` fail, as when the OS breaks it:
+    /// each accept of it first gives the streams already in its backlog, then gives
+    /// `Error::Io` with code 5 (`EIO`), also one that waits. A connect to it is refused
+    /// when its SYN arrives after the fault. A connect whose SYN it took, but not its
+    /// ACK, before the fault ends `Ok`, and its stream is reset when the RST of the
+    /// fault arrives. The streams it accepted still work. A listener bound at `local`
+    /// after it drops works. A fault on a listener that already failed does nothing.
+    ///
+    /// # Panics
+    ///
+    /// When no TCP listener of the node is bound at `local`.
+    pub fn fail_listener(&self, local: SocketAddr) {
+        let node = self.0.node;
+        let mut state = lock(&self.0.shared);
+        let now = state.now();
+        let waker = state.net().tcp().fail(now, node, local);
+        drop(state);
+        let Some(waker) = waker else {
+            panic!("no TCP listener of node {node} is bound at {local}");
+        };
+        waker.wake();
+    }
+
     /// The node's serial ports: one at each end of a line that
     /// [`Sim::line`](crate::Sim::line) joins to the node.
     ///

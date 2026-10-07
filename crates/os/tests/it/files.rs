@@ -175,6 +175,8 @@ fn create_allocates_an_empty_file_that_is_there() {
 fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
     use rustix::fs::{self, FallocateFlags, OFlags};
     const LEN: u64 = 4 << 20;
+    // ext4 counts the extent tree of the file in `st_blocks`.
+    const SLACK: u64 = 64 << 10;
     run(|files, data| async move {
         // What a crash after an allocation that kept the length leaves.
         let flags = OFlags::WRONLY.union(OFlags::CREATE);
@@ -184,7 +186,16 @@ fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
         drop(fd);
         create(&files, "a", LEN).await.close().await;
         let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert_eq!(allocated, LEN);
+        assert!(
+            (LEN..=LEN + SLACK).contains(&allocated),
+            "{allocated} bytes allocated for {LEN}"
+        );
+        // A truncate to the length frees each block past the end and no other.
+        let fd = fs::open(data.join("a"), OFlags::WRONLY, fs::Mode::empty()).unwrap();
+        fs::ftruncate(&fd, LEN).unwrap();
+        drop(fd);
+        let truncated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
+        assert_eq!(truncated, allocated);
     });
 }
 
@@ -279,6 +290,210 @@ fn a_write_open_after_a_close_or_a_drop_of_the_holder_succeeds() {
         let file = files.open(Path::new("a"), Mode::Write).await.unwrap();
         drop(file);
         files.open(Path::new("a"), Mode::Write).await.unwrap();
+    });
+}
+
+#[test]
+fn a_rename_moves_the_file_and_the_handle_follows_it() {
+    run(|files, _| async move {
+        let pool = pool();
+        files.create_dir(Path::new("d")).await.unwrap();
+        let mut file = create(&files, "d/a", 4 * KIB).await;
+        file.write_at(0, &[block(&pool, b"one")]).await.unwrap();
+        file.rename(Path::new("d/b")).await.unwrap();
+        let found = files.open(Path::new("d/a"), Mode::Read).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "d/a".into() });
+        file.write_at(3, &[block(&pool, b"two")]).await.unwrap();
+        let moved = files.open(Path::new("d/b"), Mode::Read).await.unwrap();
+        assert_eq!(read(&moved, &pool, 0, 6).await, b"onetwo");
+    });
+}
+
+#[test]
+fn a_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    run(|files, _| async move {
+        drop(create(&files, "b", 4 * KIB).await);
+        let mut file = create(&files, "a", 4 * KIB).await;
+        let found = file.rename(Path::new("./b")).await.unwrap_err();
+        assert_eq!(found, Error::Exists { path: "./b".into() });
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+    });
+}
+
+#[test]
+fn a_path_with_a_trailing_slash_names_only_a_directory() {
+    run(|files, _| async move {
+        drop(create(&files, "a", 4 * KIB).await);
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("a/", Mode::Write),
+            ("a/.", Mode::Read),
+            ("a//", Mode::Read),
+            ("a/", Mode::Create { len: 4 * KIB }),
+            ("b/", Mode::Create { len: 4 * KIB }),
+            ("b/", Mode::Read),
+            ("b/.", Mode::Read),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new("a/")).await);
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(
+            names,
+            [PathBuf::from("a")],
+            "a refused remove keeps the file"
+        );
+        for path in ["b/", "a"] {
+            results.push(files.remove(Path::new(path)).await);
+        }
+        let expected = [
+            Err(io("a/", Operation::Open, 20)),
+            Err(io("a/.", Operation::Open, 20)),
+            Err(io("a//", Operation::Open, 20)),
+            Err(io("a/", Operation::Open, 21)),
+            Err(io("b/", Operation::Open, 21)),
+            Err(Error::NotFound { path: "b/".into() }),
+            Err(Error::NotFound { path: "b/.".into() }),
+            Err(io("a/", Operation::Remove, 20)),
+            Ok(()),
+            Ok(()),
+        ];
+        assert_eq!(results, expected);
+    });
+}
+
+#[test]
+fn a_path_of_the_data_directory_names_no_file() {
+    run(|files, _| async move {
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("./", Mode::Read),
+            ("./", Mode::Write),
+            (".", Mode::Read),
+            (".", Mode::Create { len: 1 }),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new(".")).await);
+        let expected = [
+            Err(io("./", Operation::Open, 21)),
+            Err(io("./", Operation::Open, 21)),
+            Err(io(".", Operation::Open, 21)),
+            Err(io(".", Operation::Open, 21)),
+            Err(io(".", Operation::Remove, 21)),
+        ];
+        assert_eq!(results, expected);
+    });
+}
+
+#[test]
+fn an_empty_path_names_no_file() {
+    run(|files, _| async move {
+        let mut results = Vec::new();
+        for mode in [Mode::Read, Mode::Write, Mode::Create { len: 4 * KIB }] {
+            results.push(files.open(Path::new(""), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new("")).await);
+        let not_found = || Error::NotFound { path: "".into() };
+        let expected = [Err(not_found()), Err(not_found()), Err(not_found()), Ok(())];
+        assert_eq!(results, expected);
+        assert_eq!(
+            files.list(Path::new("")).await.unwrap(),
+            Vec::<PathBuf>::new()
+        );
+    });
+}
+
+#[test]
+fn a_rename_onto_a_file_that_is_there_gives_exists_and_changes_nothing() {
+    run(|files, _| async move {
+        let pool = pool();
+        let mut file = create(&files, "a", 4 * KIB).await;
+        file.write_at(0, &[block(&pool, b"one")]).await.unwrap();
+        let other = create(&files, "b", 4 * KIB).await;
+        other.write_at(0, &[block(&pool, b"two")]).await.unwrap();
+        other.close().await;
+        let found = file.rename(Path::new("b")).await.unwrap_err();
+        assert_eq!(found, Error::Exists { path: "b".into() });
+        for (path, bytes) in [("a", b"one"), ("b", b"two")] {
+            let kept = files.open(Path::new(path), Mode::Read).await.unwrap();
+            assert_eq!(read(&kept, &pool, 0, 3).await, bytes);
+        }
+        file.rename(Path::new("c")).await.unwrap();
+        let moved = files.open(Path::new("c"), Mode::Read).await.unwrap();
+        assert_eq!(read(&moved, &pool, 0, 3).await, b"one");
+    });
+}
+
+#[test]
+fn a_rename_of_a_removed_path_gives_not_found_and_changes_nothing() {
+    run(|files, _| async move {
+        let mut file = create(&files, "a", 4 * KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let found = file.rename(Path::new("b")).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
+        let found = files.open(Path::new("b"), Mode::Read).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "b".into() });
+    });
+}
+
+#[test]
+fn a_rename_of_a_path_that_names_another_file_gives_not_found() {
+    run(|files, _| async move {
+        let pool = pool();
+        let mut file = create(&files, "a", 4 * KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let other = create(&files, "a", 4 * KIB).await;
+        other.write_at(0, &[block(&pool, b"new")]).await.unwrap();
+        let found = file.rename(Path::new("b")).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
+        let kept = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        assert_eq!(read(&kept, &pool, 0, 3).await, b"new");
+        let found = files.open(Path::new("b"), Mode::Read).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "b".into() });
+    });
+}
+
+#[test]
+fn a_rename_of_a_path_that_is_a_link_to_the_file_gives_not_found() {
+    run(|files, data| async move {
+        std::fs::write(data.join("t"), [0; 4_096]).unwrap();
+        std::os::unix::fs::symlink("t", data.join("a")).unwrap();
+        let mut file = files.open(Path::new("a"), Mode::Write).await.unwrap();
+        let found = file.rename(Path::new("b")).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
+        assert!(data.join("t").is_file() && data.join("a").is_symlink());
+        assert!(!data.join("b").exists());
+    });
+}
+
+#[test]
+fn a_write_open_of_the_new_name_gives_busy_until_the_handle_closes() {
+    run(|files, data| async move {
+        let mut file = create(&files, "a", 4 * KIB).await;
+        file.rename(Path::new("b")).await.unwrap();
+        let (other, thread) = self::files(data.parent().unwrap(), "other");
+        for files in [&files, &other] {
+            let found = files.open(Path::new("b"), Mode::Write).await.unwrap_err();
+            assert_eq!(found, Error::Busy { path: "b".into() });
+        }
+        file.close().await;
+        files.open(Path::new("b"), Mode::Write).await.unwrap();
+        drop(other);
+        thread.join().unwrap();
+    });
+}
+
+#[test]
+fn an_error_after_a_rename_names_the_new_path() {
+    run(|files, data| async move {
+        let pool = pool();
+        let mut file = create(&files, "a", 4 * KIB).await;
+        file.rename(Path::new("b")).await.unwrap();
+        std::fs::write(data.join("b"), [7; 3_000]).unwrap();
+        let found = file.read_at(2_000, pool.alloc(2_000).unwrap()).await;
+        assert_eq!(found.unwrap_err(), io("b", Operation::ReadAt, 5));
     });
 }
 
