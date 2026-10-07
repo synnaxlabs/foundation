@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn the_signed_bytes_are_the_tag_the_key_and_the_card() {
         let card = Card {
-            name: "a.b".parse().unwrap(),
+            name: "ab.cd".parse().unwrap(),
             public_key: public(1),
             seal_key: SealKey::new([9; 32]).unwrap(),
             addresses: vec![
@@ -468,12 +468,12 @@ mod tests {
                     at: "[::1]:258".parse().unwrap(),
                 },
             ],
-            version: 3,
+            version: 0x0102_0304_0506_0708,
         };
         let mut expected = b"foundation/card/1".to_vec();
         expected.extend(1u128.to_le_bytes());
-        expected.push(3);
-        expected.extend(b"a.b");
+        expected.push(5);
+        expected.extend(b"ab.cd");
         expected.extend(public(1).to_bytes());
         expected.extend([9; 32]);
         expected.extend(3u64.to_le_bytes());
@@ -484,7 +484,7 @@ mod tests {
         expected.push(6);
         expected.extend(1u128.to_be_bytes());
         expected.extend([2, 1]);
-        expected.extend(3u64.to_le_bytes());
+        expected.extend([8, 7, 6, 5, 4, 3, 2, 1]);
         assert_eq!(statement(key(1), &card), expected);
     }
 
