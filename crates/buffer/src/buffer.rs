@@ -314,10 +314,12 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable tails past the synced `sealed` groups, keeps their records
-    /// as spares, and counts the commit.
+    /// Moves the durable tails past the synced `sealed` groups, tells the writer
+    /// that a trim can free them, keeps their records as spares, and counts the
+    /// commit.
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
+            self.writer.synced(record.ends());
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
                 self.logs
                     .sync(slot, header, record.offset())
@@ -792,8 +794,8 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             mem::swap(&mut state.queue, &mut taken);
         }
         for closed in taken.drain(..) {
-            let (record, next) = closed.seal(chain);
-            chain = next;
+            let record = closed.seal(chain);
+            chain = record.ends().record.chain();
             sealed.push(record);
         }
         let result = write(&shared, &sealed).await;
@@ -979,5 +981,36 @@ mod tests {
                 |buffer, _, _| async move { buffer },
             );
         assert_eq!(walked, written);
+    }
+
+    /// A commit gives the writer the boundaries of its records. No public call
+    /// shows them until a commit trims, so the test asks the writer.
+    #[test]
+    fn a_commit_gives_the_writer_the_boundaries_of_its_records() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let tail = Arc::new(Mutex::new(None));
+        let found = Arc::clone(&tail);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.assign(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                for commit in 0..60 {
+                    let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
+                    buffer.append(batch).expect("the ring has room");
+                    buffer.committed().await.expect("commits");
+                }
+                let trimmed = buffer.shared.state.borrow().writer.trimmed(None);
+                *found.lock().expect("no panic held the lock") = trimmed;
+                buffer
+            },
+        );
+        // The restart record and 60 records of one block are synced. The headroom
+        // is three records of two blocks.
+        let tail = tail.lock().expect("no panic held the lock");
+        assert_eq!(tail.map(crate::wal::Position::offset), Some(3 * 4096));
     }
 }

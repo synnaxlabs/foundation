@@ -2,11 +2,10 @@
 
 use std::fmt;
 
-use aws_lc_rs::signature::KeyPair;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
-use crate::bytes::{put_key, take};
+use crate::bytes::{put_key, put_name, take, take_key, take_name};
 use crate::ed25519;
 
 pub mod addresses;
@@ -33,11 +32,7 @@ impl Card {
     /// public key, the seal key, a count of addresses as 8 little-endian bytes, each
     /// address, then the version as 8 little-endian bytes.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
-        let name = self.name.as_str().as_bytes();
-        out.push(
-            u8::try_from(name.len()).expect("invariant: a name is at most 255 bytes"),
-        );
-        out.extend(name);
+        put_name(&self.name, out);
         out.extend(self.public_key.to_bytes());
         out.extend(self.seal_key.to_bytes());
         self.addresses.encode(out);
@@ -45,17 +40,15 @@ impl Card {
     }
 
     /// Takes one card from the start of `bytes`. `None` when the bytes do not start
-    /// with what [`Card::encode`] gives, such as a count of more than 32 addresses;
-    /// `bytes` is then at no known place.
+    /// with what [`Card::encode`] gives, such as an address list that
+    /// [`Addresses::new`](addresses::Addresses::new) refuses; `bytes` is then at no known
+    /// place.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the `Join` change of #336 is the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
-        let [len] = take(bytes)?;
-        let (name, rest) = bytes.split_at_checked(usize::from(len))?;
-        *bytes = rest;
-        let name = std::str::from_utf8(name).ok()?.parse().ok()?;
+        let name = take_name(bytes)?;
         let public_key = PublicKey::new(take(bytes)?).ok()?;
         let seal_key = SealKey::new(take(bytes)?).ok()?;
         let addresses = addresses::Addresses::decode(bytes)?;
@@ -71,11 +64,13 @@ impl Card {
 }
 
 /// A card that its own `public_key` signed, over `foundation/card/1`, the node key,
-/// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one.
-/// It proves only that the key in the card signed it. That the node owns the key
-/// comes from its admission.
+/// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one, and
+/// each keeps the node key that the signature covers. It proves only that the public
+/// key in the card signed it. That the node owns the public key comes from its
+/// admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signed {
+    key: node::Key,
     card: Card,
     signature: [u8; 64],
 }
@@ -90,11 +85,15 @@ impl Signed {
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
         let pair = ed25519::pair(private_key);
         assert!(
-            pair.public_key().as_ref() == card.public_key.to_bytes(),
+            ed25519::public(&pair) == card.public_key,
             "the card's public key is not the public half of the private key"
         );
-        let signature = ed25519::sign(&pair, &statement(key, &card));
-        Self { card, signature }
+        let signature = ed25519::sign(&pair, &statement(TAG, key, &card));
+        Self {
+            key,
+            card,
+            signature,
+        }
     }
 
     /// Checks `signature` over `card` of node `key`.
@@ -107,10 +106,41 @@ impl Signed {
         card: Card,
         signature: [u8; 64],
     ) -> Result<Self, Forged> {
-        if !ed25519::holds(card.public_key, &statement(key, &card), &signature) {
+        if !ed25519::holds(card.public_key, &statement(TAG, key, &card), &signature) {
             return Err(Forged { node: key });
         }
-        Ok(Self { card, signature })
+        Ok(Self {
+            key,
+            card,
+            signature,
+        })
+    }
+
+    /// Adds the one byte form of the signed card to `out`: the node key as 16
+    /// little-endian bytes, the card, then the signature.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_key(self.key, out);
+        self.card.encode(out);
+        out.extend(self.signature);
+    }
+
+    /// Takes one signed card from the start of `bytes`. `None` when the bytes do not
+    /// start with what [`Signed::encode`] gives, or when the signature does not hold;
+    /// `bytes` is then at no known place.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        let key = take_key(bytes)?;
+        let card = Card::decode(bytes)?;
+        Self::check(key, card, take(bytes)?).ok()
+    }
+
+    /// The node that the card is signed for. The signature covers it.
+    #[must_use]
+    pub const fn key(&self) -> node::Key {
+        self.key
     }
 
     /// The card.
@@ -141,10 +171,10 @@ impl fmt::Display for Forged {
 
 impl std::error::Error for Forged {}
 
-// The bytes a node signs for its card. They name the node, so nodes that share a key
-// cannot share a card.
-fn statement(key: node::Key, card: &Card) -> Vec<u8> {
-    let mut bytes = TAG.to_vec();
+/// The bytes signed under `tag` for `card` of node `key`. They name the node, so a
+/// signature holds for one node only.
+pub(crate) fn statement(tag: &[u8], key: node::Key, card: &Card) -> Vec<u8> {
+    let mut bytes = tag.to_vec();
     put_key(key, &mut bytes);
     card.encode(&mut bytes);
     bytes
@@ -274,8 +304,9 @@ mod tests {
         #[test]
         fn a_signed_card_checks(card in card(3)) {
             let signed = Signed::sign(key(3), card.clone(), &private(3));
-            prop_assert_eq!(signed.card(), &card);
+            prop_assert_eq!((signed.key(), signed.card()), (key(3), &card));
             let checked = Signed::check(key(3), card, *signed.signature());
+            prop_assert_eq!(checked.as_ref().map(Signed::key), Ok(key(3)));
             prop_assert_eq!(checked, Ok(signed));
         }
     }
@@ -407,7 +438,7 @@ mod tests {
         expected.extend(1u128.to_be_bytes());
         expected.extend([2, 1]);
         expected.extend([8, 7, 6, 5, 4, 3, 2, 1]);
-        assert_eq!(statement(key(1), &card), expected);
+        assert_eq!(statement(TAG, key(1), &card), expected);
     }
 
     #[test]

@@ -494,7 +494,7 @@ mod tests {
     use types::frame::{Form, Frame, Path, Range};
 
     use super::*;
-    use crate::common::{SCALARS, create_pool, interner, key};
+    use crate::common::{SCALARS, create_interner, create_pool, key};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -638,7 +638,7 @@ mod tests {
     }
 
     fn one_index() -> Arc<KeySet> {
-        interner().intern(&[Group {
+        create_interner().intern(&[Group {
             index: key(Slot::new(1)),
             data: &[],
         }])
@@ -658,7 +658,7 @@ mod tests {
             index: key(Slot::new(3)),
             data: &[(key(Slot::new(4)), Type::Scalar(Scalar::U16))],
         };
-        interner().intern(&[zero, one])
+        create_interner().intern(&[zero, one])
     }
 
     /// A write of both groups of [`two_groups`], with every entry present.
@@ -694,7 +694,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        let set = interner().intern(&[
+        let set = create_interner().intern(&[
             Group {
                 index: key(Slot::new(1)),
                 data: &data[0],
@@ -1184,7 +1184,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is of key set 1, not of key set 0")]
             fn on_a_frame_of_another_key_set() {
-                let mut interner = interner();
+                let mut interner = create_interner();
                 let set = interner.intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[],
@@ -1279,7 +1279,7 @@ mod tests {
                                        01000000-0000-0000-0000-000000000001: vector \
                                        0 has tag 9")]
             fn on_a_group_with_the_error_of_its_first_series_by_entry() {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(2)),
                     data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I32))],
                 }]);
@@ -1317,7 +1317,7 @@ mod tests {
 
             /// Splits a frame of one stamp at `count` and a `String` series after it.
             fn split_a_string_series(count: u32) {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::String)],
                 }]);
@@ -1359,7 +1359,7 @@ mod tests {
         #[test]
         fn gives_none_for_a_series_of_each_scalar() {
             for scalar in SCALARS {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::Scalar(scalar))],
                 }]);
@@ -1378,7 +1378,7 @@ mod tests {
                 Type::Bytes,
             ];
             for data_type in types {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[
                         (key(Slot::new(2)), Type::Scalar(Scalar::U8)),
@@ -1494,7 +1494,7 @@ mod tests {
                         data,
                     })
                     .collect();
-                let set = interner().intern(&shapes);
+                let set = create_interner().intern(&shapes);
                 let mut write = BTreeMap::new();
                 for (n, (index, data)) in data.iter().enumerate() {
                     let &(_, present, count) = &groups[n];
