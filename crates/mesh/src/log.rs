@@ -1,11 +1,11 @@
 //! The `raft` state of one region on disk: the hard state and the log entries.
 //!
 //! The log is the files `log-0`, `log-1`, and so on in one directory. A file holds
-//! records back to back, then zeros. One record is one [`Log::write`]: a header, then
-//! the body. The header holds its own check, the format version, the record's number,
-//! the length of the body, and the check of the body. Record numbers count up from 0
-//! through all files. A record that does not fit in the rest of a file starts the
-//! next file, or makes the file again, larger, when it holds no record.
+//! records back to back, then zeros. One record is one write of the log: a header,
+//! then the body. The header holds its own check, the format version, the record's
+//! number, the length of the body, and the check of the body. Record numbers count up
+//! from 0 through all files. A record that does not fit in the rest of a file starts
+//! the next file, or makes the file again, larger, when it holds no record.
 //!
 //! A header never crosses a 512-byte sector: a record whose header would cross one
 //! starts at the next sector. A power cut keeps all or none of a sector, so a header
@@ -64,7 +64,7 @@ pub(crate) struct Stored {
 
 /// Why a log call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// A file call failed.
     Files(files::Error),
     /// The pool has no block for a read or a write.

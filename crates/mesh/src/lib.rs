@@ -20,12 +20,12 @@ pub mod card;
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod change;
+pub mod change;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod claim;
+pub mod claim;
 #[cfg(test)]
 mod common;
 #[cfg_attr(
@@ -39,16 +39,12 @@ mod ed25519;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod entry;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the streams of #471 are the first user")
-)]
 mod error;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod log;
+pub mod log;
 mod member;
 #[cfg_attr(
     not(test),
@@ -59,11 +55,12 @@ mod message;
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod region;
+pub mod region;
 pub mod status;
 #[cfg(any(test, feature = "sim"))]
 pub mod testing;
 pub mod ticket;
 
 pub use driver::{Mesh, Watch};
+pub use error::{Error, Stopped};
 pub use member::Member;

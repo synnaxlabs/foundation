@@ -401,7 +401,7 @@ impl Watch {
     /// [`Error::Stopped`] with the cause, at once, on each call after the group stops
     /// or each [`Mesh`] of it drops. A group that stopped keeps its cause when each
     /// [`Mesh`] drops.
-    pub(crate) async fn next(&mut self) -> Result<Option<node::Key>, Error> {
+    pub async fn next(&mut self) -> Result<Option<node::Key>, Error> {
         poll_fn(|cx| {
             if let Some(stopped) = self.stopped.get() {
                 return Poll::Ready(Err(Error::Stopped(stopped.clone())));

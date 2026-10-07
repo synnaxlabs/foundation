@@ -2154,6 +2154,23 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). Proposed
   by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+- **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
+  `Watch::next`, and `Mesh::member` (#562). They give `Error` and `Stopped`, which hold
+  the cause types `log::Error`, `claim::Error`, `region::Unfit`, and `change::Unknown`,
+  each public in its own module, so a caller can match the exact cause. `claim::Error`
+  is the `grant::Error` of the rulings: #1460 gave the module its new name. The cause
+  types at the root (`mesh::LogError`) lost, because each name repeats its module. An
+  `Error` that holds a text for each cause lost, because a caller cannot match a text.
+  The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index only.
+  `Config`, `Mesh::open`, and `Mesh::serve` become public after the senders (#1410), so
+  until then no crate outside `mesh` opens a `Mesh`. The calls that change the region
+  and the change records stay private. The surface is approved by the architect,
+  2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. `member`
+  is approved by the architect, 2026-10-07T15:17:13Z:
+  https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
+  of the PRs is decided by the architect, 2026-10-07T17:18:52Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6043038615.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and

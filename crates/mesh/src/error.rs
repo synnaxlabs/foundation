@@ -9,7 +9,7 @@ use crate::{claim, log, status};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The log did not open.
     Log(log::Error),
     /// `raft` refused the log, a message, or a proposal.
@@ -114,7 +114,7 @@ impl From<claim::Error> for Error {
 
 /// Why a group stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Stopped {
+pub enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
     /// The committed change at `at` has 0 bytes or a kind that this build does not

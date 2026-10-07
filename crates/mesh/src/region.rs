@@ -277,7 +277,7 @@ impl std::error::Error for Refused {}
 
 /// Why the region cannot hold a member: a founding member, or the node of a `Join`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unfit {
+pub enum Unfit {
     /// A segment of the member's name, or of the name of one of its status channels,
     /// starts with `@`.
     Reserved {
