@@ -146,7 +146,14 @@ How to read this record:
 - **S5** `Channel { key, name, kind: Kind }`, with
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
-  or virtual flag.
+  or virtual flag. Amended: no `name` field, because the name is the tree key, and
+  `Kind::Data(Data)` has private fields. An array or list of size 0 is valid: no
+  caller divides by its width, and a refusal, when one is needed, goes in
+  `sample::Type`, which every format reads. The spec numbers its scalar codes in its
+  own table, apart from STORED BODY, so a change to one format does not change the
+  other. Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
+  https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -435,9 +442,13 @@ How to read this record:
   blocks of the record's entries, so an entry of the pool's largest block reads
   (#968). A read holds no record while it waits for a file read, so a change that
   frees ring space must first hold the records of each read in progress (#510).
-  Recovery walks from the tail to the first record that does not follow the chain.
-  A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open, and so does an entry whose `first` is below the tail of its path or whose
+  Recovery walks from the tail to the first record that does not follow the chain. A
+  block of kind 0 is no record and ends the walk, also when its CRC follows the chain:
+  no version writes kind 0, and a zeroed block must end the walk for every chain value
+  (decided by the architect, #1049:
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031201904). A
+  record that follows the chain but has an unknown kind or a wrong shape fails the open,
+  and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
   durable: a killed process may have written records that it never synced (#657). Before
   that sync, the open writes again, as read, the two header blocks and each window the
@@ -446,11 +457,26 @@ How to read this record:
   them between two reads. So an open writes again the header, 8 KiB, and the bytes it
   walks, at most the area, and the first 52 KiB of each record over one block twice
   (#698). Lost: a walk with direct I/O, which needs a new `env::files` read mode in each
-  driver and in `sim`. The restart record needs one free block: an open of a full ring
-  first moves records at the tail to a segment. The walk holds one pool
-  block at a time and reads a longer record in pieces of the pool's largest block, so
-  the pool puts no bound on `body_max`. An open with no such block free fails with
-  `Pool`, and the next open recovers the record (#440, #572).
+  driver and in `sim`. An open that fails with `Invalid` wrote only bytes that it read,
+  where it read them, and did not sync the ring: the ring reads as it did before the
+  open. That is a statement about what a read gives, not about what is durable. On a
+  disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
+  reads, which reads each record twice, and windows held until the walk ends, which
+  takes memory up to the area. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). One
+  case differs: on a file with no header, the open writes and syncs the first checkpoint
+  before the walk, so a false CRC match of the new chain value, 1 in 2^32, can give
+  `Invalid` after that write. Each statement about a record holds only when no CRC gives
+  a false match. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
+  `Invalid` gives offset 0 for a header block, which is also the offset of the first
+  record of a ring, until #1093 gives the header its own error. Decided by the architect
+  (#1049, https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031051950).
+  The restart record needs one free block: an open of a full ring first moves records at
+  the tail to a segment. The walk holds one pool block at a time and reads a longer
+  record in pieces of the pool's largest block, so the pool puts no bound on `body_max`.
+  An open with no such block free fails with `Pool`, and the next open recovers the
+  record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
@@ -639,11 +665,17 @@ How to read this record:
   entry or group count: an entry or group past the key set is absent. A frame is at
   most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
   their order and padding are part of the disk and wire format version (C9d). A change
-  to either needs a new version. The padding is at most 7 bytes for each present
-  series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
-  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
-  records enter (X43). Decided by the coordinator (#306).
+  to either needs a new version. A `Draft` writes zeros in the padding, and no reader
+  reads it, so `frame::check` does not check it. A frame from a peer may hold other
+  bytes there, which `replica` stores and copy mode (X43) sends as they are (decided by
+  the architect, #1064:
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642, worded in
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031226370). The
+  padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
+  1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
+  body at its `(tag, end)` pairs and panics on ends that do not fit. Copy mode runs
+  `frame::check` once where remote records enter (X43). Decided by the coordinator
+  (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -1006,34 +1038,57 @@ How to read this record:
   for the kind of time (two checks where one kind byte does the work).
 - **HUB WIRE (#561)** A remote reader session is one hub stream of class `Complete` or
   `Latest`. After the header, the reader's node sends `wire::hub::Open`: the mode and
-  the number of channels, all on one index. A latest session gets the newest live
-  frame before its commit. A complete session gets each live frame after its commit,
-  and `Open` carries its first grant in bytes (CREDIT RULES). The home answers
-  `Opened`; the reader sends `Credit`, its total grant since the open; the home sends
-  each frame as a `Head` (path, seq, count, and the number of series). Every frame is
-  encoded (X35), so `Head` has no form. The body holds only the series of the
-  reader's view, the index series too, written from the frame's block as slices, and
-  both ends charge `View::charge` (M2). A series has the place of its first listing in
-  the open; the index, when the open does not list it, has the next place.
-  Only the fixed part of `Open` and of `Head` is one message. The rest is one run of
-  bytes, in messages of at most the peer's `message_bytes_max`, back to back with no
-  prefix: after `Open`, the keys; after `Head`, the end of each series in the body,
-  then the body. So no count of channels or series has a cap, and the reader fills
-  one block of the length of the last end. The home checks each key as it arrives and
-  never allocates by the peer's count. A head with more series than places is not
-  valid. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
+  the number of channels, all on one index. A latest session gets the newest live frame
+  before its commit. A complete session gets each live frame after its commit, and
+  `Open` carries its first grant in bytes (CREDIT RULES). The home answers `Opened`; the
+  reader sends `Credit`, its total grant since the open; the home sends each frame as a
+  `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
+  `Head` has no form. The body holds only the series of the reader's view, the index
+  series too, written from the frame's block as slices, and both ends charge
+  `View::charge` (M2). A series has the place of its first listing in the open, from 0;
+  the index, when the open does not list it, has place `channels`. An open of no channel
+  is not valid. Only the fixed part of `Open` and of `Head` is one message. The rest is
+  one run of bytes, in messages of at most the peer's `message_bytes_max`, back to back
+  with no prefix: after `Open`, the keys; after `Head`, the place and end of each series
+  in the body, then the body. A message never splits a key or an end, so each side
+  decodes each message as it arrives. The keys run holds exactly `channels` keys and the
+  ends run exactly the head's number of series, so each side counts them to find where a
+  run ends, and the body starts a new message. So no count of channels or series has a
+  cap, and the reader fills one block of the length of the last end. A run message with
+  more keys or ends than remain is not valid. A head of no series is not valid, since a
+  frame holds its index. The home checks each key as it arrives and never allocates by
+  the peer's count. A head with more series than places, or an end with a place the
+  session does not have or that repeats in its frame, is not valid; the reader's `hub`
+  checks this when it maps a place to its key. The body is laid out as the series bytes
+  of the frame of only the view's series that `View::charge` charges (FRAME LAYOUT), in
+  the home's entry order, with ends the home computes for those series: the first series
+  starts at 0, and each other at the end before it rounded up to a multiple of 8. An end
+  below the start of its series is not valid; `types::frame::check` refuses it. The
+  padding may hold any bytes (FRAME LAYOUT), and the reader ignores it: the reader
+  copies each series into a frame of its own, whose entry order follows its own slots,
+  and its `Draft` writes zeros in the padding of that frame. Each direction has its own
+  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
+  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
   (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode or comes from the wrong side), which every protocol may use.
-  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
-  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91
-  channels a session, the most that fit in 1472 bytes; the index in its own field of
+  that does not decode, comes from the wrong side, or breaks a rule above), which every
+  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
+  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
+  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
   `Open`, because the home knows its index and a second copy needs a check; the whole
   `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
-  open needs no mesh time (READER RULES), and a later named open can add one; grants
-  for many sessions in one message, which wait until a link carries a second session.
-  The coordinator approved the messages (2026-10-05); the architect decided the rest
-  (#561, 2026-10-06) and the run, the index place, and `MALFORMED` on #1064. The byte
-  form is recorded when it merges.
+  open needs no mesh time (READER RULES), and a later named open can add one; grants for
+  many sessions in one message, which wait until a link carries a second session. The
+  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
+  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
+  whole keys and ends and one message type for each direction
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
+  open of no channel and the place checks in `hub`
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). The byte
+  form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
+  `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
+  is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
+  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
@@ -1396,20 +1451,22 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
-  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
-  first `Voters` entry shows the configuration before the entries: a joint entry's
-  outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
-  starts at index 1, so that entry is the joint entry of the group's first change, and
-  the node checks proofs as a founder with the same log does, gaps included (#881,
-  #1005). Lost: an empty committed set proves nothing (the new node then refuses a
-  leader that the outgoing set elects when the old leader fails before the joint entry
-  commits); a joining node starts with the group's configuration (the caller must know
-  it, and it removes the operator's recovery of a wiped voter); the founding
-  configuration as entry 1, as in etcd (a wider change that alone leaves the node open
-  until it holds that entry). A `Voters` entry with an empty `incoming` set, in
-  `Start.entries` or in an `Append`, is `Error::NoVoters`: a group with no voter can
-  never commit or elect.
+  `Start.entries`. A node that joins starts with the founding voters from the answer to
+  its join (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). An empty
+  `Start.voters` is a voter that an operator wiped. It takes any proof until it holds a
+  `Voters` entry (#1004). Then its first `Voters` entry shows the configuration before
+  the entries: a joint entry's outgoing set, or for a leave its own set (#928,
+  coordinator, 2026-10-06). A log starts at index 1, so that entry is the joint entry of
+  the group's first change, and the node checks proofs as a founder with the same log
+  does, gaps included (#881, #1005). Lost: an empty committed set proves nothing (the
+  node then refuses a leader that the outgoing set elects when the old leader fails
+  before the joint entry commits); a joining node starts with the group's current
+  configuration (the caller must know it, and it removes the operator's recovery of a
+  wiped voter); the founding configuration as entry 1, as in etcd (a wider change that
+  alone leaves the node open until it holds that entry). A `Voters` entry with an empty
+  `incoming` set, in `Start.entries` or in an `Append`, is `Error::NoVoters`: a group
+  with no voter can never commit or elect.
   A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
@@ -1505,6 +1562,43 @@ How to read this record:
   format version. A message has one byte form, and a decode takes nothing else. The
   log (MESH LOG) and the messages share the byte form of an entry. Decided by
   `consensus`, approved by the coordinator (#471).
+- **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
+  shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
+  the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
+  task and a writer task lost: they need a second waker. A tick is 100 ms, a heartbeat
+  is 1 tick, and an election timeout is 10 ticks. A tick that comes due in a write is
+  lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
+  this order: the peer holds the key of the member that the message names
+  (`Error::Spoofed`), a request comes from a voter of this node's configuration
+  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  configuration refuses a leader that is not a voter of that configuration, when a
+  change that the node does not hold made that leader a voter. The node does not get the
+  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
+  configuration takes no request. Only a voter that an operator wiped is such a node
+  (#881), because a node that joins opens with the founding voters from its join answer
+  (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
+  messages for one member wait in a queue of 64 that drops its oldest, because `raft`
+  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
+  system refuses memory for (`Refused`), does not stop the group, because each may
+  succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
+  and until then no message leaves, nothing applies, and the group gets no tick. Nothing
+  bounds the proposals and the messages that the group takes in that time, and a record
+  that the pool can never hold waits with no end (#1091). A pool whose budget holds no
+  block (`TooLarge`) stops the group (the `Refused` wait decided by the architect:
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
+  stops when a write of the log fails, when a committed entry is not a change that this
+  build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
+  the first cause, and a watch gives it also after each `Mesh` drops. A stopped group
+  does not start again: the node opens the mesh again (#1066 for an open after a failed
+  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
+  and a write that waits for a block ends at the next tick; until then a new open gives
+  `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
+  does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
+  node or a voter that is not a member (`Error::NotMember`), and a private key that is
+  not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
+  decided by the architect (#471):
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1664,7 +1758,20 @@ How to read this record:
   2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
   HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
   HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
-  Decided by the coordinator with `advisor` on 2026-10-06 (#341).
+  Decided by the coordinator with `advisor` on 2026-10-06 (#341). The client keeps one
+  idle connection for each origin. It does not reuse one that is idle longer than 90 s
+  (the `hyper-util` default), read on the `env` clock, and the next send closes it: the
+  client sends no keep-alive, and a firewall or NAT may drop the state of an idle
+  stream. Decided by the coordinator with `advisor` on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). A
+  request that fails on a reused connection before its response goes once more on a
+  new connection, when the connection did not write it, or when its method is
+  idempotent and no byte of a response came (RFC 9112, as in Go). The pool key is the
+  origin: scheme, host, and port. Today the client takes only `http` with an IP
+  address, so the socket address is the origin. With TLS or name lookup, the key keeps
+  the host name, because a TLS connection is verified for one name and must never
+  carry a request for another. Decided by the architect on #1111
+  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -2223,7 +2330,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
   From the review of #1018: a name matches in any ASCII case and with or without one
   final dot, as in DNS. An IP literal as a name panics, because no lookup reads it.
-  A lookup that would end past the end of the clock never answers.
+  A lookup that would end past the end of the clock never answers. The match in any
+  case and with a final dot was confirmed by the architect on #1018, in place of its
+  earlier exact match
+  (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649).
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -2342,7 +2452,21 @@ How to read this record:
   count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
   is the long-term path (#1077). Running the stored count on another core count lost:
   it bends C2. Decided by the architect on #1062:
-  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
+  count is an empty directory `shards-<n>` in the data directory, made and synced
+  before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the
+  head of the interner handoff. Another count gives `Error::Shards`, and a failed
+  file call `Error::Directory`. Any record of another count fails the start, also
+  next to `shards-<cores>`, and `stored` is the smallest such count, so the error
+  does not hang on the order of the list. A name whose rest is not a count in plain
+  decimal (`shards-03`, `shards-+3`), or is zero, is not a record. With no record,
+  rings up to `shard-<k>` are a record of `k + 1`, so a data directory made before
+  #1076 is checked too; a crash cannot leave a ring with no record. A name
+  `shard-<usize::MAX>` is not a ring, because no node has a shard of that index.
+  Each start syncs the data directory before `shard-0`, also when the record is
+  there, because a process crash can leave it unsynced. A one-sector file lost: it
+  needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
+  https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -2504,9 +2628,9 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
-| Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
+| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |

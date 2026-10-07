@@ -20,6 +20,9 @@ public surfaces, contracts, deferrals in risk crates, and benchmark judgments. G
 on each. Leave routing and status to the coordinator, and give no answer to a notice
 that needs no decision.
 
+Send an extremely difficult or highly contested issue to `laptop.director`, with your
+analysis, the options, and your recommendation. The director decides it.
+
 ## Interface issues
 
 For each `interface` issue (the proposed signature and the reason):
