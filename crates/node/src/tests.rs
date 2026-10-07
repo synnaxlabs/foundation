@@ -610,7 +610,7 @@ mod buffer {
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let shards = ["shard-0", "shard-1"];
-        let made = ["shard-0", "shard-1", "shards-2"];
+        let made = ["lock", "shard-0", "shard-1", "shards-2"];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
@@ -817,8 +817,9 @@ mod buffer {
     /// leaves the claim alone.
     #[test]
     fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
-        let all = ["shard-0", "shard-1", "shard-2", "shards-3"].map(PathBuf::from);
-        let mut seen = [false; 5];
+        let all = ["lock", "shard-0", "shard-1", "shard-2", "shards-3"];
+        let all = all.map(PathBuf::from);
+        let mut seen = [false; 6];
         for step in 0..200 {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 3);
@@ -829,17 +830,17 @@ mod buffer {
             assert_eq!(sim.run(), Ok(()), "at {after:?}");
             assert_eq!(node.join(), Ok(()), "at {after:?}");
             let listed = listed(&mut sim, &host, "");
-            let rings = listed.len().saturating_sub(1);
             let made: Vec<PathBuf> = if listed.is_empty() {
                 Vec::new()
             } else {
-                all[..rings].iter().chain(&all[3..]).cloned().collect()
+                let held = listed.len() - 1;
+                all[..held].iter().chain(&all[4..]).cloned().collect()
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
             assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
         }
-        assert_eq!(seen[1..], [true; 4], "a stop after each step");
+        assert_eq!(seen[2..], [true; 4], "a stop after each step");
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -908,7 +909,7 @@ mod buffer {
         assert_eq!(panics(&mut run), Vec::<String>::new());
         assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
         assert_eq!(run.node.join(), Err(opened(1)));
-        let made = ["shard-0", "shards-3"].map(PathBuf::from);
+        let made = ["lock", "shard-0", "shards-3"].map(PathBuf::from);
         assert_eq!(listed(&mut run.sim, &run.host, ""), made);
     }
 
@@ -992,7 +993,8 @@ mod directory {
             assert_eq!(e, Error::Shards { stored: 3, cores });
             assert_eq!(e.to_string(), text);
             let listed = listed(&mut sim, &host, "");
-            assert_eq!(listed, [PathBuf::from("shards-3")], "{cores} cores");
+            let made = ["lock", "shards-3"].map(PathBuf::from);
+            assert_eq!(listed, made, "{cores} cores");
         }
     }
 
@@ -1034,6 +1036,7 @@ mod directory {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
         let made = [
+            "lock",
             "other-3",
             "shard-0",
             "shard-1",
@@ -1091,20 +1094,21 @@ mod directory {
 
     #[test]
     fn a_failed_file_call_of_the_claim_stops_the_node_before_any_ring() {
-        use env::files::Operation::{CreateDir, List, SyncDir};
+        use env::files::Operation::{CreateDir, List, Open, SyncDir};
         for (path, operation, text, made) in [
-            ("", List, "list of  failed with OS error 5", &[][..]),
+            ("lock", Open, "open of lock failed with OS error 5", &[][..]),
+            ("", List, "list of  failed with OS error 5", &["lock"][..]),
             (
                 "shards-2",
                 CreateDir,
                 "create_dir of shards-2 failed with OS error 5",
-                &[][..],
+                &["lock"][..],
             ),
             (
                 "",
                 SyncDir,
                 "sync_dir of  failed with OS error 5",
-                &["shards-2"][..],
+                &["lock", "shards-2"][..],
             ),
         ] {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -1119,10 +1123,7 @@ mod directory {
             assert_eq!(e, Error::Directory(io), "{operation:?}");
             assert_eq!(
                 e.to_string(),
-                format!(
-                    "cannot read or record the shard count of the data directory: \
-                     {text}"
-                )
+                format!("cannot claim the data directory: {text}")
             );
             let made: Vec<PathBuf> = made.iter().map(PathBuf::from).collect();
             assert_eq!(listed(&mut sim, &host, ""), made, "{operation:?}");
@@ -1145,7 +1146,7 @@ mod directory {
         .expect("the run ends");
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
-        let made = ["shard-0", "shard-1", &name, "shards-2"];
+        let made = ["lock", "shard-0", "shard-1", &name, "shards-2"];
         assert_eq!(listed, made.map(PathBuf::from));
     }
 
@@ -1167,7 +1168,7 @@ mod directory {
             })
             .expect("the run ends");
             assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
-            let mut made = ["shard-0", "shard-1", &name, "shards-2"];
+            let mut made = ["lock", "shard-0", "shard-1", &name, "shards-2"];
             made.sort_unstable();
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "{name}");
@@ -1233,7 +1234,7 @@ mod directory {
         };
         for (crash, kept) in [
             (sim::Crash::Power, &[][..]),
-            (sim::Crash::Process, &["shards-2"][..]),
+            (sim::Crash::Process, &["lock", "shards-2"][..]),
         ] {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
@@ -1246,7 +1247,7 @@ mod directory {
             host.fail_file(Path::new(""), SyncDir);
             let e = run_on(&mut sim, &host);
             assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
-            let made = [PathBuf::from("shards-2")];
+            let made = ["lock", "shards-2"].map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
         }
     }
@@ -1462,5 +1463,126 @@ mod home {
                 }],
             ]
         );
+    }
+}
+
+mod lock {
+    use super::*;
+
+    /// The error of a start on a data directory that another node holds.
+    fn busy() -> Error {
+        Error::Directory(env::files::Error::Busy {
+            path: PathBuf::from("lock"),
+        })
+    }
+
+    /// Starts a node on the cores of `host`, over the data directory of `disk`.
+    fn start_over(host: &sim::node::Node, disk: &sim::node::Node) -> Node {
+        let disk = disk.clone();
+        Node::start(Config {
+            files: Box::new(move || {
+                let disk = disk.clone();
+                Box::new(move || disk.files())
+            }),
+            ..config(host, Size::MEBIBYTE, Box::new(heap))
+        })
+    }
+
+    #[test]
+    fn a_second_node_on_the_data_directory_of_a_running_node_is_refused() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let first = start_over(&host, &host);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        let second = start_over(&host, &host);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        let e = second.join();
+        assert_eq!(e, Err(busy()));
+        assert_eq!(
+            busy().to_string(),
+            "cannot claim the data directory: file lock is open for writing in \
+             another handle"
+        );
+        first.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(first.join(), Ok(()));
+        let made = ["lock", "shard-0", "shard-1", "shards-2"].map(PathBuf::from);
+        assert_eq!(listed(&mut sim, &host, ""), made);
+    }
+
+    /// Two nodes that start at once on a new data directory: one claims it, and the
+    /// other stops before it reads a name or opens a ring.
+    #[test]
+    fn of_two_nodes_that_start_at_once_one_claims_the_data_directory() {
+        let mut seen = [false; 2];
+        for seed in 0..16 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            let nodes = [start_over(&host, &host), start_over(&host, &host)];
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "seed {seed}");
+            let failed = nodes.each_ref().map(|n| n.shards[0].failed.get().cloned());
+            let claimed = usize::from(failed[0].is_some());
+            assert_eq!(failed[claimed], None, "seed {seed}");
+            assert_eq!(failed[1 - claimed], Some(busy()), "seed {seed}");
+            seen[claimed] = true;
+            for node in &nodes {
+                node.stop();
+            }
+            assert_eq!(sim.run(), Ok(()), "seed {seed}");
+            let joined = nodes.map(Node::join);
+            assert_eq!(joined[claimed], Ok(()), "seed {seed}");
+            let made = ["lock", "shard-0", "shard-1", "shards-2"].map(PathBuf::from);
+            assert_eq!(listed(&mut sim, &host, ""), made, "seed {seed}");
+        }
+        assert_eq!(seen, [true; 2]);
+    }
+
+    /// A stop at any point of the claim and the opens, then a second node at once:
+    /// a node holds the lock until each of its rings has closed, so the other never
+    /// finds a ring open.
+    #[test]
+    fn the_lock_outlives_each_ring() {
+        let mut seen = [false; 3];
+        // The opens end at about 1.3 ms; a stop at 760 us finds `shard-1` opening.
+        for step in 0..400 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let first = start_over(&host, &host);
+            let after = Span::from_nanos(step * 5_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            first.stop();
+            let second = start_over(&host, &host);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "at {after:?}");
+            second.stop();
+            assert_eq!(sim.run(), Ok(()), "at {after:?}");
+            let joined = [first.join(), second.join()];
+            let outcome = [
+                [Ok(()), Ok(())],
+                [Ok(()), Err(busy())],
+                [Err(busy()), Ok(())],
+            ]
+            .iter()
+            .position(|o| *o == joined);
+            let Some(outcome) = outcome else {
+                panic!("at {after:?}: {joined:?}");
+            };
+            seen[outcome] = true;
+        }
+        assert_eq!(seen, [true; 3]);
+    }
+
+    /// A process crash frees the lock, so the next start claims the data directory.
+    #[test]
+    fn a_restart_after_a_process_crash_claims_the_data_directory() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = start_over(&host, &host);
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        sim.crash(&host, sim::Crash::Process);
+        drop(node);
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
     }
 }
