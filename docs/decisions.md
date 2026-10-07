@@ -2021,8 +2021,11 @@ How to read this record:
   job of `transport` (#1363) (approved by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). The
   tasks end when the group stops or when each `Mesh` drops, also a task that waits in
-  a dial or in a send. The task of a member that left the region ends only then
-  (#1401). Proposed by box1.builder-3, decided by the architect (#471),
+  a dial or in a send. The task of a voter that a change removed, to which `raft`
+  sends no more messages, ends only then (#1401) (approved by the architect,
+  2026-10-07T13:40:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881).
+  Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full

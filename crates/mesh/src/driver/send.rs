@@ -32,13 +32,7 @@ pub(super) struct Senders {
 #[derive(Default)]
 struct Link {
     session: Option<Session>,
-    stream: Option<Stream>,
-}
-
-struct Stream {
-    sender: Sender,
-    // Whether the header of the protocol went on the stream.
-    headed: bool,
+    stream: Option<Sender>,
 }
 
 // Why a message did not go.
@@ -147,32 +141,29 @@ impl Senders {
     }
 
     // Sends `message` on the stream of `link`. With no stream it opens one, and with
-    // no session it dials first. The header of the protocol goes first on a stream.
-    // Each block is taken just before its send: a dial can wait until it times out.
+    // no session it dials first. The header of the protocol goes first on a stream,
+    // which `link` holds only after. Each block is taken just before its send: a
+    // dial can wait until it times out.
     async fn pass(
         &self,
         to: node::Key,
         link: &mut Link,
         message: raft::Message,
     ) -> Result<(), Failure> {
-        let stream = if let Some(stream) = &mut link.stream {
-            stream
+        let sender = if let Some(sender) = &mut link.stream {
+            sender
         } else {
             let session = match &link.session {
                 Some(session) => session,
                 None => link.session.insert(self.dial(to).await?),
             };
-            let sender = session.open_sender(Class::Command).await?;
-            let headed = false;
-            link.stream.insert(Stream { sender, headed })
-        };
-        if !stream.headed {
+            let mut sender = session.open_sender(Class::Command).await?;
             let header = self.block(&wire::header::encode(Protocol::Mesh))?;
-            stream.sender.send(header).await?;
-            stream.headed = true;
-        }
+            sender.send(header).await?;
+            link.stream.insert(sender)
+        };
         let block = self.block(&Message::Raft(message).encode())?;
-        Ok(stream.sender.send(block).await?)
+        Ok(sender.send(block).await?)
     }
 
     // A block of the pool that holds `bytes`.

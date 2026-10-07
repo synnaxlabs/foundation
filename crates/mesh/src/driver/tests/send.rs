@@ -123,9 +123,8 @@ async fn next(
 fn create_config(node: &sim::node::Node, tasks: &Tasks, pool: Rc<Pool>) -> Config {
     Config {
         members: IDS.map(create_voter).into(),
-        transport: Rc::new(create_transport(node, tasks, 1, PORT, create_pool())),
         pool,
-        ..config(node, tasks, 1, &IDS, &IDS)
+        ..config_at(node, tasks, 1, PORT, &IDS, &IDS)
     }
 }
 
@@ -243,28 +242,34 @@ fn a_message_that_the_pool_has_no_block_for_drops_and_its_stream_stays() {
         let config = create_config(&node, &tasks, Rc::clone(&pool));
         let _mesh = Mesh::open(config).await.unwrap();
         let clock = node.clock();
-        clock.sleep(seconds(2)).await;
+        clock.sleep(seconds(4)).await;
         let blocks = fill(&pool);
         clock.sleep(seconds(4)).await;
         drop(blocks);
         pending::<()>().await;
     };
-    let (first, dropped, second, more) = run(LIMIT, mesh, |peer| async move {
+    let (sent, waited, second, more) = run(LIMIT, mesh, |peer| async move {
         let session = peer.session().await;
         let mut receiver = stream(&session).await;
-        let first = next(&mut receiver).await;
         let clock = peer.node.clock();
-        let waited = within(&clock, seconds(4), pin!(next(&mut receiver))).await;
+        let mut sent = Vec::new();
+        let mut waited = Some(next(&mut receiver).await);
+        // A campaign comes each 2 s at most, so 3 s with no message is a drop.
+        while let Some(Ok(Some(message))) = waited {
+            sent.push(message);
+            waited = within(&clock, seconds(3), pin!(next(&mut receiver))).await;
+        }
         let second = next(&mut receiver).await;
-        (first, waited.is_none(), second, peer.more(&session).await)
+        (sent, waited, second, peer.more(&session).await)
     });
-    assert_eq!([first, second], [(); 2].map(|()| Ok(Some(pre_vote()))));
-    assert!(dropped, "a message came while the pool had no block");
+    assert_eq!(waited, None, "the stream ended");
+    assert_eq!(sent, vec![pre_vote(); sent.len()]);
+    assert_eq!(second, Ok(Some(pre_vote())));
     assert_eq!(more, [false; 2]);
 }
 
 #[test]
-fn a_stream_keeps_its_place_while_the_pool_has_no_block_for_its_header() {
+fn no_stream_comes_while_the_pool_has_no_block_for_its_header() {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
         let pool = small_pool();
         let config = create_config(&node, &tasks, Rc::clone(&pool));
@@ -319,7 +324,10 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
             commit: 0,
         };
         assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
-        node.clock().sleep(seconds(10)).await;
+        let clock = node.clock();
+        clock.sleep(seconds(10)).await;
+        // A campaign can start at this tick, and the task of node 4 then runs next.
+        clock.sleep(Span::MILLISECOND).await;
         let group = mesh.group.borrow();
         let waiting = group.queues.get(&key(4)).map(|queue| queue.messages.len());
         assert_eq!(waiting, Some(0));
@@ -368,18 +376,26 @@ fn a_message_that_is_too_large_for_the_peer_drops_and_its_stream_stays() {
     assert_eq!(large(1472), (false, [false; 2]));
 }
 
-/// Asserts that node 2 gets one message, and that its stream and its session then
-/// end with code 0, when `mesh` runs on node 1.
+/// Asserts that node 2 gets a message, and that its stream and its session then end
+/// with code 0, when `mesh` runs on node 1.
 fn assert_ends<M: Future<Output = ()> + 'static>(
     mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
 ) {
-    let (sent, closed) = run(LIMIT, mesh, |peer| async move {
+    let (sent, end, closed) = run(LIMIT, mesh, |peer| async move {
         let session = peer.session().await;
         let mut receiver = stream(&session).await;
-        let sent = [next(&mut receiver).await, next(&mut receiver).await];
-        (sent, session.closed().await)
+        let mut sent = Vec::new();
+        let end = loop {
+            match next(&mut receiver).await {
+                Ok(Some(message)) => sent.push(message),
+                end => break end,
+            }
+        };
+        (sent, end, session.closed().await)
     });
-    assert_eq!(sent, [Ok(Some(pre_vote())), Err(closed.clone())]);
+    assert!(!sent.is_empty(), "no message came before the end");
+    assert_eq!(sent, vec![pre_vote(); sent.len()]);
+    assert_eq!(end, Err(closed.clone()));
     assert_eq!(closed, transport::Error::PeerClosed { code: Code(0) });
 }
 
@@ -404,7 +420,7 @@ fn each_task_that_sends_ends_when_the_mesh_drops() {
         let config = create_config(&node, &tasks, create_pool());
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
-        node.clock().sleep(seconds(2)).await;
+        node.clock().sleep(seconds(3)).await;
         drop(mesh);
         assert_ended(&node.clock(), transport).await;
     });
@@ -416,7 +432,7 @@ fn each_task_that_sends_ends_when_the_group_stops() {
         let config = create_config(&node, &tasks, create_pool());
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
-        node.clock().sleep(seconds(2)).await;
+        node.clock().sleep(seconds(3)).await;
         stop(&node, &mesh);
         assert_ended(&node.clock(), transport).await;
     });
@@ -438,15 +454,16 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             let mut serving = pin!(accept(mesh.clone(), transport, tasks.clone()));
             let mut leading = pin!(lead(&mesh, &clock, home(1)));
             poll_fn(|cx| {
-                let _ = serving.as_mut().poll(cx);
+                let Poll::Pending = serving.as_mut().poll(cx);
                 leading.as_mut().poll(cx)
             })
             .await;
         }
         clock.sleep(seconds(10)).await;
-        let group = mesh.group.borrow();
-        let waiting = group.queues.get(&key(2)).map(|queue| queue.messages.len());
-        drop(group);
+        let waiting = {
+            let group = mesh.group.borrow();
+            group.queues.get(&key(2)).map(|queue| queue.messages.len())
+        };
         assert!(waiting > Some(1), "the task of node 2 does not wait");
         end(node, mesh).await;
         pending::<()>().await;

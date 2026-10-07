@@ -752,6 +752,18 @@ mod tests {
         members: &[u8],
         voters: &[u8],
     ) -> Config {
+        config_at(node, tasks, id, 0, members, voters)
+    }
+
+    /// As [`config`], with the transport at `port` of `node`.
+    fn config_at(
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        id: u8,
+        port: u16,
+        members: &[u8],
+        voters: &[u8],
+    ) -> Config {
         let pool = create_pool();
         Config {
             key: key(id),
@@ -763,7 +775,13 @@ mod tests {
             clock: node.clock(),
             entropy: node.entropy(),
             tasks: tasks.clone(),
-            transport: Rc::new(create_transport(node, tasks, id, 0, Rc::clone(&pool))),
+            transport: Rc::new(create_transport(
+                node,
+                tasks,
+                id,
+                port,
+                Rc::clone(&pool),
+            )),
             pool,
         }
     }
@@ -1025,9 +1043,8 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let base = config(&node, &tasks, id, &IDS, &IDS);
-        let pool = Rc::clone(&base.pool);
-        let transport = Rc::new(create_transport(&node, &tasks, id, PORT, pool));
+        let base = config_at(&node, &tasks, id, PORT, &IDS, &IDS);
+        let transport = Rc::clone(&base.transport);
         let hidden = board.lock().unwrap().hidden;
         let member = |of| {
             if hidden == Some(of) {
@@ -1038,7 +1055,6 @@ mod tests {
         };
         let config = Config {
             members: IDS.map(member).into(),
-            transport: Rc::clone(&transport),
             ..base
         };
         let mesh = Mesh::open(config).await.unwrap();
@@ -1197,6 +1213,45 @@ mod tests {
         cluster.run(seconds(5));
         let healed = BTreeMap::from([(old, vec![Some(key(10 + new))])]);
         assert_eq!(cluster.take(), (Vec::new(), healed));
+    }
+
+    /// Cuts one follower off for `cut` seconds while the leader commits home 9, heals
+    /// the links, and gives the milliseconds until the watch of the follower gives
+    /// that home, in steps of 250 ms.
+    fn follower_heal_ms(run: u64, cut: i64) -> i64 {
+        const STEP: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
+        let mut cluster = Cluster::new(run);
+        cluster.script(home);
+        cluster.start();
+        cluster.run(seconds(5));
+        let (led, _) = cluster.take();
+        let leader = led[0];
+        let follower = IDS.into_iter().find(|&id| id != leader).unwrap();
+        for other in IDS.into_iter().filter(|&id| id != follower) {
+            cluster.link(follower, other, 1.0);
+        }
+        cluster.script(|_| home(9));
+        cluster.run(seconds(cut));
+        let (led, homes) = cluster.take();
+        assert_eq!(led, [leader], "run {run}");
+        assert_eq!(homes.get(&follower), None, "run {run}");
+        for other in IDS.into_iter().filter(|&id| id != follower) {
+            cluster.link(follower, other, 0.0);
+        }
+        let healed = (250..=100_000).step_by(250).find(|_| {
+            cluster.run(STEP);
+            let (_, homes) = cluster.take();
+            homes.get(&follower).and_then(|homes| homes.last()) == Some(&Some(key(9)))
+        });
+        healed.expect("the follower has no home 100 s after the heal")
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+        for run in 0..4 {
+            let waited = follower_heal_ms(run, 5);
+            assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
+        }
     }
 
     /// Runs `body` on the one node of a run.
