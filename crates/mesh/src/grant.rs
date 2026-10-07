@@ -133,7 +133,6 @@ mod tests {
         signer,
     };
 
-    // A heartbeat of node 1 in term 5 with its votes from 1, 2 and 3, signed.
     fn proven() -> Message {
         common::proven(1, 2, Body::Heartbeat { commit: 0 })
     }
@@ -177,8 +176,18 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_proof_of_each_voter_passes() {
+        let members = members(&[1, 2, 3]);
+        for leader in 1..=3 {
+            let to = leader % 3 + 1;
+            let message = common::proven(leader, to, Body::Heartbeat { commit: 0 });
+            assert_eq!(check(&message, &members), Ok(()), "leader {leader}");
+        }
+    }
+
+    #[test]
     fn a_refusal_carries_no_signature() {
-        let refused = message(2, 1, reply_body(Grant::Vote, Answer::Refused), None);
+        let refused = message(2, 1, reply_body(Grant::Vote, Answer::Refused));
         let mut ready = Ready {
             messages: vec![refused.clone()],
             ..Ready::default()
@@ -283,7 +292,7 @@ mod tests {
         let members = members(&[1, 2, 3, 4]);
         let forged = Err(Error::Forged { voter: key(1) });
         let mut later = proven();
-        later.term = Term(6);
+        later.term = Term(TERM.0 + 1);
         assert_eq!(check(&later, &members), forged);
         let mut other = proven();
         other.proof.as_mut().unwrap().candidate = key(4);
@@ -298,7 +307,7 @@ mod tests {
         let members = members(&[1, 2, 3]);
         let forged = Err(Error::Forged { voter: key(2) });
         let mut later = granted(2, Grant::Vote, 1);
-        later.term = Term(6);
+        later.term = Term(TERM.0 + 1);
         assert_eq!(check(&later, &members), forged);
         let mut other = granted(2, Grant::Vote, 1);
         other.to = key(3);

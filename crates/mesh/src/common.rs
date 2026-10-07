@@ -42,13 +42,14 @@ pub(crate) fn pool() -> Rc<Pool> {
     Rc::new(Pool::new(config, memory))
 }
 
-pub(crate) fn message(from: u8, to: u8, body: Body, proof: Option<Proof>) -> Message {
+/// `body` from `from` to `to` in `TERM`, with no proof.
+pub(crate) fn message(from: u8, to: u8, body: Body) -> Message {
     Message {
         from: key(from),
         to: key(to),
         term: TERM,
         body,
-        proof,
+        proof: None,
     }
 }
 
@@ -63,7 +64,7 @@ pub(crate) fn reply_body(grant: Grant, answer: Answer) -> Body {
 pub(crate) fn granted(voter: u8, grant: Grant, candidate: u8) -> Message {
     let body = reply_body(grant, Answer::Granted(None));
     let mut ready = Ready {
-        messages: vec![message(voter, candidate, body, None)],
+        messages: vec![message(voter, candidate, body)],
         ..Ready::default()
     };
     signer(voter).sign(&mut ready);
@@ -92,7 +93,10 @@ pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
         voters: [1, 2, 3].map(vote).into(),
     };
     let mut ready = Ready {
-        messages: vec![message(leader, to, body, Some(proof))],
+        messages: vec![Message {
+            proof: Some(proof),
+            ..message(leader, to, body)
+        }],
         ..Ready::default()
     };
     signer(leader).sign(&mut ready);
