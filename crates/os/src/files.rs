@@ -236,19 +236,24 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
         Mode::Write => OFlags::RDWR,
         Mode::Create { .. } => OFlags::RDWR.union(OFlags::CREATE),
     };
-    let fd =
-        fs::openat(data, path, flags.union(OFlags::CLOEXEC), FILE).map_err(&failed)?;
-    if mode != Mode::Read {
-        match fs::flock(&fd, FlockOperation::NonBlockingLockExclusive) {
-            Err(Errno::WOULDBLOCK) => {
-                return Err(Error::Busy {
-                    path: path.to_path_buf(),
-                });
+    let (fd, stat) = loop {
+        let fd = fs::openat(data, path, flags.union(OFlags::CLOEXEC), FILE)
+            .map_err(&failed)?;
+        if mode != Mode::Read {
+            match fs::flock(&fd, FlockOperation::NonBlockingLockExclusive) {
+                Err(Errno::WOULDBLOCK) => {
+                    return Err(Error::Busy {
+                        path: path.to_path_buf(),
+                    });
+                }
+                locked => locked.map_err(&failed)?,
             }
-            locked => locked.map_err(&failed)?,
         }
-    }
-    let stat = fs::fstat(&fd).map_err(&failed)?;
+        let stat = fs::fstat(&fd).map_err(&failed)?;
+        if mode == Mode::Read || named(data, path, &stat).map_err(&failed)? {
+            break (fd, stat);
+        }
+    };
     if FileType::from_raw_mode(stat.st_mode).is_dir() {
         return Err(failed(Errno::ISDIR));
     }
@@ -350,6 +355,16 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
     return fs::fsync(fd);
     #[cfg(target_os = "macos")]
     return fs::fcntl_fullfsync(fd);
+}
+
+/// Whether `path` names the file of `stat`. A failed create of another handle unlinks
+/// its file, also after a write open found it and before that open locked it.
+fn named(data: &OwnedFd, path: &Path, stat: &fs::Stat) -> io::Result<bool> {
+    match fs::statat(data, path, AtFlags::empty()) {
+        Ok(found) => Ok((found.st_dev, found.st_ino) == (stat.st_dev, stat.st_ino)),
+        Err(Errno::NOENT) => Ok(false),
+        Err(errno) => Err(errno),
+    }
 }
 
 /// Allocates the first `len` bytes of the empty file `fd` on disk, all or none, and

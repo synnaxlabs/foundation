@@ -1,5 +1,6 @@
 //! `os::files` on the real disk, through `env::files`.
 
+use std::cell::Cell;
 use std::future::poll_fn;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -221,7 +222,7 @@ fn a_create_past_the_file_size_limit_leaves_no_file() {
         let test = thread.name().expect("invariant: libtest names the thread");
         // The limit is on the whole process, so this test runs alone in a child. An
         // ignored `SIGXFSZ` stays ignored across `exec`, so it does not end the child.
-        let script = r#"trap '' XFSZ; ulimit -f "$0"; exec "$1" --exact "$2""#;
+        let script = r#"trap '' XFSZ && ulimit -f "$0" && exec "$1" --exact "$2""#;
         let status = std::process::Command::new("sh")
             .args(["-c", script])
             .arg((LIMIT / 512).to_string())
@@ -438,4 +439,54 @@ fn files_in_a_directory_under_a_file_gives_dir() {
         "cannot open the data directory: Not a directory (os error 20)"
     );
     assert!(matches!(found, os::Error::Dir(_)));
+}
+
+#[test]
+fn a_write_open_while_another_create_fails_holds_the_file_at_its_path() {
+    let scratch = Scratch::new();
+    let (creator, creator_thread) = files(&scratch.0, "creator");
+    let (writer, writer_thread) = files(&scratch.0, "writer");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for _ in 0..500 {
+            let stopped = Cell::new(false);
+            // Fails with no allocation, so each create unlinks the file it made.
+            let mut create = pin!(async {
+                while !stopped.get() {
+                    let mode = Mode::Create { len: u64::MAX };
+                    creator.open(Path::new("a"), mode).await.unwrap_err();
+                }
+            });
+            let mut write = pin!(async {
+                loop {
+                    if let Ok(file) = writer.open(Path::new("a"), Mode::Write).await {
+                        stopped.set(true);
+                        return file;
+                    }
+                }
+            });
+            let mut file = None;
+            poll_fn(|context| {
+                if file.is_none()
+                    && let Poll::Ready(found) = write.as_mut().poll(context)
+                {
+                    file = Some(found);
+                }
+                match (file.is_some(), create.as_mut().poll(context)) {
+                    (true, Poll::Ready(())) => Poll::Ready(()),
+                    _ => Poll::Pending,
+                }
+            })
+            .await;
+            let found = writer.open(Path::new("a"), Mode::Write).await.unwrap_err();
+            assert_eq!(found, Error::Busy { path: "a".into() });
+            file.unwrap().close().await;
+            writer.remove(Path::new("a")).await.unwrap();
+        }
+    });
+    drop((creator, writer));
+    creator_thread.join().unwrap();
+    writer_thread.join().unwrap();
 }
