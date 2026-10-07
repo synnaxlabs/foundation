@@ -1640,6 +1640,24 @@ fn a_connect_in_its_handshake_at_the_fault_is_reset_and_never_accepted() {
 }
 
 #[test]
+fn a_write_before_the_reset_of_the_fault_arrives_is_taken() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        let written = (write_all(&mut tcp, b"ping").await, node.clock().now());
+        (written, read(&mut tcp, 1).await)
+    });
+    sim.run_for(Span::from_nanos(delay().nanos() * 3 / 2))
+        .unwrap();
+    b.fail_listener(remote);
+    sim.run().unwrap();
+    let reset = Err(Net::Reset { remote });
+    assert_eq!(take(&client), ((Ok(()), legs(2)), reset));
+}
+
+#[test]
 fn a_stream_that_a_failed_listener_accepted_still_works() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
