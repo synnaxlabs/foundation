@@ -2,7 +2,8 @@ use std::fmt;
 
 use types::time::Monotonic;
 
-use crate::{Error, Handoff, Lease, Writer};
+use crate::lease::Lease;
+use crate::{Error, Handoff, Writer};
 
 /// A writer's place in one [`Gate`]. Keys order by when the writer opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

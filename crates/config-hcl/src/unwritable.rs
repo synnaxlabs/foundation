@@ -2,7 +2,6 @@ use std::fmt;
 
 use document::Span;
 use document::diagnostic::{Code, Diagnostic};
-use document::encoding::TooDeep;
 
 const KEY: Code = Code::new("hcl.unwritable-key");
 const KEYWORD: Code = Code::new("hcl.unwritable-keyword");
@@ -44,13 +43,9 @@ pub enum Unwritable {
         /// span.
         span: Option<Span>,
     },
-    /// A block or a value nested deeper than [`document::encoding::DEPTH_MAX`], which
-    /// [`read`](crate::read) refuses.
-    TooDeep(TooDeep),
 }
 
-/// Gives each part a diagnostic with a stable `hcl.unwritable-*` code, or `document`'s
-/// own diagnostic for nesting past the depth limit.
+/// Gives each part a diagnostic with a stable `hcl.unwritable-*` code.
 impl From<&Unwritable> for Diagnostic {
     fn from(unwritable: &Unwritable) -> Self {
         let (code, span, message, fix) = match *unwritable {
@@ -86,7 +81,6 @@ impl From<&Unwritable> for Diagnostic {
                  a `for` expression",
                 "Put another item first, or rename it",
             ),
-            Unwritable::TooDeep(too_deep) => return Self::from(&too_deep),
         };
         Self::new(code, span, message.into(), fix.into())
     }
@@ -115,14 +109,13 @@ pub(crate) mod tests {
     }
 
     /// One part of each kind, each at `span`.
-    pub(crate) fn every(span: Option<Span>) -> [Unwritable; 6] {
+    pub(crate) fn every(span: Option<Span>) -> [Unwritable; 5] {
         let every = [
             Unwritable::Key { span },
             Unwritable::Keyword { span },
             Unwritable::Function { span },
             Unwritable::Reference { span },
             Unwritable::For { span },
-            Unwritable::TooDeep(TooDeep { span }),
         ];
         for part in every {
             // A new variant fails this match, so it joins `every`.
@@ -131,8 +124,7 @@ pub(crate) mod tests {
                 | Unwritable::Keyword { .. }
                 | Unwritable::Function { .. }
                 | Unwritable::Reference { .. }
-                | Unwritable::For { .. }
-                | Unwritable::TooDeep(_) => {}
+                | Unwritable::For { .. } => {}
             }
         }
         every
@@ -168,11 +160,6 @@ pub(crate) mod tests {
                  a `for` expression",
                 "Put another item first, or rename it",
             ),
-            (
-                "document.too-deep",
-                "the document nests deeper than 64 levels",
-                "Make it flatter",
-            ),
         ];
         for span in [Some(span()), None] {
             let parts = every(span);
@@ -183,16 +170,6 @@ pub(crate) mod tests {
                 assert_eq!(Diagnostic::from(part), expected, "{part:?}");
                 assert_eq!(part.to_string(), format!("{message}. {fix}"), "{part:?}");
             }
-        }
-    }
-
-    #[test]
-    fn too_deep_keeps_documents_diagnostic() {
-        for span in [Some(span()), None] {
-            assert_eq!(
-                Diagnostic::from(&Unwritable::TooDeep(TooDeep { span })),
-                Diagnostic::from(&TooDeep { span })
-            );
         }
     }
 }

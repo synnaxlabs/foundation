@@ -8,5 +8,10 @@
     "clangd-lsp@claude-plugins-official": false,
     "gopls-lsp@claude-plugins-official": false,
     "lua-lsp@claude-plugins-official": false
+  },
+  "permissions": {
+    "allow": [
+      "Bash(gh pr merge:*)"
+    ]
   }
 }

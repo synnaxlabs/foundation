@@ -14,7 +14,7 @@ use block::{Block, Unique};
 use env::files::{Descriptor, Error, Mode, Operation, Request};
 use env::thread::Handle;
 use env::threads::Threads;
-use rustix::fs::{self, AtFlags, FallocateFlags, FileType, FlockOperation, OFlags};
+use rustix::fs::{self, AtFlags, FileType, FlockOperation, OFlags};
 use rustix::io::{self, Errno};
 use tokio::sync::{mpsc, oneshot};
 
@@ -257,7 +257,7 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
         // Not atomic: a crash before the allocation leaves an empty file, which this
         // allocates.
         Mode::Create { len } if found == 0 && len != 0 => {
-            fs::fallocate(&fd, FallocateFlags::empty(), 0, len)
+            allocate(&fd, len)
                 .and_then(|()| sync_all(&fd))
                 .map_err(&failed)?;
             Ok((fd, len))
@@ -345,6 +345,15 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
     return fs::fsync(fd);
     #[cfg(target_os = "macos")]
     return fs::fcntl_fullfsync(fd);
+}
+
+/// Allocates the first `len` bytes of the empty file `fd` on disk and sets its length
+/// to `len`.
+fn allocate(fd: &OwnedFd, len: u64) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    return fs::fallocate(fd, fs::FallocateFlags::empty(), 0, len);
+    #[cfg(target_os = "macos")]
+    return crate::allocate::all(fd, len);
 }
 
 /// The path of `path` from the data directory, where an empty path is the data

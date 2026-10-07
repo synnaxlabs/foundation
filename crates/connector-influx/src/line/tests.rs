@@ -54,6 +54,8 @@ fn value(text: &str) -> Value {
 /// Parses one line of line protocol, as InfluxDB reads it.
 fn parse(line: &str) -> Parsed {
     let line = line.strip_suffix('\n').expect("a line ends with a newline");
+    let line = line.trim_start_matches([' ', '\t', '\0']);
+    assert!(!line.starts_with('#'), "InfluxDB drops a comment: {line:?}");
     let [head, fields, time] = split(line, ' ')[..] else {
         panic!("not three parts: {line:?}");
     };
@@ -62,6 +64,7 @@ fn parse(line: &str) -> Parsed {
         let (key, value) = pair(tag);
         (key, unescape(value))
     });
+    let fields = fields.trim_start_matches([' ', '\t', '\0']);
     let fields = split(fields, ',').into_iter().map(|field| {
         let (key, text) = pair(field);
         (key, value(text))
@@ -190,7 +193,7 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 name: "a\\b".into(),
                 character: '\\',
             },
-            "the name \"a\\\\b\" holds '\\\\', which line protocol cannot carry",
+            "the name \"a\\\\b\" holds '\\\\', which no name may hold",
         ),
         (
             Measurement::new("m", &[("k", "a\nb")], &["f"]),
@@ -198,7 +201,7 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 name: "a\nb".into(),
                 character: '\n',
             },
-            "the name \"a\\nb\" holds '\\n', which line protocol cannot carry",
+            "the name \"a\\nb\" holds '\\n', which no name may hold",
         ),
         (
             Measurement::new("m", &[], &["f\r"]),
@@ -206,7 +209,61 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 name: "f\r".into(),
                 character: '\r',
             },
-            "the name \"f\\r\" holds '\\r', which line protocol cannot carry",
+            "the name \"f\\r\" holds '\\r', which no name may hold",
+        ),
+    ]);
+}
+
+#[test]
+fn refuses_a_tab_or_nul_in_any_part() {
+    refuses(&[
+        (
+            Measurement::new("\t#m", &[], &["f"]),
+            Error::Character {
+                name: "\t#m".into(),
+                character: '\t',
+            },
+            "the name \"\\t#m\" holds '\\t', which no name may hold",
+        ),
+        (
+            Measurement::new("m\0x", &[], &["f"]),
+            Error::Character {
+                name: "m\0x".into(),
+                character: '\0',
+            },
+            "the name \"m\\0x\" holds '\\0', which no name may hold",
+        ),
+        (
+            Measurement::new("m", &[("\tk", "v")], &["f"]),
+            Error::Character {
+                name: "\tk".into(),
+                character: '\t',
+            },
+            "the name \"\\tk\" holds '\\t', which no name may hold",
+        ),
+        (
+            Measurement::new("m", &[("k", "a\tb")], &["f"]),
+            Error::Character {
+                name: "a\tb".into(),
+                character: '\t',
+            },
+            "the name \"a\\tb\" holds '\\t', which no name may hold",
+        ),
+        (
+            Measurement::new("m", &[], &["f", "\tf"]),
+            Error::Character {
+                name: "\tf".into(),
+                character: '\t',
+            },
+            "the name \"\\tf\" holds '\\t', which no name may hold",
+        ),
+        (
+            Measurement::new("m", &[], &["f\0g"]),
+            Error::Character {
+                name: "f\0g".into(),
+                character: '\0',
+            },
+            "the name \"f\\0g\" holds '\\0', which no name may hold",
         ),
     ]);
 }
@@ -277,7 +334,8 @@ fn allows_what_is_reserved_only_elsewhere() {
 }
 
 fn name() -> impl Strategy<Value = String> {
-    "[^_#\\\\\n\r][^\\\\\n\r]{0,8}".prop_filter("not time", |name| name != "time")
+    "[^_#\\\\\n\r\t\0][^\\\\\n\r\t\0]{0,8}"
+        .prop_filter("not time", |name| name != "time")
 }
 
 fn field_value() -> impl Strategy<Value = Value> {
@@ -321,5 +379,25 @@ proptest! {
         let mut out = Vec::new();
         line.line(&mut out, &values, Stamp::from_nanos(time));
         prop_assert_eq!(parse(text(&out)), (measurement, tags, fields, time));
+    }
+
+    #[test]
+    fn refuses_a_tab_or_nul_anywhere(
+        name in name(),
+        at in any::<proptest::sample::Index>(),
+        character in proptest::sample::select(vec!['\t', '\0']),
+        part in 0..4_usize,
+    ) {
+        let mut chars: Vec<char> = name.chars().collect();
+        chars.insert(at.index(chars.len() + 1), character);
+        let name: String = chars.into_iter().collect();
+        let n = name.as_str();
+        let got = match part {
+            0 => Measurement::new(n, &[("k", "v")], &["f"]),
+            1 => Measurement::new("m", &[(n, "v")], &["f"]),
+            2 => Measurement::new("m", &[("k", n)], &["f"]),
+            _ => Measurement::new("m", &[("k", "v")], &["f", n]),
+        };
+        prop_assert_eq!(got, Err(Error::Character { name, character }));
     }
 }
