@@ -265,6 +265,7 @@ pub(crate) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
         term,
         body: Body::Heartbeat { commit: 0 },
         proof: Some(proof(Grant::Vote, from, VOTERS)),
+        chain: Vec::new(),
     }
 }
 
@@ -301,6 +302,7 @@ pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
                 term,
                 body: granted.clone(),
                 proof: None,
+                chain: Vec::new(),
             })
             .unwrap();
         }
@@ -333,6 +335,7 @@ pub(crate) fn accept(message: &Message) -> Message {
             last: prev.index + count(entries.len()),
         },
         proof: None,
+        chain: Vec::new(),
     }
 }
 
@@ -360,6 +363,7 @@ pub(crate) fn reply(from: u8, term: u64, body: Body) -> Message {
         term: Term(term),
         body,
         proof: None,
+        chain: Vec::new(),
     }
 }
 

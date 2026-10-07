@@ -107,6 +107,7 @@ proptest! {
             term: Term(term.0 + 1),
             body: grant(other, cut, Term(term.0 + 1)),
             proof: None,
+            chain: Vec::new(),
         });
         prop_assert_eq!(network.nodes[cut].role(), Role::Candidate);
         for _ in 0..4 * ELECTION {
@@ -128,6 +129,7 @@ fn a_group_keeps_its_leader_after_a_reply_from_a_node_that_is_not_a_peer() {
         term: Term(agreed.1.0 + 1),
         body: Body::HeartbeatReply,
         proof: None,
+        chain: Vec::new(),
     };
     network.nodes[follower].step(reply).unwrap();
     for _ in 0..4 * ELECTION {
@@ -164,6 +166,7 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
                 })
                 .collect(),
         }),
+        chain: Vec::new(),
     });
     for _ in 0..10 * ELECTION {
         network.round();
@@ -197,6 +200,7 @@ fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
         term: agreed.1,
         body: grant(other, cut, agreed.1),
         proof: None,
+        chain: Vec::new(),
     });
     assert_eq!(network.nodes[cut].role(), Role::PreCandidate);
     for _ in 0..4 * ELECTION {

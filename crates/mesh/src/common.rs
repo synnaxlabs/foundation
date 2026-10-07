@@ -113,6 +113,7 @@ pub(crate) fn message(from: u8, to: u8, body: Body) -> Message {
         term: TERM,
         body,
         proof: None,
+        chain: Vec::new(),
     }
 }
 
@@ -134,9 +135,48 @@ pub(crate) fn granted(voter: u8, grant: Grant, candidate: u8) -> Message {
     ready.messages.remove(0)
 }
 
+/// `voter`'s signature of its `grant` to `candidate` in `TERM`.
 pub(crate) fn signature(voter: u8, grant: Grant, candidate: u8) -> Signature {
-    let (_, signature) = granted(voter, grant, candidate).claims().next().unwrap();
-    signature.unwrap()
+    grant_in(TERM, voter, grant, candidate)
+}
+
+/// `voter`'s signature of its `grant` to `candidate` in `term`.
+pub(crate) fn grant_in(
+    term: Term,
+    voter: u8,
+    grant: Grant,
+    candidate: u8,
+) -> Signature {
+    grant_signed(term, voter, voter, grant, candidate)
+}
+
+/// The signature of the `grant` of `voter` to `candidate` in `term`, made with the
+/// private key of `signer`: a forgery unless `signer` is `voter`.
+pub(crate) fn grant_signed(
+    term: Term,
+    voter: u8,
+    signer: u8,
+    grant: Grant,
+    candidate: u8,
+) -> Signature {
+    let body = reply_body(grant, Answer::Granted(None));
+    let mut ready = Ready {
+        messages: vec![Message {
+            term,
+            ..message(voter, candidate, body)
+        }],
+        ..Ready::default()
+    };
+    Signer::new(key(voter), &private(signer)).sign(&mut ready);
+    match ready.messages.remove(0).body {
+        Body::PreVoteReply {
+            answer: Answer::Granted(signature),
+        }
+        | Body::VoteReply {
+            answer: Answer::Granted(signature),
+        } => signature.expect("`sign` signs the grant"),
+        body => unreachable!("a grant answers with {body:?}"),
+    }
 }
 
 /// `body` from `leader` to `to`, with the leader's votes from 1, 2 and 3, signed.
@@ -166,19 +206,8 @@ pub(crate) fn proven_at(
     body: Body,
 ) -> Message {
     let vote = |&(voter, signer): &(u8, u8)| {
-        let signed = (voter != leader).then(|| {
-            let body = reply_body(Grant::Vote, Answer::Granted(None));
-            let mut ready = Ready {
-                messages: vec![Message {
-                    term,
-                    ..message(voter, leader, body)
-                }],
-                ..Ready::default()
-            };
-            Signer::new(key(voter), &private(signer)).sign(&mut ready);
-            let (_, signature) = ready.messages[0].claims().next().unwrap();
-            signature.unwrap()
-        });
+        let signed = (voter != leader)
+            .then(|| grant_signed(term, voter, signer, Grant::Vote, leader));
         (key(voter), signed)
     };
     let proof = Proof {
@@ -198,20 +227,51 @@ pub(crate) fn proven_at(
     ready.messages.remove(0)
 }
 
+// The votes of 1, 2 and 3 for `leader` in `term`, each signed but the leader's own.
+fn votes(term: Term, leader: u8) -> Proof {
+    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
+    votes_of(term, leader, &[1, 2, 3])
+}
+
+// The vote of each of `voted` for `leader` in `term`, each signed but the leader's
+// own.
+fn votes_of(term: Term, leader: u8, voted: &[u8]) -> Proof {
+    let vote = |&voter: &u8| {
+        let signed =
+            (voter != leader).then(|| grant_in(term, voter, Grant::Vote, leader));
+        (key(voter), signed)
+    };
+    Proof {
+        grant: Grant::Vote,
+        candidate: key(leader),
+        voters: voted.iter().map(vote).collect(),
+    }
+}
+
 /// The configuration entry `voters` that `leader` wrote at `at`, with its votes from
-/// 1, 2 and 3, signed as `sign` signs a change.
+/// 1, 2 and 3 in the term of `at`, signed as `sign` signs a change.
 ///
 /// # Panics
 ///
 /// When `leader` is not 1, 2 or 3, as [`proven`].
 pub(crate) fn change(leader: u8, at: Position, voters: Voters) -> Entry {
-    let to = if leader == 1 { 2 } else { 1 };
-    let proof = proven(leader, to, Body::HeartbeatReply).proof;
+    votes(at.term, leader);
+    change_voted(leader, at, voters, &[1, 2, 3])
+}
+
+/// The configuration entry `voters` that `leader` wrote at `at`, with the vote of
+/// each of `voted` in the term of `at`, signed as `sign` signs a change.
+pub(crate) fn change_voted(
+    leader: u8,
+    at: Position,
+    voters: Voters,
+    voted: &[u8],
+) -> Entry {
     let entry = Entry {
         at,
         data: Data::Voters(Change {
             voters,
-            votes: proof.expect("a proven message holds a proof"),
+            votes: votes_of(at.term, leader, voted),
             signature: None,
         }),
     };

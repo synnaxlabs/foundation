@@ -222,7 +222,7 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
-        claim::check(&mut message, public_key)?;
+        claim::check(&group.raft, &mut message, public_key)?;
         group.raft.step(message)?;
         group.sync();
         group.wake();
@@ -1933,6 +1933,50 @@ mod tests {
                 let mut pre_vote = message(3, 1, Body::PreVote { last: at });
                 pre_vote.term = Term(common::TERM.0 + 1);
                 assert_eq!(mesh.receive(public(3), pre_vote), Ok(()));
+            });
+        }
+
+        // Node 1 was down while leader 2 moved the voters from 1, 2, 3 and 4 to 1, 2
+        // and 3 in the term before `TERM`, and nodes 2 and 3 then elected node 2 in
+        // `TERM`. The chain of the two entries proves the leader.
+        #[test]
+        fn takes_a_leader_that_the_chain_proves() {
+            solo(|node, tasks| async move {
+                let all = [1, 2, 3, 4];
+                let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
+                let link = |index, outgoing: &[u8]| {
+                    let at = Position {
+                        term: Term(common::TERM.0 - 1),
+                        index,
+                    };
+                    let voters = Voters {
+                        incoming: [1, 2, 3].map(key).into(),
+                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+                    };
+                    let Data::Voters(change) = common::change(2, at, voters).data
+                    else {
+                        unreachable!("a change is a voters entry");
+                    };
+                    raft::Link { at, change }
+                };
+                let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
+                let short = heartbeat.clone();
+                heartbeat.chain = vec![link(1, &all), link(2, &[])];
+                let mut forged = heartbeat.clone();
+                forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
+                let unproven = raft::Error::Unproven {
+                    term: common::TERM,
+                    from: key(2),
+                };
+                assert_eq!(mesh.receive(public(2), short), Err(Error::Raft(unproven)));
+                let claim = Error::Claim(claim::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(2), forged), Err(claim));
+                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                assert_eq!(term(&mesh), common::TERM);
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
         }
 
@@ -3895,6 +3939,122 @@ mod tests {
         assert_eq!(Vec::from(queue.messages), expected);
     }
 
+    /// A chain with a vote or a leader of a node that has no key at this node.
+    mod chain {
+        use super::*;
+        use crate::common::proven_at;
+
+        const FOUNDERS: [u8; 3] = [1, 2, 3];
+        const ALL: [u8; 4] = [1, 2, 3, 4];
+
+        fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+            Voters {
+                incoming: incoming.iter().map(|&id| key(id)).collect(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            }
+        }
+
+        // The configuration entry `voters` that `leader` wrote at `index` of `term`
+        // with the votes of `voted`, as a link.
+        fn link(
+            leader: u8,
+            term: u64,
+            index: u64,
+            voters: Voters,
+            voted: &[u8],
+        ) -> raft::Link {
+            let at = Position {
+                term: Term(term),
+                index,
+            };
+            let entry = common::change_voted(leader, at, voters, voted);
+            let Data::Voters(change) = entry.data else {
+                unreachable!("a change is a voters entry");
+            };
+            raft::Link { at, change }
+        }
+
+        // The chain of a region whose founders are 1, 2 and 3. Leader 2 of term 4,
+        // which 2 and 3 elected, made node 4 a voter. `leader` of term 5, which
+        // `voted` elected, then moved the voters to 3 alone.
+        fn links(leader: u8, voted: &[u8]) -> Vec<raft::Link> {
+            vec![
+                link(2, 4, 1, voters(&ALL, &FOUNDERS), &[2, 3]),
+                link(2, 4, 2, voters(&ALL, &[]), &[2, 3]),
+                link(leader, 5, 3, voters(&[3], &ALL), voted),
+                link(leader, 5, 4, voters(&[3], &[]), voted),
+            ]
+        }
+
+        // A heartbeat of term 6 from leader 3, which elected itself alone, to node
+        // 1, with `chain`.
+        fn heartbeat(chain: Vec<raft::Link>) -> raft::Message {
+            let body = Body::Heartbeat { commit: 0 };
+            let mut heartbeat = proven_at(3, 1, Term(6), &[(3, 3)], body);
+            heartbeat.chain = chain;
+            heartbeat
+        }
+
+        fn unproven() -> Error {
+            Error::Raft(raft::Error::Unproven {
+                term: Term(6),
+                from: key(3),
+            })
+        }
+
+        // Node 1, a founder in term 0 with an empty log and the keys of `members`,
+        // takes `heartbeat` with `expected`. On `Ok` it is in term 6 and replies.
+        // On an error it stays in term 0 and sends nothing.
+        fn takes(
+            members: &'static [u8],
+            heartbeat: raft::Message,
+            expected: Result<(), Error>,
+        ) {
+            solo(move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, members, &FOUNDERS).await.unwrap();
+                assert_eq!(mesh.receive(public(3), heartbeat), expected);
+                if expected.is_ok() {
+                    assert_eq!(term(&mesh), Term(6));
+                    let reply = mesh.outgoing(key(3)).await.unwrap();
+                    let mut expected = message(1, 3, Body::HeartbeatReply);
+                    expected.term = Term(6);
+                    assert_eq!(reply, expected);
+                } else {
+                    assert_eq!(term(&mesh), Term(0));
+                    assert!(quiet(&mesh, 3).await);
+                }
+            });
+        }
+
+        #[test]
+        fn a_link_with_a_vote_of_no_key_and_a_quorum_of_known_votes_proves() {
+            takes(&FOUNDERS, heartbeat(links(2, &ALL)), Ok(()));
+        }
+
+        #[test]
+        fn a_link_with_no_quorum_of_known_votes_proves_nothing() {
+            takes(&ALL, heartbeat(links(2, &[2, 3, 4])), Ok(()));
+            takes(&FOUNDERS, heartbeat(links(2, &[2, 3, 4])), Err(unproven()));
+        }
+
+        #[test]
+        fn a_chain_is_cut_before_a_link_whose_leader_has_no_key() {
+            takes(&ALL, heartbeat(links(4, &ALL)), Ok(()));
+            let mut cut = heartbeat(links(4, &ALL));
+            cut.chain[2].change.signature = Some(raft::Signature([0; 64]));
+            takes(&FOUNDERS, cut, Err(unproven()));
+        }
+
+        #[test]
+        fn a_forged_link_vote_of_a_known_node_refuses_the_message() {
+            let mut forged = heartbeat(links(2, &ALL));
+            let votes = &mut forged.chain[2].change.votes.voters;
+            votes.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+            let claim = Error::Claim(claim::Error::Forged { signer: key(3) });
+            takes(&FOUNDERS, forged, Err(claim));
+        }
+    }
+
     /// An append that the check cuts before an entry with a claim of a node whose
     /// join is in the same run.
     mod cut {
@@ -3906,27 +4066,6 @@ mod tests {
                 term: Term(term),
                 index,
             }
-        }
-
-        /// The configuration entry `voters` that `leader` wrote at `at` with the
-        /// votes of `voted`, signed as the leader signs it.
-        fn change(leader: u8, at: Position, voters: Voters, voted: &[u8]) -> Entry {
-            let signed: Vec<_> = voted.iter().map(|&voter| (voter, voter)).collect();
-            let proven = proven_at(leader, 1, at.term, &signed, Body::HeartbeatReply);
-            let entry = Entry {
-                at,
-                data: Data::Voters(raft::Change {
-                    voters,
-                    votes: proven.proof.unwrap(),
-                    signature: None,
-                }),
-            };
-            let mut ready = Ready {
-                entries: vec![entry],
-                ..Ready::default()
-            };
-            common::signer(leader).sign(&mut ready);
-            ready.entries.remove(0)
         }
 
         fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
@@ -3958,11 +4097,21 @@ mod tests {
                 empty(at(4, 1)),
                 bytes(at(4, 2), &ticket()),
                 bytes(at(4, 3), &join(4)),
-                change(2, at(4, 4), voters(&[1, 2, 3, 4], &[1, 2, 3]), &[2, 3]),
-                change(2, at(4, 5), voters(&[1, 2, 3, 4], &[]), &[2, 3]),
+                common::change_voted(
+                    2,
+                    at(4, 4),
+                    voters(&[1, 2, 3, 4], &[1, 2, 3]),
+                    &[2, 3],
+                ),
+                common::change_voted(2, at(4, 5), voters(&[1, 2, 3, 4], &[]), &[2, 3]),
                 empty(at(5, 6)),
-                change(2, at(5, 7), voters(&[1, 2, 3], &[1, 2, 3, 4]), &[2, 3, 4]),
-                change(2, at(5, 8), voters(&[1, 2, 3], &[]), &[2, 3, 4]),
+                common::change_voted(
+                    2,
+                    at(5, 7),
+                    voters(&[1, 2, 3], &[1, 2, 3, 4]),
+                    &[2, 3, 4],
+                ),
+                common::change_voted(2, at(5, 8), voters(&[1, 2, 3], &[]), &[2, 3, 4]),
                 empty(at(6, 9)),
             ]
         }
