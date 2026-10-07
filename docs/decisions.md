@@ -2453,9 +2453,10 @@ How to read this record:
   split frees the spare room of its first half. A point with one float field takes
   about 19 heap bytes, with no dependence on its tags. Each chunk keeps a column for
   each key it holds, so many sparse keys cost more: 255 keys, each set by every 255th
-  point, take about 28 bytes a point. `tests/memory.rs` bounds 24 a point for one
-  field, for 63 sparse keys, for appends newest first, and for writes that split
-  chunks, and 32 for 255 sparse keys.
+  point, take about 28 bytes a point. `tests/memory.rs` bounds 22 a point for one
+  field, for 63 sparse keys, for appends newest first, for writes that split chunks,
+  and for one point of 255 fields among points of one field, and 32 for 255 sparse
+  keys.
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

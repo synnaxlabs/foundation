@@ -19,7 +19,7 @@ const CHUNK: usize = 4096;
 
 /// The most heap bytes a point with one float field may take: 8 of time, 8 of value,
 /// and 2 of index, with room for the chunks.
-const BUDGET: usize = 24;
+const BUDGET: usize = 22;
 
 /// The most that SIM INFLUX allows, which also holds with 255 sparse fields: each
 /// chunk keeps a column for each field it holds.
