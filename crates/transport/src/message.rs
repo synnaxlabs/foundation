@@ -745,7 +745,8 @@ mod tests {
                 assert!(live.load(Ordering::Relaxed) <= 64, "at the last byte");
                 pool.alloc(len).ok()
             };
-            let read = Reader::new(message.len())
+            let mut reader = Reader::new(message.len());
+            let read = reader
                 .read(|_| true, take, source)
                 .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(read, Ok(Poll::Ready(Some(message))));

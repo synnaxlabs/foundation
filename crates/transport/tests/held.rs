@@ -1,8 +1,8 @@
 //! A message that waits for a block from the pool is held on the heap, outside the
 //! pool, in one buffer made at its length. When its stream resets or its session
 //! closes, the read that gives the error frees it, though the caller keeps the
-//! receiver. The count covers each thread, so
-//! this binary has no test harness. The sim runs on one thread, so the count is exact.
+//! receiver. The count covers each thread, so this binary has no test harness. The
+//! sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
