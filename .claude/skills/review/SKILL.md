@@ -25,7 +25,7 @@ Launch in parallel every reviewer the PR needs:
 | --- | --- |
 | Every PR | `reviewer` |
 | A code PR: it changes a `.rs` file, a `Cargo.toml`, or `Cargo.lock` | add `architecture` and `breaker` |
-| A hot path: it changes code that runs once per sample, series, frame, or data message, whatever its body says. A control message whose rate does not grow with the data (raft, membership) is not one | add `performance`. It must report measured numbers for `main` and the PR, with the machine. Run it again if it does not |
+| A hot path: it changes code that runs once per sample, series, frame, or data message, whatever its body says. A control message whose rate does not grow with the data (raft, membership) is not one. The `Hot path:` line of the `architecture` report decides | add `performance`. It must report measured numbers for `main` and the PR, with the machine. Run it again if it does not |
 | A flagged oracle weakening | add one `reviewer` per weakening, told to argue for fixing the code instead |
 
 When the PR changes a public surface or a crate's dependencies, also send its link to
