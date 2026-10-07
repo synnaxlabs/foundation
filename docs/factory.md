@@ -121,8 +121,9 @@ that pass in CI.
   message or a session's context.
 - An approval is a link to the person's or the architect's own comment, with its UTC
   time. Never record a paraphrase as an approval. All sessions post as one bot, so a
-  session's approval or OK starts with its name (`laptop.architect: OK ...`). An
-  approval that names no session does not count.
+  session's approval or OK starts with its name (`laptop.architect: OK ...`). The one
+  other form: `laptop.director` approves a red-team PR with the line
+  ``Director: approved at `<sha>` ``. An approval that names no session does not count.
 - A new decision says "Supersedes <link>". A ruling ships in the code PR that needs it,
   with the link to the architect's comment. A change to the meaning of a ruling needs a
   new approval before the PR merges.
