@@ -508,6 +508,21 @@ impl Leader {
     async fn rest(&self, span: Span) {
         self.clock().sleep(span).await;
     }
+
+    /// The entry of `change` at `at`, as committed, in a message of `term`.
+    fn append_in(&self, term: Term, change: &Change, at: Position) -> block::Block {
+        let entry = Entry {
+            at,
+            data: Data::Bytes(encoded(change)),
+        };
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: vec![entry],
+            commit: at.index,
+        };
+        let append = common::proven_in(term, 2, 1, append);
+        self.peer.block(&Message::Raft(append).encode())
+    }
 }
 
 /// The stream of a proposal of node 1, after the proposal.
@@ -647,6 +662,43 @@ fn a_try_ends_when_the_same_leader_leads_a_later_term() {
         ms < 300,
         "the try ended {ms} ms after the heartbeat of term 6"
     );
+}
+
+// The answer comes while nothing polls the call. Node 1 then takes a heartbeat of
+// term 6, which the read of its term shows, so the next poll of the call sees the
+// answer and the new term.
+#[test]
+fn one_poll_that_sees_the_answer_and_a_later_term_keeps_the_answer() {
+    let asked = Arc::new(Mutex::new(false));
+    let got = Arc::clone(&asked);
+    let call = move |node: sim::node::Node, mesh: Mesh| async move {
+        let clock = node.clock();
+        let mut call = pin!(set(mesh.clone()));
+        while !*asked.lock().unwrap() {
+            assert!(now(call.as_mut()).await.is_pending());
+            clock.sleep(Span::MILLISECOND).await;
+        }
+        clock.sleep(HALF).await;
+        let beat = common::proven_in(Term(6), 2, 1, Body::Heartbeat { commit: 0 });
+        assert_eq!(mesh.receive(public(2), beat), Ok(()));
+        assert_eq!(term(&mesh), Term(6));
+        within(&clock, seconds(10), call).await
+    };
+    let (set, (more, end)) = run(call, |mut leader| async move {
+        let (_, mut asked) = leader.proposal().await;
+        leader.silent.set(true);
+        *got.lock().unwrap() = true;
+        leader.answer(&mut asked, at(1)).await.unwrap();
+        leader.rest(seconds(1)).await;
+        let mut sender = Leader::open(&leader.peer, &leader.dialed).await;
+        let append = leader.append_in(Term(6), &home(1), at(1));
+        sender.send(append).await.unwrap();
+        let more = leader.proposal_within(seconds(3)).await;
+        (more.map(|(change, _)| change), asked.end().await)
+    });
+    assert_eq!(more, None);
+    assert_eq!(end, Ok(()));
+    assert_eq!(set, Some((Ok(()), Some(key(1)))));
 }
 
 /// The next value of `watch`, which comes while `call` waits.
