@@ -27,6 +27,30 @@ fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
     });
 }
 
+/// A home's list of each place and its home entry, sorted by place, with entries in
+/// the reverse order of places, and the series length of each entry.
+fn list_of(series: u32) -> (Vec<(u32, usize)>, Vec<u32>) {
+    let places = (0..series)
+        .map(|place| (place, usize::try_from(series - 1 - place).expect("fits")))
+        .collect();
+    (places, (0..series).map(|entry| entry % 13 + 1).collect())
+}
+
+#[divan::bench(args = SERIES)]
+fn encode_ends_by_place(bencher: Bencher<'_, '_>, series: u32) {
+    let (places, lens) = list_of(series);
+    let mut run =
+        vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
+    bencher.bench_local(|| {
+        let mut end = 0_u32;
+        let ends = divan::black_box(&places).iter().map(|&(place, entry)| {
+            end = end.next_multiple_of(8) + lens[entry];
+            (place, end)
+        });
+        ends::encode(ends, &mut run);
+    });
+}
+
 #[divan::bench(args = SERIES)]
 fn decode_ends(bencher: Bencher<'_, '_>, series: u32) {
     let run = run_of(series);
