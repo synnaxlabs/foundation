@@ -1647,15 +1647,18 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
-  the first cause, and a watch gives it also after each `Mesh` drops. A stopped group
-  does not start again: the node opens the mesh again (#1066 for an open after a failed
-  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
-  and a write that waits for a block ends at the next tick; until then a new open gives
-  `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
-  does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
-  node or a voter that is not a member (`Error::NotMember`), and a private key that is
-  not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
-  decided by the architect (#471):
+  the first cause, and a watch gives it also after each `Mesh` drops. `member` has no
+  error (#562): it gives the record that the node holds, also after a stop (approved by
+  the architect, 2026-10-07T08:07:48Z:
+  https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
+  group does not start again: the node opens the mesh again (#1066 for an open after a
+  failed sync). The task ends soon after the last `Mesh` drops, a write in progress ends
+  first, and a write that waits for a block ends at the next tick; until then a new open
+  gives `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A
+  watch does not keep the group running, and a dropped watch leaves no waker. `open`
+  refuses a node or a voter that is not a member (`Error::NotMember`), and a private key
+  that is not the key of this node's member (`Error::WrongKey`). Proposed by
+  box1.builder-3, decided by the architect (#471):
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
@@ -1723,17 +1726,22 @@ How to read this record:
   a stored position means. Cost: about 40 bytes of names per member (architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
   card's byte form is the name behind a length byte, the public key (32 bytes), the seal
-  key (32 bytes), a count of addresses (8 bytes), each address, and the version (8
-  bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the relay's
-  public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in network
-  order), and the port (2 bytes). An IPv6 address has no flow info and no scope, because
-  each means something only on the node that sets it. Every number but the IP is little
-  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
-  configuration is the one source) and no lease. The seal key is inside the signed card
-  (S8). A join is one `Join` change. Every node that applies it checks the card, and the
-  admission against the ticket's public key, scope, uses, and expiry at the change's
-  mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a
-  join answers with the founding voters and their cards, and the node opens with them as
+  key (32 bytes), a count of addresses (8 bytes), at most 32, each address, and the
+  version (8 bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the
+  relay's public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in
+  network order), and the port (2 bytes). An IPv6 address has no flow info and no scope,
+  because each means something only on the node that sets it. Every number but the IP is
+  little endian. The cap is part of the byte form because every member keeps every card:
+  without it, one node sets the size of each member's state. Lost: a bound from a MESH
+  WIRE frame limit, which ties what a valid card is to a link setting and bounds no
+  region state. Decided by the architect, #336
+  (https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6032881587). It
+  lives only in `mesh` region state (X1), with no voter flag (the raft configuration is
+  the one source) and no lease. The seal key is inside the signed card (S8). A join is
+  one `Join` change. Every node that applies it checks the card, and the admission
+  against the ticket's public key, scope, uses, and expiry at the change's mesh time
+  (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a join
+  answers with the founding voters and their cards, and the node opens with them as
   `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
   cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
   and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
@@ -2206,6 +2214,28 @@ How to read this record:
   it, because the shard count belongs to the node, so the buffer is the one place
   that refuses it. Decided by the architect on #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
+- **SHARD DISK (2026-10-07)** Until segments exist, `node` gives each shard's ring
+  `disk / n` of the node's disk budget (`node::Config::disk`, a `types::byte::Size`),
+  and shard 0 also gets the remainder, as SHARD POOLS does. The budget bounds each new
+  ring file: `node` takes the largest ring whose file fits each part
+  (`buffer::Layout::fit`), so the format stays in `buffer`. When a part holds no ring,
+  no shard starts, and `join` gives `Error::Disk` with the budget, the shard count, and
+  the least budget (`n` times the least ring that `fit` gives, capped at the largest
+  `Size`); `config` cannot check it, as for the pool part (NODE SETTINGS). The ring is
+  the whole store. A ring already there keeps its size, which can be more than its part,
+  until `Buffer::resize` exists (#451). So oldest first (B1) holds per shard, not per
+  node. This is a patch. The long-term path is small rings for commits, then segments
+  that draw from one node-wide allowance (#1081). The 5.5 lab sizes the budget for the
+  shard that holds the index. With `Buffer::resize`, `node` computes the `Layout` with
+  `fit` and calls `Buffer::resize`, nothing more: `buffer` sets the file length itself,
+  so `node` never extends or cuts the ring file and does not learn the format (after
+  https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843).
+  Decided by the architect, #342:
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672, and
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
