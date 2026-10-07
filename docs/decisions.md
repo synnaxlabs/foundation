@@ -1783,9 +1783,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
   `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
-  stops when a write of the log fails, when a committed entry is empty or has a change
-  kind that this build does not know, or when each `Mesh` drops: this build cannot judge
-  such an entry, and a newer build can. A committed entry of a known kind whose body
+  stops when a write of the log fails, when a committed change has 0 bytes or a kind
+  that this build does not know, or when each `Mesh` drops: this build cannot judge
+  such an entry, and a newer build can. An entry with no change (the first entry of a
+  leader) is not a change of 0 bytes. A committed entry of a known kind whose body
   does not decode is `Refused::Body` on every node, and the group goes on, so one voter
   that proposes bad bytes cannot halt the region. So a change to the body or to a cap of
   a known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
