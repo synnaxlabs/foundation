@@ -1823,6 +1823,21 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
+- **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
+  names one sample of an index (X31), and InfluxDB keys a point by measurement, tag
+  set, and time, so a resend stores each sample once. Each explicit gap is one line,
+  `foundation_gaps,connector=<connector>,index=<index> count=<n>i <stamp>`: `count` is
+  the number of trimmed samples, and `<stamp>` is the stamp of the first sample after
+  the gap. The gap line goes in the request of that sample, and the position is acked
+  only after InfluxDB confirms it (B3). Two gaps in a row add their counts. The count
+  is signed, because InfluxDB 1 OSS refuses `u`. The measurement name is fixed, and
+  the kind check (#1153) refuses it as a data measurement. A reader rebuilds the seqs
+  from the writer's record and the gaps from the gap lines.
+  Lost: a seq field (about 20 bytes a line), a seq tag (one series per sample), a gap
+  point in the data measurement (a field type conflict), and a configurable gap
+  measurement. Decided by the architect (`laptop.architect-2`), #1151
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032215953,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
