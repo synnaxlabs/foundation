@@ -631,10 +631,14 @@ How to read this record:
   no entry of its own and moves no stored mark, but a handoff that it records does. A
   lost range is durable only when a later live entry of its index, with samples or a
   handoff, is on disk. A restart before that continues the index at the lost range's
-  first seq. This replaces the confirm rule of #885. Decided by laptop.architect on
-  2026-10-07 (#1347), with the live write and `Full` text above:
-  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037240549
-  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037245942
+  first seq. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440.
+  Decided by laptop.architect (#1347), with the live write and `Full` text above, at
+  2026-10-07T11:46:56Z:
+  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037240549, at
+  2026-10-07T11:47:17Z:
+  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037245942, and at
+  2026-10-07T11:52:25Z:
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037325066
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
