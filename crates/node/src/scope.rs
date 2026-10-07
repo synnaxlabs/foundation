@@ -101,6 +101,7 @@ impl Spawned {
         if polled.is_ready() {
             drop(slot);
             let done = running.borrow_mut().remove(&self.key);
+            // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
         }
         polled
@@ -177,7 +178,10 @@ mod tests {
         let (mut scope, queued) = scope();
         let held = Rc::new(());
         let inner = Rc::clone(&held);
-        scope.spawn(Box::pin(async move { drop(inner) }));
+        scope.spawn(Box::pin(poll_fn(move |_| {
+            let _ = &inner;
+            Poll::Ready(())
+        })));
         let mut task = take(&queued);
         let (waker, _) = waker();
         let mut cx = Context::from_waker(&waker);
@@ -220,6 +224,32 @@ mod tests {
         let (scope, queued) = scope();
         let owner = Rc::new(RefCell::new(Some(scope)));
         let future = drop_scope(&owner, Poll::Ready(()));
+        owner.borrow_mut().as_mut().unwrap().spawn(future);
+        let mut task = take(&queued);
+        let (waker, _) = waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
+        assert!(owner.borrow().is_none());
+    }
+
+    /// Drops the scope in its `Option` when it drops.
+    struct DropsScope(Rc<RefCell<Option<Scope>>>);
+
+    impl Drop for DropsScope {
+        fn drop(&mut self) {
+            drop(self.0.borrow_mut().take());
+        }
+    }
+
+    #[test]
+    fn a_future_whose_drop_at_completion_drops_its_scope_ends_its_task() {
+        let (scope, queued) = scope();
+        let owner = Rc::new(RefCell::new(Some(scope)));
+        let guard = DropsScope(Rc::clone(&owner));
+        let future: Task = Box::pin(poll_fn(move |_| {
+            let _ = &guard;
+            Poll::Ready(())
+        }));
         owner.borrow_mut().as_mut().unwrap().spawn(future);
         let mut task = take(&queued);
         let (waker, _) = waker();
