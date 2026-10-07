@@ -284,8 +284,8 @@ pub mod keys {
 /// The run of ends after a head: the place of each series and the end of its bytes in
 /// the body. The body follows, as long as the last end, laid out as the series bytes
 /// of a frame of only these series: the first starts at 0, and each other at the end
-/// before it rounded up to a multiple of 8. The home writes zeros in the padding, and
-/// the reader ignores it. An end whose place the session does not have, that repeats a
+/// before it rounded up to a multiple of 8. The padding may hold any bytes, and the
+/// reader ignores it. An end whose place the session does not have, that repeats a
 /// place of its frame, or that is below the start of its series, is not valid.
 pub mod ends {
     use super::{Error, Writer, run};
@@ -817,7 +817,7 @@ mod tests {
                 let ends = super::super::ends::decode(&message)
                     .expect("the run has ends")
                     .map(|(place, end)| (place, usize::try_from(end).expect("fits")));
-                types::frame::check(&vec![0; len], ends)
+                types::frame::check(&vec![0xff; len], ends)
             };
             assert_eq!(check(&[(0, 3), (1, 13)], 13), Ok(()));
             assert_eq!(
