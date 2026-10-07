@@ -2019,6 +2019,61 @@ fn an_open_with_another_layout_at_once_with_one_that_closes_gets_length() {
     }
 }
 
+/// Three opens at once of a directory with no ring, on a disk of `disk` bytes. The
+/// sync of the root fails for the open that makes the ring, so its ring has no
+/// checkpoint. Returns what each open gave.
+fn three_opens_and_a_failed_sync(disk: u64) -> [Option<Result<(), Error>>; 3] {
+    let (mut sim, node) = node_with_disk(44_546, disk);
+    let results = [204_253, 77_015, 33_749].map(|gap| {
+        let result = Arc::new(Mutex::new(None));
+        let (own, shared) = (node.clone(), Arc::clone(&result));
+        drop(on_node(
+            &node,
+            &format!("open-{gap}"),
+            move |tasks| async move {
+                own.clock().sleep(Span::from_nanos(gap)).await;
+                let config = Config {
+                    commit: Span::from_nanos(1),
+                    ..node_config(&own, tasks, DIR)
+                };
+                let opened = Buffer::open(config, &mut Slots::new()).await.map(drop);
+                *shared.lock().expect("no panic") = Some(opened);
+            },
+        ));
+        result
+    });
+    sim.run_for(Span::from_nanos(136_143))
+        .expect("the run goes on");
+    node.fail_file(FilePath::new(""), Operation::SyncDir);
+    sim.run_for(commits(4)).expect("the run goes on");
+    results.map(|result| result.lock().expect("no panic").take())
+}
+
+/// A limit of opens at once. The first open removes the ring with no checkpoint that
+/// the third left. The second found no ring before, and its create runs before the
+/// directory sync of the first, while the removed ring keeps its room. So it gets
+/// `Full` on a disk with room for one ring and a half, and `Ok` on one with room
+/// for two. The run hangs on the delay of each file call.
+#[test]
+fn an_open_at_once_with_a_remove_of_another_open_can_get_full() {
+    let len = AREA_START + AREA;
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::new(),
+        operation: Operation::SyncDir,
+        code: 5,
+    });
+    let full = Error::Files(FileError::Full {
+        path: PathBuf::from(RING),
+    });
+    let tight = three_opens_and_a_failed_sync(len + len / 2);
+    assert_eq!(
+        tight,
+        [Some(Ok(())), Some(Err(full)), Some(Err(failed.clone()))]
+    );
+    let wide = three_opens_and_a_failed_sync(2 * len);
+    assert_eq!(wide, [Some(Err(busy())), Some(Ok(())), Some(Err(failed))]);
+}
+
 /// A failed read of the header blocks fails the open with its error and leaves the
 /// ring: the next open makes a ring that was not there, and recovers the entry of a
 /// ring with a checkpoint.
