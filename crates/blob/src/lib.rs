@@ -150,11 +150,11 @@ impl Store {
     }
 
     /// Stores `chunk` under `digest`. It returns only after the chunk is durable: a
-    /// crash after the return keeps it. A put of a chunk the store holds makes no file
-    /// call. A second put of one digest while the first is in flight waits for it.
-    /// A put whose future is dropped before it returns stores nothing that a get gives
-    /// unchecked: the next get of the digest reads and checks the file, and the next
-    /// put writes it again.
+    /// crash after the return keeps it. A put of a digest that a put stored since the
+    /// open makes no file call. A second put of one digest while the first is in
+    /// flight waits for it. A put whose future is dropped before it returns stores
+    /// nothing that a get gives unchecked: the next get of the digest reads and checks
+    /// the file, and the next put writes it again.
     ///
     /// # Errors
     ///
