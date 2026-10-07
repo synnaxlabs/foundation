@@ -1,5 +1,6 @@
 //! Which commits a review round covers, read from the history with `git`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
@@ -61,17 +62,20 @@ impl<'a> History<'a> {
     /// code. A moved file counts as removed and added.
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
-    /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
-    /// `git merge-tree` finds a conflict in between its parents gives "resolves a
-    /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
+    /// by its resolution and by the moves of its base side. A `.rs`, `Cargo.toml`, or
+    /// `Cargo.lock` file that `git merge-tree` finds a conflict in between its
+    /// parents gives "resolves a conflict in `<file>` in `<merge>`". A path that is
+    /// not code, that its first parent changes since a merge base with its second
+    /// parent, and that the merge moves into a code file by its own rename detection
+    /// gives "the base moves `<old>`, which the PR changes, into the code file
+    /// `<new>`". Else the change is read to `end` from the
     /// tree that `git merge-tree` makes of `from` and the newest base commit that
     /// `end` holds, not from `from`: the base's code does not count, and text of the
     /// range that the base moves into a code file does. A code file that this tree
     /// has a conflict in gives "has a conflict in `<file>` between its start and the
-    /// base", so a conflict that leaves no markers fails closed too. A path that is
-    /// not code, that `from` changes since a merge base with that base commit, and
-    /// that this merge moves into a code file by its own rename detection gives "the
-    /// base moves `<old>`, which the PR changes, into the code file `<new>`". An
+    /// base", so a conflict that leaves no markers fails closed too. Such a move of a
+    /// path that `from` changes, in the merge that makes this tree, gives the same
+    /// phrase as for a merge on the chain. An
     /// `end` that holds more than one newest base commit gives "holds the base at
     /// more than one newest commit: `<commit>`, `<commit>`".
     ///
@@ -112,10 +116,14 @@ impl<'a> History<'a> {
                 continue;
             };
             let merge = line.split(' ').next().unwrap_or_default();
-            if let Some(path) = self.merged(first, second)?.code_conflict() {
+            let merged = self.merged(first, second)?;
+            if let Some(path) = merged.code_conflict() {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
+            }
+            if let Some(moved) = self.moved_into_code(first, second, &merged.tree)? {
+                return Ok(Some(moved));
             }
         }
         let bases = self.git(&["merge-base", "--all", &end_sha, &base])?;
@@ -146,34 +154,22 @@ impl<'a> History<'a> {
     ///
     /// A failed `git` command, or a changed path that is not UTF-8.
     fn first_change(&self, old: &str, new: &str) -> Result<Option<String>, String> {
-        // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
-        // the path, each ended by a NUL.
-        let raw = self.output(&[
-            "diff",
-            "--raw",
-            "-z",
-            "--no-abbrev",
-            "--no-renames",
-            old,
-            new,
+        let globs = [
             "--",
             ":(glob)**/*.rs",
             ":(glob)**/Cargo.toml",
             ":(glob)**/Cargo.lock",
-        ])?;
-        let mut fields = raw.split(|&b| b == 0);
-        while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
-            let entry = String::from_utf8_lossy(entry);
-            let [_, _, old, new, _] = entry.split(' ').collect::<Vec<_>>()[..] else {
-                return Err(format!("git diff: a bad raw entry `{entry}`"));
-            };
-            let path = std::str::from_utf8(path).map_err(|e| {
+        ];
+        for entry in self.diff(old, new, &globs)? {
+            let path = std::str::from_utf8(&entry.path).map_err(|e| {
                 format!(
                     "git diff: the path `{}` is not UTF-8: {e}",
-                    String::from_utf8_lossy(path)
+                    String::from_utf8_lossy(&entry.path)
                 )
             })?;
-            if let Some(line) = self.first_code(old, new, rust_path(path))? {
+            if let Some(line) =
+                self.first_code(&entry.old, &entry.new, rust_path(path))?
+            {
                 return Ok(Some(format!("changes code at `{path}:{line}`")));
             }
         }
@@ -321,28 +317,12 @@ impl<'a> History<'a> {
             return Ok(None);
         };
         let probed = self.merged(&probe.commit, second)?.tree;
-        // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
-        // the path, each ended by a NUL.
-        let raw = self.output(&[
-            "diff",
-            "--raw",
-            "-z",
-            "--no-abbrev",
-            "--no-renames",
-            tree,
-            &probed,
-        ])?;
-        let mut fields = raw.split(|&b| b == 0);
-        while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
-            let new = String::from_utf8_lossy(path);
-            let entry = String::from_utf8_lossy(entry);
-            let Some(blob) = entry.split(' ').nth(3) else {
-                return Err(format!("git diff: a bad raw entry `{entry}`"));
-            };
+        for entry in self.diff(tree, &probed, &[])? {
+            let new = String::from_utf8_lossy(&entry.path);
             if !code_path(&new) {
                 continue;
             }
-            let text = self.output(&["cat-file", "blob", blob])?;
+            let text = self.output(&["cat-file", "blob", &entry.new])?;
             let old = String::from_utf8_lossy(&text).lines().find_map(|line| {
                 let n: usize =
                     line.strip_prefix(PROBE)?.strip_prefix(' ')?.parse().ok()?;
@@ -371,57 +351,51 @@ impl<'a> History<'a> {
     ///
     /// A failed `git` command.
     fn probe(&self, first: &str, second: &str) -> Result<Option<Probe>, String> {
-        let mut changed = Vec::new();
-        let mut entries = Vec::new();
+        let mut modes = BTreeMap::new();
         for base in self.git(&["merge-base", "--all", first, second])?.lines() {
-            let raw = self.output(&[
-                "diff",
-                "--raw",
-                "-z",
-                "--no-abbrev",
-                "--no-renames",
-                "--diff-filter=M",
-                base,
-                first,
-            ])?;
-            let mut fields = raw.split(|&b| b == 0);
-            while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
-                if code_path(&String::from_utf8_lossy(path)) {
-                    continue;
+            for entry in self.diff(base, first, &["--diff-filter=M"])? {
+                if !code_path(&String::from_utf8_lossy(&entry.path)) {
+                    modes.insert(entry.path, entry.mode);
                 }
-                let mode = entry.split(|&b| b == b' ').nth(1).unwrap_or_default();
-                let text = format!("{PROBE} {}\n", changed.len());
-                let blob =
-                    self.run(&["hash-object", "-w", "--stdin"], text.as_bytes(), &[])?;
-                entries.extend_from_slice(mode);
-                entries.push(b' ');
-                entries.extend_from_slice(
-                    String::from_utf8_lossy(&blob).trim().as_bytes(),
-                );
-                entries.push(b'\t');
-                entries.extend_from_slice(path);
-                entries.push(0);
-                changed.push(path.to_vec());
             }
         }
-        if changed.is_empty() {
+        if modes.is_empty() {
             return Ok(None);
         }
-        let commit = self.child(first, &entries)?;
+        let files: Vec<_> = modes
+            .iter()
+            .enumerate()
+            .map(|(n, (path, mode))| File {
+                mode,
+                path,
+                text: format!("{PROBE} {n}\n"),
+            })
+            .collect();
         Ok(Some(Probe {
-            commit,
-            paths: changed,
+            commit: self.child(first, &files)?,
+            paths: modes.into_keys().collect(),
         }))
     }
 
-    /// A commit with the parent `first` and its tree with the index entries
-    /// `entries` (`<mode> <blob>TAB<path>NUL`) in place of its own. It builds the
-    /// tree in an index file of its own, which it removes.
+    /// A commit with the parent `first` and its tree with `files` in place of its
+    /// own. It builds the tree in an index file of its own, which it removes.
     ///
     /// # Errors
     ///
     /// A failed `git` command.
-    fn child(&self, first: &str, entries: &[u8]) -> Result<String, String> {
+    fn child(&self, first: &str, files: &[File<'_>]) -> Result<String, String> {
+        // Each entry is `<mode> <blob>TAB<path>NUL`.
+        let mut entries = Vec::new();
+        for file in files {
+            let blob =
+                self.run(&["hash-object", "-w", "--stdin"], file.text.as_bytes(), &[])?;
+            entries.extend_from_slice(file.mode.as_bytes());
+            entries.push(b' ');
+            entries.extend_from_slice(String::from_utf8_lossy(&blob).trim().as_bytes());
+            entries.push(b'\t');
+            entries.extend_from_slice(file.path);
+            entries.push(0);
+        }
         let name = format!("xtask-review-probe-{}", std::process::id());
         let index = self
             .root
@@ -430,7 +404,7 @@ impl<'a> History<'a> {
         let tree = self
             .run(&["read-tree", first], b"", &env)
             .and_then(|_| {
-                self.run(&["update-index", "-z", "--index-info"], entries, &env)
+                self.run(&["update-index", "-z", "--index-info"], &entries, &env)
             })
             .and_then(|_| self.run(&["write-tree"], b"", &env));
         let removed = std::fs::remove_file(&index)
@@ -459,6 +433,48 @@ impl<'a> History<'a> {
             ],
         )?;
         Ok(String::from_utf8_lossy(&commit).trim().to_string())
+    }
+
+    /// The entries of `git diff --raw` from the tree-ish `old` to `new`, with no
+    /// renames, given the further arguments `args`.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git diff`, or an entry not in the raw format.
+    fn diff(&self, old: &str, new: &str, args: &[&str]) -> Result<Vec<Entry>, String> {
+        let raw = self.output(
+            &[
+                &[
+                    "diff",
+                    "--raw",
+                    "-z",
+                    "--no-abbrev",
+                    "--no-renames",
+                    old,
+                    new,
+                ],
+                args,
+            ]
+            .concat(),
+        )?;
+        // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
+        // the path, each ended by a NUL.
+        let mut entries = Vec::new();
+        let mut fields = raw.split(|&b| b == 0);
+        while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
+            let entry = String::from_utf8_lossy(entry);
+            let [_, mode, old, new, _] = entry.split(' ').collect::<Vec<_>>()[..]
+            else {
+                return Err(format!("git diff: a bad raw entry `{entry}`"));
+            };
+            entries.push(Entry {
+                mode: mode.to_string(),
+                old: old.to_string(),
+                new: new.to_string(),
+                path: path.to_vec(),
+            });
+        }
+        Ok(entries)
     }
 
     /// What `git merge-tree` makes of `first` and `second`.
@@ -542,6 +558,24 @@ impl<'a> History<'a> {
 
 /// The first word of each line of probe text that `History::moved_into_code` writes.
 const PROBE: &str = "xtask-review-probe";
+
+/// One entry of `git diff --raw`.
+struct Entry {
+    /// The mode in the new tree.
+    mode: String,
+    /// The blob in the old tree, all zeros when the path is added.
+    old: String,
+    /// The blob in the new tree, all zeros when the path is removed.
+    new: String,
+    path: Vec<u8>,
+}
+
+/// A file to write in a tree.
+struct File<'a> {
+    mode: &'a str,
+    path: &'a [u8],
+    text: String,
+}
 
 /// A child of a commit, with a probe text in each path that is not code and that
 /// the commit changes.
