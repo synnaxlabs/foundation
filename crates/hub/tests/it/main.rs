@@ -611,7 +611,8 @@ fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
 }
 
 /// Once the hub and each session drop while the commit task waits for a commit, the
-/// hub holds no commit: a commit of the home resolves only once the ring has closed.
+/// hub holds no commit: once a commit of the home resolves and drops, the ring is
+/// closed.
 #[test]
 fn drops_the_commit_it_waits_for_with_the_hub() {
     for seed in 0..64 {
