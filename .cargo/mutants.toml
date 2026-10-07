@@ -1,4 +1,4 @@
-# Build with each feature, as CI's test job does, so code behind a feature such as
+# Build with all features on, as CI's test step does, so code behind a feature such as
 # `sim` is mutated and tested.
 all_features = true
 
