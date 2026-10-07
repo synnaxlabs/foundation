@@ -51,8 +51,9 @@ impl Eq for Stored {}
 /// What one [`Buffer::read`](crate::Buffer::read) gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Read {
-    /// The seqs a skip ahead left out right before the first entry, when the read
-    /// started at or in them.
+    /// The seqs right before the first entry that the path no longer has, as one
+    /// range: trimmed, or skipped by an append. When the path holds no entry, the
+    /// range ends at its durable tail. Its length is the count of samples lost.
     pub gap: Option<Range<u64>>,
     /// The entries, in order, with no seq left out between them.
     pub entries: Vec<Stored>,
@@ -112,6 +113,16 @@ impl<'a> Reading<'a> {
     /// What the read gave.
     pub(crate) fn finish(self) -> Read {
         self.read
+    }
+
+    /// Ends the read at the seqs up to `end` that no record holds. A read with no
+    /// entry reports them as its gap and goes on at `end`. A read that holds entries
+    /// stays before them, so the next read reports them.
+    pub(crate) fn trimmed(&mut self, end: Mark) {
+        if self.read.entries.is_empty() {
+            self.read.gap = Some(self.read.next.seq..end.seq);
+            self.read.next = end;
+        }
     }
 
     /// Gives the entries of `index` on the path in the record of `run` that come
