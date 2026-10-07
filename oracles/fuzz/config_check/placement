@@ -1,0 +1,6 @@
+placement "p" {
+  select = "edge.**"
+  home = "n_1"
+  standby = n_2
+  copies = ["n_3", n_4]
+}
