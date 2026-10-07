@@ -367,7 +367,6 @@ impl Shard {
         slot: Slot,
         limit_bytes: u64,
     ) -> Result<delivery::complete::Key, Error> {
-        // Its close reads mesh time.
         if self.now().is_none() {
             return Err(Error::Unsynced);
         }
