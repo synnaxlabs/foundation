@@ -3217,10 +3217,10 @@ How to read this record:
   `env` randomness." The first PR that gives `Interner::intern` a subset of channels
   that a party outside the node picks makes `Interner.sets` a `BTreeMap` and limits the
   key sets of outside sessions (#1513).
-  A QUIC stream ID is not a key that a party outside the node picks freely: a peer must
-  use its stream IDs in order, and `streams_max` limits how many are open, so a set of
-  keys that collide costs the peer many streams and a lookup at most that many compares.
-  Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
+  ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
+  are open, so a set of keys that collide costs the peer many streams and a lookup at
+  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
   https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
@@ -3742,6 +3742,7 @@ How to read this record:
 | REMOTE CONTROL, `inbox:<name>` issues | MESSAGES |
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
+| R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 
 ---
 

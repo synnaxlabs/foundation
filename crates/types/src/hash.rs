@@ -2,13 +2,11 @@
 //!
 //! Iteration order and hashes are the same in every run, so a simulated run replays.
 //! The hasher has no key, so a party outside the node that chooses keys freely can
-//! make them collide. Never key these maps by such a value. A map whose keys a party
-//! outside the node picks is a `BTreeMap`, whose lookup is O(log n) compares for each
-//! set of keys, unless the node limits the keys that the party puts in the map to a
-//! small count. A keyed hasher, with its key from `env` randomness, comes only when a
-//! benchmark shows that such a `BTreeMap` is too slow. A QUIC stream ID is not chosen
-//! freely: a peer must use its stream IDs in order, and the node limits how many are
-//! open.
+//! make them collide. A map whose keys a party outside the node picks is a `BTreeMap`,
+//! whose lookup is O(log n) compares for each set of keys, unless the node limits the
+//! keys that the party puts in the map to a small count, as the limit on the open QUIC
+//! streams of one session does. A keyed hasher, with its key from `env` randomness,
+//! comes only when a benchmark shows that such a `BTreeMap` is too slow.
 //!
 //! The hasher spreads a key by its low bits, so keys that differ only in their top
 //! bits fall in few buckets. A key that the node makes keeps its varying bits low, as
