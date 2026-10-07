@@ -86,8 +86,9 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// routes to this shard. It stays on the thread that made it. `node` binds one
 /// [`Port`] and splits it into one part for each shard.
 ///
-/// Dropping it refuses each later dial from a peer, and closes each session that no
-/// caller accepted with `Code(0)`. The sessions it gave stay open.
+/// Dropping it closes each session that no caller accepted with `Code(0)`, and the
+/// sessions it gave stay open. It refuses each dial from a peer until each session
+/// ended, and then frees its socket, so a later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
 }
@@ -448,6 +449,32 @@ mod tests {
                 "aborted by peer: the server refused to accept a new connection";
             let reason = String::from(reason);
             assert_eq!(dialed.err(), Some(Error::Broken { reason }));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_after_each_session_ended_gets_no_answer() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            let session = transport.accept().await.expect("a session");
+            drop(transport);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            node.clock().sleep(testing::spans(testing::IDLE, 4)).await;
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            assert_eq!(dialed.err(), Some(Error::TimedOut));
         });
         assert_eq!(sim.run(), Ok(()));
     }

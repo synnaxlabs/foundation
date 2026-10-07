@@ -335,8 +335,8 @@ impl Task {
         poll_fn(|cx| self.poll(cx)).await;
     }
 
-    /// Ready when the socket broke, or when the carrier and its sessions dropped and
-    /// each connection drained.
+    /// Ready when the socket broke, or when the carrier dropped, each connection
+    /// drained, and the socket holds no datagram.
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.state.borrow_mut();
         let fresh =
@@ -365,6 +365,7 @@ impl Task {
             && state.endpoint.drained()
             && self.socket.held.is_none()
         {
+            state.task = None;
             return Poll::Ready(());
         }
         // Each poll of the sleep arms the timer again.
