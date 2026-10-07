@@ -2258,8 +2258,9 @@ mod tests {
     }
 
     // The pool gives no block for the end of the record, so the write puts no byte. The
-    // sync that fails is the one of the next record, which the files keep or not. A
-    // sync of zeros fails in its place, and the log has no second record.
+    // sync that fails is the one of the next record, which the files keep or not. If
+    // the log synced zeros first, that sync fails in its place, and the log has no
+    // second record.
     #[test]
     fn a_stopped_write_that_put_no_block_needs_no_zeros() {
         let mut kept = 0;
@@ -2375,8 +2376,8 @@ mod tests {
     }
 
     // The sync that fails is the one of the third record, which the files keep or
-    // not. A second sync of the zeros fails in its place, and the log has no third
-    // record.
+    // not. If the log synced the zeros a second time, that sync fails in its place,
+    // and the log has no third record.
     #[test]
     fn the_zeros_go_in_one_time() {
         let mut kept = 0;
