@@ -1774,9 +1774,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
   2026-10-07T17:08:02Z). Amended (approved by `laptop.architect`,
   2026-10-07T20:35:59Z:
-  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046363822, and
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046363822,
   2026-10-07T20:47:58Z:
-  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046560645,
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046560645, and
+  2026-10-07T20:51:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046617974,
   #1589): the rule is that a message `step` refuses or drops by its header gives no
   claim. So it also gives no claim of a message for another node, from this node, or
   from a second leader of this term (`Misrouted`, `Loopback`, `SecondLeader`). One
