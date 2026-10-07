@@ -1933,15 +1933,23 @@ How to read this record:
   key, the card and its signature, the admission, and the status keys, which the voter
   assigns (UUIDv7). Apply refuses, in this order, a forged card, a reserved name (A3), a
   name outside the region, a status channel `<name>.<status>` that is longer than a
-  name can be or reserved, a key that is already a member, an unknown ticket, and each
-  refusal of `Record::admit`. The name and key checks are one function, which
-  `State::new` also runs on the founding members. A refused change is a no-op on every
-  node, so a forged card in the log cannot stop a node. A `Join` holds a
-  `card::Unchecked`, not a `card::Signed`: it has the byte form of a signed card, decode
-  keeps a join whose signature does not hold, and apply refuses it as `Forged`. Each
-  number in a change is little endian; a
-  `Ticket` is the public key, the prefix behind a length byte, a reusable byte (0 or
-  1), the expiry (8 bytes), and the ephemeral span behind a presence byte. Decided by
+  name can be or reserved, a key that is already a member, a name that a member holds,
+  a status key that a member holds or that the join repeats (A4), an unknown ticket,
+  and each refusal of `Record::admit`. So no refusal counts a use. A member's names are
+  its card name and each `<name>.<status>`, and two names are equal when they differ
+  only in ASCII case (A3, X27), so each full name maps to at most one member. Region
+  state cannot see the keys of the spec, so the status key check covers members only.
+  The name and key checks are one function, which `State::new` also runs on the
+  founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. A member
+  and a `Join` hold at most 64 status entries, refused at decode (`MAX_STATUS`), as the
+  32 of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:44:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. A
+  refused change is a no-op on every node, so a forged card in the log cannot stop a
+  node. A `Join` holds a `card::Unchecked`, not a `card::Signed`: it has the byte form
+  of a signed card, decode keeps a join whose signature does not hold, and apply refuses
+  it as `Forged`. Each number in a change is little endian; a `Ticket` is the public
+  key, the prefix behind a length byte, a reusable byte (0 or 1), the expiry (8 bytes),
+  and the ephemeral span behind a presence byte. Decided by
   `laptop.architect` (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
   The reserved name check is region state, not a ticket check, because "no member name
