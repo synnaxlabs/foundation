@@ -642,7 +642,11 @@ How to read this record:
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
   size is checked only when the bodies are appended, after the handoffs: a frame whose
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
-  is known. Decided by the `write-path` builder (#191).
+  is known. Decided by the `write-path` builder (#191). After a failed commit, the home
+  gives `Disk` before it checks the size, so a frame that no record of the ring or no
+  block of the pool holds gets `Disk`, not `Large`, on either path (#1260). Decided by
+  `laptop.architect` (2026-10-07T09:21:07Z):
+  https://github.com/synnaxlabs/foundation/issues/1260#issuecomment-6034929252.
 - **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
   `clock::Reader` in its `Config`, in each call that needs them. One
   `clock::Reader::now` gives both at one instant, so a control lease and a stamp check
