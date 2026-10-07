@@ -72,6 +72,8 @@ struct Test {
     tasks: Tasks,
     /// How many tasks of the hub have ended.
     ended: Rc<Cell<usize>>,
+    /// How many polls the hub's tasks have had.
+    polls: Rc<Cell<usize>>,
     /// The node's mesh clock until [`Test::sync`] runs it.
     unsynced: Option<clock::Clock>,
     hub: Hub,
@@ -103,13 +105,14 @@ impl Test {
             clock: mesh.clone(),
             limits: LIMITS,
         });
-        let ended = Rc::new(Cell::new(0));
+        let (ended, polls) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
         let hub = Hub::new(hub::Config {
             home,
             interner,
             tasks: Tasks::new(Counted {
                 tasks: tasks.clone(),
                 ended: Rc::clone(&ended),
+                polls: Rc::clone(&polls),
             }),
         });
         for (key, channel, data_type, index) in CHANNELS {
@@ -127,6 +130,7 @@ impl Test {
             mesh,
             tasks,
             ended,
+            polls,
             unsynced: Some(unsynced),
             hub,
         }
@@ -180,17 +184,23 @@ impl Test {
     }
 }
 
-/// Spawns on `tasks`, and counts in `ended` each task that completes.
+/// Spawns on `tasks`, and counts each poll in `polls` and each task that completes in
+/// `ended`.
 struct Counted {
     tasks: Tasks,
     ended: Rc<Cell<usize>>,
+    polls: Rc<Cell<usize>>,
 }
 
 impl env::tasks::Driver for Counted {
-    fn spawn(&self, task: env::tasks::Task) {
-        let ended = Rc::clone(&self.ended);
+    fn spawn(&self, mut task: env::tasks::Task) {
+        let (ended, polls) = (Rc::clone(&self.ended), Rc::clone(&self.polls));
         self.tasks.spawn(async move {
-            task.await;
+            std::future::poll_fn(|cx| {
+                polls.set(polls.get() + 1);
+                task.as_mut().poll(cx)
+            })
+            .await;
             ended.set(ended.get() + 1);
         });
     }
@@ -508,6 +518,22 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
         clock.sleep(SETTLE).await;
         assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
         assert_eq!(ended.get(), 1, "the commit task ended");
+    });
+}
+
+/// Writes during a commit wake the commit task once, not once per write.
+#[test]
+fn wakes_the_commit_task_once_for_the_writes_during_a_commit() {
+    run(23, |test| async move {
+        let _reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        let before = test.polls.get();
+        for value in 0..20 {
+            write(&mut writer, &[test.now()], &[value]);
+            test.clock.sleep(Span::from_nanos(1)).await;
+        }
+        assert_eq!(test.polls.get() - before, 2, "one wait, then one wake");
     });
 }
 

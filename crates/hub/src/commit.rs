@@ -13,7 +13,7 @@ use std::task::{Poll, Waker};
 pub(crate) struct Signal {
     /// Whether a home call may have appended since the task last waited for a commit.
     pub(crate) due: bool,
-    /// The task's waker while it sleeps.
+    /// The task's waker, kept while it sleeps and while it waits for a commit.
     pub(crate) task: Option<Waker>,
 }
 
@@ -22,9 +22,10 @@ impl Signal {
     /// one, and the handoff of a writer open or close. Wakes the task once per commit
     /// at most.
     pub(crate) fn appended(&mut self) {
-        self.due = true;
-        if let Some(task) = self.task.take() {
-            task.wake();
+        if !mem::replace(&mut self.due, true)
+            && let Some(task) = &self.task
+        {
+            task.wake_by_ref();
         }
     }
 }
