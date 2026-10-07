@@ -24,6 +24,8 @@ Check:
   concurrent, crash midway.
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
   code catch or skip an error to hide a defect?
+- Guards: does a check repeat one that another path already makes? Remove it and run
+  the tests. If none fails, it is a finding.
 - Tests: does each test fail if the behavior breaks? Name a change to the code that no
   test would catch. Does a test read a private field, or compare the `Debug` string of
   the type under test, with no written reason? Name the public call that shows the same

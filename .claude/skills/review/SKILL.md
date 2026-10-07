@@ -58,5 +58,6 @@ nothing checked again. So when round 1 led to fix commits:
 ## Done
 
 Review is done when the last round comment ends at the PR head, finds nothing, and
-names each reviewer that the table requires, and each deferral in a risk crate links its
-OK. Only then does the author run `gh pr ready`.
+names each reviewer that the table requires, each deferral in a risk crate links its
+OK, and each issue that the review or the architect promised exists. Only then does the
+author run `gh pr ready`.
