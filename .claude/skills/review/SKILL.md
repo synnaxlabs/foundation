@@ -24,7 +24,9 @@ Launch in parallel every reviewer the PR needs:
 | A flagged oracle weakening | add one `reviewer` per weakening, told to argue for fixing the code instead |
 
 When the PR changes a public surface or a crate's dependencies, also send its link to
-`laptop.architect`, which reviews it before the person.
+`laptop.architect`, which reviews it before the person. A public surface change includes
+a change to what a public item accepts, returns, or states in its doc, and any change
+from a surface or text that the architect approved.
 
 The breaker makes its own worktree. Never give it another path: its permission check
 refuses every command outside that worktree. Remove the worktree when the breaker
@@ -40,9 +42,9 @@ returns (`git worktree remove --force <path>`).
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
    the answer, also when the code is already on `main`. A deferral in a risk crate
    (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
-   `transport`) needs the explicit OK of `laptop.architect`: link its comment. An
-   answer that decides what a public doc or a ruling means needs the architect's
-   approval too.
+   `transport`) needs the explicit OK of `laptop.architect`: link its comment. A fix or
+   an answer that makes such a public surface change, or decides what a ruling means,
+   needs the architect's approval too: link its comment.
 
 ## Second round
 
@@ -62,5 +64,6 @@ nothing checked again. So when round 1 led to fix commits:
 
 Review is done when the last round comment ends at the PR head, finds nothing, and
 names each reviewer that the table requires, each deferral in a risk crate links its
-OK, and each issue that the review or the architect promised exists. Only then does the
+OK, each public surface change links the architect's approval, and each issue that the
+review or the architect promised exists. Only then does the
 author run `gh pr ready`.
