@@ -1772,10 +1772,14 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z, and
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
-  2026-10-07T17:08:02Z). Amended (2026-10-07, #1589): it also gives no claim of a
-  message for another node or from this node, which `step` refuses by its header
-  (`Misrouted`, `Loopback`) before it reads a link. One predicate decides what `step`
-  reads and what `claims` gives.
+  2026-10-07T17:08:02Z). Amended (approved by `laptop.architect`,
+  2026-10-07T20:35:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046363822,
+  #1589): the rule is that a message
+  `step` refuses or drops before it reads a claim gives no claim. So it also gives no
+  claim of a message for another node, from this node, or from a second leader of
+  this term (`Misrouted`, `Loopback`, `SecondLeader`). One predicate, `Raft::reads`,
+  holds each refusal and drop that comes before a claim is read, and decides both.
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;

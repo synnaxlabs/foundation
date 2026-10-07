@@ -321,6 +321,30 @@ fn a_message_from_this_node_claims_nothing() {
     assert_eq!(raft.ready(), Ready::default());
 }
 
+// `step` refuses a second leader of its term before it reads a claim.
+#[test]
+fn a_second_leader_of_the_term_claims_nothing() {
+    let mut raft = receiver(7);
+    let proof = Proof {
+        grant: Grant::Vote,
+        candidate: key(3),
+        voters: [(key(2), Some(signature(2))), (key(3), Some(signature(3)))].into(),
+    };
+    let mut led = message(8, Body::Heartbeat { commit: 0 }, Some(proof));
+    led.from = key(3);
+    raft.step(led).unwrap();
+    drop(raft.ready());
+    let mut second = outside(8);
+    second.chain = chain();
+    assert_eq!(claims(&raft, &second), Vec::new());
+    let refused = Error::SecondLeader {
+        term: Term(8),
+        from: key(1),
+    };
+    assert_eq!(raft.step(second), Err(refused));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
 #[test]
 fn a_message_claims_its_proof_in_its_term_then_its_grant() {
     let proof = Proof {

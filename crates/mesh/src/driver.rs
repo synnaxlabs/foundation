@@ -1848,6 +1848,23 @@ mod tests {
     mod receive {
         use super::*;
 
+        // The link at `index` of the term before `TERM`, by leader 2: the voters
+        // move from `outgoing` to 1, 2 and 3.
+        fn link(index: u64, outgoing: &[u8]) -> raft::Link {
+            let at = Position {
+                term: Term(common::TERM.0 - 1),
+                index,
+            };
+            let voters = Voters {
+                incoming: [1, 2, 3].map(key).into(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            };
+            let Data::Voters(change) = common::change(2, at, voters).data else {
+                unreachable!("a change is a voters entry");
+            };
+            raft::Link { at, change }
+        }
+
         fn requests() -> [Body; 4] {
             let last = Position::default();
             [
@@ -2051,21 +2068,6 @@ mod tests {
             solo(|node, tasks| async move {
                 let all = [1, 2, 3, 4];
                 let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
-                let link = |index, outgoing: &[u8]| {
-                    let at = Position {
-                        term: Term(common::TERM.0 - 1),
-                        index,
-                    };
-                    let voters = Voters {
-                        incoming: [1, 2, 3].map(key).into(),
-                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
-                    };
-                    let Data::Voters(change) = common::change(2, at, voters).data
-                    else {
-                        unreachable!("a change is a voters entry");
-                    };
-                    raft::Link { at, change }
-                };
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
                 let short = heartbeat.clone();
@@ -2095,21 +2097,6 @@ mod tests {
             solo(|node, tasks| async move {
                 let all = [1, 2, 3, 4];
                 let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
-                let link = |index, outgoing: &[u8]| {
-                    let at = Position {
-                        term: Term(common::TERM.0 - 1),
-                        index,
-                    };
-                    let voters = Voters {
-                        incoming: [1, 2, 3].map(key).into(),
-                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
-                    };
-                    let Data::Voters(change) = common::change(2, at, voters).data
-                    else {
-                        unreachable!("a change is a voters entry");
-                    };
-                    raft::Link { at, change }
-                };
                 let mut heartbeat = proven(2, 3, Body::Heartbeat { commit: 0 });
                 heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
                 heartbeat.chain = vec![link(1, &all), link(2, &[])];
@@ -2120,6 +2107,32 @@ mod tests {
                 forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
                 assert_eq!(mesh.receive(public(2), forged), Err(misrouted));
                 assert_eq!(term(&mesh), Term(0));
+            });
+        }
+
+        // `step` refuses a second leader of its term before it reads a claim, so
+        // `receive` checks no grant of its proof.
+        #[test]
+        fn checks_no_grant_of_a_second_leader() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let led = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), led), Ok(()));
+                let second = proven(3, 1, Body::Heartbeat { commit: 0 });
+                let refused = Error::Raft(raft::Error::SecondLeader {
+                    term: common::TERM,
+                    from: key(3),
+                });
+                assert_eq!(
+                    mesh.receive(public(3), second.clone()),
+                    Err(refused.clone())
+                );
+                let mut forged = second;
+                let proof = forged.proof.as_mut().unwrap();
+                proof.voters.get_mut(&key(1)).unwrap().as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(3), forged), Err(refused));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
         }
 
