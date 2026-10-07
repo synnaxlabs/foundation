@@ -54,8 +54,7 @@ or a line range.
 7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.
 8. `/review <pr>`. It runs the reviewers by tier and the second round.
 9. If review changed code, run the gate again. Then `gh pr ready <n>` and
-   `gh pr merge <n> --auto`. The merge queue takes it when the checks and code owners
-   pass.
+   `gh pr merge <n> --auto`. The merge queue takes it when the checks pass.
 10. **Wait once.** Run `.claude/skills/build/wait.sh <n>` with `run_in_background`.
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
@@ -97,7 +96,8 @@ cargo mutants --in-diff "$p" --jobs 4
 
 Never change a public surface, a decision, or another crate. When the work needs a
 person or a decision, ask on the issue, add `blocked`, and take the next `night` issue.
-A PR that waits for a code owner waits for the morning; take the next issue meanwhile.
+A PR that needs the person (`oracles/`, `.github/`, `.claude/`) waits for the morning;
+take the next issue meanwhile.
 
 ## Rules
 

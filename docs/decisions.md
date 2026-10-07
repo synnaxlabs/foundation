@@ -2015,6 +2015,11 @@ How to read this record:
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
+  own PR through the queue when the gate, the review rounds, and CI pass; agents may run
+  `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
+  `.claude/`. The person: "Great, make the fucking changes and do your fucking job
+  shipping software". Supersedes: the approvals in ENGINEERS and MERGE QUEUE.
 
 ### 1.14 Testing
 
