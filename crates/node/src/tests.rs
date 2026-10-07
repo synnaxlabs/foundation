@@ -516,7 +516,8 @@ mod buffer {
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let shards = ["shard-0", "shard-1"];
-        assert_eq!(listed(&mut sim, &host, ""), shards.map(PathBuf::from));
+        let made = ["shard-0", "shard-1", "shards-2"];
+        assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
         }
@@ -531,12 +532,12 @@ mod buffer {
         assert_eq!(len, 8192 + (64 << 20));
     }
 
-    /// A crash at any point of the first opens leaves rings that the next start
-    /// opens.
+    /// A crash at any point of the claim and the first opens leaves a data directory
+    /// that the next start opens.
     #[test]
     fn a_crash_during_the_opens_leaves_rings_the_next_start_opens() {
         for crash in [sim::Crash::Process, sim::Crash::Power] {
-            // The opens end at about 1.14 ms.
+            // The claim ends at about 250 us, and the opens at about 1.3 ms.
             for step in 0..60 {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
@@ -555,10 +556,9 @@ mod buffer {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
-        // A ring that was not there would need its directory made.
-        for core in 0..2 {
-            let dir = format!("shard-{core}");
-            host.fail_file(Path::new(&dir), env::files::Operation::CreateDir);
+        // A ring or a record that was not there would need its directory made.
+        for dir in ["shard-0", "shard-1", "shards-2"] {
+            host.fail_file(Path::new(dir), env::files::Operation::CreateDir);
         }
         assert_eq!(run_on(&mut sim, &host), Ok(()));
     }
@@ -598,8 +598,8 @@ mod buffer {
         assert_eq!(panics(&mut run), Vec::<String>::new());
         assert!(matches!(taken(&mut run.node), Poll::Ready(None)));
         assert_eq!(run.node.join(), Err(opened(1)));
-        let shards = ["shard-0"].map(PathBuf::from);
-        assert_eq!(listed(&mut run.sim, &run.host, ""), shards);
+        let made = ["shard-0", "shards-3"].map(PathBuf::from);
+        assert_eq!(listed(&mut run.sim, &run.host, ""), made);
     }
 
     #[test]
@@ -640,6 +640,133 @@ mod buffer {
                 reason: "injected".into(),
             };
             assert_eq!(e, Error::Start(start), "seed {seed}");
+        }
+    }
+}
+
+mod directory {
+    use super::*;
+
+    /// Makes the record of a node of `stored` shards in `host`'s data directory.
+    fn record(sim: &mut sim::Sim, host: &sim::node::Node, stored: usize) {
+        sim.run_on(host, move |host, _| async move {
+            let record = PathBuf::from(format!("shards-{stored}"));
+            host.files().create_dir(&record).await.expect("makes");
+        })
+        .expect("the run ends");
+    }
+
+    #[test]
+    fn a_data_directory_made_for_another_shard_count_is_refused() {
+        for (cores, text) in [
+            (
+                2,
+                "the data directory holds 3 shards, but this node starts 2; start it \
+                 on 3 cores",
+            ),
+            (
+                4,
+                "the data directory holds 3 shards, but this node starts 4; start it \
+                 on 3 cores",
+            ),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, cores);
+            record(&mut sim, &host, 3);
+            let e = run_on(&mut sim, &host).unwrap_err();
+            assert_eq!(e, Error::Shards { stored: 3, cores });
+            assert_eq!(e.to_string(), text);
+            let listed = listed(&mut sim, &host, "");
+            assert_eq!(listed, [PathBuf::from("shards-3")], "{cores} cores");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_count_is_not_a_record() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        sim.run_on(&host, |host, _| async move {
+            let files = host.files();
+            for name in ["shards-x", "shards", "other-3"] {
+                files.create_dir(Path::new(name)).await.expect("makes");
+            }
+        })
+        .expect("the run ends");
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
+        let listed = listed(&mut sim, &host, "");
+        let made = [
+            "other-3", "shard-0", "shard-1", "shards", "shards-2", "shards-x",
+        ];
+        assert_eq!(listed, made.map(PathBuf::from));
+    }
+
+    #[test]
+    fn a_failed_file_call_of_the_claim_stops_the_node_before_any_ring() {
+        use env::files::Operation::{CreateDir, List, SyncDir};
+        for (path, operation, text, made) in [
+            ("", List, "list of  failed with OS error 5", &[][..]),
+            (
+                "shards-2",
+                CreateDir,
+                "create_dir of shards-2 failed with OS error 5",
+                &[][..],
+            ),
+            (
+                "",
+                SyncDir,
+                "sync_dir of  failed with OS error 5",
+                &["shards-2"][..],
+            ),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new(path), operation);
+            let e = run_on(&mut sim, &host).unwrap_err();
+            let io = env::files::Error::Io {
+                path: PathBuf::from(path),
+                operation,
+                code: 5,
+            };
+            assert_eq!(e, Error::Directory(io), "{operation:?}");
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "cannot read or record the shard count of the data directory: \
+                     {text}"
+                )
+            );
+            let made: Vec<PathBuf> = made.iter().map(PathBuf::from).collect();
+            assert_eq!(listed(&mut sim, &host, ""), made, "{operation:?}");
+        }
+    }
+
+    #[test]
+    fn join_gives_a_refused_data_directory_over_a_shard_that_panicked() {
+        for seed in 0..32 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 3);
+            record(&mut sim, &host, 2);
+            host.fail_shard(2, Fault::Panic);
+            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let mut run = Run {
+                seed,
+                sim,
+                host,
+                node,
+            };
+            panics(&mut run);
+            let e = run.node.join().unwrap_err();
+            assert_eq!(
+                e,
+                Error::Shards {
+                    stored: 2,
+                    cores: 3
+                },
+                "seed {seed}"
+            );
         }
     }
 }

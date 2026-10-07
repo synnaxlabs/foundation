@@ -2261,7 +2261,11 @@ How to read this record:
   not open stops the node, and `join` gives `Error::Buffer` with the core, after
   `Start` and `Memory` and before `Panicked`. A data directory made for another shard
   count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
-  is the long-term path (#1077). Running the stored count on another core count lost:
+  is the long-term path (#1077). The count is an empty directory `shards-<n>` in the
+  data directory, made and synced before `shard-0`, so a crash leaves it whole or
+  absent. Shard 0 claims it at the head of the interner handoff. Another count gives
+  `Error::Shards`, and a failed file call `Error::Directory`. A one-sector file lost:
+  it needs a block, a write, two syncs, and a decode (#1076). Running the stored count on another core count lost:
   it bends C2. Decided by the architect on #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
