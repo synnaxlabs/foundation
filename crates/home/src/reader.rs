@@ -200,7 +200,7 @@ impl Set {
             });
         }
         keys.clear();
-        mem::swap(keys, &mut self.keys);
+        keys.append(&mut self.keys);
         keys.sort_unstable();
         keys.dedup();
     }
