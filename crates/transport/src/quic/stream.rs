@@ -2095,6 +2095,7 @@ mod tests {
             for receiver in &mut receivers {
                 let read = next(&mut pair.server, now, receiver);
                 assert_eq!(read, Ok(Poll::Ready(Some((1..=LEN).collect()))));
+                // Private: a buffer left after the read shows in no public count.
                 assert_eq!(receiver.reader.held(), (None, 0));
             }
         });
@@ -2130,11 +2131,13 @@ mod tests {
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut before, |_, _| None);
             assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
+            // Private: tests/held.rs checks this drop through the heap.
             assert_eq!(before.reader.held(), (None, 0));
             pair.run(Duration::from_secs(3));
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut after, |_, _| None);
             assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+            // Private: tests/held.rs checks this drop through the heap.
             assert_eq!(after.reader.held(), (None, 0));
         });
     }

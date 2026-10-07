@@ -234,14 +234,12 @@ impl Held {
     }
 
     /// Copies the chunks into the buffer of a message of `len` bytes, and drops them.
+    /// The first chunk makes the buffer, so a message with no chunks holds no heap.
     fn spill(&mut self, len: usize) {
-        if self.chunks.is_empty() {
-            return;
-        }
-        if self.buffer.capacity() == 0 {
-            self.buffer = Vec::with_capacity(len);
-        }
         for chunk in self.chunks.drain(..) {
+            if self.buffer.capacity() == 0 {
+                self.buffer = Vec::with_capacity(len);
+            }
             self.buffer.extend_from_slice(&chunk);
         }
     }

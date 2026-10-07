@@ -1,7 +1,7 @@
 //! A message that waits for a block from the pool is held on the heap, outside the
 //! pool. When its stream resets or its session closes, the read that gives the error
 //! frees it, though the caller keeps the receiver. The count covers each thread, so
-//! this binary has no test harness.
+//! this binary has no test harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -50,10 +50,10 @@ fn main() {
     ] {
         let (read, freed) = run(end);
         assert_eq!(read, Some(error), "{end:?}: the read after the end");
-        assert!(
-            freed >= LEN,
-            "{end:?}: the read that gave the error freed {freed} bytes, \
-             under the {LEN} of the message"
+        assert_eq!(
+            freed, LEN,
+            "{end:?}: the read that gives the error frees the buffer of the message, \
+             made at its length"
         );
     }
 }
