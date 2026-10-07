@@ -1161,11 +1161,12 @@ mod tests {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
-            // The close's drain ends in the pause, before the keep-alive.
             drop(session);
-            // The drop's wake waits in the pause too, so it cannot drain the
-            // endpoint early.
             drop(carrier);
+            // The task sends the close and arms the drain timer, which falls due in
+            // the pause, before the keep-alive.
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert!(socket(&node).is_err());
             node.pause(spans(Span::MILLISECOND, 150));
             node.clock().sleep(spans(Span::MILLISECOND, 151)).await;
             assert_eq!(socket(&node).err(), None);

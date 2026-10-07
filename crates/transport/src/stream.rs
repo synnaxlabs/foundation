@@ -800,6 +800,14 @@ mod tests {
                 assert_eq!(sender.send(side.block(b"a")).await, Err(CANCELLED));
                 let tried = sender.try_send(side.block(b"a")).map(|_| ());
                 assert_eq!(tried, Err(CANCELLED));
+                let part = [super::Part {
+                    range: 0..1,
+                    zeros: 0,
+                }];
+                let sent = sender.send_parts(side.block(b"a"), &part).await;
+                assert_eq!(sent, Err(CANCELLED));
+                let tried = sender.try_send_parts(side.block(b"a"), &part);
+                assert_eq!(tried.map(|_| ()), Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
