@@ -169,10 +169,7 @@ const fn codes(data_type: Type) -> (u8, u8, u32) {
             element,
             rows,
             columns,
-        } => {
-            let ([r0, r1], [c0, c1]) = (rows.to_le_bytes(), columns.to_le_bytes());
-            (5, code(element), u32::from_le_bytes([r0, r1, c0, c1]))
-        }
+        } => (5, code(element), u32::from(rows) | u32::from(columns) << 16),
     }
 }
 
