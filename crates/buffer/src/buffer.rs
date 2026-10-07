@@ -408,6 +408,13 @@ impl Buffer {
         self.shared.layout
     }
 
+    /// The block pool from [`Config::pool`]. Its largest block bounds an entry, with
+    /// [`Limit::Block`].
+    #[must_use]
+    pub fn pool(&self) -> &Pool {
+        &self.shared.pool
+    }
+
     /// Where `path` of the index at `slot` stands, with every appended entry.
     #[must_use]
     pub fn tail(&self, slot: Slot, path: Path) -> Tail {
