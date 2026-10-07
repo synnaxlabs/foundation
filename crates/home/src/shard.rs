@@ -775,13 +775,13 @@ mod tests {
             self.with(0, buffer, mesh)
         }
 
-        /// A shard of the number `shard` over `buffer`, with mesh time from `mesh`.
-        fn with(&self, shard: u32, buffer: Buffer, mesh: clock::Reader) -> Shard {
+        /// A shard of the number `shard` over `buffer`, with the clocks of `clock`.
+        fn with(&self, shard: u32, buffer: Buffer, clock: clock::Reader) -> Shard {
             Shard::new(Config {
                 shard,
                 buffer,
                 pool: Rc::clone(&self.pool),
-                clock: mesh,
+                clock,
                 limits: LIMITS,
             })
         }
@@ -1714,6 +1714,29 @@ mod tests {
                 handoffs.len(),
                 1,
                 "b takes index 2 when the lease of a ends"
+            );
+        });
+    }
+
+    #[test]
+    fn renews_the_lease_only_on_the_indexes_that_a_write_carries() {
+        run(90, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = Writer {
+                lease: Some(Span::from_nanos(1_000_000)),
+                ..writer("a", 1, &set)
+            };
+            let a = shard.open_writer(a).expect("synced");
+            let wait = Span::from_nanos(600_000);
+            test.clock.sleep(wait).await;
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            test.clock.sleep(wait).await;
+            let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(a, LIVE, second),
+                Ok(&[applied(0, 1, 1), refused(2, Refusal::Expired)][..])
             );
         });
     }

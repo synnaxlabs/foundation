@@ -16,8 +16,8 @@ pub(crate) struct Writer {
     pub(crate) subject: Name,
     /// The writer's authority. The home does not cap it by access yet.
     pub(crate) authority: Authority,
-    /// How long the writer may go without a write and keep control, or `None` for
-    /// no limit.
+    /// How long the writer may go without a write to an index and keep control of
+    /// it, or `None` for no limit. A write to one index does not renew another.
     pub(crate) lease: Option<Span>,
     /// The key set of every frame the writer writes.
     pub(crate) set: Arc<KeySet>,
@@ -86,7 +86,9 @@ mod tests {
 
     #[test]
     fn says_what_to_do_for_each_error() {
-        let lease = Error::Lease { span: Span::ZERO };
+        let lease = Error::Lease {
+            span: Span::from_nanos(-3),
+        };
 
         assert_eq!(
             Error::Unsynced.to_string(),
@@ -94,7 +96,7 @@ mod tests {
         );
         assert_eq!(
             lease.to_string(),
-            format!("control lease must be longer than zero, got {}", Span::ZERO)
+            "control lease must be longer than zero, got -3ns"
         );
     }
 
