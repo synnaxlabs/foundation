@@ -46,6 +46,7 @@ In 4 of the 5 worst escaped defects, the defect came in through a fix or a defer
 nothing checked again. So when round 1 led to fix commits:
 
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
-   with the round 1 comment attached.
+   with the round 1 comment attached. When a fix commit changes code on a hot path, run
+   `performance` again on it too, and update the Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing.
