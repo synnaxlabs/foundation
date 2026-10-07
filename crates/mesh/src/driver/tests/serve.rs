@@ -10,6 +10,8 @@ use super::*;
 const MALFORMED: Code = Code(2);
 /// The code of a stream with a message that the mesh refused.
 const REFUSED: Code = Code(16);
+/// Half of the shortest election timeout.
+const HALF: Span = Span::from_nanos(5 * TICK.nanos());
 
 /// Node 2, with its session to node 1.
 struct Peer {
@@ -71,7 +73,27 @@ where
     M: Future<Output: Send + 'static> + 'static,
     P: Future<Output: Send + 'static> + 'static,
 {
-    let mut sim = Sim::new(sim::Config::default());
+    let mesh = |node, tasks, incoming, _| mesh(node, tasks, incoming);
+    run_shared(0, create_pool, mesh, peer)
+}
+
+/// As [`run`], on run `seed` of the simulation, and the transport of node 1 has the
+/// pool that `pool` makes. `mesh` also gets it, so that a mesh can share it as on a
+/// shard.
+fn run_shared<M, P>(
+    seed: u64,
+    pool: fn() -> Rc<Pool>,
+    mesh: impl FnOnce(sim::node::Node, Tasks, Incoming, Rc<Pool>) -> M + Send + 'static,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> (M::Output, P::Output)
+where
+    M: Future<Output: Send + 'static> + 'static,
+    P: Future<Output: Send + 'static> + 'static,
+{
+    let mut sim = Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
     let at = SocketAddr::new(nodes[0].addresses()[0], PORT);
     let served = Arc::new(Mutex::new(None));
@@ -82,13 +104,16 @@ where
     };
     let (node, result) = (nodes[0].clone(), Arc::clone(&served));
     let main = move |tasks: Tasks| async move {
-        let transport = create_transport(&node, &tasks, 1, PORT, create_pool());
+        let pool = pool();
+        let transport = create_transport(&node, &tasks, 1, PORT, Rc::clone(&pool));
         let session = transport.accept().await.unwrap();
         let mut incoming = session.accept().await.unwrap();
-        let header = incoming.receiver.recv().await.unwrap().unwrap();
-        let protocol = wire::header::decode(&header).unwrap();
-        assert_eq!(protocol, (Protocol::Mesh, &[][..]));
-        let output = mesh(node, tasks, incoming).await;
+        {
+            let header = incoming.receiver.recv().await.unwrap().unwrap();
+            let protocol = wire::header::decode(&header).unwrap();
+            assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+        }
+        let output = mesh(node, tasks, incoming, pool).await;
         *result.lock().unwrap() = Some(output);
         drop(session.closed().await);
     };
@@ -197,8 +222,9 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
                 let mesh = Mesh::start(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
                 // The group did not see the heartbeat after the refused message:
-                // its reply comes after the write of the term.
-                node.clock().sleep(seconds(1)).await;
+                // its reply comes after the write of the term. The wait is
+                // shorter than each election timeout.
+                node.clock().sleep(HALF).await;
                 assert!(quiet(&mesh, 2).await);
                 served
             },
@@ -232,7 +258,7 @@ fn serve_stops_a_one_way_stream_at_a_message_that_it_does_not_carry() {
             |node, tasks, incoming| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let served = mesh.serve(public(2), incoming).await;
-                node.clock().sleep(seconds(1)).await;
+                node.clock().sleep(HALF).await;
                 assert!(quiet(&mesh, 2).await);
                 served
             },
@@ -457,7 +483,8 @@ fn serve_gives_the_cause_when_the_peer_stopped_the_reply_half() {
             peer.settle().await;
             peer.send(&mut sender, &propose(3)).await;
             sender.finish().unwrap();
-            peer.settle().await;
+            // Node 1 leads and serves first: the session lives until then.
+            peer.node.clock().sleep(seconds(10)).await;
         },
     );
     let cause = transport::Error::Stopped { code: Code(40) };
@@ -499,35 +526,173 @@ fn serve_refuses_a_proposal_of_a_peer_that_is_no_voter() {
     assert_eq!((served, seen), (Err(refused), codes(REFUSED)));
 }
 
+// The write of a local proposal waits for a block when the forwarded proposal comes.
 #[test]
-fn serve_refuses_a_proposal_when_the_pool_has_no_block_for_the_answer() {
+fn serve_refuses_a_proposal_while_a_write_of_the_log_waits_for_a_block() {
     let (served, seen) = run(
         |node, tasks, incoming| async move {
             let pool = small_pool();
             let (mesh, first) = leader(&node, &tasks, Rc::clone(&pool)).await;
             let held = fill(&pool);
+            let mut local = pin!(mesh.propose(home(4)));
+            assert!(now(local.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
             let served = mesh.serve(public(1), incoming).await;
             drop(held);
+            assert_eq!(local.await, Ok(after(first, 1)));
             // The group did not see the change.
-            assert_eq!(mesh.propose(home(4)).await, Ok(after(first, 1)));
+            assert_eq!(mesh.propose(home(5)).await, Ok(after(first, 2)));
             served
         },
         |peer| async move { stopped(peer, &[propose(3)]).await },
     );
-    assert_eq!((served, seen), (Err(exhausted(17)), codes(REFUSED)));
+    assert_eq!((served, seen), (Err(exhausted(93)), codes(REFUSED)));
 }
 
+/// What `serve` gave in 30 s, what a later proposal gave in 30 s, and the position
+/// of the first entry.
+type Served = (
+    Option<Result<(), Error>>,
+    Option<Result<Position, Error>>,
+    Position,
+);
+
+/// Serves `incoming` on `mesh`, then proposes one more change.
+async fn serve_then_propose(
+    node: &sim::node::Node,
+    mesh: &Mesh,
+    incoming: Incoming,
+    first: Position,
+) -> Served {
+    let clock = node.clock();
+    let serve = pin!(mesh.serve(public(1), incoming));
+    let served = within(&clock, seconds(30), serve).await;
+    let later = within(&clock, seconds(30), pin!(mesh.propose(home(4)))).await;
+    (served, later, first)
+}
+
+/// Forwards a proposal, and gives its answer when one comes in 10 s.
+async fn forward(peer: Peer) -> Option<Result<Option<Message>, transport::Error>> {
+    let (mut sender, mut receiver) = peer.ask(&[propose(3)]).await;
+    sender.finish().unwrap();
+    let clock = peer.node.clock();
+    within(&clock, seconds(10), pin!(next(&mut receiver))).await
+}
+
+/// Asserts that `serve` answered the proposal of [`forward`], and that the group took
+/// a later one.
+fn assert_answered(
+    served: Served,
+    answer: Option<Result<Option<Message>, transport::Error>>,
+) {
+    let (served, later, first) = served;
+    let at = after(first, 1);
+    let answered = Some(Ok(Some(Message::Proposed { at })));
+    assert_eq!(
+        (served, answer, later),
+        (Some(Ok(())), answered, Some(Ok(after(first, 2))))
+    );
+}
+
+// Another user of the pool leaves room for the one block of a write, 192 bytes. A
+// block of the answer that `serve` holds while the group writes takes that room, and
+// only the end of the write frees it.
 #[test]
-fn serve_refuses_a_proposal_when_the_group_stops() {
-    let ((served, stop), seen) = run(
+fn serve_answers_a_proposal_when_the_pool_has_room_for_only_the_write() {
+    let (served, answer) = run(
         |node, tasks, incoming| async move {
-            let (mesh, _) = leader(&node, &tasks, create_pool()).await;
-            let stop = fail_sync(&node);
-            (mesh.serve(public(1), incoming).await, stop)
+            let pool = small_pool();
+            let (mesh, first) = leader(&node, &tasks, Rc::clone(&pool)).await;
+            let _held = [pool.alloc(3584).unwrap(), pool.alloc(192).unwrap()];
+            serve_then_propose(&node, &mesh, incoming, first).await
+        },
+        forward,
+    );
+    assert_answered(served, answer);
+}
+
+// The mesh and the transport share the pool, as on a shard, so the block of the
+// proposal, 128 bytes, comes from the room of the write. The write has its 192 bytes
+// only after that block drops.
+#[test]
+fn serve_drops_the_block_of_the_proposal_before_the_group_writes() {
+    let (served, answer) = run_shared(
+        0,
+        small_pool,
+        |node, tasks, incoming, pool| async move {
+            let (mesh, first) = leader(&node, &tasks, Rc::clone(&pool)).await;
+            let _held = [pool.alloc(3584).unwrap(), pool.alloc(192).unwrap()];
+            serve_then_propose(&node, &mesh, incoming, first).await
+        },
+        forward,
+    );
+    assert_answered(served, answer);
+}
+
+// The system gives no memory for a block of a new size. The log has its block, and
+// the answer is the first block of its size.
+#[test]
+fn serve_gives_no_answer_when_the_pool_has_no_block_for_it() {
+    let ((served, taken, later, first), seen) = run(
+        |node, tasks, incoming| async move {
+            let budget = block::Config { budget: 1 << 20 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            let (mesh, first) = leader(&node, &tasks, pool).await;
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            switch.refuse();
+            let served = mesh.serve(public(1), incoming).await;
+            switch.allow();
+            let taken = watch.next().await;
+            (served, taken, mesh.propose(home(4)).await, first)
         },
         |peer| async move { stopped(peer, &[propose(3)]).await },
     );
-    assert_eq!((served, seen), (Err(stop), codes(REFUSED)));
+    let error = Error::Pool(block::Error::Refused { requested: 17 });
+    assert_eq!(
+        error.to_string(),
+        "the pool has no block for the mesh now: the system refused memory for a block \
+         of 17 bytes"
+    );
+    assert_eq!(served, Err(error));
+    // The group took the change.
+    assert_eq!((taken, later), (Ok(Some(key(3))), Ok(after(first, 2))));
+    // No code of the mesh.
+    assert_eq!(seen, codes(Code(0)));
+}
+
+// The group stops in the write of the entry of the proposal. By the draw of the disk,
+// the sync that fails keeps the bytes of the entry or not, so the stop is no refusal.
+#[test]
+fn serve_gives_no_code_of_the_mesh_when_the_group_stops() {
+    let mut homes = BTreeSet::new();
+    for seed in 0..16 {
+        let ((served, home), seen) = run_shared(
+            seed,
+            create_pool,
+            |node, tasks, incoming, _| async move {
+                let (mesh, _) = leader(&node, &tasks, create_pool()).await;
+                fail_sync(&node);
+                let served = mesh.serve(public(1), incoming).await;
+                drop(mesh);
+                let config = config(&node, &tasks, 1, &[1, 2], &[1]);
+                let mesh = Mesh::open(config).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                assert_eq!(watch.next().await, Ok(None));
+                (served, watch.next().await)
+            },
+            |peer| async move { stopped(peer, &[propose(3)]).await },
+        );
+        let text = "the group stopped: sync of log/log-0 failed with OS error 5";
+        assert_eq!(served.unwrap_err().to_string(), text);
+        assert_eq!(seen, codes(Code(0)));
+        homes.insert(home.unwrap());
+    }
+    // After a new open, the change applies on each disk that kept its entry.
+    let kept = Some(key(3));
+    assert!(homes.contains(&kept), "no disk kept the entry: {homes:?}");
+    assert!(homes.is_subset(&[Some(key(1)), kept].into()), "{homes:?}");
 }
 
 #[test]

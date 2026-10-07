@@ -937,6 +937,7 @@ version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
  "block",
+ "clock",
  "env",
  "proptest",
  "raft",
@@ -1811,6 +1812,7 @@ dependencies = [
  "aws-lc-rs",
  "block",
  "bytes",
+ "counting",
  "env",
  "noq-proto",
  "proptest",
