@@ -446,7 +446,12 @@ How to read this record:
   disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
   reads, which reads each record twice, and windows held until the walk ends, which
   takes memory up to the area. Decided by the architect (#1049,
-  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). The
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). One
+  case differs: on a file with no header, the open writes and syncs the first checkpoint
+  before the walk, so a false CRC match of the new chain value, 1 in 2^32, gives
+  `Invalid` after that write. Each statement about a record holds only when no CRC gives
+  a false match. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971). The
   restart record needs one free block: an open of a full ring first moves records at the
   tail to a segment. The walk holds one pool block at a time and reads a longer record
   in pieces of the pool's largest block, so the pool puts no bound on `body_max`. An
