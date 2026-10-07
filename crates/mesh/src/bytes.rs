@@ -57,7 +57,8 @@ pub(crate) fn take_keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
     Some(keys)
 }
 
-fn put_count(count: usize, out: &mut Vec<u8>) {
+/// Adds a count as 8 little-endian bytes.
+pub(crate) fn put_count(count: usize, out: &mut Vec<u8>) {
     let count = u64::try_from(count).expect("invariant: a count fits in 64 bits");
     out.extend(count.to_le_bytes());
 }
