@@ -23,6 +23,116 @@ use crate::{handoff, order, split, stored};
 
 /// The indexes of one shard, with their writers and readers. It is not `Send`: each
 /// call is on the shard's thread.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::PathBuf;
+/// # use std::rc::Rc;
+/// #
+/// # use block::{Heap, Pool};
+/// # use buffer::{Buffer, Layout};
+/// # use types::channel::{Key, Slots};
+/// # use types::frame::key_set::{Group, Interner};
+/// # use types::frame::{Draft, Form};
+/// # use types::sample::{Scalar, Type};
+/// #
+/// # type Error = Box<dyn std::error::Error>;
+/// #
+/// # async fn example(
+/// #     node: sim::node::Node,
+/// #     tasks: env::tasks::Tasks,
+/// # ) -> Result<(), Error> {
+/// #     let (clock, reader) = clock::Clock::new(node.clock());
+/// #     let wall = node.wall();
+/// #     tasks.spawn(async move { clock.run(wall).await });
+/// #     let (stamps, values) = (Key::from_u128(1), Key::from_u128(2));
+/// #     let mut slots = Slots::new();
+/// #     let mut interner = Interner::new();
+/// #     let index = slots.assign(stamps);
+/// #     slots.assign(values);
+/// #     interner.slots().assign(stamps);
+/// #     interner.slots().assign(values);
+/// #     let set = interner.intern(&[Group {
+/// #         index: stamps,
+/// #         data: &[(values, Type::Scalar(Scalar::I64))],
+/// #     }]);
+/// #     let config = block::Config { budget: 1 << 21 };
+/// #     let heap = Heap::new(config.reservation());
+/// #     let pool = Rc::new(Pool::new(config, heap));
+/// #     let mut frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8), (1, 8)])?;
+/// #     for (entry, sample) in [(0, 10_i64), (1, 7)] {
+/// #         let series = frame.series_mut(entry).expect("the series is present");
+/// #         series.copy_from_slice(&sample.to_le_bytes());
+/// #     }
+/// #     frame.set_count(0, 1);
+/// #     let config = buffer::Config {
+/// #         files: node.files(),
+/// #         dir: PathBuf::from("shard-0"),
+/// #         pool,
+/// #         clock: node.clock(),
+/// #         tasks,
+/// #         entropy: node.entropy(),
+/// #         layout: Layout::new(1 << 18, 4087).expect("a ring"),
+/// #         commit: Span::from_nanos(10_000_000),
+/// #     };
+/// #     let buffer = Buffer::open(config, &mut slots).await?;
+/// #     while reader.now().mesh.is_none() {
+/// #         node.clock().sleep(Span::from_nanos(1)).await;
+/// #     }
+/// use home::{Config, Outcome, Shard, order, writer};
+/// use types::authority::Authority;
+/// use types::frame::{Label, Path, Range};
+/// use types::time::{Span, Stamp};
+///
+/// let mut shard = Shard::new(Config {
+///     shard: 0,
+///     buffer,
+///     clock: reader,
+///     limits: order::Limits {
+///         earliest: Stamp::from_nanos(1),
+///         ahead: Span::from_nanos(1_000_000_000),
+///     },
+/// });
+/// shard.carry(index);
+/// let reader = shard.open_complete(index, 1 << 20)?;
+/// let writer = shard.open_writer(writer::Writer {
+///     subject: "a".parse()?,
+///     authority: Authority(1),
+///     lease: None,
+///     set,
+/// })?;
+///
+/// let range = Range { seq: 0, count: 1 };
+/// let written = shard.write(writer, Label::Path(Path::Live), frame)?;
+/// assert_eq!(written, [Outcome::Applied { slot: index, range }]);
+///
+/// shard.committed().await?;
+/// let mut woken = Vec::new();
+/// shard.woken(&mut woken);
+/// assert_eq!(woken, [reader.into()]);
+/// let taken = shard.take(reader.into()).expect("a frame waits");
+/// assert_eq!(taken.range(0), Some(range));
+/// #     Ok(())
+/// # }
+/// #
+/// # fn main() {
+/// #     let mut sim = sim::Sim::new(sim::Config::default());
+/// #     let node = sim.node(sim::node::Config::default());
+/// #     let config = env::shards::Config {
+/// #         name: "shard-0".into(),
+/// #         core: None,
+/// #     };
+/// #     let handle = node
+/// #         .shards()
+/// #         .start(config, move |tasks| async move {
+/// #             example(node, tasks).await.expect("the example ends");
+/// #         })
+/// #         .expect("the shard starts");
+/// #     sim.run().expect("the run ends");
+/// #     handle.join().expect("the shard ended");
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Shard {
     /// The shard's number on its node.

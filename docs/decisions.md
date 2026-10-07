@@ -550,6 +550,15 @@ How to read this record:
   back when the error shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500
   days ahead, so the ahead limit stops nothing and one bad stamp makes each later true
   stamp `Backwards` (#952 review, 2026-10-06).
+- **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
+  `codec`, and `home` items, apart from `Config`, which only `node` builds. `Config`
+  takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
+  for monotonic and mesh time. `home::Error` holds only what `write` gives, and each
+  other call has its own error. Conversions from `control` errors are private. The `hub`
+  row stays as it is. Lost: the lost designs of the plan
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
+  by the architect, #963
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
