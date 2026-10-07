@@ -15,7 +15,8 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Makes a policy. A `keep` of zero is valid.
+    /// Makes a policy. A `keep` of zero is valid: then no hold keeps a sample after its
+    /// store time, so a reader that is behind gets a gap.
     ///
     /// # Errors
     ///
