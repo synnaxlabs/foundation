@@ -1913,9 +1913,9 @@ mod tests {
         }
 
         /// The ring must also hold the blocks that a wrap skips in those commits. The
-        /// first record takes one block, so only the first wrap skips: 3 blocks. With
-        /// 1 to 5 commits before the doubled one, the skip is in the commit after it,
-        /// in it (2 and 3), in the commit before it, or in the commit two before it.
+        /// first record takes one block, so only the first wrap must skip: 3 blocks.
+        /// With 1 to 5 commits before the doubled one, that wrap is in the commit after
+        /// it, in it (2 and 3), in the commit before it, or in the one two before it.
         #[test]
         fn a_ring_that_holds_three_commits_and_no_wrap_skip_refuses_a_record() {
             let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
