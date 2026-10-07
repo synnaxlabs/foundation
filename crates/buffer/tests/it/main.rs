@@ -145,8 +145,9 @@ impl Shard {
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
-    /// the record before it, a restart record or a data record, or the tail chain of
-    /// the header. The tail offset in each header block must be 0.
+    /// the record before it, a restart record or a data record. The tail offset in
+    /// each header block must be 0. The first record follows the tail chain of the
+    /// header, so for it the two header blocks must be the same up to the seq.
     fn seal(&self, offset: u64) {
         let file = self.memory.bytes(RING);
         for block in [0, to_usize(BLOCK)] {
@@ -166,12 +167,11 @@ impl Shard {
         assert_eq!(at, start, "no record starts at {offset}");
         let chain = match before.map(|before| (before, file[before + 8])) {
             None => {
-                let blocks = [0, to_usize(BLOCK)];
-                let magic = |&block: &usize| file[block..].starts_with(b"FNDNRING");
-                assert!(blocks.iter().any(magic), "the ring has no header");
-                let chains = blocks.map(|block| u32_at(block + CHAIN_AT));
-                assert_eq!(chains[0], chains[1], "the header holds two tail chains");
-                chains[0]
+                let [first, second] =
+                    [0, to_usize(BLOCK)].map(|block| &file[block..block + SEQ_AT]);
+                assert_eq!(first, second, "the header blocks differ before the seq");
+                assert!(first.starts_with(b"FNDNRING"), "the ring has no header");
+                u32_at(CHAIN_AT)
             }
             Some((before, RESTART)) => u32_at(before + 9),
             Some((before, DATA)) => u32_at(before + 4),
@@ -2240,7 +2240,7 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
 /// The first record follows the tail chain of the header, and a zero header block
 /// holds another one.
 #[test]
-#[should_panic(expected = "the header holds two tail chains")]
+#[should_panic(expected = "the header blocks differ before the seq")]
 fn seal_refuses_the_first_record_under_two_tail_chains() {
     run(112, Memory::default(), |shard| async move {
         shard.create_two_records().await;
@@ -2362,6 +2362,8 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
     let cases = [
         (None, first, true),
         (None, second, false),
+        (Some(first), first, true),
+        (Some(first), second, false),
         (Some(second), first, false),
         (Some(second), second, true),
     ];
@@ -2379,7 +2381,8 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
                 return shard.open_refused(ring, error).await;
             }
             let opened = shard.open(ring, &mut Slots::new()).await;
-            assert_eq!(opened.map(drop), Ok(()), "the block at {unaligned}");
+            let case = format!("newer: {newer:?}, the block at {unaligned}");
+            assert_eq!(opened.map(drop), Ok(()), "{case}");
         });
     }
 }
