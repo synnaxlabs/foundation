@@ -82,15 +82,16 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// - [`Error::Duplicate`] when two of `config.members` name one node.
+    /// - [`Error::Member`] when the region cannot hold one of `config.members`, or two
+    ///   name one node.
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
-        let state = region::State::new(config.region, config.members)
-            .map_err(|region::Duplicate { key }| Error::Duplicate(key))?;
+        let state =
+            region::State::new(config.region, config.members).map_err(Error::Member)?;
         let signer = Signer::new(config.key, &config.private_key);
         match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
@@ -491,7 +492,7 @@ mod tests {
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
-    use crate::region::Malformed;
+    use crate::region::{Malformed, Refused};
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
@@ -1512,14 +1513,18 @@ mod tests {
                     let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
                     config.members.insert(at, second);
                     let opened = Mesh::open(config).await.err();
-                    let duplicate = Some(Error::Duplicate(key(2)));
+                    let duplicate =
+                        Some(Error::Member(Refused::Duplicate { key: key(2) }));
                     assert_eq!(opened, duplicate, "{case} at {at}");
                     assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
                 });
             }
         }
-        let text = format!("node {} has two member records", key(2));
-        assert_eq!(Error::Duplicate(key(2)).to_string(), text);
+        let text = format!("node {} is already a member", key(2));
+        assert_eq!(
+            Error::Member(Refused::Duplicate { key: key(2) }).to_string(),
+            text
+        );
     }
 
     #[test]

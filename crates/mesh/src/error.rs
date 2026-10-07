@@ -3,7 +3,7 @@ use std::fmt;
 use raft::Position;
 use types::node;
 
-use crate::region::Malformed;
+use crate::region::{Malformed, Refused};
 use crate::{grant, log};
 
 /// Why a mesh call failed.
@@ -28,8 +28,8 @@ pub(crate) enum Error {
     Grant(grant::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
-    /// Two member records name one node.
-    Duplicate(node::Key),
+    /// The region cannot hold a member record of the config.
+    Member(Refused),
     /// This node's private key is not the key of its member.
     WrongKey,
     /// The group stopped.
@@ -53,7 +53,7 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
-            Self::Duplicate(key) => write!(f, "node {key} has two member records"),
+            Self::Member(refused) => refused.fmt(f),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
