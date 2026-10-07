@@ -132,13 +132,13 @@ nothing checked again. So when round 1 led to fix commits:
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
    with the round 1 comment and each architect review attached. Only a range that
    changes no `.rs` line but comments skips `breaker`, and its round comment says so.
-   The `reviewer` also gets each answer that changed no code, and checks it against the
-   code and against "Findings" step 3: an answer that names later work and is not on the
-   `Deferred:` line, or a deferral in a risk crate with no linked OK, is a finding. Its
-   report gives the `Public surface:` and `Hot path:` lines for the range. The round
-   comment adds each item of the first to its own `Public surface:` line, and copies the
-   second. When the `Hot path:` line names a function, run `performance` again on the
-   range, and update the Performance section with its numbers.
+   The `reviewer` also gets each answer that changed no code, and checks it
+   (`.claude/agents/reviewer.md`). The round comment puts each deferral that its report
+   names on its `Deferred:` line. Its report gives the `Public surface:` and `Hot path:`
+   lines for the range. The round comment adds each item of the first to its own
+   `Public surface:` line, and copies the second. When the `Hot path:` line names a
+   function, run `performance` again on the range, and update the Performance section
+   with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
