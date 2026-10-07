@@ -54,8 +54,9 @@ pub(crate) struct Config {
     pub(crate) pool: Rc<Pool>,
 }
 
-/// One node's part in the group of a region. The group runs until it stops or the
-/// mesh and its watches drop. It stays on the shard that opened it.
+/// One node's part in the group of a region. Clones share it. The group runs until
+/// it stops or each clone and each watch drops. It stays on the shard that opened it.
+#[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
 }
@@ -455,7 +456,7 @@ mod tests {
     }
 
     /// Sends each message for `to` as one datagram.
-    async fn send(mesh: Rc<Mesh>, mut sender: udp::Sender, to: u8) -> ! {
+    async fn send(mesh: Mesh, mut sender: udp::Sender, to: u8) -> ! {
         loop {
             let message = mesh.outgoing(key(to)).await.unwrap();
             let contents = Message::Raft(message).encode();
@@ -471,7 +472,7 @@ mod tests {
     }
 
     /// Gives the mesh each datagram, with the key of the node at its source address.
-    async fn receive(mesh: Rc<Mesh>, mut receiver: udp::Receiver) -> ! {
+    async fn receive(mesh: Mesh, mut receiver: udp::Receiver) -> ! {
         let mut bytes = vec![0; 1 << 16];
         loop {
             let mut meta = [Meta::default()];
@@ -497,12 +498,7 @@ mod tests {
 
     /// Proposes the change of node `id` in the script, once per tick, until the
     /// group takes it.
-    async fn propose(
-        mesh: Rc<Mesh>,
-        clock: Clock,
-        id: u8,
-        board: Arc<Mutex<Board>>,
-    ) -> ! {
+    async fn propose(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
             let mut board = board.lock().unwrap();
@@ -590,7 +586,7 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let mesh = Rc::new(open(&node, &tasks, id, &IDS, &IDS).await.unwrap());
+        let mesh = open(&node, &tasks, id, &IDS, &IDS).await.unwrap();
         let config = udp::Config {
             local: address(id),
             send_buffer_bytes: 1 << 20,
@@ -598,12 +594,12 @@ mod tests {
         };
         let (sender, receiver) = node.net().udp(&config).unwrap();
         for to in IDS.into_iter().filter(|&to| to != id) {
-            let (mesh, sender) = (Rc::clone(&mesh), sender.clone());
+            let (mesh, sender) = (mesh.clone(), sender.clone());
             tasks.spawn(async move {
                 send(mesh, sender, to).await;
             });
         }
-        let (receiving, proposing) = (Rc::clone(&mesh), Rc::clone(&mesh));
+        let (receiving, proposing) = (mesh.clone(), mesh.clone());
         tasks.spawn(async move {
             receive(receiving, receiver).await;
         });
@@ -843,15 +839,46 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_voter_leads_after_one_election_timeout() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let clock = node.clock();
+            let opened = clock.now();
+            lead(&mesh, &clock, home(1)).await;
+            let waited = clock.now() - opened;
+            // The timeout is 10 to 19 ticks, and `lead` proposes once per tick.
+            let timeout = seconds(1)..=seconds(2);
+            assert!(timeout.contains(&waited), "it led after {waited}");
+        });
+    }
+
+    #[test]
+    fn an_input_does_not_wait_for_the_next_tick() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let clock = node.clock();
+            let opened = clock.now();
+            // The group now waits for its first tick.
+            clock.sleep(Span::MILLISECOND).await;
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply, None));
+            let waited = clock.now() - opened;
+            assert!(waited < TICK, "the reply came after {waited}");
+        });
+    }
+
+    #[test]
     fn a_log_that_cannot_write_stops_the_group() {
         solo(|node, tasks| async move {
-            let mesh = Rc::new(open(&node, &tasks, 1, &[1], &[1]).await.unwrap());
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(None));
             lead(&mesh, &node.clock(), home(1)).await;
             assert_eq!(watch.next().await, Ok(Some(key(1))));
             let waiting = Rc::new(RefCell::new(None));
-            let (other, slot) = (Rc::clone(&mesh), Rc::clone(&waiting));
+            let (other, slot) = (mesh.clone(), Rc::clone(&waiting));
             tasks.spawn(async move {
                 let message = other.outgoing(key(2)).await;
                 *slot.borrow_mut() = Some(message);
