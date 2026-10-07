@@ -441,22 +441,21 @@ impl Group {
     }
 
     // Takes the joins that `raft` appended since the last sync. It runs after each
-    // change to the log of `raft`, so `unstable` holds each entry since then. When
-    // `unstable` no longer holds the synced entry, a step replaced it, and the joins
-    // from the first unstable index go.
+    // step and proposal; a tick adds no join. When `unstable` no longer holds the
+    // synced entry, a step replaced it or `ready` took it, and the joins from the
+    // first unstable index go.
     fn sync(&mut self) {
         let unstable = self.raft.unstable();
         let (Some(first), Some(last)) = (unstable.first(), unstable.last()) else {
             return;
         };
         let synced = self.synced;
-        let mut entries = unstable.iter();
-        let new = if entries.any(|entry| entry.at == synced) {
-            entries.as_slice()
-        } else {
+        let new = unstable.iter().rev().take_while(|entry| entry.at != synced);
+        let new = new.count();
+        if new == unstable.len() {
             self.unapplied.split_off(&first.at.index);
-            unstable
-        };
+        }
+        let (_, new) = unstable.split_at(unstable.len().saturating_sub(new));
         self.unapplied.extend(joins(new));
         self.synced = last.at;
     }
@@ -655,7 +654,6 @@ async fn run(
                 group.raft.tick(rng.next_u64());
                 tick = clock.sleep(TICK);
             }
-            group.sync();
             let ready = group.raft.ready();
             if ready == Ready::default() {
                 group.task = Some(cx.waker().clone());
@@ -2098,6 +2096,17 @@ mod tests {
                 let reply = message(4, 1, Body::HeartbeatReply);
                 let spoofed = Error::Spoofed { from: key(4) };
                 assert_eq!(mesh.receive(public(5), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_join_that_this_leader_proposes_gives_a_key_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
+                lead(&mesh, &node.clock(), home(1)).await;
+                assert!(started(&mesh, join(4)).await.is_pending());
+                let reply = message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply), Ok(()));
             });
         }
 

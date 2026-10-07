@@ -256,8 +256,8 @@ impl Raft {
 
     /// The entries that the next [`Raft::ready`] gives, in index order: appended
     /// since the last `ready` and not yet written. A step that replaces entries
-    /// makes it start at the first replaced index, which can be at or below the
-    /// last index that an earlier `ready` gave.
+    /// makes it start at or below the first replaced index, which can be at or
+    /// below the last index that an earlier `ready` gave.
     #[must_use]
     pub fn unstable(&self) -> &[Entry] {
         self.log.unstable()
@@ -2766,6 +2766,16 @@ mod tests {
             raft.step(message(3, 2, body)).unwrap();
             assert_eq!(raft.unstable(), entries(&[(2, 2), (2, 3)]));
             assert_eq!(raft.ready().entries, entries(&[(2, 2), (2, 3)]));
+        }
+
+        #[test]
+        fn unstable_keeps_its_start_when_a_step_replaces_an_entry_not_given() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1), (1, 2)]), 0);
+            raft.step(message(2, 1, body)).unwrap();
+            let body = append(position(1, 1), entries(&[(2, 2)]), 0);
+            raft.step(message(3, 2, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(1, 1), (2, 2)]));
         }
 
         // The term, the vote, and the leader move only for a message that is
