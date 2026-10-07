@@ -1013,6 +1013,74 @@ fn a_base_move_after_a_modify_delete_of_two_merge_bases_counts() {
     assert_eq!(repo.reaches(&first, &end), Ok(false));
 }
 
+/// A commit of `files` with `parents`, at one fixed time for every commit.
+fn at_one_time(repo: &Repo, files: &[(&[u8], &str)], parents: &[&str]) -> String {
+    let loose = repo.commit_tree(files, &[]);
+    let tree = repo.git(&["rev-parse", &format!("{loose}^{{tree}}")]);
+    let mut command = repo.command();
+    command
+        .env("GIT_AUTHOR_DATE", "@1700000000 +0000")
+        .env("GIT_COMMITTER_DATE", "@1700000000 +0000")
+        .args(["commit-tree", &tree, "-m", "c"]);
+    for parent in parents {
+        command.args(["-p", parent]);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn a_base_move_of_a_file_that_the_bases_move_aside_counts() {
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let unreviewed = format!("fn unreviewed() {{}}\n{text}");
+    let aside: &[u8] = b"d~Temporary merge branch 1";
+    for graph in [false, true] {
+        let repo = Repo::new(&format!("move-aside-{graph}"));
+        let o = at_one_time(&repo, &[(b"a.txt", "base\n")], &[]);
+        // One base adds the file `d`, the other the directory `d`: the merge of the
+        // two bases moves the file aside, to a path that the order of the bases picks.
+        let b1 = at_one_time(&repo, &[(b"a.txt", "base\n"), (b"d", text)], &[&o]);
+        let b2 = at_one_time(&repo, &[(b"a.txt", "base\n"), (b"d/k", "k\n")], &[&o]);
+        let first = at_one_time(
+            &repo,
+            &[(b"a.txt", "base\n"), (aside, &unreviewed), (b"d/k", "k\n")],
+            &[&b1, &b2],
+        );
+        let m = at_one_time(
+            &repo,
+            &[(b"a.txt", "base\n"), (aside, text), (b"d/k", "k\n")],
+            &[&b2, &b1],
+        );
+        let base = at_one_time(
+            &repo,
+            &[(b"a.txt", "base\n"), (b"x.rs", text), (b"d/k", "k\n")],
+            &[&m],
+        );
+        repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+        repo.git(&["reset", "--quiet", "--hard", &first]);
+        repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+        let end = repo.head();
+        if graph {
+            repo.git(&["commit-graph", "write", "--reachable"]);
+        }
+        assert_eq!(
+            repo.git(&["show", "HEAD:x.rs"]).lines().next(),
+            Some("fn unreviewed() {}")
+        );
+        assert_eq!(
+            repo.code_change(&first, &end),
+            Ok(Some(
+                "the base moves `d~Temporary merge branch 1`, which the PR changes, \
+                 into the code file `x.rs`"
+                    .to_string()
+            )),
+            "{graph}"
+        );
+        assert_eq!(repo.reaches(&first, &end), Ok(false), "{graph}");
+    }
+}
+
 #[test]
 fn a_base_move_from_code_or_to_text_does_not_count() {
     let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";

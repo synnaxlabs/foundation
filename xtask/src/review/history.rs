@@ -260,20 +260,20 @@ impl<'a> History<'a> {
         let [_, first, second] = line.split(' ').collect::<Vec<_>>()[..] else {
             return Ok(None);
         };
-        Ok(self.on_base(second, base)?.then_some((first, second)))
+        Ok(self.ancestor(second, base)?.then_some((first, second)))
     }
 
-    /// Reports whether `commit` is an ancestor of the commit `base`.
-    fn on_base(&self, commit: &str, base: &str) -> Result<bool, String> {
+    /// Reports whether `commit` is an ancestor of the commit `of`, or is `of`.
+    fn ancestor(&self, commit: &str, of: &str) -> Result<bool, String> {
         let status = command(self.root)
-            .args(["merge-base", "--is-ancestor", commit, base])
+            .args(["merge-base", "--is-ancestor", commit, of])
             .status()
             .map_err(|e| format!("git merge-base: {e}"))?;
         match status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => Err(format!(
-                "git merge-base --is-ancestor {commit} {base}: {status}"
+                "git merge-base --is-ancestor {commit} {of}: {status}"
             )),
         }
     }
@@ -292,7 +292,7 @@ impl<'a> History<'a> {
     /// The phrase "the base moves `<old>`, which the PR changes, into the code file
     /// `<new>`" for the first path `<old>` of `changed(first, second)` that their
     /// merge, with the tree `tree`, moves into the code file `<new>`. The moves are the
-    /// merge's own: `second` is merged again with a child of `first` that gives each
+    /// merge's own: `second` is merged again with a copy of `first` that gives each
     /// such path a probe text of its own, and the probe text is read in the code files
     /// that the two merges make differently.
     ///
@@ -305,6 +305,10 @@ impl<'a> History<'a> {
         second: &str,
         tree: &str,
     ) -> Result<Option<String>, String> {
+        // The merge is `first`, and moves nothing.
+        if self.ancestor(second, first)? {
+            return Ok(None);
+        }
         let Some(probe) = self.probe(first, second)? else {
             return Ok(None);
         };
@@ -333,7 +337,7 @@ impl<'a> History<'a> {
         Ok(None)
     }
 
-    /// A child of `first` in which each path of `changed(first, second)` holds the
+    /// A copy of `first` in which each path of `changed(first, second)` holds the
     /// probe text `<PROBE> <n>`, where `paths[n]` is that path. `None` when no such
     /// path exists.
     ///
@@ -355,7 +359,7 @@ impl<'a> History<'a> {
             })
             .collect();
         Ok(Some(Probe {
-            commit: self.child(first, &files)?,
+            commit: self.copy(first, &files)?,
             paths: changed.into_iter().map(|(_, path)| path).collect(),
         }))
     }
@@ -373,13 +377,12 @@ impl<'a> History<'a> {
         first: &str,
         second: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, String> {
-        let bases = self.git(&["merge-base", "--all", first, second])?;
-        // A merge of `first` with a commit that has no files and the same merge bases
-        // builds the same base. It gives a conflict with `first` as stage 3 for each
-        // file that the base and `first` both hold with a difference, and for each file
-        // that `first` moves.
-        let gone = self.commit(EMPTY_TREE, &bases.lines().collect::<Vec<_>>())?;
-        let (_, output) = self.merge_tree(&[&gone, first])?;
+        // A merge of `first` with a copy of `second` that has no files builds the same
+        // base. It gives a conflict with `first` as stage 2 for each file that the base
+        // and `first` both hold with a difference, and for each file that `first`
+        // moves.
+        let gone = self.commit(second, EMPTY_TREE)?;
+        let (_, output) = self.merge_tree(&[first, &gone])?;
         // `<tree>NUL`, then `<mode> <blob> <stage>TAB<path>NUL` for each stage of each
         // conflicted path, then `NUL` and the messages.
         let mut changed = Vec::new();
@@ -391,7 +394,7 @@ impl<'a> History<'a> {
             let mut parts = field.splitn(2, |&b| b == b'\t');
             let stage = String::from_utf8_lossy(parts.next().unwrap_or_default());
             let path = parts.next().unwrap_or_default();
-            if let [mode, _, "3"] = stage.split(' ').collect::<Vec<_>>()[..]
+            if let [mode, _, "2"] = stage.split(' ').collect::<Vec<_>>()[..]
                 && !code_path(&String::from_utf8_lossy(path))
             {
                 changed.push((mode.to_string(), path.to_vec()));
@@ -400,13 +403,13 @@ impl<'a> History<'a> {
         Ok(changed)
     }
 
-    /// A commit with the parent `first` and its tree with `files` in place of its
-    /// own. It builds the tree in an index file of its own, which it removes.
+    /// A copy of `first` (`commit`) with its tree with `files` in place of its own.
+    /// It builds the tree in an index file of its own, which it removes.
     ///
     /// # Errors
     ///
     /// A failed `git` command.
-    fn child(&self, first: &str, files: &[File<'_>]) -> Result<String, String> {
+    fn copy(&self, first: &str, files: &[File<'_>]) -> Result<String, String> {
         // Each entry is `<mode> <blob>TAB<path>NUL`.
         let mut entries = Vec::new();
         for file in files {
@@ -434,22 +437,27 @@ impl<'a> History<'a> {
             .map_err(|e| format!("{}: {e}", index.display()));
         let tree = tree?;
         removed?;
-        self.commit(String::from_utf8_lossy(&tree).trim(), &[first])
+        self.commit(first, String::from_utf8_lossy(&tree).trim())
     }
 
-    /// A commit of `tree` with `parents`, by a fixed author at a fixed time, so the
-    /// same inputs give the same commit.
+    /// A commit of `tree` with the parents and the commit time of `commit`, by a
+    /// fixed author. A merge with it finds the same merge bases in the same order as a
+    /// merge with `commit`, since the walk reads only parents and commit times, and
+    /// so builds the same base from more than one.
     ///
     /// # Errors
     ///
-    /// A failed `git commit-tree`.
-    fn commit(&self, tree: &str, parents: &[&str]) -> Result<String, String> {
+    /// A failed `git` command.
+    fn commit(&self, commit: &str, tree: &str) -> Result<String, String> {
+        let line =
+            self.git(&["show", "-s", "--date=raw", "--format=%cd%x00%P", commit])?;
+        let (when, parents) = line.split_once('\0').unwrap_or_default();
         let mut args = vec!["commit-tree", tree, "-m", "probe"];
-        for parent in parents {
+        for parent in parents.split_whitespace() {
             args.extend(["-p", parent]);
         }
         let who = OsStr::new("xtask");
-        let when = OsStr::new("@0 +0000");
+        let when = OsStr::new(when);
         let commit = self.run(
             &args,
             b"",
@@ -607,7 +615,7 @@ struct File<'a> {
     text: String,
 }
 
-/// A child of a commit, with a probe text in each path that is not code and that
+/// A copy of a commit, with a probe text in each path that is not code and that
 /// the commit changes.
 struct Probe {
     commit: String,
@@ -687,7 +695,10 @@ fn command(root: &Path) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_ATTR_NOSYSTEM", "1")
-        .args(["-c", "core.attributesFile=/dev/null"]);
+        .args(["-c", "core.attributesFile=/dev/null"])
+        // So a walk for merge bases reads only parents and commit times
+        // (`History::commit`).
+        .args(["-c", "core.commitGraph=false"]);
     command
 }
 
