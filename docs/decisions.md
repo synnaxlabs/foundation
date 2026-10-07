@@ -3287,7 +3287,7 @@ How to read this record:
   one call that takes a name in place of a path in the data directory (#1449, decided
   by `laptop.architect-2`, 2026-10-07 14:55 UTC:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
-  panic list and the bare-name reason:
+  panic list and the bare-name reason, 2026-10-07 17:35 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
@@ -3313,8 +3313,10 @@ How to read this record:
   `Power` crash keeps the durable entries of each directory, as for a create or a
   remove, so it undoes each rename since the last `sync_dir` of the directory, a rename
   in flight too. A `Process` crash applies a rename in flight, as for other calls.
-  Decided by `laptop.architect-2`, #1449
-  (https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508).
+  Decided by `laptop.architect-2`, #1449, 2026-10-07 14:55 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
+  text, 2026-10-07 17:35 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

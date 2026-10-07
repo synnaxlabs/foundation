@@ -907,11 +907,10 @@ mod tests {
         }
     }
 
-    /// Never ends a call of one operation.
-    /// A driver that hangs the call of `on` after `passed` calls of it ended.
+    /// A driver that hangs the call of `on` after `remaining` calls of it ended.
     struct Stuck {
         on: Operation,
-        passed: Cell<u32>,
+        remaining: Cell<u32>,
     }
 
     impl Stuck {
@@ -919,11 +918,11 @@ mod tests {
             Self::file_after(on, 0)
         }
 
-        fn file_after(on: Operation, passed: u32) -> File {
+        fn file_after(on: Operation, remaining: u32) -> File {
             File {
                 descriptor: Box::new(Self {
                     on,
-                    passed: Cell::new(passed),
+                    remaining: Cell::new(remaining),
                 }),
                 path: "ring/0".into(),
                 mode: Mode::Write,
@@ -933,10 +932,10 @@ mod tests {
 
         fn request(&self, operation: Operation) -> Request<'_, ()> {
             if self.on == operation {
-                if self.passed.get() == 0 {
+                if self.remaining.get() == 0 {
                     return Box::pin(std::future::pending());
                 }
-                self.passed.set(self.passed.get() - 1);
+                self.remaining.set(self.remaining.get() - 1);
             }
             Box::pin(async { Ok(()) })
         }
