@@ -291,6 +291,71 @@ fn woken_of_a_reader_that_takes_each_frame() {
     .expect("the run ends");
 }
 
+/// The home's `woken` with one complete reader that falls 8 frames behind, takes
+/// each, then falls 8 frames behind again: no call of the second lag allocates.
+fn woken_of_a_reader_that_falls_behind_again() {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        let (mut shard, mut interner, now) = shard(&node, tasks).await;
+        let (time, value) = (channel::Key::from_u128(1), channel::Key::from_u128(2));
+        let slot = interner.slots().assign(time);
+        shard.carry(slot);
+        let data = vec![(value, Type::Scalar(Scalar::I64))];
+        let set = interner.intern(&[Group {
+            index: time,
+            data: &data,
+        }]);
+        let writer = shard
+            .open_writer(home::writer::Writer {
+                subject: name("a"),
+                authority: Authority(1),
+                lease: None,
+                set: Arc::clone(&set),
+            })
+            .expect("opens");
+        let reader = shard.open_complete(slot, u64::MAX).into();
+        let entries = set.entries();
+        let entry = |key| {
+            entries
+                .iter()
+                .position(|entry| entry.key == key)
+                .expect("the key set holds the channel")
+        };
+        let (time, value) = (entry(time), entry(value));
+        let mut keys = Vec::new();
+        let mut lags = Vec::new();
+        for lag in 0..2_i64 {
+            let mut calls = Vec::new();
+            for n in 0..8 {
+                let mut draft =
+                    Draft::new(shard.pool(), &set, Form::Raw, &[(time, 8), (value, 8)])
+                        .expect("a frame");
+                for entry in [time, value] {
+                    let bytes = draft.series_mut(entry).expect("present");
+                    bytes.copy_from_slice(&(now + lag * 8 + n).to_le_bytes());
+                }
+                draft.set_count(entries[time].group, 1);
+                let written = shard.write(writer, Label::Path(Path::Live), draft);
+                assert!(written.is_ok(), "the home applies frame {n}");
+                shard.committed().await.expect("commits");
+                let ((), allocations) = ALLOCATOR.count(|| shard.woken(&mut keys));
+                calls.push((keys.len(), allocations));
+            }
+            let taken = std::iter::from_fn(|| shard.take(reader)).count();
+            assert_eq!(taken, 8, "lag {lag}");
+            lags.push(calls);
+        }
+        let mut expected = [(0, 0); 8];
+        expected[0] = (1, 0);
+        assert_eq!(
+            lags[1], expected,
+            "(keys given, allocations) of each call of the second lag: {lags:?}"
+        );
+    })
+    .expect("the run ends");
+}
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
@@ -298,6 +363,7 @@ fn main() {
         "the allocator counts"
     );
     woken_of_a_reader_that_takes_each_frame();
+    woken_of_a_reader_that_falls_behind_again();
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, |node, tasks| async move {
