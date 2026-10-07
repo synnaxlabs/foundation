@@ -280,43 +280,53 @@ How to read this record:
   so a floor never changes which record goes (B1). The commit writes the new tail in the
   same sync as its data, and reuses the space only after that sync. A trim never frees a
   record that a read in progress holds (#510). `buffer` keeps its own headroom (at least
-  two records of `body_max`, or twice the last commit), so a full ring does not refuse a
-  live write under steady pressure. `append` gives `Rejected::Full` only when the
-  records queued since the last commit do not fit after the trim: the full disk queue of
-  B5, which is the commit queue. A read reports the trimmed seqs of a path as
-  `Read::gap`, also when the path holds no entry, and the gap's length is the count of
-  samples lost (B2). An open of a full ring frees the oldest record for its restart
-  record, until segments exist (S4). `set_floor` and `usage` wait for their first
-  effect, the B1 warning (#1080). Lost: a `trim` call from the home (it needs the commit
-  rate, a late trim gives a second gap, and the edge cases of the ring move up into
-  `home`). Decided by the architect (#160,
-  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6030836762). An
-  open frees to the same headroom as a commit. A checkpoint never passes the newest
-  record of a path unless a later synced record holds that path's tail (seq and stamp),
-  so a restart continues from the disk (A8). That record syncs before the checkpoint, in
-  a sync of its own: a crash can keep the checkpoint and lose a record of the same sync.
+  two records of `body_max`, or twice the records of the commit that trims), so a full
+  ring does not refuse a live write under steady pressure. `append` gives
+  `Rejected::Full` only when the records queued since the last commit do not fit after
+  the trim: the full disk queue of B5, which is the commit queue. A read reports the
+  trimmed seqs of a path as `Read::gap`, also when the path holds no entry, and the
+  gap's length is the count of samples lost (B2). An open of a full ring frees the
+  oldest record for its restart record, until segments exist (S4). `set_floor` and
+  `usage` wait for their first effect, the B1 warning (#1080). Lost: a `trim` call from
+  the home (it needs the commit rate, a late trim gives a second gap, and the edge cases
+  of the ring move up into `home`). Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6030836762). An open
+  frees to the same headroom as a commit. A checkpoint never passes the newest record of
+  a path unless a later synced record holds that path's tail (seq and stamp), so a
+  restart continues from the disk (A8). That record syncs before the checkpoint, in a
+  sync of its own: a crash can keep the checkpoint and lose a record of the same sync.
   The cost of a trim grows with the paths that lose their newest record, not with all
   paths. A carried tail is no sample: a read gives no entry for it, only the gap up to
   it. The trim does not turn on without the carried tail, and the PR that builds it
   records its form on disk here. Decided by the architect (#160,
   https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
   As built (#1222): the headroom is three times the larger of the largest record and the
-  last commit. The space of a trim is free only after its sync. From one trim to the
-  release of the next, the ring takes the records of two commits and the blocks that one
-  wrap skips, which are less than one largest record. Twice the last commit alone
-  refused a write at each wrap. Twice the last commit plus one largest record refused
-  each commit that was more than one largest record over the commit before it. Measured
-  on a full ring of 1024 blocks after commits of 40 blocks: a commit of 80 blocks is not
-  refused and a commit of 81 is, and two commits of 60 blocks are not refused and
-  commits of 60 and 61 are. On a ring of 4096 blocks, a load that grows by 30 percent
-  with each commit, for 7 commits, is not refused, and a load that grows by 40 percent
-  is. Measured with a largest record of four blocks and one record in each commit, for
-  2000 commits: a ring of 13 blocks or more refuses no write, a ring of 12 blocks (three
-  of the largest record) refuses at most 2, and a ring of 8 to 11 blocks refuses up to
-  one write in three. Under three of the largest record the headroom is more than the
-  area, so each trim frees every synced record. A trim moves the tail to the boundary
-  after a record of any kind: a wrap record and a restart record also end where a tail
-  can go.
+  records of the commit that trims, which are the records not yet synced. The space of a
+  trim is free only at its release, after its sync. From one trim to the release of the
+  next, the ring takes the records of two commits and the blocks that one wrap skips,
+  which are less than one largest record. So after commits of `c` bytes, the next two
+  commits and the blocks of one wrap skip fit when they are at most `3c`: one commit of
+  up to `2c` less the skip, or a load that grows by the factor `g` with each commit
+  while `g + g²` is under 3, about 30 percent a commit. Above that, `append` gives
+  `Full`, the full commit queue of B5. Lost: twice the records of the commit that trims
+  (it refused a write at each wrap), and twice those records plus one largest record (it
+  refused each commit that was more than one largest record over the commit before it).
+  Measured on a full ring of 1024 blocks after commits of 40 records of one block, where
+  each commit comes while the one before it syncs: a commit of 80 records is not refused
+  and a commit of 81 is, and two commits of 60 records are not refused and commits of 60
+  and 61 are. A commit of 20 records of four blocks is refused when it wraps, because
+  the wrap skips 3 blocks, and a commit of 19 is not. A trim cannot free the commit in
+  its sync, so with one record in each commit, three records and the blocks of one wrap
+  skip must fit in the area. Four of the largest record less one block always hold them,
+  and a smaller ring can refuse a live write under a steady load: with a largest record
+  of four blocks, commits of 2, 4, 4, and 4 blocks get `Full` on a ring of 13 or 14
+  blocks. `Layout::new` accepts two of the largest record today, and #1276 sets the
+  minimum to four before the trim turns on. A trim moves the tail to the boundary after
+  a record of any kind: a wrap record and a restart record also end where a tail can go.
+  Decided by the architect: the headroom (#1222,
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557), and the
+  boundaries and the deferral of the minimum to #1276 (#1222,
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero

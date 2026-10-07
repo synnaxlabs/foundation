@@ -1868,6 +1868,27 @@ mod tests {
             assert_eq!(stepped([60, 61]), Some((401, full)));
         }
 
+        /// Fills a ring of 1024 blocks with `fill` commits of 40 records of one
+        /// block, then runs a commit of `count` largest records and a commit of 40
+        /// records of one block. Each record comes while the commit before it syncs.
+        fn jumped(fill: usize, count: usize) -> Option<(usize, Full)> {
+            let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
+            let then = [vec![BODY_MAX; count], vec![8; 40]];
+            let commits = iter::repeat_n(vec![8; 40], fill).chain(then);
+            steady(layout, commits.map(|lens| (lens, vec![])))
+        }
+
+        #[test]
+        fn a_wrap_takes_the_blocks_that_it_skips_from_the_headroom() {
+            assert_eq!(jumped(40, 20), None);
+            assert_eq!(jumped(51, 19), None);
+            let full = Full {
+                needed: 16384,
+                free: 4096,
+            };
+            assert_eq!(jumped(51, 20), Some((51, full)));
+        }
+
         proptest! {
             /// A ring of four of its largest record refuses no record when each
             /// commit holds one, of any length, placed before or after the release
