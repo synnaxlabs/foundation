@@ -149,8 +149,8 @@ impl Hub {
 
     /// Opens a reader session on `channels`, which share one index, as
     /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, as a
-    /// view of only `channels` and their index. A complete reader gets each live frame written
-    /// after the returned future resolves.
+    /// view of only `channels` and their index. A complete reader gets each live frame
+    /// written after the returned future resolves.
     ///
     /// # Errors
     ///

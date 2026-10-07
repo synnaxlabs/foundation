@@ -132,6 +132,8 @@ impl Reader {
         }
         let index = index.ok_or(Error::Empty)?;
         let slot = borrowed.interner.slots().assign(index);
+        // A frame without the reader's channels still shows that time moved.
+        slots.push(slot);
         let (key, credit) = match mode {
             Mode::Complete => {
                 let key = borrowed.home.open_complete(slot, WINDOW);

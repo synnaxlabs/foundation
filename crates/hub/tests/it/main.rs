@@ -46,11 +46,12 @@ const WINDOW: u64 = 1 << 20;
 const STAMP: Type = Type::Scalar(Scalar::Stamp);
 const I64: Type = Type::Scalar(Scalar::I64);
 /// Two indexes, each with one `i64` channel. `time` is at slot 0.
-const CHANNELS: [(u128, &str, Type, u128); 4] = [
+const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (1, "time", STAMP, 1),
     (2, "value", I64, 1),
     (3, "time-b", STAMP, 3),
     (4, "value-b", I64, 3),
+    (5, "value-c", I64, 1),
 ];
 
 /// What one test gets: a hub on one shard, with [`CHANNELS`] defined.
@@ -216,23 +217,38 @@ fn entry(set: &types::frame::key_set::KeySet, key: u128) -> usize {
 
 /// Writes `stamps` to `time` and `values` to `value`, one sample of each per pair.
 fn write(writer: &mut Writer, stamps: &[i64], values: &[i64]) -> Vec<Outcome> {
+    write_series(writer, &[(1, stamps), (2, values)])
+}
+
+/// Writes the samples of each channel by key, in one group: the first is its index.
+fn write_series(writer: &mut Writer, channels: &[(u128, &[i64])]) -> Vec<Outcome> {
     let set = writer.set();
-    let (time, value) = (entry(set, 1), entry(set, 2));
-    let group = set.entries()[time].group;
-    let series = [(time, stamps.len() * 8), (value, values.len() * 8)];
+    let entries: Vec<_> = channels.iter().map(|&(key, _)| entry(set, key)).collect();
+    let group = set.entries()[entries[0]].group;
+    let mut series: Vec<_> = (entries.iter().zip(channels))
+        .map(|(&entry, (_, samples))| (entry, samples.len() * 8))
+        .collect();
+    series.sort_unstable();
     let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-    for (entry, samples) in [(time, stamps), (value, values)] {
+    for (&entry, (_, samples)) in entries.iter().zip(channels) {
         let bytes = draft.series_mut(entry).expect("the series is present");
-        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(samples) {
+        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(*samples) {
             *bytes = sample.to_le_bytes();
         }
     }
-    let count = u32::try_from(stamps.len()).expect("a short frame");
+    let count = u32::try_from(channels[0].1.len()).expect("a short frame");
     draft.set_count(group, count);
     writer
         .write(LIVE, draft)
         .expect("the home takes it")
         .to_vec()
+}
+
+/// The entries of the view in `received`, as channel keys.
+fn keys(received: &Received<'_>) -> Vec<u128> {
+    let entries = received.set.entries();
+    let present = received.view.iter().map(|(entry, _)| entries[entry].key);
+    present.map(channel::Key::as_u128).collect()
 }
 
 /// Writes frame `n` of a run from `now`: 1000 samples per series, with values that
@@ -515,6 +531,57 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
             spent - last < limit && limit <= spent,
             "{spent} bytes end at the first frame past {limit}"
         );
+    });
+}
+
+#[test]
+fn gives_a_reader_on_some_channels_of_a_frame_those_and_their_index() {
+    run(20, |test| async move {
+        let mut both = test.reader(&["value-c", "value"], Mode::Complete).await;
+        let mut one = test.reader(&["value-c"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
+        let received = both.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 5, 2], "in the key set's order");
+        assert_eq!(samples(&received, 1), [now]);
+        assert_eq!(samples(&received, 2), [7]);
+        assert_eq!(samples(&received, 5), [9]);
+        let received = one.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 5]);
+        assert_eq!(samples(&received, 1), [now]);
+        assert_eq!(samples(&received, 5), [9]);
+    });
+}
+
+#[test]
+fn gives_a_reader_the_index_of_a_frame_without_its_channels() {
+    run(21, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["time"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now])]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1]);
+        assert_eq!(samples(&received, 1), [now]);
+        let range = Range { seq: 0, count: 1 };
+        assert_eq!(received.view.range(0), Some(range));
+    });
+}
+
+#[test]
+fn releases_the_lent_frame_at_the_next_call() {
+    run(22, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[0]);
+        test.clock.sleep(SETTLE).await;
+        reader.next().await.expect("a frame");
+        write(&mut writer, &[now + 1], &[1]);
+        let held = test.free();
+        assert!(poll_once(reader.next()).is_pending());
+        assert_eq!(test.free(), held + 1, "the lent frame is released");
     });
 }
 
