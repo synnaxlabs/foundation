@@ -10,9 +10,9 @@ pub(crate) struct Tie {
     pub(crate) second: Name,
 }
 
-/// The policy in `policies`, keyed by name, whose selector `select` gives matches
-/// `name` most specifically, or `None` when none matches. A key given twice ties with
-/// itself.
+/// The policy in `policies`, keyed by name, whose selector (from `select`) matches
+/// `name` most specifically, or `None` when none matches. Keys are distinct: a key
+/// given twice at the top specificity ties with itself.
 pub(crate) fn resolve<'a, P>(
     name: &Name,
     policies: impl IntoIterator<Item = (&'a Name, &'a P)>,
