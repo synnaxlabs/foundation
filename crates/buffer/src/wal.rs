@@ -959,8 +959,8 @@ mod tests {
         Layout::new(AREA, BODY_MAX).expect("the test sizes make a ring")
     }
 
-    /// The ring of 8 blocks that the recorded cases of [`ops`] ran on. They replay
-    /// what they found only on it.
+    /// A ring of 8 blocks, two of its largest record. The recorded cases of the
+    /// properties ran on it, and replay what they found only on it.
     fn recorded() -> Layout {
         Layout::new(8 * 4096, BODY_MAX).expect("the test sizes make a ring")
     }
@@ -1347,7 +1347,7 @@ mod tests {
 
         #[test]
         fn checks_a_batch_against_each_limit_at_its_boundary() {
-            let layout = Layout::new(64 * 4096, 60_000).expect("a ring of 64 blocks");
+            let layout = Layout::fit(u64::MAX, 60_000).expect("the largest file");
             let body = |len| Limit::Body { len, max: 60_000 };
             let cases = [
                 ("no entry", (0, 0, 0), Ok(())),
@@ -2133,12 +2133,13 @@ mod tests {
                 ring.append(body).expect("the ring has room");
             }
             let three = ring.live.back().expect("three records").clone();
-            let end = ring.head;
             ring.reopen(5).expect("the restart record fits");
+            let restart = ring.head;
+            ring.append(&[8; BODY_MAX]).expect("the ring has room");
             assert_eq!(ring.trim(Some(three.offset)), Some(three.start));
-            assert_eq!(ring.walk().0, [vec![7; BODY_MAX]]);
-            assert_eq!(ring.trim(None), Some(end));
-            assert_eq!(ring.walk().0, Vec::<Vec<u8>>::new());
+            assert_eq!(ring.walk().0, [vec![7; BODY_MAX], vec![8; BODY_MAX]]);
+            assert_eq!(ring.trim(None), Some(restart));
+            assert_eq!(ring.walk().0, [vec![8; BODY_MAX]]);
         }
 
         /// A ring with the same records trims to the same tail after a reopen: the
@@ -2179,13 +2180,13 @@ mod tests {
             let _writer = cursor.writer(4096, 2);
         }
 
-        /// The smallest ring holds one restart record after any number of opens
+        /// A ring of two blocks holds one restart record after any number of opens
         /// with no data, so it takes its largest record.
         #[test]
         fn takes_the_largest_record_after_opens_with_no_data() {
-            let layout = Layout::new(4 * 4096, 4087).expect("an area of four blocks");
-            let mut area = vec![0; 4 * 4096];
-            for chain in 1..=5 {
+            let layout = Layout::new(2 * 4096, 4087).expect("an area of two blocks");
+            let mut area = vec![0; 2 * 4096];
+            for chain in 1..=3 {
                 let mut cursor = Cursor::new(layout, START, PIECE);
                 loop {
                     let Window { place, len } = cursor.window();
@@ -2564,17 +2565,56 @@ mod tests {
             Ok(())
         }
 
+        fn gives_the_live_data(
+            layout: Layout,
+            ops: &[Op],
+        ) -> Result<(), TestCaseError> {
+            let mut ring = Ring::with(layout);
+            run(&mut ring, ops);
+            let (data, cursor) = ring.walk();
+            prop_assert_eq!(data, ring.data());
+            prop_assert_eq!(cursor.at, ring.head);
+            prop_assert_eq!(cursor.at.offset, ring.writer.head());
+            Ok(())
+        }
+
+        /// A walk of chained records from a tail at block `tail` ends within one
+        /// lap, whatever the records are.
+        fn ends_within_one_lap(
+            layout: Layout,
+            records: &[(u8, usize)],
+            tail: u64,
+            chain: u32,
+        ) -> Result<(), TestCaseError> {
+            let blocks = index(layout.area) / ALIGN;
+            let mut area = vec![0xEE; index(layout.area)];
+            let (mut block, mut next) = (index(tail), chain);
+            for (kind, len) in records {
+                let record = (HEADER_LEN + len).div_ceil(ALIGN);
+                if block + record > blocks {
+                    block = 0;
+                }
+                next = put(&mut area, block, next, *kind, &vec![*kind; *len]);
+                block += record;
+            }
+            let tail = at(tail, chain);
+            let walked = match walk_in(layout, &area, tail) {
+                Ok((_, cursor)) => cursor.at.offset - tail.offset,
+                Err(invalid) => invalid.offset - tail.offset + 1,
+            };
+            prop_assert!(walked <= layout.area);
+            Ok(())
+        }
+
         proptest! {
             #[test]
             fn gives_the_live_data_in_order(ops in ops()) {
-                for layout in [recorded(), layout()] {
-                    let mut ring = Ring::with(layout);
-                    run(&mut ring, &ops);
-                    let (data, cursor) = ring.walk();
-                    prop_assert_eq!(data, ring.data());
-                    prop_assert_eq!(cursor.at, ring.head);
-                    prop_assert_eq!(cursor.at.offset, ring.writer.head());
-                }
+                gives_the_live_data(layout(), &ops)?;
+            }
+
+            #[test]
+            fn gives_the_live_data_in_order_on_the_recorded_ring(ops in ops()) {
+                gives_the_live_data(recorded(), &ops)?;
             }
 
             /// A walk from the tail of any trim finds the records after it.
@@ -2595,40 +2635,28 @@ mod tests {
             }
 
             #[test]
-            fn keeps_a_last_record_of_the_recorded_ring_the_same(
+            fn keeps_a_last_record_only_when_its_sectors_survive_on_the_recorded_ring(
                 crash in crash(recorded()),
             ) {
                 keeps_the_last_record(recorded(), crash)?;
             }
 
-            /// `far` comes last, so the recorded cases give the values before it
-            /// as they did.
             #[test]
             fn ends_within_one_lap_on_any_chained_records(
                 records in prop::collection::vec((0..6u8, 0..6000usize), 0..12),
+                tail in 0..BLOCKS,
+                chain in any::<u32>(),
+            ) {
+                ends_within_one_lap(layout(), &records, tail, chain)?;
+            }
+
+            #[test]
+            fn ends_within_one_lap_on_any_chained_records_on_the_recorded_ring(
+                records in prop::collection::vec((0..6u8, 0..6000usize), 0..12),
                 tail in 0..recorded().area / 4096,
                 chain in any::<u32>(),
-                far in 0..BLOCKS,
             ) {
-                for (layout, tail) in [(recorded(), tail), (layout(), far)] {
-                    let blocks = index(layout.area) / ALIGN;
-                    let mut area = vec![0xEE; index(layout.area)];
-                    let (mut block, mut next) = (index(tail), chain);
-                    for (kind, len) in &records {
-                        let record = (HEADER_LEN + len).div_ceil(ALIGN);
-                        if block + record > blocks {
-                            block = 0;
-                        }
-                        next = put(&mut area, block, next, *kind, &vec![*kind; *len]);
-                        block += record;
-                    }
-                    let tail = at(tail, chain);
-                    let walked = match walk_in(layout, &area, tail) {
-                        Ok((_, cursor)) => cursor.at.offset - tail.offset,
-                        Err(invalid) => invalid.offset - tail.offset + 1,
-                    };
-                    prop_assert!(walked <= layout.area);
-                }
+                ends_within_one_lap(recorded(), &records, tail, chain)?;
             }
         }
     }

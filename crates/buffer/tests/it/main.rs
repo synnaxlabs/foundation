@@ -237,6 +237,14 @@ fn layout(area: u64, body_max: usize) -> Layout {
     Layout::new(area, body_max).expect("the sizes make a ring")
 }
 
+/// The smallest ring whose records hold a body of at most `body_max` bytes.
+fn least(body_max: usize) -> Layout {
+    let min = Layout::fit(0, body_max)
+        .expect_err("no ring in no bytes")
+        .min;
+    Layout::fit(min, body_max).expect("the least length holds a ring")
+}
+
 fn key(index: u32) -> channel::Key {
     channel::Key::from_u128(u128::from(index))
 }
@@ -2696,7 +2704,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
 fn a_record_over_the_most_entries_is_invalid() {
     for (count, opens) in [(1023_u32, true), (1024, false)] {
         run(102, Memory::default(), move |shard| async move {
-            let ring = layout(128 * BLOCK, 100_000);
+            let ring = least(100_000);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
             let a = slots.assign(key(1));
@@ -3038,7 +3046,7 @@ fn each_open_starts_a_new_chain() {
 /// it has blocks opens and takes its largest record.
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
-    for area in [4 * BLOCK, AREA] {
+    for area in [2 * BLOCK, AREA] {
         run(24, Memory::default(), move |shard| async move {
             let ring = layout(area, BODY_MAX);
             for _ in 0..area / BLOCK {
@@ -3486,7 +3494,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
-        let ring = layout(256 * BLOCK, 150_000);
+        let ring = least(150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3520,7 +3528,7 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 512 << 10);
-        let ring = layout(640 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3567,7 +3575,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), largest);
-        let ring = layout(640 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
@@ -3609,7 +3617,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
 #[test]
 fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
     run(156, Memory::default(), |mut shard| async move {
-        let ring = layout(640 * BLOCK, 600_000);
+        let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
