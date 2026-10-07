@@ -32,8 +32,9 @@ impl State {
     ///
     /// # Errors
     ///
-    /// [`Refused::Reserved`] or [`Refused::Long`] when the region cannot hold a member,
-    /// and [`Refused::Duplicate`] when two of `members` have one key.
+    /// [`Refused::Reserved`], [`Refused::Outside`], or [`Refused::Long`] when the
+    /// region cannot hold a member, and [`Refused::Duplicate`] when two of `members`
+    /// have one key.
     pub(crate) fn new(region: Name, members: Vec<Member>) -> Result<Self, Refused> {
         let mut state = Self {
             region,
@@ -117,7 +118,7 @@ impl State {
     ) -> Result<(), Refused> {
         if !options.prefix.starts_with(&self.region) {
             return Err(Refused::Outside {
-                prefix: options.prefix,
+                name: options.prefix,
                 region: self.region.clone(),
             });
         }
@@ -139,15 +140,23 @@ impl State {
         if name.reserved() {
             return Err(Refused::Reserved { name: name.clone() });
         }
-        // Two names joined by a dot fail to parse only on length.
-        if let Some(status) = status
-            .keys()
-            .find(|status| format!("{name}.{status}").parse::<Name>().is_err())
-        {
-            return Err(Refused::Long {
+        if !name.starts_with(&self.region) {
+            return Err(Refused::Outside {
                 name: name.clone(),
-                status: status.clone(),
+                region: self.region.clone(),
             });
+        }
+        for status in status.keys() {
+            // Two names joined by a dot fail to parse only on length.
+            let Ok(full) = format!("{name}.{status}").parse::<Name>() else {
+                return Err(Refused::Long {
+                    name: name.clone(),
+                    status: status.clone(),
+                });
+            };
+            if full.reserved() {
+                return Err(Refused::Reserved { name: full });
+            }
         }
         let key = card.key();
         if self.members.contains_key(&key) {
@@ -343,9 +352,10 @@ impl std::error::Error for Malformed {}
 pub(crate) enum Refused {
     /// The card of a `Join` is forged.
     Forged(card::Forged),
-    /// A segment of a member's name starts with `@`.
+    /// A segment of a member's name, or of the name of one of its status channels,
+    /// starts with `@`.
     Reserved {
-        /// The member's name.
+        /// The name.
         name: Name,
     },
     /// The name of a member's status channel, `<name>.<status>`, is longer than
@@ -373,10 +383,11 @@ pub(crate) enum Refused {
         /// The public key.
         public_key: PublicKey,
     },
-    /// The prefix of a `Ticket` change is not under the region's prefix.
+    /// A member's name, or the prefix of a `Ticket` change, is not under the region's
+    /// prefix.
     Outside {
-        /// The ticket's prefix.
-        prefix: Name,
+        /// The name or the prefix.
+        name: Name,
         /// The region's prefix.
         region: Name,
     },
@@ -404,8 +415,8 @@ impl fmt::Display for Refused {
             Self::Recorded { public_key } => {
                 write!(f, "ticket {public_key} is already recorded")
             }
-            Self::Outside { prefix, region } => {
-                write!(f, "the prefix {prefix} is not under the region {region}")
+            Self::Outside { name, region } => {
+                write!(f, "the name {name} is not under the region {region}")
             }
         }
     }
@@ -516,6 +527,15 @@ mod tests {
                 name: name("plant.@changes")
             })
         );
+        let mut outside = members(&[1, 2]);
+        outside[1].card = signed(2, "factory.node2");
+        assert_eq!(
+            State::new(name("plant"), outside),
+            Err(Refused::Outside {
+                name: name("factory.node2"),
+                region: name("plant")
+            })
+        );
         let mut long = members(&[1, 2]);
         long[1].status = BTreeMap::from([(long_status(256 - 12), index(1))]);
         assert_eq!(
@@ -556,7 +576,7 @@ mod tests {
         assert_eq!(
             state.apply(record(8, options("plants.edge", false))),
             Err(Refused::Outside {
-                prefix: name("plants.edge"),
+                name: name("plants.edge"),
                 region: name("plant")
             })
         );
@@ -661,6 +681,48 @@ mod tests {
         assert_eq!(state.ticket(public(8)).map(|record| record.uses), Some(0));
     }
 
+    // `plant.@changes` is the region's changes channel.
+    #[test]
+    fn a_join_with_a_reserved_status_name_is_refused() {
+        let mut state = state();
+        assert_eq!(state.apply(record(8, options("plant", true))), Ok(None));
+        let before = state.clone();
+        let mut reserved = join(8, 3, "plant");
+        reserved.status = BTreeMap::from([(name("@changes"), index(9))]);
+        assert_eq!(
+            apply_join(&mut state, reserved),
+            Err(Refused::Reserved {
+                name: name("plant.@changes")
+            })
+        );
+        assert_eq!(state, before);
+        let mut deep = join(8, 3, "plant");
+        deep.status = BTreeMap::from([(name("disk.@a"), index(9))]);
+        assert_eq!(
+            apply_join(&mut state, deep),
+            Err(Refused::Reserved {
+                name: name("plant.disk.@a")
+            })
+        );
+        assert_eq!(apply_join(&mut state, join(8, 3, "plant")), Ok(None));
+    }
+
+    // A ticket's prefix is under the region, so only a founding member can be outside
+    // it; a join outside the region fails here before the ticket's scope.
+    #[test]
+    fn a_join_outside_the_region_is_refused() {
+        let mut state = state();
+        let before = state.clone();
+        assert_eq!(
+            apply_join(&mut state, join(7, 3, "plants.edge")),
+            Err(Refused::Outside {
+                name: name("plants.edge"),
+                region: name("plant")
+            })
+        );
+        assert_eq!(state, before);
+    }
+
     #[test]
     fn a_join_whose_status_channel_name_is_too_long_is_refused() {
         let mut state = state();
@@ -681,20 +743,32 @@ mod tests {
         assert_eq!(apply_join(&mut state, longest), Ok(None));
     }
 
-    // Each join fails two checks, and the refusal names the first.
+    // Each join fails more than one check, and the refusal names the first.
     #[test]
     fn a_join_refusal_names_the_first_check_that_fails() {
         let mut state = state();
         let mut forged = join(7, 1, "plant.@a");
         forged.signature[0] ^= 1;
+        let mut outside = join(7, 1, "plants.edge.a");
+        outside.status = BTreeMap::from([(long_status(256 - 14), index(9))]);
         let mut long = join(7, 1, "plant.edge.a");
-        long.status = BTreeMap::from([(long_status(256 - 13), index(9))]);
+        long.status = BTreeMap::from([
+            (long_status(256 - 13), index(9)),
+            (name("t.@a"), index(10)),
+        ]);
         let cases = [
             (forged, Refused::Forged(card::Forged { node: node(1) })),
             (
                 join(7, 1, "plant.@a"),
                 Refused::Reserved {
                     name: name("plant.@a"),
+                },
+            ),
+            (
+                outside,
+                Refused::Outside {
+                    name: name("plants.edge.a"),
+                    region: name("plant"),
                 },
             ),
             (
@@ -757,10 +831,10 @@ mod tests {
             ),
             (
                 Refused::Outside {
-                    prefix: name("plants.edge"),
+                    name: name("plants.edge"),
                     region: name("plant"),
                 },
-                "the prefix plants.edge is not under the region plant".to_owned(),
+                "the name plants.edge is not under the region plant".to_owned(),
             ),
         ];
         for (refused, text) in cases {
