@@ -1923,11 +1923,15 @@ How to read this record:
   `Options` (prefix, reusable, expiry, ephemeral), and the use count. `Record::admit`
   refuses, in this order, a forged admission, a name outside the prefix, a join at or
   after the expiry, and a second use of a single-use ticket, and counts a use only when
-  all checks pass, so a refused join never uses up a ticket. The ephemeral expiry of a
-  `Member` comes from its ticket, because the admin decides what a ticket admits
-  (BQ11a) and the joining node is outside input. Lost: a bearer secret in the `Join`,
-  which every member could replay and which binds to no card. Decided by
-  `laptop.architect` (2026-10-07T09:27:39Z):
+  all checks pass, so a refused join never uses up a ticket. The expiry is the first
+  mesh time at which the ticket admits no node, so the `Expired` text is "ticket
+  {public_key} expired at {expiry}, and the join is at {at}". The text and the admit
+  order approved by `laptop.architect` (2026-10-07T11:03:29Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6036571225. The
+  ephemeral expiry of a `Member` comes from its ticket, because the admin decides what
+  a ticket admits (BQ11a) and the joining node is outside input. Lost: a bearer secret
+  in the `Join`, which every member could replay and which binds to no card. Decided
+  by `laptop.architect` (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. A
   `ticket::Voter` holds only the node key, the public key to pin, and the addresses,
   not a signed card: the ticket is the trust root, so a voter's signature over its own
