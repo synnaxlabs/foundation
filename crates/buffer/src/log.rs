@@ -158,15 +158,14 @@ pub(crate) enum Found {
     /// The oldest record left with a durable entry that ends past the mark, with
     /// the index of the path.
     Run(channel::Key, Run),
-    /// No record is left with such an entry, and a trim freed samples past the
-    /// mark: the path's durable entries end at this mark.
-    Trimmed(Mark),
-    /// No durable entry has samples past the mark.
-    Nothing,
+    /// No record left has such an entry: the mark after the path's newest durable
+    /// entry. No record holds the seqs from the read's mark up to it.
+    End(Mark),
 }
 
 /// One path of an index: where it stands with every appended entry, where it
-/// stands on disk, and the records that hold it, oldest first.
+/// stands on disk, and its runs, oldest first. The first runs can be of records
+/// that a trim hid.
 #[derive(Clone, Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 struct Log {
@@ -197,20 +196,17 @@ impl Log {
         }
     }
 
-    /// Moves the durable tail past the entry, drops the runs before `trimmed`,
-    /// and adds the record at `offset` to the runs when it is not the newest.
+    /// Moves the durable tail past the entry. When the record at `offset` is not
+    /// the newest run, drops the runs before `hidden` and adds the record.
     fn sync(
         &mut self,
         header: &Header,
         offset: u64,
-        trimmed: u64,
+        hidden: u64,
     ) -> Result<(), Invalid> {
         let start = self.end();
         self.durable.advance(header)?;
         self.empty = start.after(header.first, header.len).given;
-        while self.runs.front().is_some_and(|run| run.offset < trimmed) {
-            self.runs.pop_front();
-        }
         if let Some(newest) = self.runs.back() {
             assert!(
                 newest.offset <= offset,
@@ -221,6 +217,9 @@ impl Log {
                 return Ok(());
             }
         }
+        while self.runs.front().is_some_and(|run| run.offset < hidden) {
+            self.runs.pop_front();
+        }
         self.runs.push_back(Run { start, offset });
         Ok(())
     }
@@ -228,15 +227,14 @@ impl Log {
 
 /// Every path the buffer holds, by the node's slot of the index and the path.
 /// `append` feeds it with each appended entry; the recovery walk and each sync
-/// feed it with each record's entries, in ring order. A trim tells it the tail of
-/// the ring.
+/// feed it with each record's entries, in ring order. A trim hides the records
+/// before its tail.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) struct Logs {
     paths: hash::Map<(Slot, Path), Log>,
-    /// The offset that a trim freed the ring up to. No read finds a record before
-    /// it.
-    trimmed: u64,
+    /// No read finds a record before this offset.
+    hidden: u64,
 }
 
 impl Logs {
@@ -267,49 +265,48 @@ impl Logs {
     }
 
     /// What a read of `path` of the index at `slot` from `from` finds, among the
-    /// records that no trim freed.
+    /// records that are not hidden.
     pub(crate) fn find(&self, slot: Slot, path: Path, from: Mark) -> Found {
         let Some(log) = self.paths.get(&(slot, path)) else {
-            return Found::Nothing;
+            return Found::End(Mark::at(0));
         };
-        let left = log.runs.partition_point(|run| run.offset < self.trimmed);
-        // The newest run that starts at or before `from`, else the oldest left.
+        // The newest run that starts at or before `from`, else the oldest.
         let chosen = log
             .runs
             .partition_point(|run| run.start <= from)
-            .saturating_sub(1)
-            .max(left);
+            .saturating_sub(1);
+        // The runs are in offset order too: only a hidden choice needs a search.
+        let chosen = match log.runs.get(chosen) {
+            Some(run) if run.offset < self.hidden => {
+                log.runs.partition_point(|run| run.offset < self.hidden)
+            }
+            _ => chosen,
+        };
         let mut runs = log.runs.range(chosen..);
         let end = log.end();
-        let Some(run) = runs.next() else {
-            return if end.seq > from.seq {
-                Found::Trimmed(end)
-            } else {
-                Found::Nothing
-            };
-        };
-        if runs.next().map_or(end, |next| next.start) > from {
-            Found::Run(log.index, *run)
-        } else {
-            Found::Nothing
+        match runs.next() {
+            Some(run) if runs.next().map_or(end, |next| next.start) > from => {
+                Found::Run(log.index, *run)
+            }
+            _ => Found::End(end),
         }
     }
 
     /// Hides the records before the offset `tail` from each later
-    /// [`find`](Self::find). A later sync of a path drops its hidden runs, so a
-    /// trim visits no path.
+    /// [`find`](Self::find). A later sync of a path drops its hidden runs, so this
+    /// call visits no path.
     ///
     /// # Panics
     ///
-    /// When `tail` is before the tail of an earlier trim.
+    /// When `tail` is before the tail of an earlier call.
     #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
-    pub(crate) fn trim(&mut self, tail: u64) {
+    pub(crate) fn hide(&mut self, tail: u64) {
         assert!(
-            self.trimmed <= tail,
-            "invariant: a trim to {tail} goes back from {}",
-            self.trimmed
+            self.hidden <= tail,
+            "invariant: the hidden tail {tail} goes back from {}",
+            self.hidden
         );
-        self.trimmed = tail;
+        self.hidden = tail;
     }
 
     /// Moves the appended tail of the header's path past the entry, as
@@ -323,12 +320,13 @@ impl Logs {
         slot: Slot,
         header: &Header,
     ) -> Result<(), Invalid> {
-        self.change(slot, header, |log| log.appended.advance(header))
+        self.change(slot, header, |log, _| log.appended.advance(header))
     }
 
     /// Moves the durable tail of the header's path past the entry, as
     /// [`Tail::advance`], and adds the record at `offset` to the path's runs when
-    /// it is not the newest. Drops the path's runs that a trim hid.
+    /// it is not the newest. A record that adds a run drops the path's hidden
+    /// runs.
     ///
     /// # Errors
     ///
@@ -343,12 +341,13 @@ impl Logs {
         header: &Header,
         offset: u64,
     ) -> Result<(), Invalid> {
-        let trimmed = self.trimmed;
-        self.change(slot, header, |log| log.sync(header, offset, trimmed))
+        // A third capture would move the closure's state from registers to the stack.
+        self.change(slot, header, |log, hidden| log.sync(header, offset, hidden))
     }
 
     /// Applies `change` to the log of the header's path, which starts empty when
-    /// the path is new. A change that fails on a new path adds nothing.
+    /// the path is new, with the hidden tail. A change that fails on a new path
+    /// adds nothing.
     ///
     /// # Panics
     ///
@@ -358,9 +357,10 @@ impl Logs {
         &mut self,
         slot: Slot,
         header: &Header,
-        change: impl FnOnce(&mut Log) -> Result<(), Invalid>,
+        change: impl FnOnce(&mut Log, u64) -> Result<(), Invalid>,
     ) -> Result<(), Invalid> {
         let key = (slot, header.path);
+        let hidden = self.hidden;
         if let Some(log) = self.paths.get_mut(&key) {
             assert!(
                 log.index == header.index,
@@ -369,10 +369,10 @@ impl Logs {
                 log.index,
                 header.index,
             );
-            return change(log);
+            return change(log, hidden);
         }
         let mut log = Log::new(header.index);
-        change(&mut log)?;
+        change(&mut log, hidden)?;
         self.paths.insert(key, log);
         Ok(())
     }
@@ -538,15 +538,12 @@ mod tests {
                     let mut end = Mark::at(0);
                     let fed_on = on_fed(&fed, slot(index), path);
                     for ((_, header, offset), before) in fed_on.zip(&marks) {
-                        let found = runs
-                            .iter()
-                            .rev()
-                            .find(|run| run.offset == *offset)
-                            .map_or(Found::Nothing, |run| Found::Run(key, *run));
+                        let run = runs.iter().rev().find(|run| run.offset == *offset);
+                        let found = Found::Run(key, *run.expect("an entry has a run"));
                         prop_assert_eq!(logs.find(slot(index), path, *before), found);
                         end = before.after(header.first, header.len);
                     }
-                    prop_assert_eq!(logs.find(slot(index), path, end), Found::Nothing);
+                    prop_assert_eq!(logs.find(slot(index), path, end), Found::End(end));
                 }
             }
         }
@@ -580,7 +577,7 @@ mod tests {
                 }
                 if let Some(trim) = trim {
                     tail = tail.max(4096 * trim.min(&(number + 1)));
-                    logs.trim(tail);
+                    logs.hide(tail);
                 }
             }
             for index in 0..3 {
@@ -596,22 +593,18 @@ mod tests {
                         });
                     marks.push(end);
                     let from = kept_from.get(&(at, path)).copied().unwrap_or(0);
+                    // No call of `Logs` shows the drop, so the model reads the runs.
                     let kept: Vec<Run> = logs.runs(at, path).collect();
                     let expected: Vec<Run> =
                         runs.iter().copied().filter(|run| run.offset >= from).collect();
                     prop_assert_eq!(kept, expected);
                     for from in &marks {
-                        let lost = if end.seq > from.seq {
-                            Found::Trimmed(end)
-                        } else {
-                            Found::Nothing
-                        };
                         let found = on_fed(&fed, at, path)
                             .zip(marks.iter().skip(1))
                             .find(|((_, _, offset), after)| {
                                 *offset >= tail && *after > from
                             })
-                            .map_or(lost, |((_, _, offset), _)| {
+                            .map_or(Found::End(end), |((_, _, offset), _)| {
                                 let run =
                                     runs.iter().rev().find(|run| run.offset == *offset);
                                 Found::Run(key, *run.expect("each entry has a run"))
@@ -857,13 +850,13 @@ mod tests {
         assert_eq!(logs.find(slot(1), Path::Live, mark(5, 0)), first);
         assert_eq!(logs.find(slot(1), Path::Live, mark(5, 1)), second);
         assert_eq!(logs.find(slot(1), Path::Live, mark(6, 0)), second);
-        assert_eq!(logs.find(slot(1), Path::Live, mark(7, 0)), Found::Nothing);
-        assert_eq!(logs.find(slot(1), Path::Live, mark(7, 3)), Found::Nothing);
-        assert_eq!(
-            logs.find(slot(1), Path::Backfill, mark(0, 0)),
-            Found::Nothing
-        );
-        assert_eq!(logs.find(slot(2), Path::Live, mark(0, 0)), Found::Nothing);
+        let end = Found::End(mark(7, 0));
+        assert_eq!(logs.find(slot(1), Path::Live, mark(7, 0)), end);
+        assert_eq!(logs.find(slot(1), Path::Live, mark(7, 3)), end);
+        let new = Found::End(mark(0, 0));
+        assert_eq!(logs.find(slot(1), Path::Backfill, mark(0, 0)), new);
+        assert_eq!(logs.find(slot(2), Path::Live, mark(0, 0)), new);
+        assert_eq!(logs.find(slot(2), Path::Live, mark(1, 0)), new);
     }
 
     /// Records at 4096, 8192, and 12288 hold [0, 3), [3, 6), and [6, 9) of one
@@ -884,13 +877,13 @@ mod tests {
     fn a_read_finds_the_oldest_record_that_a_trim_left() {
         let mut logs = three_records();
         let key = channel::Key::from_u128(1);
-        logs.trim(4096);
+        logs.hide(4096);
         assert_eq!(
             logs.find(slot(1), Path::Live, mark(0, 0)),
             Found::Run(key, run(0, 0, 4096)),
             "a trim keeps the record at its tail"
         );
-        logs.trim(8192);
+        logs.hide(8192);
         let second = Found::Run(key, run(3, 0, 8192));
         assert_eq!(logs.find(slot(1), Path::Live, mark(0, 0)), second);
         assert_eq!(logs.find(slot(1), Path::Live, mark(2, 0)), second);
@@ -899,46 +892,45 @@ mod tests {
             logs.find(slot(1), Path::Live, mark(6, 0)),
             Found::Run(key, run(6, 0, 12288))
         );
-        assert_eq!(logs.find(slot(1), Path::Live, mark(9, 0)), Found::Nothing);
+        assert_eq!(
+            logs.find(slot(1), Path::Live, mark(9, 0)),
+            Found::End(mark(9, 0))
+        );
     }
 
     #[test]
     fn a_read_of_a_path_with_no_record_left_finds_its_durable_end() {
         let mut logs = three_records();
-        logs.trim(8192);
-        let end = Found::Trimmed(mark(2, 0));
+        logs.hide(8192);
+        let end = Found::End(mark(2, 0));
         assert_eq!(logs.find(slot(2), Path::Live, mark(0, 0)), end);
         assert_eq!(logs.find(slot(2), Path::Live, mark(1, 0)), end);
-        assert_eq!(logs.find(slot(2), Path::Live, mark(2, 0)), Found::Nothing);
-        assert_eq!(logs.find(slot(2), Path::Live, mark(3, 0)), Found::Nothing);
-        logs.trim(12289);
-        assert_eq!(
-            logs.find(slot(1), Path::Live, mark(8, 0)),
-            Found::Trimmed(mark(9, 0))
-        );
-        assert_eq!(logs.find(slot(1), Path::Live, mark(9, 0)), Found::Nothing);
+        assert_eq!(logs.find(slot(2), Path::Live, mark(2, 0)), end);
+        assert_eq!(logs.find(slot(2), Path::Live, mark(3, 0)), end);
+        logs.hide(12289);
+        let end = Found::End(mark(9, 0));
+        assert_eq!(logs.find(slot(1), Path::Live, mark(8, 0)), end);
+        assert_eq!(logs.find(slot(1), Path::Live, mark(9, 0)), end);
     }
 
-    /// A trim that frees only entries with no samples loses no sample, so a read
-    /// from their seq finds nothing, and an entry synced later is found.
+    /// The durable end counts the hidden entries with no samples at its seq, and
+    /// an entry synced later is found.
     #[test]
-    fn a_trim_of_entries_with_no_samples_leaves_no_gap() {
+    fn a_read_past_hidden_entries_with_no_samples_finds_the_durable_end() {
         let mut logs = Logs::default();
         logs.sync(slot(1), &header(1, Path::Live, 0, 4, None), 4096)
             .expect("syncs");
         logs.sync(slot(1), &header(1, Path::Live, 4, 0, None), 8192)
             .expect("syncs");
-        logs.trim(4096);
+        logs.hide(4096);
         assert_eq!(
             logs.find(slot(1), Path::Live, mark(4, 0)),
             Found::Run(channel::Key::from_u128(1), run(4, 0, 8192))
         );
-        logs.trim(12288);
-        assert_eq!(logs.find(slot(1), Path::Live, mark(4, 0)), Found::Nothing);
-        assert_eq!(
-            logs.find(slot(1), Path::Live, mark(3, 0)),
-            Found::Trimmed(mark(4, 1))
-        );
+        logs.hide(12288);
+        let end = Found::End(mark(4, 1));
+        assert_eq!(logs.find(slot(1), Path::Live, mark(4, 0)), end);
+        assert_eq!(logs.find(slot(1), Path::Live, mark(3, 0)), end);
         logs.sync(slot(1), &header(1, Path::Live, 4, 0, None), 12288)
             .expect("syncs");
         assert_eq!(
@@ -947,10 +939,12 @@ mod tests {
         );
     }
 
+    /// No call of `Logs` shows the drop, which only bounds memory, so the test
+    /// reads the runs.
     #[test]
     fn a_sync_of_a_path_drops_the_runs_that_a_trim_hid() {
         let mut logs = three_records();
-        logs.trim(8192);
+        logs.hide(8192);
         let all: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
         assert_eq!(all.len(), 3, "a trim visits no path");
         logs.sync(slot(1), &header(1, Path::Live, 9, 1, None), 16384)
@@ -967,7 +961,7 @@ mod tests {
             [run(0, 0, 4096)],
             "a path with no sync keeps its runs"
         );
-        logs.trim(20480);
+        logs.hide(20480);
         logs.sync(slot(1), &header(1, Path::Live, 10, 1, None), 20480)
             .expect("syncs");
         let left: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
@@ -975,11 +969,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: a trim to 4096 goes back from 8192")]
-    fn a_trim_that_goes_back_is_a_broken_invariant() {
+    #[should_panic(expected = "invariant: record 4096 comes after record 8192")]
+    fn a_record_before_a_hidden_newest_run_is_a_broken_invariant() {
+        let mut logs = Logs::default();
+        logs.sync(slot(1), &header(1, Path::Live, 0, 3, None), 8192)
+            .expect("syncs");
+        logs.hide(12288);
+        logs.sync(slot(1), &header(1, Path::Live, 3, 1, None), 4096)
+            .expect("the invariant panics first");
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: the hidden tail 4096 goes back from 8192")]
+    fn a_hidden_tail_that_goes_back_is_a_broken_invariant() {
         let mut logs = three_records();
-        logs.trim(8192);
-        logs.trim(8192);
-        logs.trim(4096);
+        logs.hide(8192);
+        logs.hide(8192);
+        logs.hide(4096);
     }
 }
