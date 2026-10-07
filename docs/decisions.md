@@ -2544,18 +2544,20 @@ How to read this record:
   (RSS) in place of a byte count, as RSS depends on the allocator and the OS. Decided
   by the architect (`laptop.architect-2`) on 2026-10-07T14:23:09Z, #1419
   (https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661).
-  Implementation, not a ruling: a chunk holds at most 4096 points. A column holds
-  only the points that set its key, each as an index and a value. A point past the
-  end of a full chunk goes into the next chunk when it has room, so appends in either
-  time order fill each chunk. A full column grows by an eighth, not by double, and a
-  split frees the spare room of its first half. A point with one float field takes
-  about 19 heap bytes in a long series. Each series also has a fixed cost of about
-  2.4 KB, so 1000 series of 200 points take about 31 bytes a point. Each chunk keeps a
-  column for each key it holds, so many sparse keys cost more: 255 keys, each set by
-  every 255th point, take about 28 bytes a point. `tests/memory.rs` bounds 22 a point
-  for one field, for 63 sparse keys, for appends newest first, for writes that split
-  chunks, and for one point of 255 fields among points of one field, and 32 for 255
-  sparse keys and for 1000 series of 200 points.
+  Implementation, not a ruling: a chunk holds at most 4096 points. A column holds only
+  the points that set its key, each as an index and a value. A point past the end of a
+  full chunk goes into the next chunk when it has room, so appends in either time order
+  fill each chunk. A full column grows by an eighth, not by double, and a split frees
+  the spare room of its first half. A point with one float field takes about 19 heap
+  bytes in a long series. Each series also has a fixed cost of about 1.6 KB, so 1000
+  series of 200 points take about 27 bytes a point. Each chunk keeps a column for each
+  key it holds, in a `Vec` sorted by key, so many sparse keys cost more: 255 keys, each
+  set by every 255th point, take about 24 bytes a point, and about 29 when writes split
+  each chunk into two halves near half full, as each half keeps a copy of each column.
+  `tests/memory.rs` bounds 22 a point for one field, for 63 sparse keys, for appends
+  newest first, for writes that split chunks, also with 63 sparse keys, and for one
+  point of 255 fields among points of one field, and 32 for 255 sparse keys, also with
+  writes that split chunks, and for 1000 series of 200 points.
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

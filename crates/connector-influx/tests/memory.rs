@@ -128,15 +128,16 @@ fn between() {
         "the even times, then one odd time in each half of each chunk",
         POINTS,
         BUDGET,
-        |k, line| {
-            let evens = POINTS - 2 * (POINTS / (CHUNK + 2));
-            let time = match k.checked_sub(evens) {
-                None => 2 * k,
-                Some(odd) => 2 * CHUNK * (odd / 2) + 1 + (odd % 2) * 6000,
-            };
-            writeln!(line, "m value={k} {time}")
-        },
+        |k, line| writeln!(line, "m value={k} {}", halves(k)),
     );
+    // A split leaves each half a copy of each column.
+    for (fields, budget) in [(63, BUDGET), (255, SPARSE)] {
+        let name =
+            format!("{fields} sparse fields, one odd time in each half of each chunk");
+        check(&name, POINTS, budget, |k, line| {
+            writeln!(line, "m c{}={k} {}", k % fields, halves(k))
+        });
+    }
 }
 
 /// Writes `points` points to a store, the `k`-th by `line(k, body)`, and checks that
@@ -165,4 +166,14 @@ fn check(
         (FLOOR * points..=budget * points).contains(&held),
         "{name}: the store holds {held} bytes, not {FLOOR} to {budget} a point"
     );
+}
+
+/// The time of the `k`-th point when the even times come first, then one odd time in
+/// each half of each chunk, so each chunk splits into two halves near half full.
+fn halves(k: usize) -> usize {
+    let evens = POINTS - 2 * (POINTS / (CHUNK + 2));
+    match k.checked_sub(evens) {
+        None => 2 * k,
+        Some(odd) => 2 * CHUNK * (odd / 2) + 1 + (odd % 2) * 6000,
+    }
 }

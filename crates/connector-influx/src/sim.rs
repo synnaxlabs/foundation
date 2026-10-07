@@ -43,17 +43,19 @@ struct Series {
     chunks: BTreeMap<Stamp, Chunk>,
 }
 
-/// Points in time order, with one typed column for each field key.
+/// Points in time order, with one typed column for each field key, in key order. A
+/// `Vec` of columns costs less a column than a map, and a chunk can hold many.
 #[derive(Debug, Default)]
 struct Chunk {
     times: Vec<Stamp>,
-    columns: BTreeMap<String, Column>,
+    columns: Vec<Column>,
 }
 
-/// The values of one field key in a chunk. `values[i]` is the value of the point at
+/// The values of field key `key` in a chunk. `values[i]` is the value of the point at
 /// index `points[i]` of the chunk, so only the points that set the field take room.
 #[derive(Debug)]
 struct Column {
+    key: Box<str>,
     points: Vec<u16>,
     values: Values,
 }
@@ -286,18 +288,30 @@ impl Chunk {
         *self.times.last().expect("a chunk holds a point")
     }
 
+    fn column(&self, key: &str) -> Option<&Column> {
+        let i = self.search(key).ok()?;
+        self.columns.get(i)
+    }
+
+    fn search(&self, key: &str) -> Result<usize, usize> {
+        self.columns
+            .binary_search_by(|column| (*column.key).cmp(key))
+    }
+
     fn set(&mut self, at: usize, fields: BTreeMap<String, Field>) {
         for (key, field) in fields {
-            self.columns
-                .entry(key)
-                .or_insert_with(|| Column::new(&field))
-                .set(at, field);
+            let i = self.search(&key).unwrap_or_else(|i| {
+                insert(&mut self.columns, i, Column::new(key.into(), &field));
+                i
+            });
+            let column = self.columns.get_mut(i).expect("found or inserted at i");
+            column.set(at, field);
         }
     }
 
     fn insert(&mut self, at: usize, time: Stamp, fields: BTreeMap<String, Field>) {
         insert(&mut self.times, at, time);
-        for column in self.columns.values_mut() {
+        for column in &mut self.columns {
             column.insert(at);
         }
         self.set(at, fields);
@@ -307,14 +321,15 @@ impl Chunk {
     /// columns that hold one of its points.
     fn split(&mut self) -> Self {
         let half = self.times.len() / 2;
-        let mut columns = BTreeMap::new();
-        self.columns.retain(|key, column| {
+        let mut columns = Vec::new();
+        self.columns.retain_mut(|column| {
             let later = column.split(half);
             if !later.points.is_empty() {
-                columns.insert(key.clone(), later);
+                columns.push(later);
             }
             !column.points.is_empty()
         });
+        self.columns.shrink_to_fit();
         Self {
             times: split(&mut self.times, half),
             columns,
@@ -323,8 +338,8 @@ impl Chunk {
 }
 
 impl Column {
-    /// An empty column for the type of `field`.
-    fn new(field: &Field) -> Self {
+    /// An empty column of `key` for the type of `field`.
+    fn new(key: Box<str>, field: &Field) -> Self {
         let values = match field {
             Field::Float(_) => Values::Float(Vec::new()),
             Field::Integer(_) => Values::Integer(Vec::new()),
@@ -333,6 +348,7 @@ impl Column {
             Field::String(_) => Values::String(Vec::new()),
         };
         Self {
+            key,
             points: Vec::new(),
             values,
         }
@@ -370,6 +386,7 @@ impl Column {
             .partition_point(|&point| usize::from(point) < half);
         let half = index(half);
         Self {
+            key: self.key.clone(),
             points: split(&mut self.points, from)
                 .into_iter()
                 .map(|point| point.strict_sub(half))
@@ -380,7 +397,8 @@ impl Column {
 }
 
 impl Values {
-    /// Puts `field` at `slot`: replaces the value at `Ok(i)`, or inserts it at `Err(i)`.
+    /// Puts `field` at `slot`: replaces the value at `Ok(i)`, or inserts it at
+    /// `Err(i)`.
     fn put(&mut self, slot: Result<usize, usize>, field: Field) {
         match (self, field) {
             (Self::Float(values), Field::Float(value)) => put(values, slot, value),
@@ -479,7 +497,7 @@ impl<'a> Fields<'a> {
     /// a copy.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Field> {
-        self.chunk.columns.get(key)?.get(self.at)
+        self.chunk.column(key)?.get(self.at)
     }
 
     /// Each field that the point sets, in key order. Each string value is a copy.
@@ -488,7 +506,7 @@ impl<'a> Fields<'a> {
         self.chunk
             .columns
             .iter()
-            .filter_map(move |(key, column)| Some((key.as_str(), column.get(at)?)))
+            .filter_map(move |column| Some((&*column.key, column.get(at)?)))
     }
 }
 
