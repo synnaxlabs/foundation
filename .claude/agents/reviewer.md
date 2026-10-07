@@ -34,8 +34,9 @@ Check:
   string of the type under test, with no written reason that holds? Name the public call
   that shows the same behavior. When the PR exists to remove work, which test fails if
   it is reverted? Does each new `.cargo/mutants.toml` entry meet the rule in
-  `testing.md`? Does an entry still skip code that the PR changes, with a reason that
-  the PR ends (a stub that it fills)? The PR narrows or removes that entry.
+  `testing.md`? Does an entry skip code that the PR adds or changes, when the entry is
+  wider than one function or its reason ends with the PR (a stub that it fills)? The PR
+  narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?
