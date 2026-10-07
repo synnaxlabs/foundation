@@ -108,9 +108,14 @@ impl Network {
         std::mem::take(&mut *out.lock().expect("no panic under the lock"))
     }
 
-    /// Writes `request` in one plain write of the adapter, and reads until the server
-    /// ends the stream. Gives the bytes written and the bytes read, or the read error.
-    fn exchange(&mut self, request: &'static [u8]) -> (usize, Result<String, String>) {
+    /// Writes `request` in one plain write of the adapter, closes the write side when
+    /// `half_closed`, and reads until the server ends the stream. Gives the bytes
+    /// written and the bytes read, or the read error.
+    fn exchange(
+        &mut self,
+        request: &'static [u8],
+        half_closed: bool,
+    ) -> (usize, Result<String, String>) {
         let (net, remote) = (self.client.net(), self.remote);
         let out = Arc::new(Mutex::new(None));
         let slot = Arc::clone(&out);
@@ -131,6 +136,11 @@ impl Network {
                 let written = poll_fn(|cx| Pin::new(&mut stream).poll_write(cx, request))
                     .await
                     .expect("the write works");
+                if half_closed {
+                    poll_fn(|cx| stream.0.poll_close(cx))
+                        .await
+                        .expect("the close works");
+                }
                 let mut read = Vec::new();
                 let mut bytes = [0; 1024];
                 let ended = loop {
@@ -295,11 +305,54 @@ fn writes_a_whole_plain_write_and_ends_the_stream_on_connection_close() {
         content-length: 7\r\nconnection: close\r\n\r\nm v=1 1";
     let mut network = Network::new();
     assert_eq!(
-        network.exchange(REQUEST),
+        network.exchange(REQUEST, false),
         (
             REQUEST.len(),
             Ok("HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n".into())
         )
     );
     assert_eq!(network.times("m"), [1]);
+}
+
+#[test]
+fn answers_a_client_that_closes_its_write_side_after_the_request() {
+    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
+        content-length: 7\r\n\r\nm v=1 1";
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(REQUEST, true),
+        (REQUEST.len(), Ok("HTTP/1.1 204 No Content\r\n\r\n".into()))
+    );
+    assert_eq!(network.times("m"), [1]);
+}
+
+#[test]
+fn stores_nothing_from_a_body_that_ends_early() {
+    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
+        content-length: 30\r\n\r\nm v=1 1\n";
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(REQUEST, true),
+        (REQUEST.len(), Err("10.0.0.2:8086 reset the stream".into()))
+    );
+    assert_eq!(network.times("m"), [0_i64; 0]);
+}
+
+#[test]
+fn answers_each_request_on_a_kept_alive_stream() {
+    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
+        content-length: 7\r\n\r\nm v=1 1\
+        POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
+        content-length: 7\r\nconnection: close\r\n\r\nm v=2 2";
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(REQUEST, false),
+        (
+            REQUEST.len(),
+            Ok("HTTP/1.1 204 No Content\r\n\r\n\
+                HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n"
+                .into())
+        )
+    );
+    assert_eq!(network.times("m"), [1, 2]);
 }

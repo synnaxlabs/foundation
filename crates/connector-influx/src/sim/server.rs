@@ -22,8 +22,9 @@ const READ_MAX: usize = 8192;
 
 /// Answers InfluxDB write requests on each stream that `listener` accepts, and writes
 /// each body to `store`. Each stream runs on its own task of `tasks`, with HTTP/1.1
-/// keep-alive. It runs until the caller drops it. A stream that the listener fails to
-/// accept is lost, as on InfluxDB.
+/// keep-alive, until its client closes it or the shard ends. Dropping the future
+/// stops only the accepts. A stream that the listener fails to accept is lost, as on
+/// InfluxDB.
 ///
 /// `POST /write?db=<db>` (InfluxDB 1) and `POST /api/v2/write?bucket=<bucket>`
 /// (InfluxDB 2 and 3) give 204 when the store takes each line, and 400 with the text
@@ -45,6 +46,7 @@ pub async fn serve(mut listener: Listener, tasks: Tasks, store: Arc<Mutex<Store>
             // The date would read the wall clock, which a simulation must not.
             let served = http1::Builder::new()
                 .auto_date_header(false)
+                .half_close(true)
                 .serve_connection(Stream(tcp), service)
                 .await;
             // `hyper` answers a request that breaks HTTP with 400 before it gives the
@@ -65,10 +67,10 @@ async fn answer(
             bytes.extend_from_slice(&data);
         }
     }
-    Ok(write(&head.method, &head.uri, &bytes, &store))
+    Ok(route(&head.method, &head.uri, &bytes, &store))
 }
 
-fn write(
+fn route(
     method: &Method,
     uri: &Uri,
     body: &[u8],
@@ -132,9 +134,6 @@ impl Read for Stream {
         let Some(bytes) = bytes.get_mut(..buf.remaining().min(READ_MAX)) else {
             unreachable!("the length is at most READ_MAX")
         };
-        if bytes.is_empty() {
-            return Poll::Ready(Ok(()));
-        }
         self.get_mut().0.poll_read(cx, bytes).map(|read| {
             let n = read.map_err(io)?;
             buf.put_slice(bytes.get(..n).expect("a read fits its buffer"));
