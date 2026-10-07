@@ -435,9 +435,13 @@ How to read this record:
   blocks of the record's entries, so an entry of the pool's largest block reads
   (#968). A read holds no record while it waits for a file read, so a change that
   frees ring space must first hold the records of each read in progress (#510).
-  Recovery walks from the tail to the first record that does not follow the chain.
-  A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open, and so does an entry whose `first` is below the tail of its path or whose
+  Recovery walks from the tail to the first record that does not follow the chain. A
+  block of kind 0 is no record and ends the walk, also when its CRC follows the chain:
+  no version writes kind 0, and a zeroed block must end the walk for every chain value
+  (decided by the architect, #1049:
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031201904). A
+  record that follows the chain but has an unknown kind or a wrong shape fails the open,
+  and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
   durable: a killed process may have written records that it never synced (#657). Before
   that sync, the open writes again, as read, the two header blocks and each window the
@@ -446,11 +450,26 @@ How to read this record:
   them between two reads. So an open writes again the header, 8 KiB, and the bytes it
   walks, at most the area, and the first 52 KiB of each record over one block twice
   (#698). Lost: a walk with direct I/O, which needs a new `env::files` read mode in each
-  driver and in `sim`. The restart record needs one free block: an open of a full ring
-  first moves records at the tail to a segment. The walk holds one pool
-  block at a time and reads a longer record in pieces of the pool's largest block, so
-  the pool puts no bound on `body_max`. An open with no such block free fails with
-  `Pool`, and the next open recovers the record (#440, #572).
+  driver and in `sim`. An open that fails with `Invalid` wrote only bytes that it read,
+  where it read them, and did not sync the ring: the ring reads as it did before the
+  open. That is a statement about what a read gives, not about what is durable. On a
+  disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
+  reads, which reads each record twice, and windows held until the walk ends, which
+  takes memory up to the area. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). One
+  case differs: on a file with no header, the open writes and syncs the first checkpoint
+  before the walk, so a false CRC match of the new chain value, 1 in 2^32, can give
+  `Invalid` after that write. Each statement about a record holds only when no CRC gives
+  a false match. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
+  `Invalid` gives offset 0 for a header block, which is also the offset of the first
+  record of a ring, until #1093 gives the header its own error. Decided by the architect
+  (#1049, https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031051950).
+  The restart record needs one free block: an open of a full ring first moves records at
+  the tail to a segment. The walk holds one pool block at a time and reads a longer
+  record in pieces of the pool's largest block, so the pool puts no bound on `body_max`.
+  An open with no such block free fails with `Pool`, and the next open recovers the
+  record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
