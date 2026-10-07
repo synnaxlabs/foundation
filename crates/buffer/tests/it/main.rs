@@ -3013,6 +3013,23 @@ fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
 }
 
 #[test]
+fn a_header_with_an_area_under_four_records_is_unfit() {
+    run(157, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = 3 * BLOCK;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area,
+            body_max: BODY_MAX,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
+    });
+}
+
+#[test]
 fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     let area = u64::MAX - 4095;
     assert_eq!(
@@ -3046,9 +3063,9 @@ fn each_open_starts_a_new_chain() {
 /// it has blocks opens and takes its largest record.
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
-    for area in [2 * BLOCK, AREA] {
+    for ring in [least(BODY_MAX), layout(AREA, BODY_MAX)] {
         run(24, Memory::default(), move |shard| async move {
-            let ring = layout(area, BODY_MAX);
+            let area = ring.area();
             for _ in 0..area / BLOCK {
                 drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
             }

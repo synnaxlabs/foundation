@@ -9,8 +9,10 @@ publish.workspace = true
 
 [dev-dependencies]
 block = { path = "../block" }
+connector-influx = { path = "../connector-influx", features = ["sim"] }
 env = { path = "../env" }
 node = { path = "../node" }
+proptest.workspace = true
 sim = { path = "../sim" }
 types = { path = "../types" }
 

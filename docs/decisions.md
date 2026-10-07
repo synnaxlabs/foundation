@@ -408,21 +408,23 @@ How to read this record:
   blocks of one wrap skip must fit in the area. Four of the largest record less one
   block always hold them, and a smaller ring can refuse a live write under a steady
   load: with a largest record of four blocks, commits of 2, 4, 4, and 4 blocks get
-  `Full` on a ring of 13 or 14 blocks. `Layout::new` accepts two of the largest record
-  today, and #1276 sets the minimum to four before the trim turns on. That minimum is
-  for one record in each commit: on a ring of 16 blocks, a steady load of one record of
-  four blocks and one of two in each commit is refused at its third commit. A trim moves
-  the tail to the boundary after a record of any kind: a wrap record and a restart
-  record also end where a tail can go. Steady pressure in the ruling means a load whose
-  commits fit the area. The ring size for a real load is the sizing of `node` (SHARD
-  DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
+  `Full` on a ring of 13 or 14 blocks. So `Layout::new` refuses an area under four of
+  the largest record (#1276), and a ring file with a smaller area does not open. That
+  minimum is for one record in each commit: on a ring of 16 blocks, a steady load of one
+  record of four blocks and one of two in each commit is refused at its third commit. A
+  trim moves the tail to the boundary after a record of any kind: a wrap record and a
+  restart record also end where a tail can go. Steady pressure in the ruling means a
+  load whose commits fit the area. The ring size for a real load is the sizing of `node`
+  (SHARD DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
   (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557),
   the area that the bound needs (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034545693,
   2026-10-07T08:57:53Z, and with the skip in the `4c` case
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034791932,
-  2026-10-07T09:12:31Z), and the boundaries and the deferral of the minimum to #1276
-  (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
+  2026-10-07T09:12:31Z), and the boundaries and the minimum of `Layout::new`, built in
+  #1276 (#1222,
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998,
+  2026-10-07T08:16:51Z).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -561,12 +563,13 @@ How to read this record:
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
-  is the offset modulo the area length. The area is at least twice the largest
-  record, so a ring that holds only its restart record takes any record (#637). A
-  ring whose head reaches the end of the offsets is full for good. A body is at most
-  `u32::MAX` bytes and at least one block less the record header (4087 bytes): a
-  record takes whole blocks, so a smaller one saves no disk and only holds less per
-  commit.
+  is the offset modulo the area length. The area is at least four times the largest
+  record (#1276), so a ring that holds only its restart record takes any record (#637),
+  and, when each commit and each open trims, a steady load of one record in each commit
+  gets no `Full` (STORE TRIM). This supersedes the two times of #637. A ring whose head
+  reaches the end of the offsets is full for good. A body is at most `u32::MAX` bytes
+  and at least one block less the record header (4087 bytes): a record takes whole
+  blocks, so a smaller one saves no disk and only holds less per commit.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -948,10 +951,15 @@ How to read this record:
   entry or group count: an entry or group past the key set is absent. A frame is at
   most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
   their order and padding are part of the disk and wire format version (C9d). A change
-  to either needs a new version. A `Draft` writes zeros in the padding, and no reader
-  reads it, so `frame::check` does not check it. A frame from a peer may hold other
-  bytes there, which `replica` stores and copy mode (X43) sends as they are (decided by
-  the architect, #1064:
+  to either needs a new version. `Layout::draft` writes zeros in the padding of a frame
+  from lengths. A frame from ends gets its padding from `Draft::body_mut`, which the
+  caller fills whole (decided by the architect, #1246, 2026-10-07T15:17:43Z:
+  https://github.com/synnaxlabs/foundation/issues/1246#issuecomment-6040879844).
+  Supersedes the zero padding of every draft in
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642. No
+  reader reads the padding, so `frame::check` does not check it. A frame from a peer may
+  hold other bytes there, which `replica` stores and copy mode (X43) sends as they are
+  (decided by the architect, #1064:
   https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642, worded in
   https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031226370). The
   padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
@@ -2576,12 +2584,15 @@ How to read this record:
   sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
   data measurement.
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
-  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
-  `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
-  minus the stored seqs, as maximal runs. Each run is one gap: `after` is the count
-  of stored samples before the run, and the count is the run's length. A gap line
-  whose stamp is not in the write record on the path of its tag, or whose range starts
-  below the first written seq, is a lab failure (panic), not data. The property test
+  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, where
+  `seq(stamp)` is the seq of the data point at its stamp, in the data measurement of
+  the same index (6039993275: stamps slew, so a stamp is not a key into the write
+  record). Seqs rise with time: a point whose seq is not above the seq before it is a
+  lab failure, and the message names both stamps and both seqs. Its gaps are the
+  union of these ranges minus the stored seqs, as maximal runs. Each run is one gap:
+  `after` is the count of stored samples before the run, and the count is the run's
+  length. A gap line with no data point at its stamp, or whose range starts below the
+  first written seq, is a lab failure (panic), not data. The property test
   also asserts no silent loss: each seq from the first written seq to the last stored
   seq is stored or in a gap range. After a lost confirmation, a resend, and a later
   trim, gap lines can overlap, so the sum of `count` in `foundation_gaps` is an upper
@@ -2608,17 +2619,14 @@ How to read this record:
   gap line and a backfill gap line at one stamp as two points, so the sum of `count`
   stays an upper bound on the loss from trims. Data lines get no `path` tag, so a live
   sample and a backfill sample of one index at one stamp are one point, and the later
-  write sets its fields. The earlier sample is a loss that no gap line counts. The fold
-  takes the path of a gap line from its tag, and `seq(stamp)` on that path from the
-  write record. From #1270, the fold, `after`, the first written seq, and the
-  no-silent-loss assertion each run on each path apart. A data point whose stamp the
-  write record holds on both paths of one index is a lab failure (panic), because the
-  lab cannot tell which seq the point holds, so the property test writes no such stamp.
-  From #1270, a separate test reads the points of the simulated InfluxDB and pins the
-  overwrite. Lost: a `path` tag on data lines, which makes two series for each channel
-  and puts the path, which is internal to the node, in each user's data schema.
-  `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
-  data nothing. Decided by `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
+  write sets its fields. The earlier sample is a loss that no gap line counts. Until
+  #1270, the fold reads the live path only, and a gap line of another path is a lab
+  failure. #1270 amends the fold for two paths. From #1270, a separate test reads the
+  points of the simulated InfluxDB and pins the overwrite. Lost: a `path` tag on data
+  lines, which makes two series for each channel and puts the path, which is internal to
+  the node, in each user's data schema. `foundation_gaps` is Foundation's own
+  measurement, so its `path` tag costs the user's data nothing. Decided by
+  `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748; amended
   2026-10-07T08:18:10Z:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167;
@@ -2628,6 +2636,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515 and of
   point 3 of 6033743748, and the loss bound of
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428.
+  Data points in the lab: sample `k` of one `Lab::write`, from 0, has the value
+  `k as f64`, which is exact below 2^53. `Lab::stored` takes a data point's seq from
+  its value: `written.start + k`. It accepts a data point only when its fields are
+  one float that is a whole number `k` in `+0..count`, where `count` is the number
+  of written samples. Until #341 names the field key of a data line, the field may
+  have any key; the #341 PR that names the key changes the check to that key.
+  Decided by the architect (`laptop.architect-2`), #1151, on 2026-10-07T14:07:11Z
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938)
+  and 2026-10-07T14:22:17Z
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039993275).
+  Supersedes the Q2 check of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938, which
+  compared each value with `seq - written.start`.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -3581,15 +3602,17 @@ How to read this record:
   Amended (2026-10-07, #1068): `block::footprint(len)` gives `usize::MAX` when `len`
   passes the largest payload, in place of a panic. No pool holds such a block, so
   every budget refuses it. `frame::charge` of ends from a hostile peer gives
-  `u64::MAX`, and `Layout::draft` refuses it with
-  `Error::Pool(block::Error::TooLarge { .. })` and takes no block. A reader drafts
-  before it spends, so a spend adds only a charge that a pool holds, and a plain add
-  never overflows. Lost: an exported largest payload with a new `Error` variant, a
-  second check of a limit that `block` owns; a saturating spend, a second guard.
+  `u64::MAX`, and `Layout::draft` refuses it with `block::Error::TooLarge { .. }`
+  (`frame::Error::Pool` at the reader) and takes no block. A reader drafts before it
+  spends, so a spend adds only a charge that a pool holds, and a plain add never
+  overflows. Lost: an exported largest payload with a new `Error` variant, a second
+  check of a limit that `block` owns; a saturating spend, a second guard.
   Decided by the architect, #1068
   (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156,
   corrected in
-  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083 and
+  https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6043266054, the
+  latter at 2026-10-07T17:32:11Z).
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
