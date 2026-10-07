@@ -443,6 +443,17 @@ fn files_in_a_directory_under_a_file_gives_dir() {
 
 #[test]
 fn a_write_open_while_another_create_fails_holds_the_file_at_its_path() {
+    hold_while_another_create_fails(Mode::Write);
+}
+
+#[test]
+fn a_create_while_another_create_fails_holds_the_file_at_its_path() {
+    hold_while_another_create_fails(Mode::Create { len: 4 * KIB });
+}
+
+/// Opens `a` with `mode` while another handle's creates fail and unlink it, and
+/// checks that the open holds the file at its path.
+fn hold_while_another_create_fails(mode: Mode) {
     let scratch = Scratch::new();
     let (creator, creator_thread) = files(&scratch.0, "creator");
     let (writer, writer_thread) = files(&scratch.0, "writer");
@@ -461,7 +472,7 @@ fn a_write_open_while_another_create_fails_holds_the_file_at_its_path() {
             });
             let mut write = pin!(async {
                 loop {
-                    if let Ok(file) = writer.open(Path::new("a"), Mode::Write).await {
+                    if let Ok(file) = writer.open(Path::new("a"), mode).await {
                         stopped.set(true);
                         return file;
                     }
