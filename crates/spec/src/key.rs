@@ -9,7 +9,7 @@ use crate::definition::Kind;
 impl Kind {
     /// The tree key of a definition of this kind with the label `label`:
     /// `<label>.@<kind>`, where `<kind>` is [`Kind::as_str`], or `label` itself for a
-    /// connector, which is at its own name.
+    /// connector or a channel, which is at its own name.
     ///
     /// # Errors
     ///
@@ -23,7 +23,7 @@ impl Kind {
     )]
     pub fn key(self, label: &str) -> Result<Name, Error> {
         let segment = match self {
-            Self::Connector => None,
+            Self::Connector | Self::Channel => None,
             _ => Some(self.as_str()),
         };
         let most = segment.map_or(Name::MAX_BYTES, |segment| {
@@ -45,12 +45,14 @@ impl Kind {
     }
 
     /// The name of the kind, such as `node_settings`: the keyword a file format names
-    /// it with, and the segment of its tree key. A connector's key has no segment.
+    /// it with, and the segment of its tree key. A connector's or a channel's key has
+    /// no segment.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Access => "access",
             Self::Connector => "connector",
+            Self::Channel => "channel",
             Self::Region => "region",
             Self::NodeSettings => "node_settings",
             Self::Compression => "compression",
@@ -127,15 +129,20 @@ mod tests {
             assert_eq!(format!("@{}", kind.as_str()), segment);
         }
         assert_eq!(Kind::Connector.as_str(), "connector");
+        assert_eq!(Kind::Channel.as_str(), "channel");
     }
 
     #[test]
-    fn keys_a_connector_at_its_own_name() {
+    fn keys_a_connector_and_a_channel_at_their_own_names() {
         let longest = "a".repeat(Name::MAX_BYTES);
-        for label in ["site_a.modbus", &longest] {
-            assert_eq!(Kind::Connector.key(label), Ok(name(label)));
+        for kind in [Kind::Connector, Kind::Channel] {
+            for label in ["site_a.modbus", &longest] {
+                assert_eq!(kind.key(label), Ok(name(label)));
+            }
+            assert_eq!(kind.key("site_a.@modbus"), Err(Error::Reserved));
+            let long = "a".repeat(Name::MAX_BYTES + 1);
+            assert_eq!(kind.key(&long), Err(Error::Long { most: 255 }));
         }
-        assert_eq!(Kind::Connector.key("site_a.@modbus"), Err(Error::Reserved));
     }
 
     #[test]
