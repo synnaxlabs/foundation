@@ -2,17 +2,6 @@
 
 use wire::hub::Error;
 
-/// The stream messages in a hub input: each is a length byte and then that many bytes.
-/// The last message ends with the input.
-pub fn messages(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    std::iter::from_fn(move || {
-        let (&len, rest) = bytes.split_first()?;
-        let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
-        bytes = rest;
-        Some(message)
-    })
-}
-
 /// The rest of a run of items in a hub session, kept apart from the decoder.
 #[derive(Clone, Copy, Debug)]
 pub struct Run {

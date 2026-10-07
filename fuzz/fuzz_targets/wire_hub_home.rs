@@ -2,7 +2,7 @@
 //! order of a session, each refusal is one that the order gives, and each valid
 //! message that the reader's node writes reads back.
 //!
-//! Input: the messages from the reader's node (`fuzz::hub::messages`).
+//! Input: the messages from the reader's node (`fuzz::messages`).
 
 #![no_main]
 
@@ -103,7 +103,7 @@ fn refused(next: Next, message: &[u8], error: Error) -> bool {
 fn read(bytes: &[u8]) {
     let mut home = Home::default();
     let mut next = Next::Open;
-    for message in fuzz::hub::messages(bytes) {
+    for message in fuzz::messages(bytes) {
         next = match (next, home.decode(message)) {
             (Next::Open, Ok(FromReader::Open(open))) => {
                 let mut out = vec![0; open.encoded_len()];
