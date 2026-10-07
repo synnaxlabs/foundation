@@ -1986,9 +1986,9 @@ How to read this record:
   standby, copies }`. Each node field is optional, but a placement names at least one
   node, and no node has two roles. When no placement selects the index, or the
   winning placement names no home, an index's home is the node of the connector that
-  writes it (precedence in X22). Amended: the
-  `home` field restores the recorded intent ("placement decides home", r8 Q8), which
-  the bootstrap list left out (architect, #1150,
+  writes it (precedence in X22). Amended: the `home` field restores the recorded
+  intent ("placement decides home", r8 Q8), which the bootstrap list left out
+  (architect, #1150,
   https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
