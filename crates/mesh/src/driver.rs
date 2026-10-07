@@ -689,7 +689,9 @@ mod tests {
 
     use super::*;
     use crate::card;
-    use crate::common::{self, create_pool, key, message, private, proven, public};
+    use crate::common::{
+        self, POOL, create_pool, key, message, private, proven, public,
+    };
     use crate::region::{Unfit, Unknown};
     use crate::status::Many;
     use crate::ticket::Options;
@@ -2235,10 +2237,9 @@ mod tests {
     #[test]
     fn a_group_that_waits_for_refused_memory_gives_that_cause() {
         solo(|node, tasks| async move {
-            let budget = block::Config { budget: 4 << 20 };
-            let (memory, switch) = Scarce::new(budget.reservation());
+            let (memory, switch) = Scarce::new(POOL.reservation());
             let config = Config {
-                pool: Rc::new(Pool::new(budget, memory)),
+                pool: Rc::new(Pool::new(POOL, memory)),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
             let mesh = Mesh::open(config).await.unwrap();
@@ -2278,9 +2279,8 @@ mod tests {
     #[test]
     fn memory_that_the_system_refuses_holds_a_message_until_it_commits() {
         solo(|node, tasks| async move {
-            let budget = block::Config { budget: 4 << 20 };
-            let (memory, switch) = Scarce::new(budget.reservation());
-            let pool = Rc::new(Pool::new(budget, memory));
+            let (memory, switch) = Scarce::new(POOL.reservation());
+            let pool = Rc::new(Pool::new(POOL, memory));
             let config = Config {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)

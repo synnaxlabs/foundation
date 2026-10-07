@@ -98,11 +98,25 @@ pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
     ids.iter().map(|&id| member(id)).collect()
 }
 
-/// A pool of 4 MiB.
+/// The settings of the pool of each test. The `mutants` job of CI caps the memory that
+/// a test process reserves, so the budget is small.
+pub(crate) const POOL: block::Config = block::Config { budget: 1 << 20 };
+
+/// A pool with the settings [`POOL`].
 pub(crate) fn create_pool() -> Rc<Pool> {
-    let config = block::Config { budget: 4 << 20 };
-    let memory = block::Heap::new(config.reservation());
-    Rc::new(Pool::new(config, memory))
+    let memory = block::Heap::new(POOL.reservation());
+    Rc::new(Pool::new(POOL, memory))
+}
+
+#[test]
+fn the_pools_of_8_test_threads_fit_under_the_memory_cap_of_ci() {
+    // What the `mutants` job gives one test process, and its test threads.
+    const CAP: usize = 4 << 30;
+    const THREADS: usize = 8;
+    // A test of `serve` holds the most pools at once: one for each of 2 transports,
+    // one of a config that it replaces, and one of the mesh.
+    const POOLS: usize = 4;
+    assert!(POOL.reservation() <= CAP / (THREADS * POOLS));
 }
 
 /// `body` from `from` to `to` in `TERM`, with no proof.
