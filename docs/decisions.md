@@ -1838,6 +1838,10 @@ How to read this record:
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
   #342. The `config` builder added the label and the bound above zero (#474).
+  Each shard's part of the pool budget must hold the largest block its buffer takes;
+  a smaller part stops the node at start with `Error::Buffer`. `config` cannot check
+  it, because the shard count belongs to the node, so the buffer is the one place
+  that refuses it. Decided by the architect on #1062 ([ruling](https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343)).
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
@@ -2240,6 +2244,16 @@ How to read this record:
   seam. The purge timer and `reclaim` on each loop turn land with the first PR that
   allocates from a pool, since no test can see either before then (#410). Proposed
   by `ops` in #410; approved by the coordinator on #806.
+- **SHARD BUFFERS (2026-10-07)** Each shard opens its write-ahead ring in directory
+  `shard-<i>` of the node's data directory and keeps it until the node stops.
+  `node::Config::files` makes the files of the data directory with no core; each
+  shard calls it once on its own thread, because `Files` is `Rc`. `node` alone names
+  `shard-<i>`. `node::Config::entropy` gives the shards randomness. A ring that does
+  not open stops the node, and `join` gives `Error::Buffer` with the core, after
+  `Start` and `Memory` and before `Panicked`. A data directory made for another shard
+  count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
+  is the long-term path (#1077). Running the stored count on another core count lost:
+  it bends C2. Decided by the architect on #1062 ([ruling](https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343)).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -2954,7 +2968,12 @@ constructs one interner per node, which owns the slot table, and passes that tab
 at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
 floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
 slot to each index it recovers; `node` opens every buffer before it opens sessions
-(#219, 2026-10-05). Approved by the coordinator on PR #449.
+(#219, 2026-10-05). Approved by the coordinator on PR #449. The shards open their
+buffers one after another, in order of core, and pass the interner along; a failed
+open does not pass it on, so no later shard opens. Start time is the sum of the
+opens. When that is too slow, the exit is a two-step `Buffer::open`: recover in
+parallel with no slots, then assign slots in one short step. Decided by the architect
+on #1062 ([ruling](https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343)).
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
