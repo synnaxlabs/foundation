@@ -2319,9 +2319,9 @@ How to read this record:
   mean to a caller. Amended (2026-10-07, #1117): `Mode::Create` makes a missing file
   with `len` zeroed bytes. It treats an empty file that is there as missing and
   allocates it, because a crash between the create and the allocation leaves one. It
-  opens any other file that is there as it is. A create that fails leaves no file that
-  it made. After `Length` or `Busy`, the file at the path is one that another call
-  made. `os` and `sim` both do this. Lost: an atomic create through a temporary name
+  opens any other file that is there as it is. A create that gives `Full` leaves no
+  file at the path and keeps no blocks. Another error can leave an empty file at the
+  path, as a crash can. `os` and `sim` both do this. Lost: an atomic create through a temporary name
   and a rename, so that the path never shows an empty file; the temporary file would
   show in `list` and need a sweep after a crash. Decided by the architect, #1117
   (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031488357).
@@ -2333,6 +2333,11 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1112#issuecomment-6031672142). The
   text of the failure rule: the architect, #1117
   (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031721563).
+  Text of the failure rule amended by the architect, #1112
+  (https://github.com/synnaxlabs/foundation/pull/1112#issuecomment-6032450864): only
+  `Full` promises no file; a flock, stat, or name check error after `openat` can leave
+  the empty file that the create made. Lost: a promise that any failed create leaves no
+  file it made.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
