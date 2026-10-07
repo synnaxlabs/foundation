@@ -5,6 +5,7 @@ use std::fmt;
 use types::name::Name;
 
 use super::Policy;
+use crate::resolve::{Tie, resolve};
 
 /// Where one index lives: its home, and the standby and copies of the placement that
 /// wins for it.
@@ -25,14 +26,14 @@ pub struct Placed<'a> {
 /// leaves out. The home is the winner's home, else `writer`, the node of the connector
 /// that writes the index.
 ///
-/// `placements` holds each placement that reaches the index: those of its region and
-/// of each region above it. Node names compare as written, so `Edge` and `edge` are
+/// `placements` holds each placement that reaches the index, once: those of its region
+/// and of each region above it. Node names compare as written, so `Edge` and `edge` are
 /// two nodes. The caller checks that a node exists, is not reserved, and is in the
 /// home's region.
 ///
 /// # Errors
 ///
-/// - [`Unplaced::Tie`] when two placements select the index with the same specificity.
+/// - [`Unplaced::Tie`] when the two most specific placements tie.
 /// - [`Unplaced::NoHome`] when neither the winner nor `writer` gives a home.
 /// - [`Unplaced::Overlap`] when the home comes from `writer` and that node is also the
 ///   winner's standby or a copy.
@@ -41,62 +42,36 @@ pub fn place<'a>(
     placements: impl IntoIterator<Item = (&'a Name, &'a Policy)>,
     writer: Option<&'a Name>,
 ) -> Result<Placed<'a>, Unplaced> {
-    let winner = resolve(index, placements)?;
+    let winner = resolve(index, placements, Policy::select)
+        .map_err(|Tie { first, second }| Unplaced::Tie(first, second))?;
     let placement = winner.map(|(key, _)| key);
     let policy = winner.map(|(_, policy)| policy);
-    let home =
-        policy
-            .and_then(Policy::home)
-            .or(writer)
-            .ok_or_else(|| Unplaced::NoHome {
+    let home = match (policy.and_then(Policy::home), writer) {
+        (Some(home), _) => home,
+        (None, Some(writer)) => {
+            if let Some((placement, policy)) = winner
+                && (policy.standby() == Some(writer)
+                    || policy.copies().contains(writer))
+            {
+                return Err(Unplaced::Overlap {
+                    node: writer.clone(),
+                    placement: placement.clone(),
+                });
+            }
+            writer
+        }
+        (None, None) => {
+            return Err(Unplaced::NoHome {
                 placement: placement.cloned(),
-            })?;
-    let placed = Placed {
+            });
+        }
+    };
+    Ok(Placed {
         placement,
         home,
         standby: policy.and_then(Policy::standby),
         copies: policy.map_or(&[], Policy::copies),
-    };
-    // `Policy::new` keeps the winner's own home out of its other roles.
-    if let Some(placement) = placement
-        && (placed.standby == Some(home) || placed.copies.contains(home))
-    {
-        return Err(Unplaced::Overlap {
-            node: home.clone(),
-            placement: placement.clone(),
-        });
-    }
-    Ok(placed)
-}
-
-/// The placement that selects `index` most specifically, with its name, or `None` when
-/// none does.
-fn resolve<'a>(
-    index: &Name,
-    placements: impl IntoIterator<Item = (&'a Name, &'a Policy)>,
-) -> Result<Option<(&'a Name, &'a Policy)>, Unplaced> {
-    let mut best = None;
-    let mut top = Vec::new();
-    for (key, policy) in placements {
-        let Some(specificity) = policy.select().matches(index) else {
-            continue;
-        };
-        if best < Some(specificity) {
-            best = Some(specificity);
-            top.clear();
-        }
-        if best == Some(specificity) {
-            top.push((key, policy));
-        }
-    }
-    top.sort_unstable_by_key(|(key, _)| *key);
-    match top.as_slice() {
-        [] => Ok(None),
-        [winner] => Ok(Some(*winner)),
-        [(first, _), (second, _), ..] => {
-            Err(Unplaced::Tie((*first).clone(), (*second).clone()))
-        }
-    }
+    })
 }
 
 /// An index that [`place`] cannot place.
@@ -301,6 +276,16 @@ mod tests {
     }
 
     #[test]
+    fn ties_a_placement_given_twice_with_itself() {
+        let placement = policy(&["a.*"], Some("n_1"), None);
+        let twice = [(name("p"), placement.clone()), (name("p"), placement)];
+        assert_eq!(
+            check("a.time", &twice, None),
+            Err(Unplaced::Tie(name("p"), name("p")))
+        );
+    }
+
+    #[test]
     fn refuses_a_writer_with_another_role() {
         let standby = [(name("p"), policy(&["a.*"], None, Some("n_1")))];
         let copy = [(
@@ -352,7 +337,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             let writer = name("writer");
-            let got = place(&index, placements.iter().map(|(k, p)| (k, p)), Some(&writer));
+            let pairs = placements.iter().map(|(k, p)| (k, p));
+            let got = place(&index, pairs, Some(&writer));
             let matching = placements
                 .iter()
                 .filter_map(|(k, p)| Some((p.select().matches(&index)?, k, p)))

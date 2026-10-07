@@ -3747,8 +3747,7 @@ connector that writes it (B7), then a plan error. The placement resolves as a wh
 policy (X25): when the winning placement names no home, a less specific one does not
 give it (architect, #1150,
 https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
-The order is `spec::placement::place`. Two placements of equal specificity are a plan
-error. Decided by architect-2 (#1150,
+The order is `spec::placement::place`. Decided by architect-2 (#1150,
 https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6039572310).
 Basis: BQ10, B7, C5 SHAPE.
 
