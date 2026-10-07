@@ -1,11 +1,9 @@
 //! Tasks given from any thread that shard 0 calls with its hub, in the order given.
 
-use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
-use std::pin::{Pin, pin};
-use std::rc::{Rc, Weak};
+use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 #[cfg(loom)]
@@ -14,13 +12,11 @@ use loom::sync::{Arc, Mutex, MutexGuard};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hub::Hub;
-use types::hash;
+
+use crate::scope::{Boxed, Scope};
 
 /// A task of [`crate::Node::spawn`], with its future boxed.
 pub(crate) type Task = Box<dyn FnOnce(Hub) -> Boxed + Send>;
-
-/// The future of a [`Task`].
-pub(crate) type Boxed = Pin<Box<dyn Future<Output = ()>>>;
 
 /// The two ends of the queue of tasks for shard 0. A task is pushed once, never on a
 /// frame's path, so a mutex is fine.
@@ -112,8 +108,7 @@ impl Inbox<Task> {
         tasks: env::tasks::Tasks,
         stop: impl Future<Output = ()>,
     ) {
-        let running: Rc<RefCell<hash::Map<u64, Slot>>> = Rc::default();
-        let mut next = 0;
+        let mut running = Scope::new(tasks);
         let mut stop = pin!(stop);
         poll_fn(|cx| {
             if stop.as_mut().poll(cx).is_ready() {
@@ -125,53 +120,13 @@ impl Inbox<Task> {
                     if stop.as_mut().poll(cx).is_ready() {
                         return Poll::Ready(());
                     }
-                    let slot = Rc::new(RefCell::new(task(hub.clone())));
-                    let run = Spawned {
-                        slot: Rc::downgrade(&slot),
-                        running: Rc::downgrade(&running),
-                        number: next,
-                    };
-                    running.borrow_mut().insert(next, slot);
-                    next += 1;
-                    tasks.spawn(poll_fn(move |cx| run.poll(cx)));
+                    running.spawn(task(hub.clone()));
                 }
             }
             Poll::Pending
         })
         .await;
         drop(running);
-    }
-}
-
-/// The future of one running task. Only the map of running futures holds it, so a
-/// stop drops it.
-type Slot = Rc<RefCell<Boxed>>;
-
-/// What the executor holds of one running task.
-struct Spawned {
-    slot: Weak<RefCell<Boxed>>,
-    running: Weak<RefCell<hash::Map<u64, Slot>>>,
-    /// The task's key in `running`.
-    number: u64,
-}
-
-impl Spawned {
-    /// Polls the task, then drops it from `running` once it completes. Ends once the
-    /// task has dropped.
-    fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(slot) = self.slot.upgrade() else {
-            return Poll::Ready(());
-        };
-        let polled = slot.borrow_mut().as_mut().poll(cx);
-        if polled.is_ready() {
-            drop(slot);
-            let running = self.running.upgrade();
-            let running = running.expect("invariant: a live slot is in the live map");
-            let done = running.borrow_mut().remove(&self.number);
-            // A future's drop may do anything, so it runs with no borrow held.
-            drop(done);
-        }
-        polled
     }
 }
 

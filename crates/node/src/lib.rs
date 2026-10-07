@@ -4,6 +4,7 @@
 
 mod directory;
 mod handoff;
+mod scope;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the publish task waits on hub writer sessions")
