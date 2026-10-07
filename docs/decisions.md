@@ -146,7 +146,10 @@ How to read this record:
 - **S5** `Channel { key, name, kind: Kind }`, with
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
-  or virtual flag.
+  or virtual flag. Amended: no `name` field, because the name is the tree key, and
+  `Kind::Data(Data)` has private fields. `Data::new` refuses an array or list that
+  holds no element (`channel::Error::Empty`). Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
