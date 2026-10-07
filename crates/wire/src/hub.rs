@@ -7,7 +7,8 @@
 //! the peer's `message_bytes_max`. A message of a run never splits a key or an end,
 //! and no message is empty. The keys run holds exactly [`Open::channels`] keys, and the
 //! ends run exactly [`Head::series`] ends, so the receiver counts them to find where a
-//! run ends. The body starts a new message.
+//! run ends. The body starts a new message. A message with more keys or ends than
+//! remain is not valid.
 //!
 //! Fields are little-endian.
 //!
@@ -210,8 +211,8 @@ impl Reply {
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
-    /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names no
-    /// series.
+    /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names
+    /// no series.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, bytes.len());
@@ -282,7 +283,8 @@ pub mod keys {
 
 /// The run of ends after a head: the place of each series and the end of its bytes in
 /// the body. The body follows, as long as the last end. An end whose place the session
-/// does not have, or that repeats a place of its frame, is not valid.
+/// does not have, that repeats a place of its frame, or that is below the end before
+/// it, is not valid.
 pub mod ends {
     use super::{Error, Writer, run};
 
@@ -700,6 +702,13 @@ mod tests {
         #[test]
         fn checks_the_length_before_the_path() {
             assert_eq!(Reply::decode(&[2, 9, 9]), Err(Error::Length { len: 3 }));
+        }
+
+        #[test]
+        fn checks_the_path_before_the_series() {
+            let mut bytes = zeros(2, 18);
+            bytes[1] = 2;
+            assert_eq!(Reply::decode(&bytes), Err(Error::Path { byte: 2 }));
         }
 
         #[test]

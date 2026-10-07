@@ -987,16 +987,18 @@ How to read this record:
   in the body, then the body. A message never splits a key or an end, so each side
   decodes each message as it arrives. The keys run holds exactly `channels` keys and the
   ends run exactly the head's number of series, so each side counts them to find where a
-  run ends, and the body starts a new message. A head of no series is not valid, since a
-  frame holds its index. So no count of channels or series has a cap, and the reader
-  fills one block of the length of the last end. The home checks each key as it arrives
-  and never allocates by the peer's count. A head with more series than places, or an
-  end with a place the session does not have or that repeats in its frame, is not valid;
-  the reader's `hub` checks this when it maps a place to its key. Each direction has its
-  own messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`,
-  `Opened` or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17
-  `NOT_HOME` (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a
-  message that does not decode or comes from the wrong side), which every protocol may
+  run ends, and the body starts a new message. So no count of channels or series has a
+  cap, and the reader fills one block of the length of the last end. A run message with
+  more keys or ends than remain is not valid. A head of no series is not valid, since a
+  frame holds its index. The home checks each key as it arrives and never allocates by
+  the peer's count. A head with more series than places, or an end with a place the
+  session does not have or that repeats in its frame, is not valid; the reader's `hub`
+  checks this when it maps a place to its key. An end below the end before it is not
+  valid; `types::frame::check` refuses it. Each direction has its own messages: the
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
+  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
+  decode, comes from the wrong side, or breaks a rule above), which every protocol may
   use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
   foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
   a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
