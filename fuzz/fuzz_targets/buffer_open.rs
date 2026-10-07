@@ -324,7 +324,6 @@ async fn build(
             .collect();
         match buffer.append(entries) {
             Ok(()) => next = firsts,
-            Err(Rejected::Full { .. }) => break,
             Err(other) => panic!("append failed: {other}"),
         }
         buffer.committed().await.expect("the batch commits");
@@ -483,9 +482,10 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
     file.sync().await.expect("the ring syncs");
 }
 
-/// Opens the changed ring. With no edits, it must open unless it is full, and give
-/// the tails and the entries the build left. When it opens, each path must read, and
-/// one commit on it must survive a reopen and read back the same before and after.
+/// Opens the changed ring. With no edits, it must open, give the tails and the
+/// entries the build left, and have room for the commit and the reopen. When it
+/// opens, each path must read, and one commit on it must survive a reopen and read
+/// back the same before and after.
 ///
 /// The commit is one entry of `CHECK_PART` bytes at each tail. A record edit can put a
 /// tail at `u64::MAX`, a precondition of `append`, so such a ring is not checked.
@@ -500,7 +500,6 @@ async fn check(
     let (buffer, slots) = match open(node, tasks, pool).await {
         Ok(opened) => opened,
         Err(Error::Pool(_) | Error::Files(_)) => panic!("open failed outside the ring"),
-        Err(Error::Full { .. }) => return,
         Err(other) if input.edits.is_empty() => {
             panic!("an open refused the ring the build wrote: {other}")
         }
@@ -555,7 +554,7 @@ async fn check(
     let before = tails(&buffer, &slots);
     match buffer.append(entries) {
         Ok(()) => {}
-        Err(Rejected::Full { .. }) => return,
+        Err(Rejected::Full { .. }) if !input.edits.is_empty() => return,
         Err(other) => panic!("append failed: {other}"),
     }
     assert_eq!(
@@ -571,10 +570,10 @@ async fn check(
         assert_eq!(given.last(), Some(commit), "a read lost the commit");
     }
     drop(buffer);
-    // An open costs one block for its restart record. No room is full, not lost.
+    // An open costs one block for its restart record. Only an edit leaves no room.
     let (reopened, slots) = match open(node, tasks, pool).await {
         Ok(opened) => opened,
-        Err(Error::Full { .. }) => return,
+        Err(Error::Full { .. }) if !input.edits.is_empty() => return,
         Err(other) => panic!("a ring with a commit did not reopen: {other}"),
     };
     let recovered: Vec<Tail> = slots
