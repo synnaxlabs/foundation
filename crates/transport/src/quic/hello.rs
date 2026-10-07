@@ -284,8 +284,8 @@ mod tests {
     /// Pairs in one of five shapes: up to 31 of any ids in any order; up to 24 ids
     /// that rise, with up to two pairs of any ids after them; ids 0 and 1, then up to
     /// 24 unknown ids that rise; ids 0 and 1, then pairs of 8-byte ids to near 256
-    /// bytes; or ids 0 and 1, then 1-byte and 2-byte ids that rise to near 256 bytes,
-    /// with up to one pair of any id after them.
+    /// bytes; or 1-byte and 2-byte ids that rise to near 256 bytes, with id 0 or 1
+    /// at times left out and up to one pair of any id after them.
     fn pairs() -> impl Strategy<Value = Vec<(u64, u64)>> {
         let id = || prop_oneof![0_u64..4, unknown()];
         let any = prop::collection::vec((id(), value()), 0..32);
@@ -321,12 +321,18 @@ mod tests {
         let many = (
             value(),
             value(),
+            prop_oneof![Just(None), Just(Some(0)), Just(Some(1))],
             60_u64..=110,
             prop::collection::vec((id(), value()), 0..=1),
         )
-            .prop_map(|(window, message, last, more)| {
-                let mut pairs = vec![(0, window), (1, message)];
-                pairs.extend((2..=last).map(|id| (id, id % 64)));
+            .prop_map(|(window, message, missing, last, more)| {
+                let value = |id| match id {
+                    0 => window,
+                    1 => message,
+                    _ => id % 64,
+                };
+                let ids = (0..=last).filter(|&id| Some(id) != missing);
+                let mut pairs: Vec<_> = ids.map(|id| (id, value(id))).collect();
                 pairs.extend(more);
                 pairs
             });
@@ -434,6 +440,14 @@ mod tests {
         assert_eq!(
             Hello::decode(&encode(&pairs)),
             fault("a hello with id 0 after id 104")
+        );
+        let mut pairs: Vec<(u64, u64)> = (0..=105).map(|id| (id, 0)).collect();
+        pairs.push((2, 0));
+        let bytes = encode(&pairs);
+        assert_eq!((pairs.len(), bytes.len()), (107, BYTES_MAX));
+        assert_eq!(
+            Hello::decode(&bytes),
+            fault("a hello with id 2 after id 105")
         );
     }
 
