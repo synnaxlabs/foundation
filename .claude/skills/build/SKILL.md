@@ -106,5 +106,8 @@ A PR that waits for a code owner waits for the morning; take the next issue mean
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
-  to `laptop.architect`, who records it.
+  to `laptop.architect`.
+- When the architect rules in a comment on your issue, act on it at once. Add the ruling
+  to the crate's section of `docs/decisions.md` in your PR, with who decided and the
+  comment link.
 - Before you stop, comment your state on the issue: done, next step, open questions.
