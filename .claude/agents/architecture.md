@@ -44,5 +44,12 @@ Check:
 - Shape decisions: read the PR's "Shape decisions" section. Challenge any choice where
   a rejected alternative is the better architecture.
 
+Start the report with two lines. First `Public surface: none`, or each public item (its
+signature or doc) and crate dependency that the PR changes, with file and line. Then
+`Hot path: none`, or each changed function that runs once per sample, series, frame,
+or data message, with the loop that runs it, whatever the PR body says. A function
+that a crate benchmark measures per frame, sample, series, or message is one. So is a
+stub that its caller on record will run so.
+
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.
