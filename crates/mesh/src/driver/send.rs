@@ -12,9 +12,8 @@ use env::tasks::Tasks;
 use transport::stream::Sender;
 use transport::{Class, Session, Transport};
 use types::node;
-use wire::Protocol;
 
-use super::Group;
+use super::{Group, header};
 use crate::bytes::block;
 use crate::message::Message;
 
@@ -171,8 +170,7 @@ impl Senders {
                 None => self.dial(to).await?,
             };
             let mut sender = session.open_sender(Class::Command).await?;
-            let header = block(&self.pool, &wire::header::encode(Protocol::Mesh))?;
-            sender.send(header).await?;
+            sender.send(header(&self.pool)?).await?;
             stream.insert(sender)
         };
         let block = block(&self.pool, &Message::Raft(message).encode())?;

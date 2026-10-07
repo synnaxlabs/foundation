@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
-use block::Pool;
+use block::{Block, Pool};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::Files;
@@ -20,8 +20,10 @@ use types::channel;
 use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
+use wire::Protocol;
 
 use crate::applied::Applied;
+use crate::bytes::block;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Signer};
 use crate::error::{Error, Stopped};
@@ -39,6 +41,15 @@ mod stream;
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
+/// The shortest election timeout.
+fn election() -> Span {
+    Span::from_nanos(TICK.nanos().saturating_mul(i64::from(ELECTION_TICKS)))
+}
+
+/// The header that goes first on each stream that this node opens.
+fn header(pool: &Pool) -> Result<Block, block::Error> {
+    block(pool, &wire::header::encode(Protocol::Mesh))
+}
 const HEARTBEAT_TICKS: u32 = 1;
 /// The most messages that wait for one member.
 const QUEUE_MAX: usize = 64;
@@ -264,9 +275,7 @@ impl Mesh {
         if public_key(from) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
-        let Voters { incoming, outgoing } = group.raft.voters();
-        let voter = incoming.contains(&from) || outgoing.contains(&from);
-        if request(&message.body) && !voter {
+        if request(&message.body) && !group.voter(from) {
             return Err(Error::NotVoter { from });
         }
         claim::check(&group.raft, &message, public_key)?;
@@ -505,7 +514,7 @@ struct Group {
     // The task of `Senders::run`, while it waits for a new queue.
     starter: Option<Waker>,
     applied: Applied,
-    // The task of each call of `set_home` that waits for the outcome of a try.
+    // The task of each call that waits for the outcome of a try of its proposal.
     calls: BTreeMap<u64, Waker>,
 }
 
@@ -524,6 +533,12 @@ impl Group {
             Some(cause) => Err(Error::Pool(cause.clone())),
             None => Ok(()),
         }
+    }
+
+    // Whether `key` votes in one half of the configuration, at least.
+    fn voter(&self, key: node::Key) -> bool {
+        let Voters { incoming, outgoing } = self.raft.voters();
+        incoming.contains(&key) || outgoing.contains(&key)
     }
 
     fn slot(&mut self) -> u64 {

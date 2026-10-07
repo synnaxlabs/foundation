@@ -6,21 +6,17 @@ use std::task::Poll;
 
 use block::Pool;
 use env::clock::Clock;
-use raft::{Position, Voters};
+use raft::Position;
 use transport::{Class, Session};
 use types::time::Span;
 use types::{channel, node};
-use wire::Protocol;
 
-use super::{Mesh, TICK};
+use super::{Mesh, TICK, election, header};
 use crate::applied::{Floor, Outcome};
 use crate::bytes::block;
 use crate::change::Change;
 use crate::error::Error;
 use crate::message::Message;
-
-// How long a try waits for the answer of the leader: one election timeout.
-const ANSWER: Span = Span::from_nanos(10 * TICK.nanos());
 
 impl Mesh {
     /// Makes `home` the home of `index`. A follower forwards it to the leader. It
@@ -42,7 +38,10 @@ impl Mesh {
         home: node::Key,
     ) -> Result<(), Error> {
         loop {
-            let attempt = self.attempt(home)?;
+            let attempt = self.attempt()?;
+            if self.member(home).is_none() {
+                return Err(Error::NotMember(home));
+            }
             let Some(at) = self.place(Change::Home { index, home }).await? else {
                 drop(attempt);
                 self.clock.sleep(TICK).await;
@@ -54,17 +53,12 @@ impl Mesh {
         }
     }
 
-    // Starts one try, when this node can propose that `home` is a home now.
-    fn attempt(&self, home: node::Key) -> Result<Try<'_>, Error> {
+    // Starts one try of a proposal, when the group runs and this node is a voter.
+    fn attempt(&self) -> Result<Try<'_>, Error> {
         let mut group = self.group.borrow_mut();
         group.running()?;
-        let Voters { incoming, outgoing } = group.raft.voters();
-        let own = group.raft.key();
-        if !incoming.contains(&own) && !outgoing.contains(&own) {
+        if !group.voter(group.raft.key()) {
             return Err(Error::NoVote);
-        }
-        if group.state.member(home).is_none() {
-            return Err(Error::NotMember(home));
         }
         Ok(Try {
             mesh: self,
@@ -90,8 +84,9 @@ impl Mesh {
         let Some(session) = session else {
             return Ok(None);
         };
+        // A new leader can take the change after one election timeout.
         let forward = forward(&session, &self.pool, change);
-        Ok(within(&self.clock, ANSWER, forward).await.flatten())
+        Ok(within(&self.clock, election(), forward).await.flatten())
     }
 }
 
@@ -99,8 +94,7 @@ impl Mesh {
 // in its answer. `None` when the peer did not propose it, or the stream failed.
 async fn forward(session: &Session, pool: &Pool, change: Change) -> Option<Position> {
     let (mut sender, mut receiver) = session.open(Class::Command).await.ok()?;
-    let header = block(pool, &wire::header::encode(Protocol::Mesh)).ok()?;
-    sender.send(header).await.ok()?;
+    sender.send(header(pool).ok()?).await.ok()?;
     let proposal = Message::Propose { change };
     sender
         .send(block(pool, &proposal.encode()).ok()?)
