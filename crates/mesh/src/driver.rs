@@ -539,6 +539,7 @@ async fn run(
 mod tests {
     use std::io::IoSliceMut;
     use std::iter;
+    use std::mem;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::Path;
     use std::pin::pin;
@@ -907,16 +908,275 @@ mod tests {
         mesh.group.borrow().raft.term()
     }
 
+    /// Gives the output of `future` when it does not wait.
+    async fn now<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+        poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+    }
+
     /// Proposes `change`, and gives the result when the call does not wait.
     async fn started(mesh: &Mesh, change: Change) -> Poll<Result<Position, Error>> {
-        let mut proposal = pin!(mesh.propose(change));
-        poll_fn(|cx| Poll::Ready(proposal.as_mut().poll(cx))).await
+        now(pin!(mesh.propose(change))).await
     }
 
     /// Whether `mesh` has no message for node `to` now.
     async fn quiet(mesh: &Mesh, to: u8) -> bool {
-        let mut outgoing = pin!(mesh.outgoing(key(to)));
-        poll_fn(|cx| Poll::Ready(outgoing.as_mut().poll(cx).is_pending())).await
+        now(pin!(mesh.outgoing(key(to)))).await.is_pending()
+    }
+
+    /// The position after `at` in its term.
+    fn after(at: Position, count: u64) -> Position {
+        Position {
+            index: at.index + count,
+            ..at
+        }
+    }
+
+    #[test]
+    fn a_proposal_returns_after_the_write_of_its_entry() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            let held = fill(&pool);
+            let result = Rc::new(RefCell::new(None));
+            let (other, slot) = (mesh.clone(), Rc::clone(&result));
+            tasks.spawn(async move {
+                let proposed = other.propose(home(2)).await;
+                *slot.borrow_mut() = Some(proposed);
+            });
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+            assert_eq!(*result.borrow(), None);
+            drop(held);
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
+            assert_eq!(result.take(), Some(Ok(after(first, 1))));
+        });
+    }
+
+    mod answer {
+        use super::*;
+
+        #[test]
+        fn a_leader_gives_the_position_of_each_change_that_a_voter_forwards() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                let first = lead(&mesh, &node.clock(), home(1)).await;
+                assert_eq!(watch.next().await, Ok(Some(key(1))));
+                // Node 9 is not a member: the leader does not check the home.
+                for (count, id) in [(1, 9), (2, 9), (3, 2)] {
+                    let at = after(first, count);
+                    let answer = mesh.answer(public(1), home(id)).await;
+                    assert_eq!(answer, Ok(Message::Proposed { at }), "change {count}");
+                }
+                assert_eq!(watch.next().await, Ok(Some(key(2))));
+            });
+        }
+
+        #[test]
+        fn a_node_that_does_not_lead_names_the_leader_that_it_knows() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let answer = mesh.answer(public(3), home(3)).await;
+                assert_eq!(answer, Ok(Message::NotLeader { leader: None }));
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                let answer = mesh.answer(public(3), home(3)).await;
+                let leader = Some(key(2));
+                assert_eq!(answer, Ok(Message::NotLeader { leader }));
+            });
+        }
+
+        #[test]
+        fn refuses_a_peer_whose_key_no_voter_holds() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+                let first = lead(&mesh, &node.clock(), home(1)).await;
+                for (case, peer) in [("a member", 2), ("no member", 9)] {
+                    let answer = mesh.answer(public(peer), home(2)).await;
+                    assert_eq!(answer, Err(Error::NotVoter), "{case}");
+                }
+                // The group saw no change between the two.
+                assert_eq!(mesh.propose(home(1)).await, Ok(after(first, 1)));
+                assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+            });
+        }
+
+        // Node 3 leaves and node 4 joins: each is a voter of one half of the
+        // configuration.
+        #[test]
+        fn takes_a_change_from_a_voter_of_each_half_of_a_joint_configuration() {
+            solo(|node, tasks| async move {
+                let members = [1, 2, 3, 4, 5];
+                let mesh = open(&node, &tasks, 1, &members, &IDS).await.unwrap();
+                let joint = Voters {
+                    incoming: [key(1), key(2), key(4)].into(),
+                    outgoing: [key(1), key(2), key(3)].into(),
+                };
+                let at = Position {
+                    term: common::TERM,
+                    index: 1,
+                };
+                let append = Body::Append {
+                    prev: Position::default(),
+                    entries: vec![Entry {
+                        at,
+                        data: Data::Voters(joint),
+                    }],
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+                let leader = Some(key(2));
+                for peer in [3, 4] {
+                    let answer = mesh.answer(public(peer), home(peer)).await;
+                    assert_eq!(answer, Ok(Message::NotLeader { leader }), "{peer}");
+                }
+                let answer = mesh.answer(public(5), home(5)).await;
+                assert_eq!(answer, Err(Error::NotVoter));
+            });
+        }
+
+        #[test]
+        fn gives_the_cause_when_the_write_of_the_entry_fails() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                lead(&mesh, &node.clock(), home(1)).await;
+                let stopped = fail_sync(&node);
+                let answer = mesh.answer(public(1), home(2)).await;
+                assert_eq!(answer, Err(stopped.clone()));
+                assert_eq!(mesh.answer(public(1), home(2)).await, Err(stopped));
+            });
+        }
+
+        type Answers = Rc<RefCell<Vec<Result<Message, Error>>>>;
+
+        /// Starts a task that gives `home(3)` from the voter to `mesh`, and puts the
+        /// answer in `answers`.
+        fn forward(mesh: &Mesh, tasks: &Tasks, answers: &Answers) {
+            let (mesh, answers) = (mesh.clone(), Rc::clone(answers));
+            tasks.spawn(async move {
+                let answer = mesh.answer(public(1), home(3)).await;
+                answers.borrow_mut().push(answer);
+            });
+        }
+
+        /// The positions that the node gave for `home(3)`.
+        fn positions(answers: &Answers) -> Vec<Position> {
+            let position = |answer| match answer {
+                Ok(Message::Proposed { at }) => Some(at),
+                Ok(Message::NotLeader { leader: None }) => None,
+                other => panic!("the node answered {other:?}"),
+            };
+            answers.take().into_iter().filter_map(position).collect()
+        }
+
+        /// Opens node 1 again after the power cut, and gives the position of the
+        /// entry that sets the home to node 1, once the node has that home.
+        fn lead_again(sim: &mut Sim, node: &sim::node::Node) -> Position {
+            sim.run_on(node, |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                let at = lead(&mesh, &node.clock(), home(1)).await;
+                while watch.next().await != Ok(Some(key(1))) {}
+                at
+            })
+            .unwrap()
+        }
+
+        // The lone voter leads in memory while the write of its term waits for a
+        // block. After a power cut the node leads the same term again, and the
+        // position that it would give for `home(3)` holds `home(1)`.
+        #[test]
+        fn a_position_in_an_answer_names_no_other_change_when_the_pool_is_full() {
+            let mut sim = Sim::new(sim::Config::default());
+            let node = sim.node(sim::node::Config::default());
+            let answered = sim
+                .run_on(&node, |node, tasks| async move {
+                    let pool = small_pool();
+                    let config = Config {
+                        pool: Rc::clone(&pool),
+                        ..config(&node, &tasks, 1, &[1], &[1])
+                    };
+                    let mesh = Mesh::open(config).await.unwrap();
+                    // No write of the log ends from here on.
+                    mem::forget(fill(&pool));
+                    let answers = Answers::default();
+                    // Longer than each election timeout.
+                    for _ in 0..30 {
+                        node.clock().sleep(TICK).await;
+                        forward(&mesh, &tasks, &answers);
+                    }
+                    node.clock().sleep(TICK).await;
+                    assert_eq!(term(&mesh), Term(1), "the node leads in memory");
+                    positions(&answers)
+                })
+                .unwrap();
+            sim.crash(&node, Crash::Power);
+            let taken = lead_again(&mut sim, &node);
+            assert!(
+                !answered.contains(&taken),
+                "the node answered that {taken:?} holds the home {}, and after the \
+                 power cut that position holds the home {}; it gave {answered:?}",
+                key(3),
+                key(1),
+            );
+        }
+
+        // The same with no fault but the power cut: the change comes while the node
+        // writes the term that it now leads. A disk call takes 100 us at most, so the
+        // voter gives the change each 10 us for 500 us before and after each tick.
+        #[test]
+        fn a_position_in_an_answer_names_no_other_change_after_a_power_cut() {
+            let mut reused = Vec::new();
+            for seed in 0..16 {
+                let mut sim = Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let node = sim.node(sim::node::Config::default());
+                let answered = sim
+                    .run_on(&node, |node, tasks| async move {
+                        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                        let clock = node.clock();
+                        let steps = |count| Span::from_nanos(count * 10_000);
+                        clock.sleep(steps(TICK.nanos() / 10_000 - 50)).await;
+                        loop {
+                            for _ in 0..100 {
+                                let mut answer = pin!(mesh.answer(public(1), home(3)));
+                                match now(answer.as_mut()).await {
+                                    Poll::Ready(Ok(Message::NotLeader {
+                                        leader: None,
+                                    })) => {}
+                                    Poll::Ready(first) => return first,
+                                    Poll::Pending => return answer.await,
+                                }
+                                clock.sleep(steps(1)).await;
+                            }
+                            clock.sleep(steps(TICK.nanos() / 10_000 - 100)).await;
+                        }
+                    })
+                    .unwrap();
+                let Ok(Message::Proposed { at: answered }) = answered else {
+                    panic!("run {seed}: the node answered {answered:?}");
+                };
+                sim.crash(&node, Crash::Power);
+                let taken = lead_again(&mut sim, &node);
+                if answered == taken {
+                    reused.push((seed, taken));
+                }
+            }
+            assert_eq!(
+                reused,
+                Vec::new(),
+                "in each run (seed, position), the node answered that the position \
+                 holds the home {}, and after the power cut it holds the home {}",
+                key(3),
+                key(1),
+            );
+        }
     }
 
     mod receive {
