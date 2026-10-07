@@ -155,8 +155,11 @@ impl Files {
         self.0.create_dir(dir).await
     }
 
-    /// Removes the file at `path`. A file that is not there counts as removed. The
-    /// removal is not durable until [`Files::sync_dir`] on its directory ends.
+    /// Removes the file at `path`. A file that is not there counts as removed. A drop
+    /// of the future does not stop the remove, which can still remove what the path
+    /// names when it ends. The removal is not durable until [`Files::sync_dir`] on its
+    /// directory ends. Count the file's room as used until then, and while a handle
+    /// holds the file.
     ///
     /// # Errors
     ///
