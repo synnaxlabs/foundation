@@ -1954,9 +1954,15 @@ How to read this record:
   state cannot see the keys of the spec, so the status key check covers members only.
   The name and key checks are one function, which `State::new` also runs on the
   founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. A member
-  and a `Join` hold at most 64 status entries, refused at decode (`MAX_STATUS`), as the
-  32 of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:44:26Z):
-  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. A
+  and a `Join` hold at most 64 status entries, as the 32 of `Addresses`. Decided by
+  `laptop.architect` (2026-10-07T10:44:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
+  `mesh::status::Status` holds the cap of 64: `Status::new` refuses more (`Many`), and
+  the decode refuses more before it reads an entry. So each `Member` that `encode`
+  writes decodes, and `region::Unfit` has no count check. Lost: `Unfit::Many` in the
+  member checks, which covers only where they run. Decided by `laptop.architect`
+  (2026-10-07T11:11:49Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036702954. A
   refused change is a no-op on every node, so a forged card in the log cannot stop a
   node. A `Join` holds a `card::Unchecked`, not a `card::Signed`: it has the byte form
   of a signed card, decode keeps a join whose signature does not hold, and apply refuses
