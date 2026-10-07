@@ -210,6 +210,23 @@ mod tests {
         bytes
     }
 
+    /// The bytes of `pairs`, with varint `i` in 8 bytes when `wide[i]` is true, else
+    /// in the fewest bytes. Ids are varints `2k` and values `2k + 1`.
+    fn encode_wide(pairs: &[(u64, u64)], wide: &[bool]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let varints = pairs.iter().flat_map(|&(id, value)| [id, value]);
+        for (at, varint) in varints.enumerate() {
+            if wide.get(at).copied().unwrap_or(false) {
+                bytes.extend(long(varint));
+            } else {
+                VarInt::from_u64(varint)
+                    .expect("a varint")
+                    .encode(&mut bytes);
+            }
+        }
+        bytes
+    }
+
     fn fault(reason: &str) -> Result<Hello, Fault> {
         Err(Fault(reason.to_owned()))
     }
@@ -219,10 +236,15 @@ mod tests {
         (value | 0xc0 << 56).to_be_bytes()
     }
 
-    /// What the `decode` doc gives for a hello of `pairs` then `tail`, the start of
-    /// one more pair when not empty, with the reason of a fault.
-    fn doc_decode(pairs: &[(u64, u64)], tail: &[u8]) -> Result<Hello, String> {
-        if encode(pairs).len() + tail.len() > 256 {
+    /// What the `decode` doc gives for a hello of `bytes` bytes that holds `pairs`
+    /// then `tail`, the start of one more pair when not empty, with the reason of a
+    /// fault.
+    fn doc_decode(
+        pairs: &[(u64, u64)],
+        tail: &[u8],
+        bytes: usize,
+    ) -> Result<Hello, String> {
+        if bytes > 256 {
             return Err("a hello over 256 bytes".to_owned());
         }
         let mut after = pairs.iter().zip(pairs.iter().skip(1));
@@ -408,11 +430,16 @@ mod tests {
                 (0_u8..4).prop_map(|id| vec![id]),
                 (0_u8..4).prop_map(|id| vec![id, 0x40]),
             ],
+            // At times, some varints in more bytes than they need.
+            wide in prop_oneof![
+                3 => Just(vec![]),
+                1 => prop::collection::vec(prop::bool::weighted(0.1), 224),
+            ],
         ) {
-            let mut bytes = encode(&pairs);
+            let mut bytes = encode_wide(&pairs, &wide);
             bytes.extend(&tail);
             let decoded = Hello::decode(&bytes).map_err(|fault| fault.0);
-            prop_assert_eq!(decoded, doc_decode(&pairs, &tail));
+            prop_assert_eq!(decoded, doc_decode(&pairs, &tail, bytes.len()));
         }
     }
 
