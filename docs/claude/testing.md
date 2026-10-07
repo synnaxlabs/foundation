@@ -30,10 +30,13 @@ behavior. Never print a pointer. No `thread_local!` state.
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
 checks on each PR that agent-written tests catch real changes. A missed mutant fails
-CI. A mutant that makes a test hang (a timeout) counts as caught.
-`.cargo/mutants.toml` lists the few functions it skips, each with its reason. Miri and
-cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
-those gates use.
+CI. A mutant that makes a test hang (a timeout) counts as caught. An assertion on a
+private field is never the only kill. `.cargo/mutants.toml` lists the few functions it
+skips. Each entry is as narrow as one function. Its comment says why no caller or peer
+can see the mutant, or names the test that kills it in a job that the mutants run does
+not see (Miri, loom, another OS). A mutant that a test could kill but none does links
+its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
+`rust-toolchain-nightly`, that only those gates use.
 
 ## Fuzzing
 
@@ -52,6 +55,9 @@ again once to prove that the failure replays (r16 59).
 
 - **A bug fix starts with a failing regression test.** Show it fails for the reason you
   diagnosed, then fix the code.
+- **Test what the change is for.** When a change exists to remove work (a clock read, a
+  copy, an allocation, a round trip), a test counts that work and fails when the change
+  is reverted.
 - **Pin the exact error.** Assert the variant and its fields or message
   (`assert!(matches!(err, Error::Backwards { .. }))`, `assert_eq!(err.to_string(),
   "...")`), never only `is_err()`. Clippy denies `assertions_on_result_states`
