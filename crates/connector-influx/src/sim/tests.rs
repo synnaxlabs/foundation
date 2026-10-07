@@ -111,6 +111,27 @@ fn a_quote_in_a_comment_runs_across_the_next_lines() {
 }
 
 #[test]
+fn skips_a_comment_with_a_quote_that_opens_no_string() {
+    for body in [
+        "#a=\"b\nm v=1 10\n",
+        "# a,b=\"c\nm v=1 10\n",
+        "# \"b\nm v=1 10\n",
+        "# a\"b\nm v=1 10\n",
+        "#\"\nm v=1 10\n",
+    ] {
+        assert_eq!(times(&stored(body), "m", &[]), [10]);
+    }
+}
+
+#[test]
+fn stores_a_leading_tab_and_a_tab_in_a_string() {
+    let store = stored("\tm v=1 10\nm s=\"a\tb\" 20\n");
+    assert_eq!(times(&store, "m", &[]), [10, 20]);
+    let point = store.points("m", &[]).last().unwrap();
+    assert_eq!(point.fields, &map(&[("s", Field::String("a\tb".into()))]));
+}
+
+#[test]
 fn refuses_a_bare_tab_and_nul_in_a_measurement() {
     const TAKE: &str = "A generic parsing error occurred: TakeWhile1";
     for (line, message) in [
