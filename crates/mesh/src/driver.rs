@@ -140,7 +140,7 @@ impl Mesh {
         }
         let pool = Rc::clone(&config.pool);
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
-        let unapplied = joins(&stored.entries).collect();
+        let unapplied = written(&stored.entries).collect();
         let start = Start {
             hard: stored.hard,
             voters: Voters {
@@ -502,9 +502,9 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
-    // The node key and public key of each join in the log that `raft` holds and
-    // this node has not applied, by index.
-    unapplied: BTreeMap<u64, (node::Key, PublicKey)>,
+    // Each join and configuration entry in the log that `raft` holds and this
+    // node has not applied, by index.
+    unapplied: BTreeMap<u64, Written>,
     // The last entry whose join `sync` took.
     synced: Position,
     // Why the last try of a write of the log found no block, until that write ends.
@@ -517,16 +517,34 @@ struct Group {
 
 impl Group {
     // The public key of `key` in the applied state, else in the joins of the log
-    // as `raft` holds it. A node key whose unapplied joins name two public keys has
-    // none until the apply decides: the first can be a forgery.
+    // as `raft` holds it. When those name two public keys, the joins below the
+    // first configuration entry that names `key` in either half decide: the leader
+    // applied the join that made `key` a voter before it wrote that entry, so that
+    // join is below it, and a later join can be a forgery. Two keys there too give
+    // none until the apply decides.
     fn public_key(&self, key: node::Key) -> Option<Known> {
         if let Some(member) = self.state.member(key) {
             return Some(Known::Applied(member.public_key()));
         }
-        let mut unapplied = self.unapplied.values().filter(|(of, _)| *of == key);
-        let (_, first) = unapplied.next()?;
-        let same = unapplied.all(|(_, other)| other == first);
-        same.then_some(Known::Unapplied(*first))
+        let joins = |below| {
+            self.unapplied
+                .range(..below)
+                .filter_map(|(_, written)| match written {
+                    Written::Join(of, public) if *of == key => Some(*public),
+                    _ => None,
+                })
+        };
+        if let Some(public) = one(joins(u64::MAX)) {
+            return Some(Known::Unapplied(public));
+        }
+        let named =
+            self.unapplied
+                .iter()
+                .find_map(|(&index, written)| match written {
+                    Written::Named(named) if named.contains(&key) => Some(index),
+                    _ => None,
+                })?;
+        one(joins(named)).map(Known::Unapplied)
     }
 
     // Takes the joins that `raft` appended since the last sync. It runs after each
@@ -549,7 +567,7 @@ impl Group {
             }
         }
         let (_, new) = unstable.split_at(unstable.len().saturating_sub(new));
-        self.unapplied.extend(joins(new));
+        self.unapplied.extend(written(new));
         self.synced = last.at;
     }
 
@@ -723,18 +741,40 @@ fn holds(entries: &[Entry], at: Position) -> bool {
     entry.is_some_and(|entry| entry.at == at)
 }
 
-// The index, node key, and public key of each join in `entries`.
-fn joins(entries: &[Entry]) -> impl Iterator<Item = (u64, (node::Key, PublicKey))> {
+// A join or a configuration entry of the log.
+#[derive(Debug)]
+enum Written {
+    // The node key and public key of a join.
+    Join(node::Key, PublicKey),
+    // The nodes that a configuration entry names, in either half.
+    Named(BTreeSet<node::Key>),
+}
+
+// Each join and configuration entry of `entries`, with its index.
+fn written(entries: &[Entry]) -> impl Iterator<Item = (u64, Written)> {
     entries.iter().filter_map(|entry| {
-        let Data::Bytes(bytes) = &entry.data else {
-            return None;
+        let written = match &entry.data {
+            Data::Voters(change) => {
+                let Voters { incoming, outgoing } = &change.voters;
+                Written::Named(incoming.iter().chain(outgoing).copied().collect())
+            }
+            Data::Bytes(bytes) => {
+                let Ok(Change::Join(join)) = Change::decode(bytes) else {
+                    return None;
+                };
+                let card = &join.card;
+                Written::Join(card.key, card.card.public_key)
+            }
+            Data::Empty => return None,
         };
-        let Ok(Change::Join(join)) = Change::decode(bytes) else {
-            return None;
-        };
-        let card = &join.card;
-        Some((entry.at.index, (card.key, card.card.public_key)))
+        Some((entry.at.index, written))
     })
+}
+
+// The one key of `keys`, when they are all the same.
+fn one(mut keys: impl Iterator<Item = PublicKey>) -> Option<PublicKey> {
+    let first = keys.next()?;
+    keys.all(|key| key == first).then_some(first)
 }
 
 // Whether `body` asks its receiver to act. The other bodies answer a request.
@@ -2703,6 +2743,105 @@ mod tests {
                 assert_eq!(mesh.receive(public(3), probe), Ok(()));
                 let reply = mesh.outgoing(key(3)).await.unwrap();
                 assert_eq!(reply.body, Body::AppendReject { hint: 0 });
+            });
+        }
+
+        /// The log of leader 2 of `TERM`: the real join of 4, the change to the
+        /// voters 2 and 4, then a stale join of 4 with the key of 5.
+        pub(super) fn stale_second() -> Vec<Data> {
+            let mut data = changes(&[join(4)]);
+            data.extend([voters(TERM, &[2, 4], &[2, 3]), voters(TERM, &[2, 4], &[])]);
+            data.extend(changes(&[stale_join()]));
+            data
+        }
+
+        /// The append of `leader` of `later`, which 2 and 4 elected, that replaces
+        /// the stale join of [`stale_second`] from `prev` below it, with its
+        /// chain. And the log that a node holds after it.
+        pub(super) fn replace_second(leader: u8) -> (raft::Message, Vec<Entry>) {
+            let Body::Append {
+                entries: mut log, ..
+            } = append(TERM, stale_second())
+            else {
+                unreachable!()
+            };
+            let chain = log[1..3]
+                .iter()
+                .map(|entry| {
+                    let Data::Voters(change) = &entry.data else {
+                        unreachable!()
+                    };
+                    raft::Link {
+                        at: entry.at,
+                        change: change.clone(),
+                    }
+                })
+                .collect();
+            let empty = Entry {
+                at: Position {
+                    term: later(),
+                    index: 4,
+                },
+                data: Data::Empty,
+            };
+            let body = Body::Append {
+                prev: log[2].at,
+                entries: vec![empty.clone()],
+                commit: 0,
+            };
+            let mut replace = proven_at(leader, 1, later(), &[(2, 2), (4, 4)], body);
+            replace.chain = chain;
+            log.truncate(3);
+            log.push(empty);
+            (replace, log)
+        }
+
+        // The real join of 4 is below the change that names it, and the stale join
+        // above, so the real key proves the vote of 4, and the node takes the
+        // whole log of the leader.
+        #[test]
+        fn takes_an_append_that_replaces_a_stale_second_join_above_prev() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, stale_second()).await;
+                let (replace, _) = replace_second(2);
+                assert_eq!(mesh.receive(public(2), replace), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            });
+            assert_eq!(entries, replace_second(2).1);
+        }
+
+        // The forged join of 4 is below the change that names it too, so the node
+        // has no key for 4, and a leader that 2 and 4 elected is unproven here. A
+        // defect until #336 builds the voter that checks a join before it stamps it.
+        #[test]
+        fn a_leader_elected_under_a_change_above_two_written_joins_is_unproven() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = changes(&[stale_join(), join(4)]);
+                data.push(voters(TERM, &[2, 4], &[2, 3]));
+                write(&mesh, data).await;
+                let elected = heartbeat(2, later(), &[(2, 2), (4, 4)]);
+                let unproven = Error::Raft(raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                });
+                assert_eq!(mesh.receive(public(2), elected), Err(unproven));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // As above, with node 4 as the leader: its key is the real one.
+        #[test]
+        fn a_leader_with_a_stale_second_join_above_the_change_is_not_spoofed() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, stale_second()).await;
+                let (replace, _) = replace_second(4);
+                assert_eq!(mesh.receive(public(4), replace), Ok(()));
+                let reply = mesh.outgoing(key(4)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
             });
         }
 

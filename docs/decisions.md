@@ -2037,13 +2037,12 @@ How to read this record:
   `foundation/grant/2`. The driver (#471) checks each
   claim of a message before each `step` against the key of its signer: the key of a
   member in the applied state, else the key that each join of that node in the log as
-  `raft` holds it and not applied names, when all of them name one key. An entry that
-  replaces a join removes its key, at the step that replaces it. Two joins that name two
-  keys give none until the apply decides: a voter stamps a join with no check, so the
-  first can be forged (decided by `laptop.director`, 2026-10-07T12:48:00Z and
-  2026-10-07T13:10:50Z:
+  `raft` holds it and not applied names, when all of them name one key (decided by
+  `laptop.director`, 2026-10-07T12:48:00Z and 2026-10-07T13:10:50Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423 and
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429). The log
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429). An
+  entry that replaces a join removes its key, at the step that replaces it. Two joins
+  that name two keys: MESH DRIVER states the rule. The log
   is the one that `raft` reads its configuration from, so each `step` and each proposal
   syncs the keys from `Raft::unstable` before the write (decided by `laptop.architect`,
   2026-10-07T13:31:26Z:
@@ -2206,7 +2205,22 @@ How to read this record:
   (`Error::Claim` with `claim::Error::Forged`), also when the key comes from a join
   that is not applied: the sender check proved that the peer holds that key
   (decided by `laptop.architect`, 2026-10-07T20:37:34Z:
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046390090). A
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046390090).
+  When the unapplied joins of a signer name two keys, its key is the key of the
+  joins below the first configuration entry, in the log as `raft` holds it, that
+  names the signer in either half, when those joins name one key, else none: the
+  leader applied the real join before it wrote that entry, so Log Matching puts the
+  real join below it in each log, and a join above it can be a forgery. The sender
+  check and the claim check both use this lookup (decided by `laptop.director`,
+  2026-10-07T20:44:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046503082.
+  Supersedes the two-keys sentence of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038611630).
+  Triggers: a change kind that removes a member states this rule again; the test of
+  a log that holds the two joins and no configuration entry that names the signer,
+  with the entry in the chain only, gets its own decision if it fails. Two joins
+  below that entry still strand a follower under a leader that the real node
+  elected, until #336 builds the voter that checks a join before it stamps it. A
   hard proof that lost such a claim can be no quorum at a node with a newer
   configuration, which then learns the term from the leader. A follower answers a cut
   run with the last entry it kept, and the leader sends the rest from there.
@@ -3974,6 +3988,7 @@ How to read this record:
 | --- | --- |
 | A1 sketch: channel `home` field, epoch and seq pair, standby in the mesh file | S5, S12, A8 |
 | Rule 3 of #1382 (6038235423): `mesh` removes a claim whose signer has no key at the node, and a bad signature of a known signer refuses the message | "Rule 3 becomes" (6042828979): the append is cut before the first entry with a claim of a signer with no key, and the chain too (6043037608) |
+| Two-keys sentence of 6038611630: two joins of one node that name two keys give none until the apply decides | MESH DRIVER (6046503082): the joins below the first configuration entry that names the node decide, when they name one key |
 | Item 3 of rule 3 of 6042828979: a claim of a known signer with a bad signature refuses the whole message | MESH DRIVER (6045806233): a claim that does not hold under a key from a join that is not applied is removed, or cuts the append or the chain; only a bad signature of an applied member refuses |
 | A1 "control is a lease" (for every holder) | S11 (optional writer setting) |
 | A2 and A15 "mesh file" and placeholder commands | K1, K3 |
