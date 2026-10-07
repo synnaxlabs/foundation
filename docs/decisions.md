@@ -2195,7 +2195,9 @@ How to read this record:
   refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
-  starts the tasks that send: one for each member, from the first message for it, so a
+  starts the tasks that send: one for each member, from the first message for it
+  (approved by the architect, 2026-10-07T13:40:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881), so a
   member that is slow holds only its own messages. `mesh` dials and `node` accepts:
   `node` gives each stream of `wire::Protocol::Mesh` to `serve`. A task dials a session
   to each member at the addresses of the member's card, as the group holds the card

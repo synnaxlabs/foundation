@@ -1352,6 +1352,16 @@ mod tests {
         }
     }
 
+    // The cut is longer than the idle limit of a session, 60 s, so each session of
+    // the follower timed out. The measured wait is at most 1.5 s.
+    #[test]
+    fn a_follower_cut_off_past_the_idle_limit_has_the_home_5_s_after_the_links_heal() {
+        for run in 0..4 {
+            let waited = follower_heal_ms(run, 62);
+            assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
+        }
+    }
+
     /// Runs `body` on the one node of a run.
     fn solo<F: Future<Output = ()> + 'static>(
         body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
