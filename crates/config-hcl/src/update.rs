@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use document::diagnostic::Diagnostic;
+use document::encoding::Checked;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
@@ -22,10 +23,11 @@ use crate::{Error, Unwritable, read, write};
 pub fn update(
     source: Source,
     text: &str,
-    document: &Document,
+    document: &Checked,
 ) -> Result<String, Refusal> {
     let old = read(source, text).map_err(Refusal::Text)?;
     write(document).map_err(Refusal::Document)?;
+    let document = document.document();
     let file = File::new(source, text);
     let mut diff = Diff {
         file: &file,
@@ -561,13 +563,16 @@ fn offset(position: Position) -> usize {
 #[cfg(test)]
 mod tests {
     use document::Map;
-    use document::encoding::TooDeep;
     use document::value::{Kind, Value};
     use proptest::prelude::*;
 
     use super::*;
     use crate::Expected;
     use crate::arbitrary::document;
+
+    fn checked(document: &Document) -> Checked {
+        Checked::new(document.clone()).unwrap()
+    }
 
     fn parsed(text: &str) -> Document {
         read(Source(0), text).unwrap()
@@ -576,7 +581,7 @@ mod tests {
     /// Updates `text` to read as `new`, checks that it does, and returns the text.
     fn updated(text: &str, new: &str) -> String {
         let document = parsed(new);
-        let out = update(Source(0), text, &document).unwrap();
+        let out = update(Source(0), text, &checked(&document)).unwrap();
         assert_eq!(read(Source(0), &out).as_ref(), Ok(&document), "{out}");
         out
     }
@@ -595,7 +600,7 @@ mod tests {
     /// its blocks.
     fn text_of(document: &Document, attributes_last: bool) -> String {
         if !attributes_last {
-            return write(document).unwrap();
+            return write(&checked(document)).unwrap();
         }
         let mut text = String::new();
         for block in &document.blocks {
@@ -603,10 +608,10 @@ mod tests {
                 body: Document::default(),
                 ..block.clone()
             };
-            let head = write(&Document {
+            let head = write(&checked(&Document {
                 attributes: Map::default(),
                 blocks: vec![empty],
-            })
+            }))
             .unwrap();
             text.push_str(head.strip_suffix("{}\n").unwrap());
             text.push_str("{\n");
@@ -617,7 +622,7 @@ mod tests {
             attributes: document.attributes.clone(),
             blocks: Vec::new(),
         };
-        text + &write(&attributes).unwrap()
+        text + &write(&checked(&attributes)).unwrap()
     }
 
     /// Adds blank lines and comments to `text`, which `write` gave, and maybe a byte
@@ -755,7 +760,7 @@ mod tests {
             let mut picks = Picks(picks.into_iter());
             let text = annotate(&text_of(&a, attributes_last), &mut picks);
             prop_assert_eq!(read(Source(0), &text), Ok(a.clone()), "{}", text);
-            prop_assert_eq!(update(Source(0), &text, &a), Ok(text));
+            prop_assert_eq!(update(Source(0), &text, &checked(&a)), Ok(text));
         }
 
         #[test]
@@ -768,7 +773,7 @@ mod tests {
             let mut picks = Picks(picks.into_iter());
             let text = annotate(&text_of(&a, attributes_last), &mut picks);
             let document = mix(&a, &b, &mut picks);
-            let out = update(Source(0), &text, &document).unwrap();
+            let out = update(Source(0), &text, &checked(&document)).unwrap();
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}\n{}", text, out);
             if text.contains('\r') {
                 prop_assert!(!out.replace("\r\n", "").contains('\n'), "{}", out);
@@ -807,7 +812,7 @@ mod tests {
                 |attribute| attribute.value.clone(),
             );
             let (start, end) = offsets(replace(&mut document, &mut k, &value));
-            let out = update(Source(0), &text, &document).unwrap();
+            let out = update(Source(0), &text, &checked(&document)).unwrap();
             prop_assert!(out.starts_with(text.get(..start).unwrap()), "{}", out);
             prop_assert!(out.ends_with(text.get(end..).unwrap()), "{}", out);
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}", out);
@@ -831,8 +836,8 @@ mod tests {
             // A heredoc needs the line end after its closer.
             prop_assume!(read(Source(0), text) == Ok(a.clone()));
             let document = mix(&a, &b, &mut picks);
-            let out = update(Source(0), text, &document).unwrap();
-            let want = update(Source(0), &ended, &document).unwrap();
+            let out = update(Source(0), text, &checked(&document)).unwrap();
+            let want = update(Source(0), &ended, &checked(&document)).unwrap();
             prop_assert!(
                 want == out || want == format!("{out}{line_end}"),
                 "{:?}\n{:?}\n{:?}",
@@ -1135,41 +1140,15 @@ mod tests {
             column,
         };
         assert_eq!(
-            update(Source(0), "a = \n", &document),
+            update(Source(0), "a = \n", &checked(&document)),
             Err(Refusal::Text(vec![Error::Syntax {
                 span: Span::new(Source(0), at(4, 0, 4), at(5, 1, 0)).unwrap(),
                 expected: Expected::Value,
             }]))
         );
         assert_eq!(
-            update(Source(0), "a = 1\n", &document),
+            update(Source(0), "a = 1\n", &checked(&document)),
             Err(Refusal::Document(vec![Unwritable::Key { span: None }]))
-        );
-
-        let mut deep = Value {
-            kind: Kind::List(Vec::new()),
-            span: None,
-        };
-        for _ in 0..64 {
-            deep = Value {
-                kind: Kind::List(vec![deep]),
-                span: None,
-            };
-        }
-        let document = Document {
-            attributes: Map::new(vec![Attribute {
-                key: "a".into(),
-                key_span: None,
-                value: deep,
-            }])
-            .unwrap(),
-            blocks: Vec::new(),
-        };
-        assert_eq!(
-            update(Source(0), "a = 1\n", &document),
-            Err(Refusal::Document(vec![Unwritable::TooDeep(TooDeep {
-                span: None
-            })]))
         );
     }
 

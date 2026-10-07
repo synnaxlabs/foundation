@@ -3,17 +3,18 @@
 
 #![no_main]
 
-use document::{Source, encoding};
+use document::Source;
+use document::encoding::{Checked, decode};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|text: &str| {
     let Ok(document) = config_hcl::read(Source(0), text) else {
         return;
     };
-    let encoded = encoding::encode(&document).expect("a read document is too deep");
+    let checked = Checked::new(document).expect("a read document is too deep");
     assert_eq!(
-        encoding::decode(&encoded).as_ref(),
-        Ok(&document),
+        decode(&checked.encode()).as_ref(),
+        Ok(&checked),
         "the document changed in its encoding"
     );
 });

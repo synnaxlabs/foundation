@@ -10,6 +10,7 @@
 #![no_main]
 
 use document::Source;
+use document::encoding::Checked;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &str| {
@@ -17,7 +18,8 @@ fuzz_target!(|input: &str| {
     let Ok(document) = config_hcl::read(Source(0), new) else {
         return;
     };
-    let updated = config_hcl::update(Source(0), old, &document);
+    let checked = Checked::new(document.clone()).expect("a read document is too deep");
+    let updated = config_hcl::update(Source(0), old, &checked);
     let own = match config_hcl::read(Source(0), old) {
         Ok(own) => own,
         Err(problems) => {
@@ -36,12 +38,12 @@ fuzz_target!(|input: &str| {
         "the update does not read as its document:\n{updated}"
     );
     assert_eq!(
-        config_hcl::update(Source(0), &updated, &document).as_deref(),
+        config_hcl::update(Source(0), &updated, &checked).as_deref(),
         Ok(updated.as_str()),
         "a second update to the same document changed the text"
     );
     assert_eq!(
-        config_hcl::update(Source(0), old, &own).as_deref(),
+        config_hcl::update(Source(0), old, &Checked::new(own).expect("a read document is too deep")).as_deref(),
         Ok(old),
         "the update to its own document changed the text"
     );

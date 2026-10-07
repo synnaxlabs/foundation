@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use document::encoding;
+use document::encoding::Checked;
 use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map};
 
@@ -41,12 +41,9 @@ pub(crate) enum After {
 ///
 /// # Errors
 ///
-/// Returns each part that HCL text cannot hold, in Document order. A Document nested
-/// deeper than [`encoding::DEPTH_MAX`] gives only [`Unwritable::TooDeep`], at the
-/// first level past the limit.
-pub fn write(document: &Document) -> Result<String, Vec<Unwritable>> {
-    encoding::check(document)
-        .map_err(|too_deep| vec![Unwritable::TooDeep(too_deep)])?;
+/// Returns each part that HCL text cannot hold, in Document order.
+pub fn write(document: &Checked) -> Result<String, Vec<Unwritable>> {
+    let document = document.document();
     let mut writer = Writer::default();
     writer.body(document.attributes.iter(), &document.blocks, 0, false);
     writer.finish()
@@ -91,8 +88,7 @@ impl<'a> Items<'a> {
     }
 }
 
-/// Recurses once per level, so it runs only on a Document that [`encoding::check`]
-/// accepts.
+/// Recurses once per level, so it runs only on a [`Checked`] Document.
 #[derive(Default)]
 pub(crate) struct Writer<'a> {
     out: String,
@@ -466,6 +462,10 @@ mod tests {
     use crate::arbitrary::document;
     use crate::{Error, read};
 
+    fn checked(document: &Document) -> Checked {
+        Checked::new(document.clone()).unwrap()
+    }
+
     fn on(start: u32, end: u32) -> Span {
         let at = |offset| Position {
             offset,
@@ -540,7 +540,7 @@ mod tests {
 
     /// Writes `document`, checks that it reads back the same, and returns the text.
     fn written(document: &Document) -> String {
-        let text = write(document).unwrap();
+        let text = write(&checked(document)).unwrap();
         assert_eq!(read(Source(0), &text).as_ref(), Ok(document), "{text}");
         text
     }
@@ -555,7 +555,7 @@ mod tests {
     proptest! {
         #[test]
         fn reads_what_it_writes(document in document()) {
-            let text = write(&document).unwrap();
+            let text = write(&checked(&document)).unwrap();
             prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
         }
 
@@ -567,7 +567,7 @@ mod tests {
             let first = name.segments().next().unwrap();
             let root = first.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
                 && !["true", "false", "null"].contains(&first);
-            match write(&document) {
+            match write(&checked(&document)) {
                 Ok(text) => {
                     prop_assert!(root, "{}", text);
                     prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
@@ -840,7 +840,7 @@ mod tests {
         };
         let at = |start, end| Some(on(start, end));
         assert_eq!(
-            write(&document),
+            write(&checked(&document)),
             Err(vec![
                 Unwritable::Function { span: at(21, 24) },
                 Unwritable::Reference { span: at(25, 27) },
@@ -859,7 +859,7 @@ mod tests {
             blocks: vec![block("@c", &[], Document::default())],
         };
         assert_eq!(
-            write(&words),
+            write(&checked(&words)),
             Err(vec![
                 Unwritable::Key { span: None },
                 Unwritable::Keyword { span: None },
@@ -886,7 +886,7 @@ mod tests {
         for name in names {
             let document = attributes(vec![("a", reference(name))]);
             assert_eq!(
-                write(&document),
+                write(&checked(&document)),
                 Err(vec![Unwritable::Reference { span: None }]),
                 "{name:?}"
             );
@@ -924,7 +924,7 @@ mod tests {
         for (items, span) in cases {
             let document = attributes(vec![("a", Kind::List(items))]);
             let error = Unwritable::For { span: Some(span) };
-            assert_eq!(write(&document), Err(vec![error]), "{document:?}");
+            assert_eq!(write(&checked(&document)), Err(vec![error]), "{document:?}");
         }
     }
 
@@ -932,7 +932,7 @@ mod tests {
     fn refuses_a_list_that_starts_with_the_call_for_x_once_for_its_function() {
         let document = attributes(vec![("a", list(vec![call("for.x", Vec::new())]))]);
         let error = Unwritable::Function { span: None };
-        assert_eq!(write(&document), Err(vec![error]));
+        assert_eq!(write(&checked(&document)), Err(vec![error]));
     }
 
     #[test]
@@ -975,12 +975,12 @@ mod tests {
             })
         };
         written(&nest(63, "a"));
-        let refused = Err(vec![Unwritable::TooDeep(TooDeep {
+        let refused = Err(TooDeep {
             span: Some(on(1, 2)),
-        })]);
-        assert_eq!(write(&nest(64, "a")), refused);
+        });
+        assert_eq!(Checked::new(nest(64, "a")), refused);
         // A key too long for `[]` to fit on its line.
-        assert_eq!(write(&nest(64, &"k".repeat(90))), refused);
+        assert_eq!(Checked::new(nest(64, &"k".repeat(90))), refused);
 
         let text = format!("{}a = []\n{}", "b {\n".repeat(64), "}\n".repeat(64));
         let bracket = Span::new(
@@ -1012,8 +1012,7 @@ mod tests {
         for _ in 0..64 {
             lists = value(Kind::List(vec![lists]));
         }
-        let refused =
-            |span| Err(vec![Unwritable::TooDeep(TooDeep { span: Some(span) })]);
+        let refused = |span| Err(TooDeep { span: Some(span) });
         let document = Document {
             attributes: Map::new(vec![Attribute {
                 key: "a".into(),
@@ -1023,7 +1022,7 @@ mod tests {
             .unwrap(),
             blocks: Vec::new(),
         };
-        assert_eq!(write(&document), refused(on(1, 2)));
+        assert_eq!(Checked::new(document), refused(on(1, 2)));
 
         let mut blocks = Block {
             span: Some(on(3, 4)),
@@ -1043,100 +1042,6 @@ mod tests {
             attributes: Map::default(),
             blocks: vec![blocks],
         };
-        assert_eq!(write(&document), refused(on(3, 4)));
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    enum Level {
-        Block,
-        List,
-        Map,
-        Call,
-    }
-
-    /// Nests `levels` levels of `level` as one block or under the attribute `a`, with
-    /// level `i` from the outside at `on(i, i + 1)`.
-    fn nested(level: Level, levels: u32) -> Document {
-        let mut document = Document::default();
-        let mut inner = None;
-        for i in (0..levels).rev() {
-            let span = Some(on(i, i.checked_add(1).unwrap()));
-            let items = Option::take(&mut inner).into_iter();
-            let kind = match level {
-                Level::Block => {
-                    let block = Block {
-                        span,
-                        ..block("b", &[], document)
-                    };
-                    document = Document {
-                        attributes: Map::default(),
-                        blocks: vec![block],
-                    };
-                    continue;
-                }
-                Level::List => Kind::List(items.collect()),
-                Level::Map => Kind::Map(
-                    Map::new(
-                        items
-                            .map(|value| Attribute {
-                                key: "a".into(),
-                                key_span: None,
-                                value,
-                            })
-                            .collect(),
-                    )
-                    .unwrap(),
-                ),
-                Level::Call => Kind::Call(Call {
-                    function: "f".into(),
-                    function_span: None,
-                    arguments: items.collect(),
-                }),
-            };
-            inner = Some(Value { kind, span });
-        }
-        if let Some(value) = inner {
-            document.attributes = Map::new(vec![Attribute {
-                key: "a".into(),
-                key_span: None,
-                value,
-            }])
-            .unwrap();
-        }
-        document
-    }
-
-    #[test]
-    fn gives_only_the_depth_error_past_the_limit() {
-        let document = Document {
-            blocks: vec![block("my block", &[], Document::default())],
-            ..nested(Level::List, 65)
-        };
-        assert_eq!(
-            write(&document),
-            Err(vec![Unwritable::TooDeep(TooDeep {
-                span: Some(on(64, 65))
-            })])
-        );
-    }
-
-    #[test]
-    fn checks_the_depth_before_it_recurses() {
-        for level in [Level::Block, Level::List, Level::Map, Level::Call] {
-            let document = nested(level, 100_000);
-            let written = write(&document);
-            #[expect(
-                clippy::mem_forget,
-                reason = "a plain drop recurses once per level"
-            )]
-            std::mem::forget(document);
-            assert_eq!(
-                written,
-                Err(vec![Unwritable::TooDeep(TooDeep {
-                    span: Some(on(64, 65))
-                })]),
-                "{level:?}"
-            );
-        }
+        assert_eq!(Checked::new(document), refused(on(3, 4)));
     }
 }

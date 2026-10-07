@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use config_hcl::{read, write};
 use document::diagnostic::Diagnostic;
+use document::encoding::Checked;
 use document::value::{Kind, Value};
 use document::{Attribute, Document, Map, Source};
 
@@ -340,7 +341,7 @@ fn writes_text_hcl_accepts() {
         let Ok(document) = read(Source(0), text) else {
             continue;
         };
-        match write(&document) {
+        match write(&Checked::new(document.clone()).unwrap()) {
             Ok(written) if read(Source(0), &written).as_ref() != Ok(&document) => {
                 failures.push(format!(
                     "{name}: write gives {written:?}, which reads as \
