@@ -1,7 +1,8 @@
 //! A simulated InfluxDB store for tests. It parses with the line protocol parser of
 //! InfluxDB 3, so it does not share a mistake with our writer.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::str::Utf8Error;
 
@@ -128,15 +129,18 @@ impl Store {
             })
             .map(|(tags, series)| series.points(tags).peekable())
             .collect();
+        // The least index wins a tie of times, so ties come in tag order.
+        let mut next: BinaryHeap<_> = series
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(at, points)| Some(Reverse((points.peek()?.time, at))))
+            .collect();
         std::iter::from_fn(move || {
-            // The first of equal times wins, so ties come in tag order.
-            let next = series
-                .iter_mut()
-                .enumerate()
-                .filter_map(|(at, points)| Some((points.peek()?.time, at)))
-                .min()?
-                .1;
-            series.get_mut(next)?.next()
+            let Reverse((_, at)) = next.pop()?;
+            let points = series.get_mut(at)?;
+            let point = points.next();
+            next.extend(points.peek().map(|point| Reverse((point.time, at))));
+            point
         })
     }
 
@@ -229,69 +233,56 @@ impl Series {
 
     /// Sets `fields` on the point at `time`, and adds the point if it is new.
     fn write(&mut self, time: Stamp, fields: BTreeMap<String, Field>) {
-        let Some((first, found, len)) = self
+        let mut chunk = self.take(time);
+        match chunk.times.binary_search(&time) {
+            Ok(at) => chunk.set(at, fields),
+            Err(at) if chunk.times.len() < CHUNK => chunk.insert(at, time, fields),
+            Err(at) => {
+                let mut right = chunk.split();
+                let half = chunk.times.len();
+                match at.checked_sub(half) {
+                    Some(at) => right.insert(at, time, fields),
+                    None => chunk.insert(at, time, fields),
+                }
+                self.put(right);
+            }
+        }
+        self.put(chunk);
+    }
+
+    /// Takes out the chunk for a point at `time`: the chunk that holds the times
+    /// around it, or else a neighbor with room, or else a new chunk. So appends in
+    /// either time order leave each chunk full.
+    fn take(&mut self, time: Stamp) -> Chunk {
+        let before = self
             .chunks
             .range(..=time)
             .next_back()
-            .or_else(|| self.chunks.first_key_value())
-            .map(|(&first, chunk)| {
-                (first, chunk.times.binary_search(&time), chunk.times.len())
-            })
-        else {
-            return self.insert(time, 0, time, fields);
-        };
-        match found {
-            Ok(at) => self.chunk(first).set(at, fields),
-            Err(at) if len < CHUNK => self.insert(first, at, time, fields),
-            // A time before or after a full chunk goes to the start of the next chunk
-            // when it has room, or else starts a chunk, so appends in either time order
-            // leave each chunk full.
-            Err(0) => self.insert(time, 0, time, fields),
-            Err(CHUNK) => {
-                let next = self
-                    .chunks
+            .filter(|(_, chunk)| chunk.times.len() < CHUNK || time <= chunk.last());
+        let key = before
+            .or_else(|| {
+                self.chunks
                     .range(time..)
                     .next()
                     .filter(|(_, chunk)| chunk.times.len() < CHUNK)
-                    .map_or(time, |(&first, _)| first);
-                self.insert(next, 0, time, fields);
-            }
-            Err(_) => {
-                let right = self.chunk(first).split();
-                self.chunks.insert(right.first(), right);
-                self.write(time, fields);
-            }
-        }
+            })
+            .map(|(&key, _)| key);
+        key.and_then(|key| self.chunks.remove(&key))
+            .unwrap_or_default()
     }
 
-    /// Adds the point at `time` at index `at` of the chunk keyed `first`, or of a new
-    /// chunk when none is keyed `first`.
-    fn insert(
-        &mut self,
-        first: Stamp,
-        at: usize,
-        time: Stamp,
-        fields: BTreeMap<String, Field>,
-    ) {
-        if at == 0 {
-            let mut chunk = self.chunks.remove(&first).unwrap_or_default();
-            chunk.insert(0, time, fields);
-            self.chunks.insert(time, chunk);
-        } else {
-            self.chunk(first).insert(at, time, fields);
-        }
-    }
-
-    fn chunk(&mut self, first: Stamp) -> &mut Chunk {
-        self.chunks
-            .get_mut(&first)
-            .expect("a chunk that was just found")
+    fn put(&mut self, chunk: Chunk) {
+        self.chunks.insert(chunk.first(), chunk);
     }
 }
 
 impl Chunk {
     fn first(&self) -> Stamp {
         *self.times.first().expect("a chunk holds a point")
+    }
+
+    fn last(&self) -> Stamp {
+        *self.times.last().expect("a chunk holds a point")
     }
 
     fn set(&mut self, at: usize, fields: BTreeMap<String, Field>) {

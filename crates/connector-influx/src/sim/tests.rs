@@ -625,6 +625,8 @@ proptest! {
             .map(|((time, tags), fields)| (*time, tags.clone(), fields.clone()))
             .collect();
         prop_assert_eq!(read(&store, "m"), expected.clone());
+        // The chunk bounds and keys show in no public call, and a broken key
+        // misplaces only later writes.
         for series in store.measurements["m"].series.values() {
             for (first, chunk) in &series.chunks {
                 prop_assert!((1..=CHUNK).contains(&chunk.times.len()));
@@ -637,20 +639,15 @@ proptest! {
             .collect();
         let filtered: Vec<_> = store
             .points("m", &[("t", "a")])
-            .map(|point| {
-                let fields = point
-                    .fields
-                    .iter()
-                    .map(|(key, field)| (key.to_owned(), field))
-                    .collect();
-                (point.time, point.tags.clone(), fields)
-            })
+            .map(|point| (point.time, point.tags.clone(), owned(point.fields)))
             .collect();
         prop_assert_eq!(filtered, tagged);
     }
 }
 
-/// The point count of each chunk of the series of `m` with no tags.
+/// The point count of each chunk of the series of `m` with no tags. Chunk fill shows
+/// in public only as heap bytes, which `tests/memory.rs` bounds; this pins the exact
+/// fill.
 fn chunks(store: &Store) -> Vec<usize> {
     store.measurements["m"].series[&Tags::new()]
         .chunks
@@ -670,6 +667,15 @@ fn lines(times: impl Iterator<Item = usize>) -> String {
 fn appends_in_time_order_fill_each_chunk() {
     let store = stored(&lines(0..=3 * CHUNK));
     assert_eq!(chunks(&store), [CHUNK, CHUNK, CHUNK, 1]);
+}
+
+#[test]
+fn appends_newest_first_after_a_full_chunk_fill_each_chunk() {
+    let mut store = stored(&lines(0..CHUNK));
+    store
+        .write(lines((CHUNK..3 * CHUNK).rev()).as_bytes())
+        .unwrap();
+    assert_eq!(chunks(&store), [CHUNK, CHUNK, CHUNK]);
 }
 
 #[test]

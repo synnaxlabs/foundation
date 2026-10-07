@@ -2439,9 +2439,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033688614).
   Memory: each series keeps its points in chunks of at most 4096, one time column and
   one typed column for each field key, so the STORE AND FORWARD scenario holds about
-  6e7 points on a CI runner (#1149). A point with one float field takes about 17 heap
+  6e7 points on a CI runner (#1149). A column holds only the points that set its key,
+  each as an index and a value, so a sparse field costs little. A point that goes past
+  the end of a full chunk goes into the next chunk when it has room, so appends in
+  either time order fill each chunk. A point with one float field takes about 18 heap
   bytes, with no dependence on its tags; `tests/memory.rs` counts the heap bytes with
-  `counting` and bounds them at 32 a point. `Point::fields` is a `Fields` view of the
+  `counting` and bounds them at 32 a point, also for sparse fields and for appends
+  newest first. `Point::fields` is a `Fields` view of the
   chunk. Lost: runs of points on a fixed time step, as mesh slew moves each time off
   any grid (MESH SLEW); and RSS in place of a byte count, as RSS depends on the
   allocator and the OS. Decided by the architect (`laptop.architect-2`), #1419
