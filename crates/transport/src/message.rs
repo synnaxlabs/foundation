@@ -561,6 +561,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            // No call shows the heap that the reader keeps.
             assert_eq!(reader.held.buffer, vec![9; 8]);
             let read = reader
                 .read(
@@ -581,7 +582,9 @@ mod tests {
             );
             assert_eq!(reader.held.buffer.capacity(), 0);
             assert!(reader.held.chunks.is_empty());
-            assert!(matches!(reader.state, State::Prefix { have: 0, .. }));
+            let mut next = Source::new(encode(&[vec![5; 20]]), 64);
+            let next = super::read(&mut reader, &pool, &mut next);
+            assert_eq!(next, Ok(Poll::Ready(Some(vec![5; 20]))));
         }
 
         #[test]
@@ -663,6 +666,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 10);
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
+            // No call shows the heap that the reader keeps.
             assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message[..10]);
             assert_eq!(reader.held.buffer.capacity(), 1_024);
@@ -688,6 +692,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
+            // No call shows the heap that the reader keeps.
             assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message);
             drop(held);
@@ -698,6 +703,7 @@ mod tests {
 
         #[test]
         fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
+            // No call shows the heap that a reader keeps.
             let mut held = Held::default();
             for byte in 0..CHUNKS_MAX {
                 held.push(100, Bytes::from(vec![u8::try_from(byte).expect("a byte")]));

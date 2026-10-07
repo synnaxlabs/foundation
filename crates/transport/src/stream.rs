@@ -333,10 +333,10 @@ impl Receiver {
     /// Waits for the next whole message. It lands in one block from the shard's pool.
     /// Returns `None` once the sender finished and every message has arrived.
     ///
-    /// It also waits while the pool has no block for the message. The message stays
-    /// queued and flow control holds the peer. The reads of one transport that wait
-    /// take blocks highest class first, then oldest first. Drop the future to end the
-    /// wait.
+    /// It also waits while the pool has no block for the message. The message keeps
+    /// its room in the receive budget, and the budget holds the peer. The reads of one
+    /// transport that wait take blocks highest class first, then oldest first. Drop
+    /// the future to end the wait.
     ///
     /// # Errors
     ///
