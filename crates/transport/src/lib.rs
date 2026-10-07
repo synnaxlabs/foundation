@@ -82,6 +82,10 @@ pub use session::{Peer, Session};
 /// node takes.
 const PAYLOAD_IPV4: u16 = 1472;
 
+/// The smallest `message_bytes_max` of either side: a datagram fits in one message,
+/// and so does a hub head or key.
+const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
+
 /// The sessions of one shard. It dials peers and accepts the sessions the node
 /// routes to this shard. It stays on the thread that made it. `node` binds one
 /// [`Port`] and splits it into one part for each shard.
@@ -253,7 +257,7 @@ impl Config {
         let message_bytes_max = self.message_bytes_max.get();
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
-        } else if message_bytes_max < usize::from(PAYLOAD_IPV4) {
+        } else if message_bytes_max < MESSAGE_BYTES_MIN {
             ("message_bytes_max", "must be at least 1472")
         } else if message_bytes_max > self.pool.largest() {
             ("message_bytes_max", "must be at most pool.largest()")

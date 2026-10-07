@@ -4,7 +4,7 @@
 use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
 use super::connection::Fault;
-use crate::PAYLOAD_IPV4;
+use crate::MESSAGE_BYTES_MIN;
 use crate::varint::{self, Varint};
 
 /// The most bytes a hello takes.
@@ -71,10 +71,10 @@ impl Hello {
             window.ok_or_else(|| Fault("a hello with no window_bytes".to_owned()))?;
         let message_bytes_max = message
             .ok_or_else(|| Fault("a hello with no message_bytes_max".to_owned()))?;
-        if message_bytes_max < usize::from(PAYLOAD_IPV4) {
+        if message_bytes_max < MESSAGE_BYTES_MIN {
             return Err(Fault(format!(
                 "a hello with a message_bytes_max of {message_bytes_max}, below \
-                 {PAYLOAD_IPV4}"
+                 {MESSAGE_BYTES_MIN}"
             )));
         }
         if window_bytes < message_bytes_max {
@@ -211,8 +211,8 @@ mod tests {
     proptest! {
         #[test]
         fn decode_gives_what_encode_sent(
-            a in u64::from(PAYLOAD_IPV4)..=VarInt::MAX.into_inner(),
-            b in u64::from(PAYLOAD_IPV4)..=VarInt::MAX.into_inner(),
+            a in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner(),
+            b in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner(),
         ) {
             let hello = Hello {
                 window_bytes: usize::try_from(a.max(b)).expect("64 bits"),

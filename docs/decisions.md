@@ -1188,23 +1188,23 @@ How to read this record:
   the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
   `message_bytes_max` below 1472 (architect, #1198:
-  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it,
-  or resets. A peer whose QUIC
-  transport parameters cannot take this node's whole hello at once (no one-way stream,
-  or a stream or connection window under the hello) also breaks it, with the reason `a
-  peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
-  `Connected` before it, and an accept gives the caller no event. Before the handshake
-  is confirmed, QUIC gives the peer no reason, only APPLICATION_ERROR. A Foundation node
-  always has room: `streams_max` is at least 1, and `window_bytes` is at least
-  `message_bytes_max`, which is at least 1472. A compile-time assertion holds 1472 at or
-  above the hello limit, so only a foreign peer gets this. Lost: send the hello later
-  when credit comes, because `open` then needs a second gate and a state that only a
-  foreign peer reaches. `Endpoint::write` gives `Error::TooLarge` for a message over the
-  peer's limit; a caller that forwards a writer's frame gives the writer `Large`, and
-  the writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by
-  the coordinator on PR #407. The budgets: proposed by `network` in #228. The room
-  order: approved by the advisor on #611. The hello: proposed by `network` in #55;
-  settled by the advisor and the coordinator under the person's delegation (#55).
+  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it, or
+  resets. A peer whose QUIC transport parameters cannot take this node's whole hello at
+  once (no one-way stream, or a stream or connection window under the hello) also breaks
+  it, with the reason `a peer with no room for the hello`. A dial that breaks so gets
+  `Error::Broken` with no `Connected` before it, and an accept gives the caller no
+  event. Before the handshake is confirmed, QUIC gives the peer no reason, only
+  APPLICATION_ERROR. A Foundation node always has room: `streams_max` is at least 1, and
+  `window_bytes` is at least `message_bytes_max`, which is at least 1472. A compile-time
+  assertion holds 1472 at or above the hello limit, so only a foreign peer gets this.
+  Lost: send the hello later when credit comes, because `open` then needs a second gate
+  and a state that only a foreign peer reaches. `Endpoint::write` gives
+  `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
+  writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
+  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
+  budgets: proposed by `network` in #228. The room order: approved by the advisor on
+  #611. The hello: proposed by `network` in #55; settled by the advisor and the
+  coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
