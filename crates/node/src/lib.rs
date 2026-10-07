@@ -2,6 +2,7 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
+mod handoff;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the publish task waits on hub writer sessions")
@@ -18,10 +19,11 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use env::thread::Handle;
-use types::channel::Slots;
+use types::frame::key_set::Interner;
 use types::time::Span;
 
-use crate::stop::Stop;
+use crate::handoff::{Give, Take};
+use crate::stop::{Guard, Stop};
 
 /// The seams a node runs on. `node`'s entry point builds the real ones from `os`;
 /// tests and `acceptance` pass simulated ones from `sim`.
@@ -33,16 +35,16 @@ pub struct Config<M> {
     /// The OS clock, a source of mesh time.
     pub wall: env::wall::Wall,
     /// The most bytes the node's pools may commit, split evenly across its shards.
+    /// Each shard's part must hold the largest block its buffer reads, else
+    /// [`Node::join`] gives [`Error::Buffer`].
     pub budget: usize,
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
     /// once for each shard, in order of core.
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
-    /// Makes the files of shard `core` under the node's data directory. `node` calls
-    /// it once for each shard, in order of core, and calls the function it gives on
-    /// that shard's thread, because a `Files` cannot leave the thread that made it.
-    pub files: Box<dyn FnMut(usize) -> Box<dyn FnOnce() -> env::files::Files + Send>>,
-    /// Randomness. Each shard's buffer draws the chain value of its restart record
-    /// from it.
+    /// Makes the files of the node's data directory. Each shard calls it once on its
+    /// own thread, because a `Files` cannot leave the thread that made it.
+    pub files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
+    /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
 }
 
@@ -64,13 +66,19 @@ pub struct Node {
     stop: Stop,
     shards: Vec<Shard>,
     failed: Option<Error>,
+    /// The node's interner, once every shard has opened its buffer.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "hub sessions take the interner (#340)")
+    )]
+    interner: Take<Interner>,
 }
 
-/// A started shard, with the error of its buffer's open once that open fails.
+/// A started shard, with its error once it fails.
 #[derive(Debug)]
 struct Shard {
     handle: Handle,
-    failed: Arc<OnceLock<buffer::Error>>,
+    failed: Arc<OnceLock<Error>>,
 }
 
 /// The size of each shard's write-ahead ring, until the disk budget sets it (#342).
@@ -85,7 +93,8 @@ impl Node {
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
     /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
     /// takes the remainder. Each shard opens its buffer in directory `shard-<i>` of
-    /// its files, and makes it there when it is not there. Returns once each shard
+    /// its files, and makes it there when it is not there. The shards open their
+    /// buffers one after another, in order of core. Returns once each shard
     /// runs or one has failed to start. A failed start, a shard with no memory, or a
     /// buffer that does not open stops the node, and [`Node::join`] returns its error.
     ///
@@ -100,17 +109,16 @@ impl Node {
             wall,
             budget,
             mut memory,
-            mut files,
+            files,
             entropy,
         } = config;
         let (mesh, _reader) = clock::Clock::new(monotonic.clone());
         let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
-        let mut node = Self {
-            stop: stop.clone(),
-            shards: Vec::new(),
-            failed: None,
-        };
+        let (give, mut interner) = handoff::pair();
+        give.give(Interner::new());
+        let mut started = Vec::new();
+        let mut error = None;
         let pinnable = shards.pinnable();
         let cores = shards.cores().get();
         for core in 0..cores {
@@ -118,8 +126,8 @@ impl Node {
             let config = block::Config { budget };
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
-                Err(error) => {
-                    node.failed = Some(Error::Memory { core, error });
+                Err(e) => {
+                    error = Some(Error::Memory { core, error: e });
                     stop.set();
                     break;
                 }
@@ -132,9 +140,12 @@ impl Node {
             let mesh = mesh.take();
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
+            let (give, take) = handoff::pair();
             let open = Open {
                 core,
-                files: files(core),
+                take: std::mem::replace(&mut interner, take),
+                give,
+                files: Arc::clone(&files),
                 clock: monotonic.clone(),
                 entropy: entropy.clone(),
                 failed: Arc::clone(&failed),
@@ -143,23 +154,23 @@ impl Node {
                 if let Some((mesh, wall)) = mesh {
                     tasks.spawn(async { mesh.run(wall).await });
                 }
-                async move {
-                    if let Some(buffer) = open.run(Rc::new(pool), tasks).await {
-                        guard.await;
-                        drop(buffer);
-                    }
-                }
+                open.serve(Rc::new(pool), tasks, guard)
             };
             match shards.start(shard, main) {
-                Ok(handle) => node.shards.push(Shard { handle, failed }),
+                Ok(handle) => started.push(Shard { handle, failed }),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
-                    node.failed = Some(Error::Start(e));
+                    error = Some(Error::Start(e));
                     break;
                 }
             }
         }
-        node
+        Self {
+            stop,
+            shards: started,
+            failed: error,
+            interner,
+        }
     }
 
     /// Asks every shard to end. Does not wait; call [`Node::join`].
@@ -179,38 +190,55 @@ impl Node {
     pub fn join(self) -> Result<(), Error> {
         let mut first = self.failed;
         let mut panicked = None;
-        for (core, shard) in self.shards.into_iter().enumerate() {
+        for shard in self.shards {
             if let Err(e) = shard.handle.join() {
                 panicked.get_or_insert(Error::Panicked(e));
             }
             if let Some(error) = shard.failed.get() {
-                first.get_or_insert_with(|| Error::Buffer {
-                    core,
-                    error: error.clone(),
-                });
+                first.get_or_insert_with(|| error.clone());
             }
         }
         first.or(panicked).map_or(Ok(()), Err)
     }
 }
 
-/// The open of a shard's buffer, made before the shard starts.
+/// The open of a shard's buffer, made before the shard starts. The shards open one
+/// after another, in order of core, because each open assigns slots in the node's
+/// one interner.
 struct Open {
     core: usize,
-    files: Box<dyn FnOnce() -> env::files::Files + Send>,
+    take: Take<Interner>,
+    give: Give<Interner>,
+    files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
-    failed: Arc<OnceLock<buffer::Error>>,
+    failed: Arc<OnceLock<Error>>,
 }
 
 impl Open {
-    /// Opens the shard's buffer on the shard's thread. A failed open is kept for
-    /// [`Node::join`] and gives `None`.
+    /// Opens the shard's buffer and keeps it until `guard` completes. A failed open
+    /// drops `guard`, which stops the node.
+    async fn serve(
+        self,
+        pool: Rc<block::Pool>,
+        tasks: env::tasks::Tasks,
+        guard: Guard,
+    ) {
+        if let Some(buffer) = self.run(pool, tasks).await {
+            guard.await;
+            drop(buffer);
+        }
+    }
+
+    /// Waits for the interner, opens the shard's buffer on the shard's thread, and
+    /// gives the interner to the next shard. A failed open is kept for
+    /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
     async fn run(
         self,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Option<buffer::Buffer> {
+        let mut interner = self.take.await?;
         let config = buffer::Config {
             files: (self.files)(),
             dir: PathBuf::from(format!("shard-{}", self.core)),
@@ -222,10 +250,16 @@ impl Open {
                 .expect("invariant: the ring sizes of node make a ring"),
             commit: COMMIT,
         };
-        let mut slots = Slots::new();
-        match buffer::Buffer::open(config, &mut slots).await {
-            Ok(buffer) => Some(buffer),
+        match buffer::Buffer::open(config, interner.slots()).await {
+            Ok(buffer) => {
+                self.give.give(interner);
+                Some(buffer)
+            }
             Err(error) => {
+                let error = Error::Buffer {
+                    core: self.core,
+                    error,
+                };
                 (self.failed.set(error))
                     .expect("invariant: a shard opens its buffer once");
                 None

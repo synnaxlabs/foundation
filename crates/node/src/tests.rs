@@ -40,17 +40,6 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
     })
 }
 
-type Files = Box<dyn FnMut(usize) -> Box<dyn FnOnce() -> env::files::Files + Send>>;
-
-/// The files of `host` for each shard.
-fn files(host: &sim::node::Node) -> Files {
-    let host = host.clone();
-    Box::new(move |_| {
-        let host = host.clone();
-        Box::new(move || host.files())
-    })
-}
-
 /// The seams of `host`, with a pool budget of `budget` from `memory`.
 fn config(
     host: &sim::node::Node,
@@ -63,7 +52,10 @@ fn config(
         wall: host.wall(),
         budget,
         memory,
-        files: files(host),
+        files: {
+            let host = host.clone();
+            Arc::new(move || host.files())
+        },
         entropy: host.entropy(),
     }
 }
@@ -419,7 +411,100 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
 }
 
 mod buffer {
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+
+    use ::buffer::{Buffer, Entry};
+    use types::channel::{Key, Slots};
+    use types::frame::Path as Stream;
+    use types::time::Stamp;
+
     use super::*;
+
+    /// Writes one entry of index `key` to the ring of shard `core` of `host`.
+    fn write(sim: &mut sim::Sim, host: &sim::node::Node, core: usize, key: u128) {
+        sim.run_on(host, move |host, tasks| async move {
+            let config = block::Config { budget: 1 << 20 };
+            let memory = block::Heap::new(config.reservation());
+            let pool = Rc::new(block::Pool::new(config, memory));
+            let config = ::buffer::Config {
+                files: host.files(),
+                dir: PathBuf::from(format!("shard-{core}")),
+                pool: Rc::clone(&pool),
+                clock: host.clock(),
+                tasks,
+                entropy: host.entropy(),
+                layout: ::buffer::Layout::new(crate::AREA, crate::BODY_MAX)
+                    .expect("the ring sizes of node make a ring"),
+                commit: crate::COMMIT,
+            };
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+            let index = Key::from_u128(key);
+            let entry = Entry {
+                index,
+                slot: slots.assign(index),
+                path: Stream::Live,
+                first: 0,
+                len: 1,
+                stored_at: Stamp::from_nanos(1),
+                last: Some(Stamp::from_nanos(1)),
+                tag: 0,
+                parts: pool.alloc(8).expect("a block").freeze().into(),
+            };
+            buffer.append([entry]).expect("the ring has room");
+            buffer.committed().await.expect("commits");
+        })
+        .expect("the run ends");
+    }
+
+    #[test]
+    fn the_shards_assign_the_indexes_they_recover_in_one_table() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        write(&mut sim, &host, 0, 1);
+        write(&mut sim, &host, 1, 2);
+        let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+        assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(Some(mut interner)) =
+            Pin::new(&mut node.interner).poll(&mut cx)
+        else {
+            panic!("the last shard gave the interner");
+        };
+        let slots = interner.slots();
+        let assigned = [3, 2, 1].map(|key| slots.assign(Key::from_u128(key)).get());
+        assert_eq!(assigned, [2, 1, 0]);
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    /// A shard's part of the budget must hold the block that its buffer's open
+    /// takes first. A shard that waits for the interner does not open after it.
+    #[test]
+    fn a_shard_part_too_small_for_the_buffer_stops_the_node() {
+        let mut run = start_with(7, 32, &[], 1 << 20, Box::new(heap));
+        assert_eq!(run.sim.run(), Ok(()));
+        let e = run.node.join().unwrap_err();
+        let pool = block::Error::TooLarge {
+            requested: 52186,
+            largest: 28672,
+        };
+        assert_eq!(
+            e,
+            Error::Buffer {
+                core: 0,
+                error: ::buffer::Error::Pool(pool),
+            }
+        );
+        assert_eq!(
+            e.to_string(),
+            "cannot open the buffer of shard-0: the pool has no block: block of 52186 \
+             bytes is above the largest block of 28672 bytes"
+        );
+    }
 
     #[test]
     fn each_shard_opens_a_ring_in_its_own_directory() {
@@ -489,8 +574,8 @@ mod buffer {
     #[test]
     fn join_gives_a_ring_that_did_not_open_over_a_shard_that_panicked() {
         for seed in 0..32 {
-            let e = refused(seed, 3, 2, &[(0, Fault::Panic)]);
-            assert_eq!(e, opened(2), "seed {seed}");
+            let e = refused(seed, 3, 1, &[(2, Fault::Panic)]);
+            assert_eq!(e, opened(1), "seed {seed}");
         }
     }
 
