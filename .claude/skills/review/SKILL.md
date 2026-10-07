@@ -100,5 +100,6 @@ round comment names each reviewer its round requires (round 1: the table; a late
 of each round comment links the OK of each deferral in a risk crate, the
 `Public surface:` line of the last round comment links the architect's approval of each
 item, each finding of an architect review has its fix commit or a linked answer, and
-each later step that the review or an architect's ruling names has its issue, or its
-trigger in the decisions entry. Only then does the author run `gh pr ready`.
+each later step that a round, an architect review, or an architect's ruling names is
+stated on its issue (a new issue, or a comment on an existing one) or as a trigger in
+the decisions entry. Only then does the author run `gh pr ready`.
