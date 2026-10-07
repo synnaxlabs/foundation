@@ -134,6 +134,7 @@ impl Shard {
     /// the record in the block before it: a restart record, or a data record of one
     /// block.
     fn seal(&self, offset: u64) {
+        assert!(offset >= BLOCK, "no record of one block before {offset}");
         let file = self.memory.bytes(RING);
         let start = to_usize(AREA_START + offset);
         let u32_at = |at: usize| {
@@ -2183,6 +2184,16 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
         shard.memory.put(RING, COVER, b"past the sector");
         shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
+/// A header block is before the first record, and its version byte reads as a kind.
+#[test]
+#[should_panic(expected = "no record of one block before 0")]
+fn seal_refuses_the_first_record_of_the_area() {
+    run(112, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.seal(0);
     });
 }
 
