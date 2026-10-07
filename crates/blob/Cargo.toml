@@ -6,6 +6,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+block = { path = "../block" }
+env = { path = "../env" }
+types = { path = "../types" }
+
+[dev-dependencies]
+block = { path = "../block", features = ["sim"] }
+sim = { path = "../sim" }
 
 [lints]
 workspace = true
