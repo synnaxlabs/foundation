@@ -413,8 +413,8 @@ pub enum Error {
     Disk {
         /// The core of the shard.
         core: usize,
-        /// The ring sizes that the part gives.
-        error: buffer::Unfit,
+        /// The length of the part, and the least length that holds a ring.
+        error: buffer::Small,
     },
 }
 
@@ -438,12 +438,9 @@ impl fmt::Display for Error {
                 f,
                 "cannot read or record the shard count of the data directory: {error}"
             ),
-            Self::Disk { core, error } => write!(
-                f,
-                "the part of the disk budget of shard-{core} holds no ring: an area \
-                 of {} bytes and a body of at most {} bytes make no ring",
-                error.area, error.body_max
-            ),
+            Self::Disk { core, error } => {
+                write!(f, "the disk budget gives shard-{core} too little: {error}")
+            }
         }
     }
 }

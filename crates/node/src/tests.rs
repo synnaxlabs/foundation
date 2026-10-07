@@ -661,15 +661,15 @@ mod buffer {
         assert_eq!(host.shard_starts(), []);
         assert_eq!(sim.run(), Ok(()));
         let e = node.join().unwrap_err();
-        let error = ::buffer::Unfit {
-            area: 2 * (1 << 20) + 4096,
-            body_max: 1 << 20,
+        let error = ::buffer::Small {
+            len: smallest - 1,
+            min: smallest,
         };
         assert_eq!(e, Error::Disk { core: 1, error });
         assert_eq!(
             e.to_string(),
-            "the part of the disk budget of shard-1 holds no ring: an area of \
-             2101248 bytes and a body of at most 1048576 bytes make no ring"
+            "the disk budget gives shard-1 too little: a ring file of 2113535 bytes \
+             holds no ring; it needs at least 2113536 bytes"
         );
     }
 
