@@ -5925,7 +5925,7 @@ mod tests {
                 let mut pair = foreign_dial(shard, |_| {});
                 let connection = foreign(&mut pair);
                 let hello = connection.streams().open(Dir::Uni).expect("a stream");
-                let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
+                let id = raw(connection, Dir::Bi, &[1], false);
                 let over = VarInt::from_u64(1 << 32).expect("a varint");
                 let stopped = connection.recv_stream(id).stop(over);
                 stopped.expect("stopped");
