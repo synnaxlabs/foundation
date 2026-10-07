@@ -32,9 +32,7 @@ pub(crate) fn prefix(len: usize) -> Varint {
 pub(crate) struct Reader {
     bytes_max: usize,
     state: State,
-    /// The bytes of the current message, as the source gave them. Its capacity
-    /// stays for the next message.
-    chunks: Vec<Bytes>,
+    held: Held,
 }
 
 #[derive(Debug)]
@@ -48,14 +46,18 @@ enum State {
     },
     /// A message of `len` bytes, with no room yet.
     Sized { len: u64 },
-    /// A message of `len` bytes that has room, with `have` of its bytes. They are
-    /// in `chunks`, or in `copy` when the source gave more than
-    /// [`chunks_max`] chunks.
-    Body {
-        len: usize,
-        have: usize,
-        copy: Option<BytesMut>,
-    },
+    /// A message of `len` bytes that has room, with `have` of its bytes in the
+    /// reader's [`Held`].
+    Body { len: usize, have: usize },
+}
+
+/// The bytes of a message that has no block yet, as the source gave them, or in one
+/// copy when the source gave more than [`chunks_max`] chunks.
+#[derive(Debug, Default)]
+struct Held {
+    /// Its capacity stays for the next message.
+    chunks: Vec<Bytes>,
+    copy: Option<BytesMut>,
 }
 
 const START: State = State::Prefix {
@@ -77,7 +79,7 @@ impl Reader {
         Self {
             bytes_max,
             state: START,
-            chunks: Vec::new(),
+            held: Held::default(),
         }
     }
 
@@ -102,7 +104,7 @@ impl Reader {
         Self {
             bytes_max,
             state,
-            chunks: Vec::new(),
+            held: Held::default(),
         }
     }
 
@@ -172,49 +174,28 @@ impl Reader {
                     if !admit(len) {
                         return Ok(Poll::Pending);
                     }
-                    self.state = State::Body {
-                        len,
-                        have: 0,
-                        copy: None,
-                    };
+                    self.state = State::Body { len, have: 0 };
                 }
-                State::Body { len, have, copy } if *have < *len => {
-                    let rest = len.saturating_sub(*have);
-                    let error = match source(rest) {
+                State::Body { len, have } if *have < *len => {
+                    let error = match next(&mut source, len.saturating_sub(*have)) {
                         Ok(Poll::Pending) => return Ok(Poll::Pending),
                         Ok(Poll::Ready(Some(chunk))) => {
-                            assert!(
-                                !chunk.is_empty(),
-                                "the source gives at least one byte"
-                            );
-                            assert!(
-                                chunk.len() <= rest,
-                                "the source gives at most the bytes asked for"
-                            );
                             *have = have.saturating_add(chunk.len());
-                            hold(&mut self.chunks, copy, *len, chunk);
+                            self.held.push(*len, chunk);
                             continue;
                         }
                         Ok(Poll::Ready(None)) => ended(),
                         Err(error) => error,
                     };
                     self.state = START;
-                    self.chunks.clear();
+                    self.held.clear();
                     return Err(error);
                 }
-                State::Body { len, copy, .. } => {
+                State::Body { len, .. } => {
                     let Some(mut block) = take(*len) else {
                         return Ok(Poll::Pending);
                     };
-                    let mut rest: &mut [u8] = &mut block;
-                    let held = copy.iter().map(AsRef::as_ref);
-                    for chunk in held.chain(self.chunks.iter().map(AsRef::as_ref)) {
-                        let (head, tail) =
-                            mem::take(&mut rest).split_at_mut(chunk.len());
-                        head.copy_from_slice(chunk);
-                        rest = tail;
-                    }
-                    self.chunks.clear();
+                    self.held.drain_into(&mut block);
                     self.state = START;
                     return Ok(Poll::Ready(Some(block.freeze())));
                 }
@@ -223,25 +204,39 @@ impl Reader {
     }
 }
 
-/// Holds `chunk`, the next bytes of a message of `len` bytes, in `chunks`, or in
-/// `copy` once `chunks` would pass [`chunks_max`].
-fn hold(
-    chunks: &mut Vec<Bytes>,
-    copy: &mut Option<BytesMut>,
-    len: usize,
-    chunk: Bytes,
-) {
-    if let Some(copy) = copy {
-        copy.extend_from_slice(&chunk);
-    } else if chunks.len() < chunks_max(len) {
-        chunks.push(chunk);
-    } else {
-        let mut bytes = BytesMut::with_capacity(len);
-        for held in chunks.drain(..) {
-            bytes.extend_from_slice(&held);
+impl Held {
+    /// Holds `chunk`, the next bytes of a message of `len` bytes.
+    fn push(&mut self, len: usize, chunk: Bytes) {
+        if let Some(copy) = &mut self.copy {
+            copy.extend_from_slice(&chunk);
+        } else if self.chunks.len() < chunks_max(len) {
+            self.chunks.push(chunk);
+        } else {
+            let mut copy = BytesMut::with_capacity(len);
+            for held in self.chunks.drain(..) {
+                copy.extend_from_slice(&held);
+            }
+            copy.extend_from_slice(&chunk);
+            self.copy = Some(copy);
         }
-        bytes.extend_from_slice(&chunk);
-        *copy = Some(bytes);
+    }
+
+    /// Copies the held bytes into `block`, which holds exactly that many, and drops
+    /// them.
+    fn drain_into(&mut self, block: &mut [u8]) {
+        let mut rest = block;
+        let copy = self.copy.iter().map(AsRef::as_ref);
+        for chunk in copy.chain(self.chunks.iter().map(AsRef::as_ref)) {
+            let (bytes, after) = mem::take(&mut rest).split_at_mut(chunk.len());
+            bytes.copy_from_slice(chunk);
+            rest = after;
+        }
+        self.clear();
+    }
+
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.copy = None;
     }
 }
 
@@ -249,6 +244,26 @@ fn ended() -> Error {
     Error::Broken {
         reason: "the stream ended inside a message".to_owned(),
     }
+}
+
+/// The source's next 1 to `max` bytes, as `source(max)` gives them.
+///
+/// # Panics
+///
+/// When the source gives no bytes or more than `max`.
+fn next(
+    source: &mut impl FnMut(usize) -> Result<Poll<Option<Bytes>>, Error>,
+    max: usize,
+) -> Result<Poll<Option<Bytes>>, Error> {
+    let next = source(max)?;
+    if let Poll::Ready(Some(chunk)) = &next {
+        assert!(!chunk.is_empty(), "the source gives at least one byte");
+        assert!(
+            chunk.len() <= max,
+            "the source gives at most the bytes asked for"
+        );
+    }
+    Ok(next)
 }
 
 /// Copies the source's next bytes into `buffer` after its first `have`. Returns
@@ -259,15 +274,14 @@ fn pull(
     have: &mut usize,
 ) -> Result<Poll<bool>, Error> {
     let rest = buffer.get_mut(*have..).expect("invariant: have <= len");
-    let Poll::Ready(chunk) = source(rest.len())? else {
+    let Poll::Ready(chunk) = next(source, rest.len())? else {
         return Ok(Poll::Pending);
     };
     let Some(chunk) = chunk else {
         return Ok(Poll::Ready(false));
     };
-    assert!(!chunk.is_empty(), "the source gives at least one byte");
     rest.get_mut(..chunk.len())
-        .expect("the source gives at most the bytes asked for")
+        .expect("invariant: the chunk fits")
         .copy_from_slice(&chunk);
     *have = have.saturating_add(chunk.len());
     Ok(Poll::Ready(true))
@@ -276,6 +290,7 @@ fn pull(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::slice;
 
     use block::{Config, Heap, Pool};
     use proptest::prelude::*;
@@ -521,7 +536,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            assert_eq!(reader.chunks.len(), 1);
+            assert_eq!(reader.held.chunks.len(), 1);
             let read = reader
                 .read(
                     |_| true,
@@ -539,7 +554,7 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
-            assert!(reader.chunks.is_empty());
+            assert!(reader.held.chunks.is_empty());
             assert!(matches!(reader.state, State::Prefix { have: 0, .. }));
         }
 
@@ -596,24 +611,21 @@ mod tests {
         fn holds_chunks_up_to_the_limit_then_copies_them() {
             let pool = pool(1 << 16);
             let message: Vec<u8> = (0..=255).cycle().take(1_024).collect();
-            let stream = encode(&[message.clone()]);
+            let stream = encode(slice::from_ref(&message));
             let (start, rest) = stream.split_at(2 + 10);
             let mut source = Source::new(start.to_vec(), 1);
             source.open = true;
             let mut reader = Reader::new(1_024);
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            assert_eq!(reader.chunks.len(), chunks_max(1_024));
+            assert_eq!(reader.held.chunks.len(), chunks_max(1_024));
             assert_eq!(chunks_max(1_024), 10);
-            assert!(matches!(reader.state, State::Body { copy: None, .. }));
+            assert!(reader.held.copy.is_none());
             let (next, rest) = rest.split_at(1);
             source.bytes.extend(next);
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            assert!(reader.chunks.is_empty());
-            let State::Body {
-                copy: Some(copy), ..
-            } = &reader.state
-            else {
-                panic!("the reader copies at the 11th chunk: {:?}", reader.state);
+            assert!(reader.held.chunks.is_empty());
+            let Some(copy) = &reader.held.copy else {
+                panic!("the reader copies at the 11th chunk: {:?}", reader.held);
             };
             assert_eq!(copy[..], message[..11]);
             source.bytes.extend(rest);
@@ -685,8 +697,10 @@ mod tests {
             let bytes_max = 1 << 10;
             let pool = pool(block::footprint(bytes_max));
             let large = vec![2; bytes_max];
-            let part: Vec<u8> =
-                encode(&[large.clone()]).into_iter().take(500).collect();
+            let part: Vec<u8> = encode(slice::from_ref(&large))
+                .into_iter()
+                .take(500)
+                .collect();
             let mut readers = Vec::new();
             for _ in 0..2 {
                 let mut source = Source::new(part.clone(), 64);
@@ -704,7 +718,7 @@ mod tests {
             for (reader, source) in &mut readers {
                 source
                     .bytes
-                    .extend(encode(&[large.clone()]).into_iter().skip(500));
+                    .extend(encode(slice::from_ref(&large)).into_iter().skip(500));
                 source.open = false;
                 assert_eq!(read_all(reader, &pool, source), Ok(vec![large.clone()]));
             }
