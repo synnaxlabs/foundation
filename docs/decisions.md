@@ -3620,18 +3620,26 @@ How to read this record:
   before it ends, as any other call. The rename can still end after the drop, and
   then the file is at `to`. `os` checks that the old path still names the file by
   device and inode, with no follow of a link, then renames with `RENAME_NOREPLACE`;
-  the I/O thread of a shard runs its calls in order, and each shard writes only its
-  own directory, so nothing changes the path between the check and the rename. Lost:
-  `Files::rename(from, to)` on paths, which cannot tell the file of the
-  handle from a new file at its path; a link then an unlink, which leaves two names at
-  a crash; a replacing rename or a `replace: bool`, which no caller wants and which
-  hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
-  &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
-  one call that takes a name in place of a path in the data directory (#1449, decided
-  by `laptop.architect-2`, 2026-10-07 14:55 UTC:
+  the I/O thread of a shard runs its calls in order, one shard writes each name
+  (SHARD BUFFERS), and one node uses a data directory (DATA DIRECTORY LOCK), so
+  nothing in Foundation changes the path between the check and the rename. Lost:
+  `Files::rename(from, to)` on paths, which cannot tell the file of the handle from a
+  new file at its path; a link then an unlink, which leaves two names at a crash; a
+  replacing rename or a `replace: bool`, which no caller wants and which hides a
+  defect that `Exists` reports; and a bare-name `rename(&mut self, name: &OsStr)`: an
+  `OsStr` can hold a `/`, so it needs the same check, and it would be the one call
+  that takes a name in place of a path in the data directory (#1449, decided by
+  `laptop.architect-2`, 2026-10-07 14:55 UTC:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   panic list and the bare-name reason, 2026-10-07 17:35 UTC:
-  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214). Also
+  lost: a rename that also syncs its directory: it would be the one directory change
+  that is durable when it ends, several changes could no longer share one
+  `sync_dir`, and a failed directory sync would be a third result, a rename that took
+  effect and is not durable (#1503, decided by `laptop.architect-2`, 2026-10-07
+  19:11 UTC: https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044972392;
+  the race sentence, 2026-10-07 19:12 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
@@ -3807,7 +3815,12 @@ How to read this record:
   not started does not start; `join` gives `Start` or `Memory`, else `Shards` or
   `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
   architect on #1062 (#1174):
-  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. One
+  shard writes each name in the data directory: shard `i` writes `shard-<i>` and each
+  name in it, and shard 0 also writes `lock` and `shards-<n>`. A change that gives a
+  name a second writer first changes the check of FILE RENAME, which relies on this
+  (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory.
   Before the claim reads a name, shard 0 opens the file `lock` in the data directory
   to write (`Mode::Create { len: 0 }`), and drops it after each shard of the node has
