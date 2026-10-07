@@ -370,7 +370,17 @@ mod tests {
         assert_eq!(size(&value).unwrap_err().span, None);
     }
 
-    mod names {
+    /// A `document.bad-name` diagnostic.
+    fn bad_name(span: Option<Span>, message: &str, fix: &str) -> Diagnostic {
+        Diagnostic::new(
+            Code::new("document.bad-name"),
+            span,
+            message.into(),
+            fix.into(),
+        )
+    }
+
+    mod labels {
         use super::*;
 
         fn labeled(text: &str) -> Label {
@@ -378,15 +388,6 @@ mod tests {
                 text: text.into(),
                 span: Some(span()),
             }
-        }
-
-        fn refused(message: &str, fix: &str) -> Result<Name, Diagnostic> {
-            Err(Diagnostic::new(
-                Code::new("document.bad-name"),
-                Some(span()),
-                message.into(),
-                fix.into(),
-            ))
         }
 
         #[test]
@@ -424,7 +425,11 @@ mod tests {
                     "Use fewer or shorter segments",
                 ),
             ] {
-                assert_eq!(label(&labeled(text)), refused(message, fix), "{text:?}");
+                assert_eq!(
+                    label(&labeled(text)),
+                    Err(bad_name(Some(span()), message, fix)),
+                    "{text:?}"
+                );
             }
         }
 
@@ -463,7 +468,7 @@ mod tests {
         }
     }
 
-    mod values {
+    mod names {
         use super::*;
 
         const FIX: &str = "Write a name such as \"site_a.node_1\"";
@@ -494,15 +499,6 @@ mod tests {
             text.parse().unwrap()
         }
 
-        fn refused(span: Option<Span>, message: &str, fix: &str) -> Diagnostic {
-            Diagnostic::new(
-                Code::new("document.bad-name"),
-                span,
-                message.into(),
-                fix.into(),
-            )
-        }
-
         #[test]
         fn reads_a_string_or_a_reference() {
             assert_eq!(name(&string("site_a.node_1")), Ok(parsed("site_a.node_1")));
@@ -519,6 +515,7 @@ mod tests {
             };
             for (kind, noun) in [
                 (Kind::Integer(7), "an integer"),
+                (Kind::Float(Float::new(1.5).unwrap()), "a float"),
                 (Kind::Bool(true), "a bool"),
                 (Kind::List(Vec::new()), "a list"),
                 (Kind::Map(Map::default()), "a map"),
@@ -527,7 +524,7 @@ mod tests {
                 let message = format!("a name is a string or a reference, not {noun}");
                 assert_eq!(
                     name(&value(kind)),
-                    Err(refused(Some(span()), &message, FIX)),
+                    Err(bad_name(Some(span()), &message, FIX)),
                     "{noun}"
                 );
             }
@@ -537,7 +534,7 @@ mod tests {
         fn refuses_a_string_that_name_refuses_at_the_value() {
             assert_eq!(
                 name(&string("site a")),
-                Err(refused(
+                Err(bad_name(
                     Some(span()),
                     "a segment is not valid: \"site a\" in \"site a\"",
                     SEGMENT
@@ -567,7 +564,7 @@ mod tests {
                     Kind::List(vec![string("n_2")]),
                     text("site a"),
                 ])),
-                Err(refused(
+                Err(bad_name(
                     at(1),
                     "a name is a string or a reference, not a list",
                     FIX
