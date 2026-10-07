@@ -12,8 +12,8 @@ use block::{Block, Unique};
 use transport::stream::{Incoming, Part, Receiver, Sender};
 use transport::{Class, Code};
 use types::channel::{self, Slot};
-use types::frame::Frame;
 use types::frame::key_set::KeySet;
+use types::frame::{self, Frame};
 use wire::header::MALFORMED;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, Reply, UNKNOWN, ends};
 
@@ -357,25 +357,31 @@ impl Out {
             }
         }
         self.by_place.fill(None);
-        let mut start = 0;
-        for (entry, end) in frame.ends() {
+        for ((entry, series), (_, end)) in frame.iter().zip(frame.ends()) {
             if let Some(place) = self.places[entry] {
-                self.by_place[place] = Some(start..end);
+                self.by_place[place] = Some(end - series.len()..end);
             }
-            start = end.next_multiple_of(8);
         }
         self.series.clear();
-        let mut end = 0_usize;
-        for (place, range) in self.by_place.iter().enumerate() {
-            let Some(range) = range else { continue };
-            let start = end.next_multiple_of(8);
+        let present = self
+            .by_place
+            .iter()
+            .enumerate()
+            .filter_map(|(place, range)| {
+                let range = range.clone()?;
+                let len = range.len();
+                Some(((place, range), len))
+            });
+        let mut last_end = 0;
+        for ((place, range), end) in frame::ends(present) {
             if let Some(last) = self.series.last_mut() {
-                last.zeros = u8::try_from(start - end).expect("a pad is under 8");
+                let start = end - range.len();
+                last.zeros = u8::try_from(start - last_end).expect("a pad fits a u8");
             }
-            end = start + range.len();
+            last_end = end;
             self.series.push(Series {
                 place: u32::try_from(place).expect("a place is a u32"),
-                range: range.clone(),
+                range,
                 end: u32::try_from(end).expect("a frame's body fits a u32"),
                 zeros: 0,
             });
@@ -436,7 +442,7 @@ impl Cut {
                 parts.push(Part {
                     range: at.range.start + from.min(len)..at.range.start + to.min(len),
                     zeros: u8::try_from(to.max(len) - from.max(len))
-                        .expect("a pad is under 8"),
+                        .expect("a pad fits a u8"),
                 });
             }
             room -= take;
