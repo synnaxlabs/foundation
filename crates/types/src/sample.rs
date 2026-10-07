@@ -174,11 +174,12 @@ impl FromStr for Type {
         }
         if let Some(array) = text.strip_suffix(']') {
             let (name, len) = array.split_once('[').ok_or(Error::Syntax)?;
+            let element = element(name)?;
             if len.contains("][") {
                 return Err(Error::Lengths);
             }
             return Ok(Self::Array {
-                element: element(name)?,
+                element,
                 len: count(len)?,
             });
         }
@@ -349,6 +350,8 @@ mod tests {
             ("f32 [3]", Error::Syntax),
             (" f32[3]", Error::Syntax),
             ("list<u8 , 16>", Error::Syntax),
+            ("f32 [2][3]", Error::Syntax),
+            ("f32 [03]", Error::Syntax),
             ("list<u8,16>", Error::Syntax),
             ("list<u8, 16> ", Error::Syntax),
             ("String", Error::Syntax),
