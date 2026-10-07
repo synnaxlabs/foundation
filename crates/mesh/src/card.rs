@@ -33,9 +33,8 @@ pub struct Card {
     pub public_key: PublicKey,
     /// The key that callers seal secret values to.
     pub seal_key: SealKey,
-    /// Where to dial the node, at most 32. An IPv6 address has no flow info and no
-    /// scope: each means something only on the node that sets it.
-    pub addresses: Vec<Address>,
+    /// Where to dial the node.
+    pub addresses: Addresses,
     /// 1 for the node's first card; each later card is higher.
     pub version: u64,
 }
@@ -44,17 +43,7 @@ impl Card {
     /// Adds the one byte form of the card to `out`: the name behind a length byte, the
     /// public key, the seal key, a count of addresses as 8 little-endian bytes, each
     /// address, then the version as 8 little-endian bytes.
-    ///
-    /// # Panics
-    ///
-    /// When the card holds more than 32 addresses, or an IPv6 address has flow info or
-    /// a scope.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
-        let count = self.addresses.len();
-        assert!(
-            count <= usize::from(ADDRESSES_MAX),
-            "a card holds {count} addresses, more than {ADDRESSES_MAX}"
-        );
         let name = self.name.as_str().as_bytes();
         out.push(
             u8::try_from(name.len()).expect("invariant: a name is at most 255 bytes"),
@@ -62,8 +51,9 @@ impl Card {
         out.extend(name);
         out.extend(self.public_key.to_bytes());
         out.extend(self.seal_key.to_bytes());
-        put_count(count, out);
-        for &address in &self.addresses {
+        let addresses = self.addresses.as_slice();
+        put_count(addresses.len(), out);
+        for &address in addresses {
             put_address(address, out);
         }
         out.extend(self.version.to_le_bytes());
@@ -96,11 +86,81 @@ impl Card {
             name,
             public_key,
             seal_key,
-            addresses,
+            addresses: Addresses(addresses),
             version,
         })
     }
 }
+
+/// Where to dial a node: at most 32 addresses, and no IPv6 address with flow info or
+/// a scope, since each means something only on the node that sets it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Addresses(Vec<Address>);
+
+impl Addresses {
+    /// The addresses of `list`, in its order.
+    ///
+    /// # Errors
+    ///
+    /// [`Invalid::Count`] for more than 32 addresses, and [`Invalid::Scoped`] for the
+    /// first IPv6 address with flow info or a scope.
+    pub fn new(list: Vec<Address>) -> Result<Self, Invalid> {
+        let count = list.len();
+        if count > usize::from(ADDRESSES_MAX) {
+            return Err(Invalid::Count { count });
+        }
+        let scoped = list.iter().find(|address| {
+            let (Address::Udp(at) | Address::Tcp(at) | Address::Relay { at, .. }) =
+                **address;
+            matches!(at, SocketAddr::V6(at) if at.flowinfo() != 0 || at.scope_id() != 0)
+        });
+        if let Some(&address) = scoped {
+            return Err(Invalid::Scoped { address });
+        }
+        Ok(Self(list))
+    }
+
+    /// The addresses, in order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Address] {
+        &self.0
+    }
+}
+
+/// Why a list of addresses cannot go on a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Invalid {
+    /// More than 32 addresses.
+    Count {
+        /// The addresses in the list.
+        count: usize,
+    },
+    /// An IPv6 address with flow info or a scope.
+    Scoped {
+        /// The address.
+        address: Address,
+    },
+}
+
+impl fmt::Display for Invalid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Count { count } => {
+                write!(
+                    f,
+                    "a card holds {count} addresses, more than {ADDRESSES_MAX}"
+                )
+            }
+            Self::Scoped { address } => write!(
+                f,
+                "the address {address:?} has IPv6 flow info or a scope, which mean \
+                 something only on the node that sets it"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Invalid {}
 
 /// A card that its own `public_key` signed, over `foundation/card/1`, the node key,
 /// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one.
@@ -117,8 +177,7 @@ impl Signed {
     ///
     /// # Panics
     ///
-    /// When `card.public_key` is not the public half of `private_key`, when the card
-    /// holds more than 32 addresses, or when an IPv6 address has flow info or a scope.
+    /// When `card.public_key` is not the public half of `private_key`.
     #[must_use]
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
         let pair = ed25519::pair(private_key);
@@ -135,11 +194,6 @@ impl Signed {
     /// # Errors
     ///
     /// [`Forged`] when it does not hold for `card.public_key`.
-    ///
-    /// # Panics
-    ///
-    /// When the card holds more than 32 addresses, or an IPv6 address has flow info or
-    /// a scope.
     pub fn check(
         key: node::Key,
         card: Card,
@@ -229,10 +283,6 @@ fn put_socket(at: SocketAddr, out: &mut Vec<u8>) {
             out.extend(at.port().to_le_bytes());
         }
         SocketAddr::V6(at) => {
-            assert!(
-                at.flowinfo() == 0 && at.scope_id() == 0,
-                "a card address has IPv6 flow info or a scope"
-            );
             out.push(V6);
             out.extend(at.ip().octets());
             out.extend(at.port().to_le_bytes());
@@ -325,7 +375,7 @@ mod tests {
                 name,
                 public_key: public(id),
                 seal_key,
-                addresses,
+                addresses: Addresses::new(addresses).unwrap(),
                 version,
             })
     }
@@ -335,13 +385,14 @@ mod tests {
             name: "plant.node".parse().unwrap(),
             public_key: public(1),
             seal_key: SealKey::new([9; 32]).unwrap(),
-            addresses: vec![
+            addresses: Addresses::new(vec![
                 Address::Udp("10.0.0.1:4100".parse().unwrap()),
                 Address::Relay {
                     node: public(2),
                     at: "[fe80::1]:4100".parse().unwrap(),
                 },
-            ],
+            ])
+            .unwrap(),
             version: 1,
         }
     }
@@ -422,7 +473,8 @@ mod tests {
         let mut resealed = fixed();
         resealed.seal_key = SealKey::new([10; 32]).unwrap();
         let mut moved = fixed();
-        moved.addresses.pop();
+        moved.addresses =
+            Addresses::new(fixed().addresses.as_slice()[..1].to_vec()).unwrap();
         let mut newer = fixed();
         newer.version = 2;
         for card in [renamed, resealed, moved, newer] {
@@ -476,21 +528,37 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a card address has IPv6 flow info or a scope")]
-    fn sign_refuses_a_scoped_address() {
-        let mut card = fixed();
-        card.addresses = vec![Address::Tcp("[fe80::1%3]:4100".parse().unwrap())];
-        let _signed = Signed::sign(key(1), card, &private(1));
+    fn addresses_refuse_an_ipv6_address_with_a_scope_or_flow_info() {
+        let scoped = Address::Relay {
+            node: public(2),
+            at: "[fe80::1%3]:4100".parse().unwrap(),
+        };
+        let mut flowing: SocketAddrV6 = "[2001:db8::1]:4100".parse().unwrap();
+        flowing.set_flowinfo(1);
+        let flowing = Address::Udp(SocketAddr::V6(flowing));
+        let plain = Address::Tcp("[2001:db8::1]:4100".parse().unwrap());
+        for address in [scoped, flowing] {
+            assert_eq!(
+                Addresses::new(vec![plain, address, scoped]),
+                Err(Invalid::Scoped { address })
+            );
+        }
     }
 
     #[test]
-    #[should_panic(expected = "a card address has IPv6 flow info or a scope")]
-    fn check_refuses_an_address_with_flow_info() {
-        let mut card = fixed();
-        let mut at: SocketAddrV6 = "[2001:db8::1]:4100".parse().unwrap();
-        at.set_flowinfo(1);
-        card.addresses = vec![Address::Udp(SocketAddr::V6(at))];
-        let _checked = Signed::check(key(1), card, [0; 64]);
+    fn invalid_says_what_is_wrong() {
+        let address = Address::Tcp("[fe80::1%3]:4100".parse().unwrap());
+        assert_eq!(
+            Invalid::Count { count: 33 }.to_string(),
+            "a card holds 33 addresses, more than 32"
+        );
+        assert_eq!(
+            Invalid::Scoped { address }.to_string(),
+            format!(
+                "the address {address:?} has IPv6 flow info or a scope, which mean \
+                 something only on the node that sets it"
+            )
+        );
     }
 
     #[test]
@@ -499,14 +567,15 @@ mod tests {
             name: "ab.cd".parse().unwrap(),
             public_key: public(1),
             seal_key: SealKey::new([9; 32]).unwrap(),
-            addresses: vec![
+            addresses: Addresses::new(vec![
                 Address::Udp("5.6.7.8:1".parse().unwrap()),
                 Address::Tcp("1.2.3.4:258".parse().unwrap()),
                 Address::Relay {
                     node: public(2),
                     at: "[::1]:258".parse().unwrap(),
                 },
-            ],
+            ])
+            .unwrap(),
             version: 0x0102_0304_0506_0708,
         };
         let mut expected = b"foundation/card/1".to_vec();
@@ -546,7 +615,7 @@ mod tests {
         let name = format!("{}.{}", "a".repeat(127), "b".repeat(127));
         let card = Card {
             name: name.parse().unwrap(),
-            addresses: Vec::new(),
+            addresses: Addresses::new(Vec::new()).unwrap(),
             ..fixed()
         };
         let bytes = encoded(&card);
@@ -558,30 +627,36 @@ mod tests {
 
     #[test]
     fn a_card_at_the_edges_round_trips() {
-        let many = many(32);
+        let full = full();
         for version in [0, u64::MAX] {
             let card = Card { version, ..fixed() };
             assert_eq!(decoded(&encoded(&card)), Some(card), "version {version}");
         }
-        assert_eq!(decoded(&encoded(&many)), Some(many), "32 addresses");
+        assert_eq!(decoded(&encoded(&full)), Some(full), "32 addresses");
         let ports = Card {
-            addresses: vec![
+            addresses: Addresses::new(vec![
                 Address::Udp("0.0.0.0:0".parse().unwrap()),
                 Address::Tcp("[::]:65535".parse().unwrap()),
                 Address::Relay {
                     node: public(1),
                     at: "1.2.3.4:0".parse().unwrap(),
                 },
-            ],
+            ])
+            .unwrap(),
             ..fixed()
         };
         assert_eq!(decoded(&encoded(&ports)), Some(ports), "ports, own relay");
     }
 
-    // A card with `count` addresses of 8 bytes each.
-    fn many(count: usize) -> Card {
+    // `count` addresses of 8 bytes each.
+    fn many(count: usize) -> Vec<Address> {
+        vec![Address::Udp("10.0.0.1:4100".parse().unwrap()); count]
+    }
+
+    // A card with 32 addresses.
+    fn full() -> Card {
         Card {
-            addresses: vec![Address::Udp("10.0.0.1:4100".parse().unwrap()); count],
+            addresses: Addresses::new(many(32)).unwrap(),
             ..fixed()
         }
     }
@@ -589,7 +664,7 @@ mod tests {
     #[test]
     fn decode_refuses_more_than_32_addresses() {
         // The count is at 75, after the name (11 bytes) and the two keys.
-        let mut bytes = encoded(&many(32));
+        let mut bytes = encoded(&full());
         assert_eq!(bytes[75..83], 32u64.to_le_bytes());
         let version = bytes.split_off(bytes.len() - 8);
         bytes[75..83].copy_from_slice(&33u64.to_le_bytes());
@@ -602,7 +677,7 @@ mod tests {
     fn decode_refuses_a_large_count_before_it_takes_an_address() {
         // 288 is 32 in its low byte.
         for count in [288, u64::MAX] {
-            let mut bytes = encoded(&many(32));
+            let mut bytes = encoded(&full());
             bytes[75..83].copy_from_slice(&count.to_le_bytes());
             let mut rest = bytes.as_slice();
             assert_eq!(Card::decode(&mut rest), None, "count {count}");
@@ -613,21 +688,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a card holds 33 addresses, more than 32")]
-    fn encode_refuses_more_than_32_addresses() {
-        let _bytes = encoded(&many(33));
-    }
-
-    #[test]
-    #[should_panic(expected = "a card holds 33 addresses, more than 32")]
-    fn sign_refuses_more_than_32_addresses() {
-        let _signed = Signed::sign(key(1), many(33), &private(1));
-    }
-
-    #[test]
-    #[should_panic(expected = "a card holds 33 addresses, more than 32")]
-    fn check_refuses_more_than_32_addresses() {
-        let _checked = Signed::check(key(1), many(33), [0; 64]);
+    fn addresses_hold_at_most_32() {
+        assert_eq!(Addresses::new(many(32)).map(|a| a.as_slice().len()), Ok(32));
+        assert_eq!(Addresses::new(many(33)), Err(Invalid::Count { count: 33 }));
     }
 
     #[test]
@@ -646,15 +709,18 @@ mod tests {
             assert_eq!(decoded(&encoded(&card)), Some(card), "{name}");
         }
         let ips = Card {
-            addresses: [
-                "255.255.255.255:65535",
-                "[::ffff:1.2.3.4]:1",
-                "[::]:0",
-                "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:1",
-            ]
-            .into_iter()
-            .map(|at| Address::Udp(at.parse().unwrap()))
-            .collect(),
+            addresses: Addresses::new(
+                [
+                    "255.255.255.255:65535",
+                    "[::ffff:1.2.3.4]:1",
+                    "[::]:0",
+                    "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:1",
+                ]
+                .into_iter()
+                .map(|at| Address::Udp(at.parse().unwrap()))
+                .collect(),
+            )
+            .unwrap(),
             ..fixed()
         };
         assert_eq!(decoded(&encoded(&ips)), Some(ips), "edge IPs");

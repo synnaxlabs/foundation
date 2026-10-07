@@ -39,7 +39,7 @@ pub(crate) fn member(id: u8) -> Member {
         name: format!("plant.node{id}").parse().unwrap(),
         public_key: public(id),
         seal_key: SealKey::new([9; 32]).unwrap(),
-        addresses: Vec::new(),
+        addresses: card::Addresses::new(Vec::new()).unwrap(),
         version: 1,
     };
     Member {
