@@ -143,7 +143,7 @@ async fn serve(
     let Some(Opened {
         mut session,
         credit,
-        mut out,
+        mut places,
     }) = open(state, class, &mut home, receiver).await?
     else {
         sender.finish()?;
@@ -151,6 +151,8 @@ async fn serve(
     };
     sender.send(reply(state, Reply::Opened)?).await?;
     loop {
+        // Both futures are cancel-safe: a dropped `recv` keeps its message queued, and
+        // `take` gives up a frame only in the poll that returns it.
         let event = {
             let mut recv = pin!(receiver.recv());
             let mut take = pin!(session.take());
@@ -177,7 +179,7 @@ async fn serve(
                     .grant(grant.limit_bytes);
             }
             Event::Frame(Ok((frame, set, _))) => {
-                out.send(state, sender, &frame, set).await?;
+                places.send(state, sender, &frame, set).await?;
             }
             Event::Frame(Err(Ended::Behind)) => {
                 sender.send(reply(state, Reply::Behind)?).await?;
@@ -201,7 +203,7 @@ struct Opened {
     session: Session,
     /// The credit of a complete session.
     credit: Option<Credit>,
-    out: Out,
+    places: Places,
 }
 
 /// Reads the open and its keys, checks each key as it arrives, and opens the session
@@ -264,7 +266,7 @@ async fn open(
     Ok(Some(Opened {
         session,
         credit,
-        out: Out::new(slots, index),
+        places: Places::new(slots, index),
     }))
 }
 
@@ -294,25 +296,25 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
 
 /// How a session sends each frame, through its places. It keeps its buffers across
 /// frames, so a frame allocates only its blocks.
-struct Out {
+struct Places {
     /// The slot of each place: of each listing in the open, repeats too.
     slots: Box<[Slot]>,
     index: Slot,
     /// The place of each entry of the frame's key set.
-    places: Vec<Option<usize>>,
+    by_entry: Vec<Option<usize>>,
     /// The range of each place's series in the frame's body.
     by_place: Vec<Option<Range<usize>>>,
     series: Vec<Series>,
     parts: Vec<Part>,
 }
 
-impl Out {
+impl Places {
     fn new(slots: Box<[Slot]>, index: Slot) -> Self {
         Self {
             by_place: vec![None; slots.len()],
             slots,
             index,
-            places: Vec::new(),
+            by_entry: Vec::new(),
             series: Vec::new(),
             parts: Vec::new(),
         }
@@ -349,16 +351,16 @@ impl Out {
     /// Lays out the series of `frame` that the session has a place for, in place
     /// order, and gives the frame's head.
     fn lay(&mut self, frame: &Frame, set: &KeySet) -> Head {
-        self.places.clear();
-        self.places.resize(set.entries().len(), None);
+        self.by_entry.clear();
+        self.by_entry.resize(set.entries().len(), None);
         for (place, &slot) in self.slots.iter().enumerate() {
             if let Some(entry) = set.find(slot) {
-                self.places[entry].get_or_insert(place);
+                self.by_entry[entry].get_or_insert(place);
             }
         }
         self.by_place.fill(None);
         for ((entry, series), (_, end)) in frame.iter().zip(frame.ends()) {
-            if let Some(place) = self.places[entry] {
+            if let Some(place) = self.by_entry[entry] {
                 self.by_place[place] = Some(end - series.len()..end);
             }
         }
@@ -490,9 +492,10 @@ mod tests {
         (draft.freeze(Path::Live), set)
     }
 
-    /// Each series that `out` laid out, as `(place, range, end, zeros)`.
-    fn laid(out: &Out) -> Vec<(u32, Range<usize>, u32, u8)> {
-        out.series
+    /// Each series that `places` laid places, as `(place, range, end, zeros)`.
+    fn laid(places: &Places) -> Vec<(u32, Range<usize>, u32, u8)> {
+        places
+            .series
             .iter()
             .map(|s| (s.place, s.range.clone(), s.end, s.zeros))
             .collect()
@@ -506,19 +509,19 @@ mod tests {
         let mut interner = Interner::new();
         let [b, index, a, _, absent] =
             [3, 1, 2, 5, 4].map(|k| interner.slots().assign(key(k)));
-        let mut out = Out::new([index, a, b, absent].into(), index);
+        let mut places = Places::new([index, a, b, absent].into(), index);
         let (wide, set) = frame(&mut interner, &pool, &[2, 3, 5], &[3, 8, 5, 8]);
-        let head = out.lay(&wide, &set);
+        let head = places.lay(&wide, &set);
         assert_eq!(
-            laid(&out),
+            laid(&places),
             [(0, 8..16, 8, 0), (1, 16..21, 13, 3), (2, 0..3, 19, 0)]
         );
         assert_eq!(head.path, Path::Live);
         assert_eq!(Some(head.range), wide.range(0));
         assert_eq!(head.series, 3);
         let (narrow, set) = frame(&mut interner, &pool, &[2], &[8, 5]);
-        let head = out.lay(&narrow, &set);
-        assert_eq!(laid(&out), [(0, 0..8, 8, 0), (1, 8..13, 13, 0)]);
+        let head = places.lay(&narrow, &set);
+        assert_eq!(laid(&places), [(0, 0..8, 8, 0), (1, 8..13, 13, 0)]);
         assert_eq!(head.series, 2);
     }
 
@@ -529,11 +532,11 @@ mod tests {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
         let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
-        let mut out = Out::new([index, a, index, b].into(), index);
+        let mut places = Places::new([index, a, index, b].into(), index);
         let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
-        let head = out.lay(&frame, &set);
+        let head = places.lay(&frame, &set);
         assert_eq!(
-            laid(&out),
+            laid(&places),
             [(0, 0..8, 8, 0), (1, 8..16, 16, 0), (3, 16..24, 24, 0)]
         );
         assert_eq!(head.series, 3);
@@ -544,10 +547,10 @@ mod tests {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
         let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
-        let mut out = Out::new([index, a, b].into(), index);
+        let mut places = Places::new([index, a, b].into(), index);
         let (wide, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
-        out.lay(&wide, &set);
-        let runs = |max| out.runs(max).map(<[Series]>::len).collect::<Vec<_>>();
+        places.lay(&wide, &set);
+        let runs = |max| places.runs(max).map(<[Series]>::len).collect::<Vec<_>>();
         assert_eq!(runs(16), [2, 1]);
         assert_eq!(runs(23), [2, 1]);
         assert_eq!(runs(24), [3]);
