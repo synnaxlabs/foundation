@@ -9,13 +9,13 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
-use block::Pool;
+use block::{Block, Pool};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
-use transport::Transport;
+use transport::{Session, Transport};
 use types::channel;
 use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
@@ -555,11 +555,13 @@ impl Group {
         Poll::Ready(message)
     }
 
-    // Wakes each task that sends, so that it ends.
-    fn wake_senders(&mut self) {
-        let queues = self.queues.values_mut();
-        let waiting = queues.filter_map(|queue| queue.waker.take());
-        waiting.chain(self.starter.take()).for_each(Waker::wake);
+    // Wakes each task that sends, so that it ends, and drops the session of each.
+    fn end_senders(&mut self) {
+        for queue in self.queues.values_mut() {
+            queue.session = None;
+            queue.waker.take().into_iter().for_each(Waker::wake);
+        }
+        self.starter.take().into_iter().for_each(Waker::wake);
     }
 
     // Applies each change in `committed`, and wakes the watches when a home moves.
@@ -589,7 +591,7 @@ impl Group {
 
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
-        self.wake_senders();
+        self.end_senders();
         self.wake_watches();
         for proposal in &self.proposals {
             proposal.wake();
@@ -608,7 +610,7 @@ impl Drop for Group {
     // that each mesh dropped.
     fn drop(&mut self) {
         self.wake();
-        self.wake_senders();
+        self.end_senders();
         self.wake_watches();
     }
 }
@@ -631,13 +633,15 @@ impl Proposal {
     }
 }
 
-// The messages that wait for one member.
+// The messages that wait for one member, and the session to it.
 #[derive(Default)]
 struct Queue {
     messages: VecDeque<raft::Message>,
     // The one task that reads this queue, while it waits for a message or in a send
     // of one.
     waker: Option<Waker>,
+    // The session that the task dialed, until a send on it fails or the group stops.
+    session: Option<Session>,
 }
 
 impl Queue {
@@ -651,6 +655,13 @@ impl Queue {
             waker.wake();
         }
     }
+}
+
+// A block of `pool` that holds `bytes`.
+fn block(pool: &Pool, bytes: &[u8]) -> Result<Block, block::Error> {
+    let mut block = pool.alloc(bytes.len())?;
+    block.copy_from_slice(bytes);
+    Ok(block.freeze())
 }
 
 // Whether `entries`, which is the run of entries of one `Ready`, holds the entry
