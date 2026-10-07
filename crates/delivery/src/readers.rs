@@ -1053,6 +1053,33 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn after_a_close_leaves_the_key_counters() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            readers.queue(&frames.frame(1), 0..2);
+            readers.close_named(old, at(1));
+            dropped(&mut readers, old.into());
+            let next = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
+            assert_eq!(next, complete::Key(2));
+            assert_eq!(readers.open_latest().key, latest::Key(0));
+        }
+
+        #[test]
+        #[should_panic(expected = "live frame at seq 1..2 queued after seq 2")]
+        fn after_a_close_keeps_the_end_of_the_queued_frames() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            readers.queue(&frames.frame(1), 0..2);
+            readers.close_named(old, at(1));
+            dropped(&mut readers, old.into());
+            readers.queue(&frames.frame(2), 1..2);
+        }
+
+        #[test]
         #[should_panic(expected = "complete session 1 was never open")]
         fn take_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
