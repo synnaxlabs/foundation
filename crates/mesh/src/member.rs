@@ -199,6 +199,17 @@ mod tests {
     }
 
     #[test]
+    fn decode_refuses_more_than_64_status_entries() {
+        let names: Vec<String> = (0..65).map(|i| format!("s{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(
+            decoded(&entries(&names[..64])).map(|m| m.status.len()),
+            Some(64)
+        );
+        assert_eq!(decoded(&entries(&names)), None);
+    }
+
+    #[test]
     fn decode_refuses_a_presence_byte_that_is_neither_value() {
         let mut bytes = entries(&[]);
         let at = head(&with_status(&[])).len();

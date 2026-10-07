@@ -852,6 +852,46 @@ mod tests {
     }
 
     #[test]
+    fn a_join_refused_as_taken_counts_no_use() {
+        let mut state = open_state();
+        assert_eq!(apply_join(&mut state, join(8, 3, "plant.edge.a")), Ok(None));
+        let before = state.clone();
+        assert_eq!(
+            apply_join(&mut state, join(7, 4, "plant.edge.A")),
+            Err(Unfit::Taken {
+                name: name("plant.edge.A"),
+                key: node(3)
+            }
+            .into())
+        );
+        assert_eq!(state, before);
+        assert_eq!(state.ticket(public(7)).map(|record| record.uses), Some(0));
+        let other = with_status(join(7, 4, "plant.edge.b"), &[("disk", 10)]);
+        assert_eq!(apply_join(&mut state, other), Ok(None));
+        assert_eq!(state.ticket(public(7)).map(|record| record.uses), Some(1));
+    }
+
+    #[test]
+    fn a_join_with_more_than_64_status_entries_does_not_decode() {
+        let status: Vec<(String, u128)> =
+            (0..65).map(|i| (format!("s{i:02}"), i)).collect();
+        let status: Vec<(&str, u128)> = status
+            .iter()
+            .map(|(text, key)| (text.as_str(), *key))
+            .collect();
+        let most = with_status(join(7, 3, "plant.edge.a"), &status[..64]);
+        let most = Change::Join(Box::new(most));
+        assert_eq!(Change::decode(&encoded(&most)), Ok(most));
+        let over = with_status(join(7, 3, "plant.edge.a"), &status);
+        let bytes = encoded(&Change::Join(Box::new(over)));
+        let length = bytes.len();
+        assert_eq!(
+            Change::decode(&bytes),
+            Err(Malformed::Body { kind: 2, length })
+        );
+    }
+
+    #[test]
     fn a_join_whose_status_channel_name_a_member_holds_is_refused() {
         let mut state = open_state();
         let first = with_status(join(8, 3, "plant.a"), &[("b.c", 20)]);

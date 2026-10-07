@@ -112,8 +112,17 @@ pub(crate) fn put_status(status: &BTreeMap<Name, channel::Key>, out: &mut Vec<u8
     }
 }
 
-/// Takes what [`put_status`] gives. `None` when the names are not in rising order.
+/// The most status entries that a member or a `Join` holds. A node's status channels
+/// are a fixed set per release, and the cap leaves room for later releases.
+pub(crate) const MAX_STATUS: u64 = 64;
+
+/// Takes what [`put_status`] gives. `None` when the names are not in rising order, or
+/// when there are more than [`MAX_STATUS`] entries.
 pub(crate) fn take_status(bytes: &mut &[u8]) -> Option<BTreeMap<Name, channel::Key>> {
+    let mut count = *bytes;
+    if take_count(&mut count)? > MAX_STATUS {
+        return None;
+    }
     let mut status = BTreeMap::new();
     take_rising(bytes, take_name, |name, bytes| {
         status.insert(name, take_channel(bytes)?);
