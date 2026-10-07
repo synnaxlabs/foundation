@@ -634,12 +634,14 @@ How to read this record:
   does not count the commit task. `next` gives a `types::frame::View` of the reader's
   channels and their index (M2), never the frame. The view borrows the reader, which
   releases the frame at the next call, not at its first poll, and grants credit for
-  it there (CREDIT RULES); a caller that keeps data copies it. A session that ends gives
-  `reader::Ended`. `Hub::define` stands. A writer on a channel of a type the home does
-  not write gets `writer::Error::Type` with the channel's name (HOME TYPE REFUSAL).
-  Decided by the architect, #1133
-  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575 and
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
+  it there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
+  keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define`
+  stands. A writer on a channel of a type the home does not write gets
+  `writer::Error::Type` with the channel's name (HOME TYPE REFUSAL). Decided by the
+  architect, #1133
+  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575,
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051, and
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
