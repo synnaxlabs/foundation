@@ -96,8 +96,10 @@ How to read this record:
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
-  tie (`a.*` and `*.a`); a tie between setting policies on one name is the S12 plan
-  error. Access has no ties (X25).
+  tie (`a.*` and `*.a`); a tie between the most specific setting policies on one name
+  is the S12 plan error. A tie below them decides nothing, because the most specific
+  value is the one used (X25). Access has no ties (X25). Decided by architect-2 (#1150:
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6040858277).
 - **A4 + M1/M2 answer** `channel::Key` is a UUIDv7 made with the channel. It is never
   reused and never changes. Files carry names only. The stored spec maps name to key,
   and `apply` assigns a key the first time a name appears. Renames are explicit
@@ -249,7 +251,7 @@ How to read this record:
   An index that no policy selects has no time cap. `keep` is zero or more. At `0s` no
   hold keeps a sample after its store time, so a reader that is behind gets a gap for
   each sample that `buffer` trims before the reader gets it. Most specific wins as a
-  whole policy (X25), equal specificity is a plan error (S12), and a data channel takes
+  whole policy (X25), a tie at the top is a plan error (S12), and a data channel takes
   its index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap",
   a size cap per index, and a read that reports each sample past `keep` as a gap while
   its bytes are on disk. That read does not depend on disk pressure, but at `0s` a
@@ -2702,7 +2704,7 @@ How to read this record:
   Mechanism: X28.
 - **S12 + C8 amendment** Settings are policies that select names. One `Selector`
   (patterns with `*`, `**`, and `!` exclusions) serves subscriptions, readers,
-  connectors, policies, and access. Most specific pattern wins; equal specificity is a
+  connectors, policies, and access. Most specific pattern wins; a tie at the top is a
   plan error; `explain` shows each effective value and its source. A rename can move a
   channel under other policies, and `plan` shows it. Current policy kinds: retention,
   placement, transmission, compression, reduction, time, access, secret store, and node
