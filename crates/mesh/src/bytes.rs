@@ -7,8 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use raft::{Grant, Position, Proof, Signature, Term};
+use types::channel;
 use types::name::Name;
 use types::node;
+use types::time::Span;
 
 /// Takes `N` bytes.
 pub(crate) fn take<const N: usize>(bytes: &mut &[u8]) -> Option<[u8; N]> {
@@ -40,6 +42,56 @@ pub(crate) fn take_name(bytes: &mut &[u8]) -> Option<Name> {
     let (name, rest) = bytes.split_at_checked(usize::from(len))?;
     *bytes = rest;
     std::str::from_utf8(name).ok()?.parse().ok()
+}
+
+/// Adds a presence byte, then the span in nanoseconds when there is one.
+pub(crate) fn put_optional_span(span: Option<Span>, out: &mut Vec<u8>) {
+    match span {
+        None => out.push(ABSENT),
+        Some(span) => {
+            out.push(PRESENT);
+            out.extend(span.nanos().to_le_bytes());
+        }
+    }
+}
+
+/// Takes what [`put_optional_span`] gives.
+#[expect(
+    clippy::option_option,
+    reason = "the outer `None` is bytes not in the form, as for each `take_*`"
+)]
+pub(crate) fn take_optional_span(bytes: &mut &[u8]) -> Option<Option<Span>> {
+    if !take_present(bytes)? {
+        return Some(None);
+    }
+    Some(Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?))))
+}
+
+/// Adds a count of status entries, then each entry in name order: the name, then the
+/// channel key as 16 little-endian bytes.
+pub(crate) fn put_status(status: &BTreeMap<Name, channel::Key>, out: &mut Vec<u8>) {
+    put_count(status.len(), out);
+    for (name, key) in status {
+        put_name(name, out);
+        out.extend(key.as_u128().to_le_bytes());
+    }
+}
+
+/// Takes what [`put_status`] gives. `None` when the names are not in rising order.
+pub(crate) fn take_status(bytes: &mut &[u8]) -> Option<BTreeMap<Name, channel::Key>> {
+    let mut status = BTreeMap::new();
+    for _ in 0..take_count(bytes)? {
+        let name = take_name(bytes)?;
+        if status
+            .last_key_value()
+            .is_some_and(|(last, _)| *last >= name)
+        {
+            return None;
+        }
+        let key = channel::Key::from_u128(u128::from_le_bytes(take(bytes)?));
+        status.insert(name, key);
+    }
+    Some(status)
 }
 
 /// Adds a position as its term, then its index.

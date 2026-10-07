@@ -15,6 +15,7 @@ use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use types::channel;
+use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -39,6 +40,8 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
+    /// The prefix of the region's names.
+    pub(crate) region: Name,
     /// Each member of the region, this node included, one record for each node. A
     /// member's peer proves the public key of its card, and that key signs the member's
     /// grants.
@@ -86,7 +89,8 @@ impl Mesh {
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
-        let state = region::State::new(config.members).map_err(Error::Duplicate)?;
+        let state = region::State::new(config.region, config.members)
+            .map_err(|region::Duplicate { key }| Error::Duplicate(key))?;
         let signer = Signer::new(config.key, &config.private_key);
         match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
@@ -201,7 +205,7 @@ impl Mesh {
     /// - [`Error::Stopped`] when the group stopped.
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead.
-    pub(crate) fn propose(&self, change: Change) -> Result<Position, Error> {
+    pub(crate) fn propose(&self, change: &Change) -> Result<Position, Error> {
         let mut group = self.group.borrow_mut();
         group.running()?;
         let mut data = Vec::new();
@@ -333,7 +337,8 @@ impl Group {
             };
             let change = Change::decode(&bytes)
                 .map_err(|cause| Stopped::Change { at, cause })?;
-            if self.state.apply(change).is_some() {
+            // A refused change is a no-op on every node.
+            if let Ok(Some(_)) = self.state.apply(change) {
                 self.wake_watches();
             }
         }
@@ -531,6 +536,7 @@ mod tests {
         Config {
             key: key(id),
             private_key: private(id),
+            region: "plant".parse().unwrap(),
             members: common::members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
@@ -623,10 +629,10 @@ mod tests {
         loop {
             clock.sleep(TICK).await;
             let mut board = board.lock().unwrap();
-            let Some(&change) = board.script.get(&id) else {
+            let Some(change) = board.script.get(&id).cloned() else {
                 continue;
             };
-            match mesh.propose(change) {
+            match mesh.propose(&change) {
                 Ok(_) => {
                     board.script.remove(&id);
                     board.led.push(id);
@@ -827,7 +833,7 @@ mod tests {
     async fn lead(mesh: &Mesh, clock: &Clock, change: Change) -> Position {
         let follower = Error::Raft(raft::Error::NotLeader { leader: None });
         loop {
-            match mesh.propose(change) {
+            match mesh.propose(&change) {
                 Ok(at) => return at,
                 Err(error) => assert_eq!(error, follower),
             }
@@ -1115,7 +1121,7 @@ mod tests {
             clock.sleep(TICK).await;
             clock.sleep(Span::MILLISECOND).await;
             let proposed = clock.now();
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             assert_eq!(watch.next().await, Ok(Some(key(2))));
             let waited = clock.now() - proposed;
             let half = Span::from_nanos(TICK.nanos() / 2);
@@ -1156,7 +1162,7 @@ mod tests {
             assert_eq!(watch.next().await, Ok(None));
             assert_eq!(watch.next().await, Ok(Some(key(1))));
             let held = fill(&pool);
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
             assert_eq!(mesh.group.borrow().state.home(INDEX), Some(key(1)));
             assert_eq!(mesh.group.borrow().running(), Ok(()));
@@ -1265,7 +1271,7 @@ mod tests {
             lead(&mesh, &node.clock(), home(1)).await;
             node.clock().sleep(TICK).await;
             let _held = fill(&pool);
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             node.clock().sleep(TICK).await;
             drop(mesh);
             node.clock().sleep(TICK).await;
@@ -1294,7 +1300,7 @@ mod tests {
             });
             node.clock().sleep(TICK).await;
             let stopped = fail_sync(&node);
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             node.clock().sleep(TICK).await;
             assert_eq!(seen.take(), [Ok(None), Ok(Some(key(1))), Err(stopped)]);
         });
@@ -1319,7 +1325,7 @@ mod tests {
                 term: Term(1),
                 index: 3,
             };
-            assert_eq!(mesh.propose(home(2)), Ok(at));
+            assert_eq!(mesh.propose(&home(2)), Ok(at));
             assert_eq!(watch.next().await, Err(stopped.clone()));
             let Error::Stopped(Stopped::Write(cause)) = &stopped else {
                 unreachable!()
@@ -1327,7 +1333,7 @@ mod tests {
             assert_eq!(stopped.to_string(), format!("the group stopped: {cause}"));
             node.clock().sleep(TICK).await;
             assert_eq!(waiting.take(), Some(Err(stopped.clone())));
-            assert_eq!(mesh.propose(home(2)), Err(stopped.clone()));
+            assert_eq!(mesh.propose(&home(2)), Err(stopped.clone()));
             let reply = message(2, 1, Body::HeartbeatReply);
             assert_eq!(mesh.receive(public(2), reply), Err(stopped));
         });
@@ -1350,7 +1356,7 @@ mod tests {
                 assert_eq!(watch.next().await, Ok(None));
                 assert_eq!(watch.next().await, Ok(Some(key(1))));
                 let stopped = fail_sync(&node);
-                mesh.propose(home(2)).unwrap();
+                mesh.propose(&home(2)).unwrap();
                 assert_eq!(watch.next().await, Err(stopped));
                 drop(mesh);
                 let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
@@ -1377,7 +1383,7 @@ mod tests {
             if changes.contains(&Some(home(2))) {
                 gave = gave.saturating_add(1);
             }
-            let end = changes.last().copied().flatten();
+            let end = changes.last().cloned().flatten();
             if end != Some(home(3)) {
                 lost.push((run, end));
             }
@@ -1448,7 +1454,7 @@ mod tests {
             assert_eq!(watch.next().await, Ok(None));
             assert_eq!(watch.next().await, Ok(Some(key(1))));
             let stopped = fail_sync(&node);
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             assert_eq!(watch.next().await, Err(stopped));
             assert_eq!(mesh.member(key(1)), Some(common::member(1)));
             assert_eq!(mesh.member(key(2)), None);
@@ -1615,7 +1621,7 @@ mod tests {
             assert_eq!(watch.next().await, Ok(None));
             assert_eq!(watch.next().await, Ok(Some(key(1))));
             let stopped = fail_sync(&node);
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             assert_eq!(watch.next().await, Err(stopped.clone()));
             drop(mesh);
             assert_eq!(watch.next().await, Err(stopped));
@@ -1637,7 +1643,7 @@ mod tests {
             });
             node.clock().sleep(TICK).await;
             let stopped = fail_sync(&node);
-            mesh.propose(home(2)).unwrap();
+            mesh.propose(&home(2)).unwrap();
             assert_eq!(mesh.outgoing(key(2)).await, Err(stopped.clone()));
             drop(mesh);
             node.clock().sleep(TICK).await;

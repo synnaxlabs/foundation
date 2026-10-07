@@ -8,8 +8,8 @@ use types::node::PublicKey;
 use types::time::Span;
 
 use crate::bytes::{
-    ABSENT, PRESENT, put_count, put_key, put_name, take, take_count, take_key,
-    take_name, take_present,
+    put_key, put_optional_span, put_status, take, take_key, take_optional_span,
+    take_status,
 };
 use crate::card;
 
@@ -40,25 +40,15 @@ impl Member {
     /// length byte, then the channel key. Every number is 8 or 16 little-endian bytes.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+        expect(dead_code, reason = "the join answer of #336 is the first user")
     )]
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         put_key(self.card.key(), out);
         self.card.card().encode(out);
         out.extend(self.card.signature());
         out.extend(self.admission);
-        match self.expiry {
-            None => out.push(ABSENT),
-            Some(expiry) => {
-                out.push(PRESENT);
-                out.extend(expiry.nanos().to_le_bytes());
-            }
-        }
-        put_count(self.status.len(), out);
-        for (name, key) in &self.status {
-            put_name(name, out);
-            out.extend(key.as_u128().to_le_bytes());
-        }
+        put_optional_span(self.expiry, out);
+        put_status(&self.status, out);
     }
 
     /// Takes one record from the start of `bytes`. `None` when the bytes do not start
@@ -66,30 +56,15 @@ impl Member {
     /// `bytes` is then at no known place.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+        expect(dead_code, reason = "the join answer of #336 is the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let key = take_key(bytes)?;
         let card = card::Card::decode(bytes)?;
         let card = card::Signed::check(key, card, take(bytes)?).ok()?;
         let admission = take(bytes)?;
-        let expiry = if take_present(bytes)? {
-            Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?)))
-        } else {
-            None
-        };
-        let mut status = BTreeMap::new();
-        for _ in 0..take_count(bytes)? {
-            let name = take_name(bytes)?;
-            if status
-                .last_key_value()
-                .is_some_and(|(last, _)| *last >= name)
-            {
-                return None;
-            }
-            let key = channel::Key::from_u128(u128::from_le_bytes(take(bytes)?));
-            status.insert(name, key);
-        }
+        let expiry = take_optional_span(bytes)?;
+        let status = take_status(bytes)?;
         Some(Self {
             card,
             admission,
@@ -104,6 +79,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::bytes::{put_count, put_name};
     use crate::common::{key, member};
 
     fn status() -> impl Strategy<Value = BTreeMap<Name, channel::Key>> {

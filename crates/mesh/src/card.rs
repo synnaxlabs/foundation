@@ -46,7 +46,7 @@ impl Card {
     /// place.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+        expect(dead_code, reason = "the streams of #471 are the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let name = take_name(bytes)?;
