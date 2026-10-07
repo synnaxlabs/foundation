@@ -1603,6 +1603,21 @@ fn a_connect_to_a_failed_listener_is_refused() {
 }
 
 #[test]
+fn a_connect_whose_syn_is_in_flight_at_the_fault_is_refused() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let refused = connect(&node, remote, options()).await.err();
+        (refused, node.clock().now())
+    });
+    sim.run_for(Span::from_nanos(delay().nanos() / 2)).unwrap();
+    b.fail_listener(remote);
+    sim.run().unwrap();
+    assert_eq!(take(&client), (Some(Net::Refused { remote }), legs(2)));
+}
+
+#[test]
 fn a_connect_in_its_handshake_at_the_fault_is_reset_and_never_accepted() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);

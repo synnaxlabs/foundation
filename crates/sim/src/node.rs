@@ -138,10 +138,11 @@ impl Node {
 
     /// Makes the TCP listener of the node at `local` fail, as when the OS breaks it:
     /// each accept of it first gives the streams already in its backlog, then gives
-    /// `Error::Io` with code 5 (`EIO`), also one that waits. A connect to it after the
-    /// fault is refused, and a connect in its handshake at the fault is reset. The
-    /// streams it accepted still work. A listener bound at `local` after it drops
-    /// works. A fault on a listener that already failed does nothing.
+    /// `Error::Io` with code 5 (`EIO`), also one that waits. A connect to it is refused
+    /// when its SYN arrives after the fault, and reset when the listener took its SYN
+    /// but not its ACK before the fault. The streams it accepted still work. A listener
+    /// bound at `local` after it drops works. A fault on a listener that already failed
+    /// does nothing.
     ///
     /// # Panics
     ///
