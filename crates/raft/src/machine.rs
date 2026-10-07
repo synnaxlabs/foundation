@@ -781,8 +781,9 @@ impl Raft {
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
         let removed_end = self.removed_end();
-        let (key, votes) = (self.key, &self.votes);
-        let links = votes.as_ref().map(|_| self.log.links(self.term));
+        let (key, term, log, votes) = (self.key, self.term, &self.log, &self.votes);
+        // The chain is scanned once per call, and only for a peer that needs it.
+        let mut links: Option<Vec<Link>> = None;
         for (&to, peer) in self.peers.range_mut(range) {
             if peer.progress.paused() {
                 continue;
@@ -800,13 +801,17 @@ impl Raft {
             let entries = self.log.slice(next, end, BATCH);
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
             peer.progress.sent(last);
-            let proof = (!peer.answered).then(|| votes.clone()).flatten();
-            let chain = (!peer.answered).then(|| links.clone()).flatten();
-            let chain = chain.unwrap_or_default();
+            let (proof, chain) = match votes {
+                Some(votes) if !peer.answered => {
+                    let links = links.get_or_insert_with(|| log.links(term));
+                    (Some(votes.clone()), links.clone())
+                }
+                _ => (None, Vec::new()),
+            };
             self.outbox.push(Message {
                 from: key,
                 to,
-                term: self.term,
+                term,
                 body: Body::Append {
                     prev,
                     entries,
