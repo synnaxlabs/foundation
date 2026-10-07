@@ -130,7 +130,7 @@ pub struct Time {
     pub mesh: Option<Interval>,
 }
 
-/// Reads mesh time from any thread with no lock. Clones read the same clock.
+/// Reads the node's clocks from any thread with no lock. Clones read the same clock.
 #[derive(Clone, Debug)]
 pub struct Reader {
     monotonic: env::clock::Clock,
@@ -171,12 +171,12 @@ impl Reader {
 
     /// The clock's first estimate at `reading`, a reading of the node's monotonic
     /// clock: its offset, with its error grown by drift to `reading` (200 ppm, 0.72 s
-    /// in one hour). Later estimates never change it. It stamps the `monotonic` of a
-    /// [`Time`] with no mesh time: its midpoint is then never later than the midpoint
-    /// of mesh time from a later [`Reader::now`], while the edges of both fit a stamp
-    /// (from 1777 to 2162 with an unknown error). `None` until a majority of the
-    /// clock's sources first agree. A call that starts after [`Reader::now`] gave
-    /// mesh time gives an interval.
+    /// in one hour). Later estimates never change it. It stamps a reading no later
+    /// than the `monotonic` of a [`Time`] with no mesh time: its midpoint is then never
+    /// later than the midpoint of mesh time from any [`Reader::now`] that gives mesh
+    /// time, while the edges of both fit a stamp (from 1777 to 2162 with an unknown
+    /// error). `None` until a majority of the clock's sources first agree. A call that
+    /// starts after [`Reader::now`] gave mesh time gives an interval.
     #[must_use]
     pub fn first(&self, reading: Monotonic) -> Option<Interval> {
         let slew = self.cell.first()?;

@@ -10,7 +10,7 @@ use estimate::discipline::Cause;
 use sim::node::Node;
 use types::time::{Monotonic, Span};
 
-use crate::common::{UNKNOWN, ms, node};
+use crate::common::{UNKNOWN, ms, node, time};
 
 fn us(n: i64) -> Span {
     Span::from_nanos(n * 1_000)
@@ -54,11 +54,11 @@ fn read(reader: &Reader) -> Option<Measurement> {
 fn has_no_time_with_no_sources() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
-    assert_eq!(reader.now().mesh, None);
+    assert_eq!(reader.now(), time(&node, None));
     let source = clock.add();
     clock.remove(source);
     assert_eq!(reader.status(), Status::Unsynced(Error::NoSources));
-    assert_eq!(reader.now().mesh, None);
+    assert_eq!(reader.now(), time(&node, None));
 }
 
 #[test]
@@ -66,14 +66,7 @@ fn gives_its_monotonic_reading_with_no_time() {
     let (mut sim, node) = node();
     let (_clock, reader) = Clock::new(node.clock());
     sim.run_for(Span::SECOND).expect("the run ends");
-    let monotonic = node.clock().now();
-    assert_eq!(
-        reader.now(),
-        Time {
-            monotonic,
-            mesh: None
-        }
-    );
+    assert_eq!(reader.now(), time(&node, None));
 }
 
 /// A monotonic clock that moves 1 ms at each read.
@@ -117,6 +110,23 @@ fn gives_mesh_time_at_its_own_monotonic_reading() {
 }
 
 #[test]
+fn reads_the_monotonic_clock_once_with_no_time() {
+    let monotonic = env::clock::Clock::new(Ticking(AtomicU64::new(0)));
+    let (_clock, reader) = Clock::new(monotonic.clone());
+    let start = monotonic.now();
+    for tick in 1..=3 {
+        let monotonic = Monotonic(start.0 + tick * 1_000_000);
+        assert_eq!(
+            reader.now(),
+            Time {
+                monotonic,
+                mesh: None
+            }
+        );
+    }
+}
+
+#[test]
 fn has_no_time_until_a_majority_agrees() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
@@ -129,10 +139,10 @@ fn has_no_time_until_a_majority_agrees() {
     };
     clock.push(a, m);
     assert_eq!(reader.status(), Status::Unsynced(alone));
-    assert_eq!(reader.now().mesh, None);
+    assert_eq!(reader.now(), time(&node, None));
     clock.push(b, m);
     assert_eq!(reader.status(), Status::Synced(m));
-    assert_eq!(reader.now().mesh, Some(m.interval()));
+    assert_eq!(reader.now(), time(&node, Some(m.interval())));
 }
 
 #[test]
@@ -165,7 +175,7 @@ fn an_add_after_the_first_estimate_holds_over_at_once() {
     };
     let cause = Cause::NoEstimate(alone);
     assert_eq!(reader.status(), Status::Holdover(first, cause));
-    assert_eq!(reader.now().mesh, Some(first.interval()));
+    assert_eq!(reader.now(), time(&node, Some(first.interval())));
 }
 
 #[test]
@@ -182,10 +192,10 @@ fn a_source_that_pushes_first_cannot_set_mesh_time() {
     };
     clock.push(a, truth);
     assert_eq!(reader.status(), Status::Unsynced(split));
-    assert_eq!(reader.now().mesh, None);
+    assert_eq!(reader.now(), time(&node, None));
     clock.push(b, truth);
     assert_eq!(reader.status(), Status::Synced(truth));
-    assert_eq!(reader.now().mesh, Some(truth.interval()));
+    assert_eq!(reader.now(), time(&node, Some(truth.interval())));
 }
 
 #[test]
@@ -196,7 +206,7 @@ fn serves_the_first_measurement_at_once() {
     let first = measure(&node, Span::HOUR, ms(2));
     clock.push(source, first);
     assert_eq!(reader.status(), Status::Synced(first));
-    assert_eq!(reader.now().mesh, Some(first.interval()));
+    assert_eq!(reader.now(), time(&node, Some(first.interval())));
 }
 
 #[test]
@@ -208,7 +218,7 @@ fn an_unknown_source_alone_gives_unknown_time() {
     clock.push(source, unknown);
     assert_eq!(reader.status(), Status::Synced(unknown));
     assert_eq!(unknown.error(), UNKNOWN);
-    assert_eq!(reader.now().mesh, Some(unknown.interval()));
+    assert_eq!(reader.now(), time(&node, Some(unknown.interval())));
 }
 
 /// An unknown estimate never replaces a known one.

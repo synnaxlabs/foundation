@@ -8,7 +8,7 @@ use proptest::prelude::*;
 use sim::node::Node;
 use types::time::{Interval, Monotonic, Span};
 
-use crate::common::{UNKNOWN, ms, node};
+use crate::common::{UNKNOWN, ms, node, time};
 
 const HALF_HOUR: Span = Span::from_nanos(30 * Span::MINUTE.nanos());
 
@@ -56,7 +56,7 @@ fn gives_nothing_before_the_first_estimate() {
     assert_eq!(reader.first(reading), None);
     let [a, _] = [clock.add(), clock.add()];
     clock.push(a, measure(&node, Span::HOUR, ms(2)));
-    assert_eq!(reader.now().mesh, None);
+    assert_eq!(reader.now(), time(&node, None));
     assert_eq!(reader.first(reading), None);
 }
 
@@ -103,7 +103,7 @@ fn keeps_the_first_estimate_after_a_step_a_holdover_and_no_sources() {
         measure(&node, plus(Span::HOUR, Span::SECOND), ms(1)),
     );
     let stepped = at(node.clock().now(), plus(Span::HOUR, ms(999)), ms(2));
-    assert_eq!(reader.now().mesh, stepped);
+    assert_eq!(reader.now(), time(&node, stepped));
     assert_eq!(reader.first(reading), first);
     let other = clock.add();
     let alone = Error::NoMajority {
