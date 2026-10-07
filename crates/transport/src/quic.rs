@@ -36,7 +36,6 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
-use crate::message::Reader;
 use crate::{Class, Code, Config, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
@@ -292,15 +291,15 @@ impl Endpoint {
     /// arrives or while the peer allows no more streams ([`Event::Available`]
     /// follows), and when the connection ended. The peer sees the stream at its first
     /// message.
+    #[expect(clippy::unwrap_in_result, reason = "a stream both ways has a receiver")]
     pub(crate) fn open(
         &mut self,
         now: Monotonic,
         key: connection::Key,
         class: Class,
     ) -> Option<(Sender, Receiver)> {
-        let sender = self.start(now, key, Dir::Bi, class)?;
-        let reader = Reader::new(self.message_bytes_max);
-        let receiver = sender.receiver(class, reader);
+        let (sender, receiver) = self.start(now, key, Dir::Bi, class)?;
+        let receiver = receiver.expect("invariant: a stream both ways has a receiver");
         Some((sender, receiver))
     }
 
@@ -311,7 +310,8 @@ impl Endpoint {
         key: connection::Key,
         class: Class,
     ) -> Option<Sender> {
-        self.start(now, key, Dir::Uni, class)
+        let (sender, _) = self.start(now, key, Dir::Uni, class)?;
+        Some(sender)
     }
 
     /// The next stream the peer opened on `key`'s connection, highest class first.
@@ -535,14 +535,14 @@ impl Endpoint {
     }
 
     /// Opens a stream of `class` in `dir` on the connection of `key`, unless it ended,
-    /// and gives its sender.
+    /// and gives its halves.
     fn start(
         &mut self,
         now: Monotonic,
         key: connection::Key,
         dir: Dir,
         class: Class,
-    ) -> Option<Sender> {
+    ) -> Option<(Sender, Option<Receiver>)> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
         let sender = connection
             .streams

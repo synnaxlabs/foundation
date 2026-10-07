@@ -411,7 +411,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::write`], or why the session ended.
+    /// As [`Endpoint::write`].
     ///
     /// # Panics
     ///
@@ -438,7 +438,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::finish`], or why the session ended.
+    /// As [`Endpoint::finish`].
     ///
     /// # Panics
     ///
@@ -452,7 +452,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::try_write`], or why the session ended.
+    /// As [`Endpoint::try_write`].
     ///
     /// # Panics
     ///
@@ -490,7 +490,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::read`], or why the session ended.
+    /// As [`Endpoint::read`].
     pub(crate) fn poll_read(
         &self,
         cx: &mut Context<'_>,

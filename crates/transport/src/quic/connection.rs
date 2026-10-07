@@ -269,10 +269,10 @@ impl Connection {
         mem::replace(&mut self.state, State::Ended)
     }
 
-    /// Gives `error` to the stream calls, and gives the ended connection's
-    /// [`Event::Closed`].
+    /// Gives `error` to the stream calls, and gives the [`Event::Closed`] of the
+    /// connection, which [`Connection::end`] ended.
     fn closed(&self, error: Error) -> Event {
-        self.streams.close(error.clone());
+        self.streams.end(error.clone());
         Event::Closed {
             key: self.key,
             error,

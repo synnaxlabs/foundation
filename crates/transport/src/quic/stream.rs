@@ -249,12 +249,6 @@ impl Sender {
         }
     }
 
-    /// The receiver of the stream, which this side opened both ways, of `class`,
-    /// that reads with `reader`.
-    pub(super) fn receiver(&self, class: Class, reader: Reader) -> Receiver {
-        Receiver::new(self.key, class, reader, &self.closed)
-    }
-
     /// The stream this sender writes.
     pub(crate) fn key(&self) -> Key {
         self.key
@@ -821,7 +815,7 @@ impl Streams {
     /// # Panics
     ///
     /// When the connection closed before.
-    pub(super) fn close(&self, error: Error) {
+    pub(super) fn end(&self, error: Error) {
         let set = self.closed.set(error);
         assert!(set.is_ok(), "invariant: a connection closes once");
     }
@@ -977,21 +971,25 @@ impl Streams {
     }
 
     /// Opens a stream of `class` of `connection`'s `inner` in `dir`, and gives its
-    /// sender. `None` until the peer's hello, and when the peer allows no more now.
+    /// sender, and its receiver when it goes both ways. `None` until the peer's
+    /// hello, and when the peer allows no more now.
     pub(super) fn open(
         &mut self,
         inner: &mut noq_proto::Connection,
         connection: connection::Key,
         dir: Dir,
         class: Class,
-    ) -> Option<Sender> {
+    ) -> Option<(Sender, Option<Receiver>)> {
         let peer = self.peer.hello()?;
         let id = inner.streams().open(dir)?;
         let prioritized = inner.send_stream(id).set_priority(priority(class));
         prioritized.expect("invariant: a stream that opens has a send half");
         let key = Key { connection, id };
         self.halves.insert(id, Half::new(key, class));
-        Some(Sender::new(key, peer.message_bytes_max, &self.closed))
+        let sender = Sender::new(key, peer.message_bytes_max, &self.closed);
+        let reader = || Reader::new(self.own.message_bytes_max);
+        let receiver = || Receiver::new(key, class, reader(), &self.closed);
+        Some((sender, (dir == Dir::Bi).then(receiver)))
     }
 
     /// The next stream the peer opened, highest class first.
