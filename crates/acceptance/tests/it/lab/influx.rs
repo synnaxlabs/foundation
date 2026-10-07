@@ -24,11 +24,11 @@ use super::{Gap, Received, Written};
 /// # Panics
 ///
 /// When the store holds what the lab did not write: a point whose fields are not one
-/// float that is a whole number below the written count, a point whose seq is not
-/// above the seq of the point before it, a gap line with no point at its stamp, a gap
-/// line with other tags or fields, a `path` that is not `live` (backfill waits on
-/// #1270), a `count` that is not a positive integer, or a gap range that starts below
-/// the first written seq.
+/// float that is a whole number in `+0..count`, a point whose seq is not above the seq
+/// of the point before it, a gap line with no point at its stamp, a gap line with other
+/// tags or fields, a `path` that is not `live` (backfill waits on #1270), a `count`
+/// that is not a positive integer, or a gap range that starts below the first written
+/// seq.
 pub(crate) fn stored(
     store: &Store,
     connector: &str,

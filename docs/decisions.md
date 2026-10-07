@@ -2362,8 +2362,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938)
   and 2026-10-07T14:22:17Z
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039993275).
-  The second supersedes the Q2 check of the first, which compared each value with
-  `seq - written.start`.
+  Supersedes the Q2 check of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938, which
+  compared each value with `seq - written.start`.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
