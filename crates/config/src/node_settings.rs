@@ -1,8 +1,9 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
+use spec::definition::Definition;
 use spec::node_settings::{Error, Policy};
 
-use crate::{Entry, Found};
+use crate::Found;
 
 const ZERO_SIZE: Code = Code::new("config.zero-size");
 const KEYS: [&str; 3] = ["select", "disk", "pool"];
@@ -13,31 +14,14 @@ pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
     let key = found.key(block);
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
-    let select = found.attribute(block, "select", read::selector);
+    let select = found.select(block, "nodes that it sets");
     let disk = found.attribute(block, "disk", read::size);
     let pool = found.attribute(block, "pool", read::size);
-    if matches!(select, Ok(None)) {
-        let fix = "Add a `select` attribute with the nodes that it sets, such as \
-                   \"site_a.*\"";
-        found.missing(block, &["select"], fix.into());
-    }
-    let (Ok(()), Ok(Some(select)), Ok(disk), Ok(pool)) = (unknown, select, disk, pool)
-    else {
+    let (Ok(()), Ok(select), Ok(disk), Ok(pool)) = (unknown, select, disk, pool) else {
         return;
     };
     match Policy::new(select, disk, pool) {
-        Ok(policy) => {
-            if let Some((key, label_span)) = key {
-                let definition = spec::definition::Definition::NodeSettings(policy);
-                found.entries.insert(
-                    key,
-                    Entry {
-                        definition,
-                        label_span,
-                    },
-                );
-            }
-        }
+        Ok(policy) => found.add(key, Definition::NodeSettings(policy)),
         Err(error) => refuse(found, block, error),
     }
 }
