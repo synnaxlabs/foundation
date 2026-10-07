@@ -408,15 +408,15 @@ impl Session {
     ) -> Poll<Result<(), Error>> {
         self.with(|endpoint, clock, slot| {
             sender.check_unfinished();
-            if let Some(error) = &slot.end {
-                return Poll::Ready(Err(error.clone()));
-            }
             let written = match message.take() {
                 Some(message) => endpoint.write(clock.now(), sender, message),
                 None => endpoint.flush(clock.now(), sender),
             };
             match written {
                 Ok(Poll::Pending) => {
+                    if let Some(error) = &slot.end {
+                        return Poll::Ready(Err(error.clone()));
+                    }
                     register_one(&mut slot.writing, sender.key().id, cx.waker());
                     Poll::Pending
                 }

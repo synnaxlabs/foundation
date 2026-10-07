@@ -365,7 +365,7 @@ mod tests {
     use sim::node::Node;
     use types::time::Span;
 
-    use crate::testing::{self, poll_once, spans};
+    use crate::testing::{self, IDLE, poll_once, spans};
     use crate::{Class, Code, Config, Error};
 
     /// The messages of [`lossy`].
@@ -648,6 +648,40 @@ mod tests {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 assert_eq!(until_error(&mut incoming.receiver).await, CANCELLED);
                 side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_over_the_peers_largest_is_too_large_after_this_side_closes() {
+        let small = |config| Config {
+            message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            small,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let large = Err(Error::TooLarge {
+                    bytes: 1473,
+                    bytes_max: 1472,
+                });
+                let body = vec![7; 1473];
+                side.session.close(Code(5));
+                assert_eq!(sender.send(side.block(&body)).await, large);
+                let closed = Error::Closed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
+                assert_eq!(sender.send(side.block(&body)).await, large);
+                side.node.clock().sleep(spans(IDLE, 3)).await;
+                assert_eq!(sender.send(side.block(&body)).await, large);
+                assert_eq!(sender.send(side.block(b"a")).await, Err(closed));
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
             },
         );
         assert_eq!(sim.run(), Ok(()));
