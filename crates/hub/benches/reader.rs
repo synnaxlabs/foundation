@@ -22,8 +22,8 @@
 //! other result panics, so no figure holds a wait on the sim.
 //!
 //! The write reads the sim clock once, which costs less than an `os` read, so compare a
-//! figure only with the control or with another build. The `timer` floor is more than
-//! half of a poll's figure, so judge a change in a poll by `net`, its p50 less the
+//! figure only with the control or with another build. The `timer` floor is a large
+//! part of a poll's figure, so judge a change in a poll by `net`, its p50 less the
 //! floor's. To compare two builds, run each several times in turn on one pinned core.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -45,6 +45,7 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 /// Frames per round. A round fits the window of a complete reader.
 const FRAMES: usize = 64;
+/// `WARMUP + ROUNDS` commits, under the 1024 that the ring of `common::shard` holds.
 const WARMUP: usize = 20;
 const ROUNDS: usize = 200;
 
