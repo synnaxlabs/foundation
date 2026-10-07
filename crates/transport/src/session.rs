@@ -472,7 +472,7 @@ mod tests {
     const LEN: usize = 40_000;
 
     #[test]
-    fn a_read_that_waits_for_budget_room_keeps_its_turn_for_a_block() {
+    fn a_read_that_waits_for_budget_room_lets_a_read_of_another_session_take_a_block() {
         let (mut sim, client, server) = testing::nodes(0);
         let at = [Address::Udp(testing::address(&server))];
         testing::shard(&server, SERVER, |config, node| async move {
@@ -514,19 +514,15 @@ mod tests {
                 assert!(poll_once(pin!(receiver.recv())).await.is_none());
             }
             drop(h3);
-            let mut sleep = pin!(clock.sleep(spans(Span::MILLISECOND, 100)));
-            poll_fn(|cx| {
+            let read = poll_fn(|cx| {
                 assert!(a_read.as_mut().poll(cx).is_pending());
-                assert!(b_read.as_mut().poll(cx).is_pending());
-                sleep.as_mut().poll(cx)
-            })
-            .await;
-            drop(stalled);
+                b_read.as_mut().poll(cx)
+            });
+            let message = read.await.expect("a message").expect("a block");
+            assert_eq!(message.to_vec(), vec![2; LEN]);
+            drop((message, stalled));
             let message = a_read.await.expect("a message").expect("a block");
             assert_eq!(message.to_vec(), vec![1; LEN]);
-            drop(message);
-            let message = b_read.await.expect("a message").expect("a block");
-            assert_eq!(message.to_vec(), vec![2; LEN]);
             first.close(Code(4));
             second.close(Code(4));
             clock.sleep(Span::MILLISECOND).await;

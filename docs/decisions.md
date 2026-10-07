@@ -1245,7 +1245,10 @@ How to read this record:
   returned since the last try. The retry interval is a `transport` constant that
   simulation tunes (5.3). The waiting reads of one `Transport` take blocks highest class
   first, then oldest first, so `CatchUp` reads cannot starve `Command` reads; other
-  users of the shard pool (M4) are not in this order. `transport` counts the time that
+  users of the shard pool (M4) are not in this order. A waiting read that then waits
+  for room in its connection's receive budget keeps its place but holds no turn, so a
+  connection that holds its budget stops no read of another connection (STREAM WIRE).
+  `transport` counts the time that
   reads wait and each refused commit, and `node` publishes them on status channels
   (BQ11b). `Transport::status` gives `Status { waited, refusals }`, pulled, not pushed:
   `waited` is the time that at least one read waited, not the sum over reads (architect,

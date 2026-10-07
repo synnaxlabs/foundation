@@ -484,12 +484,17 @@ impl Session {
     ) -> Poll<Result<Option<Block>, Error>> {
         self.with(|endpoint, clock, slot, waits| {
             let (now, stream, class) = (clock.now(), receiver.key(), receiver.class());
-            let take =
-                |pool: &_, len| waits.take(now, pool, stream, class, len, cx.waker());
+            let mut asked = false;
+            let take = |pool: &_, len| {
+                asked = true;
+                waits.take(now, pool, stream, class, len, cx.waker())
+            };
             let read = match endpoint.read(now, receiver, take) {
-                // A read keeps its place in the queue while it waits for room.
                 Ok(Poll::Pending) => {
                     let Some(error) = &slot.end else {
+                        if !asked {
+                            waits.park(now, stream);
+                        }
                         register_one(&mut slot.reading, stream.id, cx.waker());
                         return Poll::Pending;
                     };
