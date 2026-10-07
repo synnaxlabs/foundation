@@ -983,6 +983,7 @@ dependencies = [
  "buffer",
  "clock",
  "codec",
+ "counting",
  "env",
  "estimate",
  "home",

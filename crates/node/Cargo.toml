@@ -23,6 +23,7 @@ types = { path = "../types" }
 
 [dev-dependencies]
 codec = { path = "../codec" }
+counting = { path = "../counting" }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 

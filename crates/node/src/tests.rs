@@ -2088,3 +2088,109 @@ mod hub {
         assert_eq!(node.join(), Ok(()));
     }
 }
+
+#[cfg(test)]
+mod wake_bench {
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::future::poll_fn;
+    use std::hint::black_box;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Instant;
+
+    use super::*;
+
+    #[global_allocator]
+    static ALLOCATOR: counting::Allocator = counting::Allocator::new();
+
+    type Boxed = Pin<Box<dyn Future<Output = ()>>>;
+
+    struct Capture(Rc<RefCell<Vec<env::tasks::Task>>>);
+
+    impl env::tasks::Driver for Capture {
+        fn spawn(&self, task: env::tasks::Task) {
+            self.0.borrow_mut().push(task);
+        }
+    }
+
+    fn inner() -> Boxed {
+        let mut n = 0u64;
+        Box::pin(poll_fn(move |_| {
+            n = black_box(n + 1);
+            Poll::Pending
+        }))
+    }
+
+    const POLLS: u32 = 10_000_000;
+    const ROUNDS: usize = 21;
+
+    fn time(f: &mut Boxed) -> (f64, u64) {
+        let cx = &mut Context::from_waker(Waker::noop());
+        ALLOCATOR.count(|| {
+            let t = Instant::now();
+            for _ in 0..POLLS {
+                let _ = black_box(f.as_mut().poll(cx));
+            }
+            t.elapsed().as_nanos() as f64 / f64::from(POLLS)
+        })
+    }
+
+    fn stats(mut v: Vec<f64>) -> (f64, f64, f64) {
+        v.sort_by(f64::total_cmp);
+        let n = v.len();
+        (v[0], v[n / 2], v[n - 1])
+    }
+
+    fn wrap(hub: ::hub::Hub, tasks: env::tasks::Tasks) -> Box<dyn Any> {
+        let (queue, inbox) = crate::task::pair::<crate::task::Task>();
+        queue.push(Box::new(|_hub| inner()));
+        let mut serve = Box::pin(inbox.serve(hub, tasks, std::future::pending()));
+        let cx = &mut Context::from_waker(Waker::noop());
+        assert!(serve.as_mut().poll(cx).is_pending());
+        Box::new((queue, serve))
+    }
+
+    #[test]
+    #[ignore = "timing"]
+    fn wake() {
+        let faults: Vec<(usize, Fault)> = Vec::new();
+        let mut harness = start(7, 1, &faults);
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let o = Arc::clone(&out);
+        harness.node.spawn(move |hub| {
+            let captured = Rc::new(RefCell::new(Vec::new()));
+            let tasks = env::tasks::Tasks::new(Capture(Rc::clone(&captured)));
+            let keep = wrap(hub, tasks);
+            let mut wrapped = captured.borrow_mut().pop().expect("spawned");
+            let mut direct = inner();
+            let cx = &mut Context::from_waker(Waker::noop());
+            let first = wrapped.as_mut().poll(cx);
+            assert_eq!(first, Poll::Pending);
+            let mut d = Vec::new();
+            let mut w = Vec::new();
+            let mut allocs = 0;
+            for _ in 0..ROUNDS {
+                let (ns, a) = time(&mut direct);
+                d.push(ns);
+                allocs += a;
+                let (ns, a) = time(&mut wrapped);
+                w.push(ns);
+                allocs += a;
+            }
+            let diff: Vec<f64> = d.iter().zip(&w).map(|(a, b)| b - a).collect();
+            o.lock().unwrap().push(stats(d));
+            o.lock().unwrap().push(stats(w));
+            o.lock().unwrap().push(stats(diff));
+            o.lock().unwrap().push((allocs as f64, 0.0, 0.0));
+            drop(wrapped);
+            drop(keep);
+            async {}
+        });
+        assert_eq!(harness.sim.run_for(Span::HOUR), Ok(()));
+        println!("direct, wrapped, added, allocations: {:?}", out.lock().unwrap());
+        harness.node.stop();
+        assert_eq!(harness.sim.run(), Ok(()));
+    }
+}
