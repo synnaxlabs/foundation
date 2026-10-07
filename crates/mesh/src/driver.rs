@@ -2100,6 +2100,19 @@ mod tests {
         }
 
         #[test]
+        fn a_join_keeps_its_key_when_a_step_follows_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = proven(2, 1, append(common::TERM, changes(&[join(4)])));
+                assert_eq!(mesh.receive(public(2), joined), Ok(()));
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply), Ok(()));
+            });
+        }
+
+        #[test]
         fn a_join_that_this_leader_proposes_gives_a_key_before_the_write() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
