@@ -1148,8 +1148,9 @@ mod tests {
         assert_eq!(*reads, expected);
     }
 
-    /// A trim hides the later records while a read waits on its first record. The
-    /// read gives the entry it holds, and the next read gives the gap.
+    /// The test hides the later records, as a trim will, while a read waits on its
+    /// first record. The read gives the entry it holds, and the next read gives the
+    /// gap.
     #[test]
     fn a_read_that_holds_entries_stops_before_the_seqs_that_a_trim_hid() {
         let mut sim = sim::Sim::new(sim::Config::default());

@@ -208,8 +208,9 @@ impl Log {
         let start = self.end();
         self.durable.advance(header)?;
         self.empty = start.after(header.first, header.len).given;
-        let freed = self.runs.partition_point(|run| run.offset < trimmed);
-        self.runs.drain(..freed);
+        while self.runs.front().is_some_and(|run| run.offset < trimmed) {
+            self.runs.pop_front();
+        }
         if let Some(newest) = self.runs.back() {
             assert!(
                 newest.offset <= offset,
