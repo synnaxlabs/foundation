@@ -190,8 +190,8 @@ struct Scratch {
     /// The check of each present group, in group order, with its index frame once
     /// frozen.
     checks: Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
-    /// The stored entry of each accepted group, in group order. Empty between
-    /// appends.
+    /// The stored entry of each accepted group with samples, in group order. Empty
+    /// between appends.
     entries: Vec<Entry>,
     outcomes: Vec<Outcome>,
 }
@@ -199,15 +199,19 @@ struct Scratch {
 /// What became of one group of a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Queued for the next group commit.
+    /// A group with samples is queued for the next group commit. A group with no
+    /// samples stores nothing and is applied with an empty range, also when a live
+    /// write found no room.
     Applied {
         /// The slot of the group's index.
         slot: Slot,
         /// The seq of the group's samples.
         range: frame::Range,
     },
-    /// A live group found no room in the ring or the pool. Its seq is a gap in the
-    /// log.
+    /// A live group with samples found no room in the ring or the pool. Its seq is a
+    /// gap in the log. The gap is durable only when a later live entry of the index,
+    /// with samples or a handoff, is on disk. A restart before that gives the next
+    /// frame the same seq.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -399,9 +403,9 @@ impl Shard {
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
     /// whose bodies no record or no block of the pool holds; no seq moves for either.
-    /// A handoff with no room decides before the size: the frame is lost or gets
-    /// [`Error::Full`]. [`Error::Disk`] after a failed commit, before any other error
-    /// but [`Error::Resend`].
+    /// A handoff with no room decides before the size: the groups with samples of a
+    /// live frame are lost, and a backfill frame gets [`Error::Full`]. [`Error::Disk`]
+    /// after a failed commit, before any other error but [`Error::Resend`].
     ///
     /// # Panics
     ///
@@ -478,10 +482,11 @@ impl Shard {
     /// Resolves when every group that [`write`](Self::write) gave as
     /// [`Outcome::Applied`] and every handoff appended before the call is on disk: at
     /// once when none of them waits for a commit, else at the end of the group commit
-    /// that holds the last of them. A lost group and a handoff that found no room are
-    /// not appended, so it does not wait for them. Commits run without this future,
-    /// so a caller may drop it. Call [`woken`](Self::woken) after it resolves.
-    /// [`Commit`] says when one held past the drop of the shard resolves.
+    /// that holds the last of them. A lost group, a group with no samples, and a
+    /// handoff that found no room are not appended, so it does not wait for them.
+    /// Commits run without this future, so a caller may drop it. Call
+    /// [`woken`](Self::woken) after it resolves. [`Commit`] says when one held past the
+    /// drop of the shard resolves.
     ///
     /// # Errors
     ///
@@ -637,9 +642,9 @@ impl Session {
     }
 }
 
-/// Freezes the index frame from `split` of each accepted group of `checks` into its
-/// check, and pushes its stored entry onto `entries`, in group order, at mesh time
-/// `stored_at`.
+/// Freezes the index frame from `split` of each accepted group of `checks` with
+/// samples into its check, and pushes its stored entry onto `entries`, in group order,
+/// at mesh time `stored_at`. A group with no samples gets no frame and no entry.
 ///
 /// # Errors
 ///
@@ -653,10 +658,11 @@ fn freeze(
     stored_at: Stamp,
 ) -> Result<(), block::Error> {
     for (group, checked, frozen) in checks {
-        if let Ok(accepted) = checked {
+        if let Ok(accepted) = checked
+            && let Some(last) = accepted.last()
+        {
             let draft = split.frame(pool, *group)?;
             let frame = frozen.insert(accepted.freeze(draft, *group));
-            let last = accepted.last();
             entries.push(stored::entry(pool, frame, set, last, stored_at)?);
         }
     }
@@ -709,8 +715,8 @@ fn record(
 }
 
 /// Spends the seq of each accepted group of `checks`, and makes the outcome of each
-/// present group into `out`: applied when the append found `room`, else lost. Each
-/// frame goes to `readers`.
+/// present group into `out`: applied when the append found `room` or the group has no
+/// samples, else lost. Each frame goes to `readers`.
 fn spend<'a>(
     checks: &mut Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     indexes: &mut [Index],
@@ -725,6 +731,12 @@ fn spend<'a>(
         let slot = entry.slot;
         let index = &mut indexes[claim.place];
         out.push(match checked {
+            // A group with no samples stores nothing, so it needs no room.
+            Ok(accepted) if accepted.last().is_none() => {
+                let range = range(&accepted.seq());
+                index.spend(accepted);
+                Outcome::Applied { slot, range }
+            }
             Ok(accepted) if room => {
                 let seq = accepted.seq();
                 let range = range(&seq);
@@ -1162,17 +1174,25 @@ mod tests {
             .collect()
     }
 
-    /// A frame that no block of the shard holds: entry 0 with stamps from `first`,
-    /// entry 1 with as many scattered values, and the series of `more`. The shard's
-    /// largest block is 1835008 bytes. The writer's pool has larger blocks, and
-    /// scattered values do not compress.
-    fn large(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
+    /// A frame that no block of the shard holds: entry 0 with 240000 stamps from
+    /// `first`, entry 1 with as many scattered values, and the series of `more`. The
+    /// shard's largest block is 1835008 bytes. The writer's pool has larger blocks,
+    /// and scattered values do not compress.
+    fn over_block(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
         let len = 240_000;
         let stamps: Vec<i64> = (first..).take(len).collect();
         let values = scattered(len);
         let mut series: Vec<(usize, &[i64])> = vec![(0, &stamps), (1, &values)];
         series.extend_from_slice(more);
         frame(&create_pool(4 * POOL), set, &series)
+    }
+
+    /// A frame that no record of `BODY_MAX` holds: entry 0 with 600 stamps from `first`
+    /// and entry 1 with as many scattered values, which do not compress.
+    fn over_record(pool: &Pool, set: &KeySet, first: i64) -> Draft {
+        let len = 600;
+        let stamps: Vec<i64> = (first..).take(len).collect();
+        frame(pool, set, &[(0, &stamps), (1, &scattered(len))])
     }
 
     /// The error of a failed sync of the ring, which the commit of `shard` gives.
@@ -1706,16 +1726,14 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_frame_too_large_for_one_write_and_spends_nothing() {
+    fn refuses_a_frame_over_the_record_and_spends_nothing() {
         run(38, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let stamps: Vec<i64> = (10..610).collect();
-            let values = scattered(600);
             for (label, stamp) in [(LIVE, 700), (BACKFILL, 5)] {
-                let large = frame(&test.pool, &set, &[(0, &stamps), (1, &values)]);
-                assert_eq!(shard.write(a, label, large), Err(Error::Large));
+                let over_record = over_record(&test.pool, &set, 10);
+                assert_eq!(shard.write(a, label, over_record), Err(Error::Large));
                 let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
                 assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
             }
@@ -1727,14 +1745,14 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_frame_whose_group_no_block_of_the_shard_holds() {
+    fn refuses_a_frame_whose_group_is_over_the_block() {
         run(45, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             for (label, stamp) in [(LIVE, 300_000), (BACKFILL, 5)] {
-                let large = large(&set, 10, &[(2, &[stamp])]);
-                assert_eq!(shard.write(a, label, large), Err(Error::Large));
+                let over_block = over_block(&set, 10, &[(2, &[stamp])]);
+                assert_eq!(shard.write(a, label, over_block), Err(Error::Large));
                 let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
                 assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
             }
@@ -1742,18 +1760,17 @@ mod tests {
     }
 
     #[test]
-    fn records_a_waiting_handoff_before_a_frame_too_large_for_one_write() {
+    fn records_a_waiting_handoff_before_a_frame_over_the_record() {
         run(39, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let stamps: Vec<i64> = (10..610).collect();
-            let large = frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
+            let over_record = over_record(&test.pool, &set, 10);
             let blocks = test.fill();
             let a = shard
                 .open_writer(writer("subject-a", 1, &set))
                 .expect("synced");
             drop(blocks);
-            assert_eq!(shard.write(a, LIVE, large), Err(Error::Large));
+            assert_eq!(shard.write(a, LIVE, over_record), Err(Error::Large));
             shard.committed().await.expect("the commit ends");
             let handoff = handoff_to("subject-a");
             assert_eq!(find(&test.ring().await, &handoff).len(), 1);
@@ -1780,20 +1797,16 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
             }
-            let stamps: Vec<i64> = (10..610).collect();
-            let no_record =
-                || frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
-            assert_eq!(shard.write(a, LIVE, no_record()), Err(Error::Large));
+            let written = shard.write(a, LIVE, over_record(&test.pool, &set, 10));
+            assert_eq!(written, Err(Error::Large));
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
             // The handoff is appended before the bodies, so the size is never checked.
+            let written = shard.write(b, LIVE, over_record(&test.pool, &set, 10));
+            assert_eq!(written, Ok(&[lost(0, 0, 600)][..]));
+            let over_block = over_block(&set, 1000, &[(2, &[stamp])]);
             assert_eq!(
-                shard.write(b, LIVE, no_record()),
-                Ok(&[lost(0, 0, 600)][..])
-            );
-            let no_block = large(&set, 1000, &[(2, &[stamp])]);
-            assert_eq!(
-                shard.write(b, LIVE, no_block),
+                shard.write(b, LIVE, over_block),
                 Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
             );
         });
@@ -1983,12 +1996,11 @@ mod tests {
     }
 
     #[test]
-    fn does_not_renew_the_lease_for_a_frame_too_large_for_one_write() {
+    fn does_not_renew_the_lease_for_a_frame_over_the_record() {
         run(95, |test| async move {
             let (mut shard, a, set) = test.leased().await;
-            let stamps: Vec<i64> = (10..610).collect();
-            let large = frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
-            assert_eq!(shard.write(a, LIVE, large), Err(Error::Large));
+            let over_record = over_record(&test.pool, &set, 10);
+            assert_eq!(shard.write(a, LIVE, over_record), Err(Error::Large));
             test.clock.sleep(WAIT).await;
             let next = frame(&test.pool, &set, &[(0, &[700]), (1, &[1])]);
             let expired = refused(0, Refusal::Expired);
@@ -2194,6 +2206,8 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, write), Err(disk.clone()));
             let refused = frame(&test.pool, &set, &[(2, &[20])]);
             assert_eq!(shard.write(b, LIVE, refused), Err(disk.clone()));
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            assert_eq!(shard.write(a, LIVE, empty), Err(disk.clone()));
             let live = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
             let backfill = frame(&test.pool, &set, &[(0, &[1]), (1, &[1])]);
             let blocks = test.fill();
@@ -2205,18 +2219,16 @@ mod tests {
 
     #[test]
     fn fails_a_large_frame_after_a_failed_sync() {
-        /// Writes, on each path, a frame that no block holds and a frame that no
-        /// record holds. Each passes the order check of its path, so its size counts.
+        /// Writes, on each path, a frame over the block and a frame over the record.
+        /// Each passes the order check of its path, so its size counts.
         fn write(test: &Test, shard: &mut Shard, a: writer::Key, expected: &Error) {
             let set = two_indexes();
             for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
-                let no_block = large(&set, first, &[]);
-                let written = shard.write(a, label, no_block);
+                let over_block = over_block(&set, first, &[]);
+                let written = shard.write(a, label, over_block);
                 assert_eq!(written, Err(expected.clone()), "{label:?}");
-                let stamps: Vec<i64> = (first..first + 600).collect();
-                let series: [(usize, &[i64]); 2] = [(0, &stamps), (1, &scattered(600))];
-                let no_record = frame(&test.pool, &set, &series);
-                let written = shard.write(a, label, no_record);
+                let over_record = over_record(&test.pool, &set, first);
+                let written = shard.write(a, label, over_record);
                 assert_eq!(written, Err(expected.clone()), "{label:?}");
             }
         }
@@ -2251,13 +2263,13 @@ mod tests {
             let writers = create_pool(4 * POOL);
             let small = |stamp: i64| frame(&writers, &set, &[(0, &[stamp]), (1, &[1])]);
             // On each path: a frame of one sample, a frame that the order check
-            // refuses, and a frame that no block holds.
+            // refuses, and a frame over the block.
             let mut write = |state: &str| {
                 for (label, first, refused) in
                     [(LIVE, 600_000, 100), (BACKFILL, 100, 500_000)]
                 {
                     let frames =
-                        [small(first), small(refused), large(&set, first, &[])];
+                        [small(first), small(refused), over_block(&set, first, &[])];
                     for (at, draft) in frames.into_iter().enumerate() {
                         let written = shard.write(b, label, draft);
                         assert_eq!(
@@ -2279,17 +2291,17 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_large_backfill_frame_whose_handoff_finds_no_room() {
+    fn refuses_a_backfill_frame_over_the_block_whose_handoff_finds_no_room() {
         run(113, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let _a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let blocks = test.fill();
             let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
-            let written = shard.write(b, BACKFILL, large(&set, 100, &[]));
+            let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
             assert_eq!(written, Err(Error::Full));
             drop(blocks);
-            let written = shard.write(b, BACKFILL, large(&set, 100, &[]));
+            let written = shard.write(b, BACKFILL, over_block(&set, 100, &[]));
             assert_eq!(written, Err(Error::Large));
         });
     }
@@ -2324,6 +2336,123 @@ mod tests {
                 Ok(&[refused(2, Refusal::Order(ahead))][..])
             );
         });
+    }
+
+    #[test]
+    fn continues_at_a_lost_range_after_a_power_cut_after_an_empty_group() {
+        let (mut sim, node) = create_node(120);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
+            drop(blocks);
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(0, 2, 0)][..]));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+            assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn skips_a_lost_range_after_a_power_cut_after_an_empty_write_records_a_handoff() {
+        let (mut sim, node) = create_node(121);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
+            // The lost frame gave its block back.
+            let more = test.fill();
+            // b outranks a; its handoff finds no block and waits.
+            let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(find(&test.ring().await, &[2, b'b']).len(), 0, "b waits");
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
+            drop((blocks, more));
+            // The empty group records the waiting handoff and stores no sample.
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            assert_eq!(shard.write(b, LIVE, empty), Ok(&[applied(0, 2, 0)][..]));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(
+                find(&test.ring().await, &[2, b'b']).len(),
+                1,
+                "the empty write recorded the handoff to b"
+            );
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 2);
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 2, 1)][..]),
+                "the handoff on disk made the lost range durable"
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn continues_at_a_lost_range_after_a_power_cut_after_a_backfill_entry() {
+        let (mut sim, node) = create_node(122);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
+            drop(blocks);
+            // A backfill entry of index 0 with samples goes to disk.
+            let later = frame(&test.pool, &set, &[(0, &[3, 4, 5]), (1, &[3, 4, 5])]);
+            assert_eq!(shard.write(a, BACKFILL, later), Ok(&[applied(0, 0, 3)][..]));
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+            assert_eq!(
+                shard.write(a, LIVE, next),
+                Ok(&[applied(0, 1, 1)][..]),
+                "only a live entry moves the live stored mark"
+            );
+        })
+        .expect("the run after the cut ends");
     }
 
     #[test]
@@ -2507,6 +2636,61 @@ mod tests {
                 headers(&test.ring().await, marked),
                 [(two, 0, 0, 0, 1), (two, 0, 0, 2, 0)]
             );
+        });
+    }
+
+    #[test]
+    fn stores_no_entry_for_a_group_with_no_samples() {
+        run(117, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
+            shard.write(a, LIVE, first).expect("written");
+            test.clock.sleep(Span::from_nanos(1)).await;
+            let marked = test.now();
+            let write = frame(&test.pool, &set, &[(0, &[]), (1, &[]), (2, &[20])]);
+            assert_eq!(
+                shard.write(a, LIVE, write),
+                Ok(&[applied(0, 1, 0), applied(2, 1, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let two = key(Slot::new(2)).as_u128();
+            assert_eq!(headers(&test.ring().await, marked), [(two, 0, 1, 1, 0)]);
+        });
+    }
+
+    #[test]
+    fn applies_a_write_with_no_samples_whose_handoff_has_no_room() {
+        run(118, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            let blocks = test.fill();
+            let a = shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(0, 0, 0)][..]));
+            drop(blocks);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(find(&test.ring().await, &handoff_to("subject-a")).len(), 1);
+        });
+    }
+
+    #[test]
+    fn refuses_a_backfill_write_with_no_samples_whose_handoff_has_no_room() {
+        run(119, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            let blocks = test.fill();
+            let a = shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            assert_eq!(shard.write(a, BACKFILL, empty), Err(Error::Full));
+            drop(blocks);
         });
     }
 
@@ -2857,6 +3041,41 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 1), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn keeps_the_newest_frame_with_samples_after_an_empty_live_write() {
+            run(115, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+                assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(0, 1, 0)][..]));
+                let reader = latest(&mut shard, Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
+        fn applies_an_empty_group_of_a_live_write_whose_other_group_is_lost() {
+            run(116, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                let mixed = frame(&test.pool, &set, &[(0, &[]), (1, &[]), (2, &[20])]);
+                let blocks = test.fill();
+                assert_eq!(
+                    shard.write(a, LIVE, mixed),
+                    Ok(&[applied(0, 1, 0), super::lost(2, 0, 1)][..])
+                );
+                drop(blocks);
+                let reader = latest(&mut shard, Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
             });
         }
 

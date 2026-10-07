@@ -15,6 +15,7 @@ use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use types::channel;
+use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -23,7 +24,7 @@ use crate::grant::{self, Signer};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
-use crate::region::{self, Change};
+use crate::region::{self, Change, Malformed, Refused};
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -40,6 +41,8 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
+    /// The prefix of the region's names.
+    pub(crate) region: Name,
     /// Each member of the region, this node included, one record for each node. A
     /// member's peer proves the public key of its card, and that key signs the member's
     /// grants.
@@ -80,14 +83,16 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// - [`Error::Duplicate`] when two of `config.members` name one node.
+    /// - [`Error::Member`] when the region cannot hold one of `config.members`, or two
+    ///   name one node.
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
-        let state = region::State::new(config.members).map_err(Error::Duplicate)?;
+        let state =
+            region::State::new(config.region, config.members).map_err(Error::Member)?;
         let signer = Signer::new(config.key, &config.private_key);
         match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
@@ -209,11 +214,16 @@ impl Mesh {
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead, or when a new leader replaces the entry before a write holds it.
     pub(crate) async fn propose(&self, change: Change) -> Result<Position, Error> {
+        let mut data = Vec::new();
+        change.encode(&mut data);
+        self.propose_data(data).await
+    }
+
+    // Proposes `data` as it is, which need not be a change.
+    async fn propose_data(&self, data: Vec<u8>) -> Result<Position, Error> {
         let proposal = {
             let mut group = self.group.borrow_mut();
             group.taking()?;
-            let mut data = Vec::new();
-            change.encode(&mut data);
             let proposal = Rc::new(Proposal {
                 at: group.raft.propose(data)?,
                 held: Cell::new(None),
@@ -416,9 +426,18 @@ impl Group {
                 Data::Bytes(bytes) => bytes,
                 Data::Empty | Data::Voters(_) => continue,
             };
-            let change = Change::decode(&bytes)
-                .map_err(|cause| Stopped::Change { at, cause })?;
-            if self.state.apply(change).is_some() {
+            let applied = match Change::decode(&bytes) {
+                Ok(change) => self.state.apply(change),
+                // Every node of this build judges a body the same way.
+                Err(Malformed::Body { kind, length }) => {
+                    Err(Refused::Body { kind, length })
+                }
+                Err(Malformed::Unknown(cause)) => {
+                    return Err(Stopped::Change { at, cause });
+                }
+            };
+            // A refused change is a no-op on every node.
+            if let Ok(Some(_)) = applied {
                 self.wake_watches();
             }
         }
@@ -612,11 +631,13 @@ mod tests {
     use sim::{Crash, Sim, link};
     use transport::Address;
     use types::node::SealKey;
+    use types::time::Stamp;
 
     use super::*;
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
-    use crate::region::Malformed;
+    use crate::region::{Join, Unfit, Unknown};
+    use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
@@ -633,12 +654,15 @@ mod tests {
         led: Vec<u8>,
         /// The position of each of those proposals.
         at: Vec<Position>,
-        /// The change that each node proposes until the group takes it.
-        script: BTreeMap<u8, Change>,
+        /// The byte forms of the changes that each node proposes in order, each until
+        /// the group takes it.
+        script: BTreeMap<u8, VecDeque<Vec<u8>>>,
         /// The voter that forwards a change to each node, with the change.
         forwards: BTreeMap<u8, (u8, Change)>,
         /// The answer of each node to the change that it got.
         answers: BTreeMap<u8, Message>,
+        /// The members from 1 to 9 on each node, when its watch last gave a home.
+        members: BTreeMap<u8, BTreeSet<u8>>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -667,6 +691,7 @@ mod tests {
         Config {
             key: key(id),
             private_key: private(id),
+            region: "plant".parse().unwrap(),
             members: common::create_members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
@@ -762,18 +787,24 @@ mod tests {
         }
     }
 
-    /// Proposes the change of node `id` in the script, once per tick, until the
+    /// Proposes the next change of node `id` in the script, once per tick, until the
     /// group takes it.
     async fn propose(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
-            let Some(change) = board.lock().unwrap().script.get(&id).copied() else {
+            let data = board
+                .lock()
+                .unwrap()
+                .script
+                .get(&id)
+                .and_then(|script| script.front().cloned());
+            let Some(data) = data else {
                 continue;
             };
-            match mesh.propose(change).await {
+            match mesh.propose_data(data).await {
                 Ok(at) => {
                     let mut board = board.lock().unwrap();
-                    board.script.remove(&id);
+                    board.script.get_mut(&id).map(VecDeque::pop_front);
                     board.led.push(id);
                     board.at.push(at);
                 }
@@ -804,10 +835,20 @@ mod tests {
         board: Arc<Mutex<Board>>,
     }
 
+    /// `config` with an MTU that holds each raft message in one datagram, as the
+    /// stream of a mesh does.
+    fn wide(config: link::Config) -> link::Config {
+        link::Config {
+            mtu: 1 << 16,
+            ..config
+        }
+    }
+
     impl Cluster {
         fn new(seed: u64) -> Self {
             let mut sim = Sim::new(sim::Config {
                 seed,
+                link: wide(link::Config::default()),
                 ..sim::Config::default()
             });
             let node = |_| sim.node(sim::node::Config::default());
@@ -835,7 +876,13 @@ mod tests {
 
         /// Sets what each node proposes.
         fn script(&self, change: impl Fn(u8) -> Change) {
-            let script = IDS.map(|id| (id, change(id))).into();
+            let script = IDS.map(|id| (id, [encoded(&change(id))].into())).into();
+            self.board.lock().unwrap().script = script;
+        }
+
+        /// Each node proposes the byte forms `changes`, in order.
+        fn script_each(&self, changes: &[Vec<u8>]) {
+            let script = IDS.map(|id| (id, changes.iter().cloned().collect())).into();
             self.board.lock().unwrap().script = script;
         }
 
@@ -846,10 +893,10 @@ mod tests {
         /// Sets the chance that a datagram between `a` and `b` is lost, each way.
         fn link(&mut self, a: u8, b: u8, loss: f64) {
             let node = |id| &self.nodes[IDS.iter().position(|&own| own == id).unwrap()];
-            let config = link::Config {
+            let config = wide(link::Config {
                 loss,
                 ..link::Config::default()
-            };
+            });
             self.sim.link(node(a), node(b), config);
             self.sim.link(node(b), node(a), config);
         }
@@ -901,13 +948,10 @@ mod tests {
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();
-            board
-                .lock()
-                .unwrap()
-                .homes
-                .entry(id)
-                .or_default()
-                .push(home);
+            let members = (1..10).filter(|&of| mesh.member(key(of)).is_some());
+            let mut board = board.lock().unwrap();
+            board.homes.entry(id).or_default().push(home);
+            board.members.insert(id, members.collect());
         }
     }
 
@@ -1023,7 +1067,7 @@ mod tests {
     async fn lead(mesh: &Mesh, clock: &Clock, change: Change) -> Position {
         let follower = Error::Raft(raft::Error::NotLeader { leader: None });
         loop {
-            match mesh.propose(change).await {
+            match mesh.propose(change.clone()).await {
                 Ok(at) => return at,
                 Err(error) => assert_eq!(error, follower),
             }
@@ -1185,7 +1229,7 @@ mod tests {
             };
             assert_eq!(mesh.receive(public(2), reply), Ok(()));
             assert_eq!(proposal.await, Ok(after(first, 1)));
-            let cause = Malformed::Kind { kind: 9 };
+            let cause = Unknown::Kind { kind: 9 };
             let stopped = Error::Stopped(Stopped::Change { at: bad, cause });
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
         });
@@ -1216,7 +1260,7 @@ mod tests {
             let leader = Some(key(2));
             let replaced = Error::Raft(raft::Error::NotLeader { leader });
             assert_eq!(proposal.await, Err(replaced));
-            let cause = Malformed::Kind { kind: 9 };
+            let cause = Unknown::Kind { kind: 9 };
             let stopped = Error::Stopped(Stopped::Change { at: bad, cause });
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
         });
@@ -1540,7 +1584,13 @@ mod tests {
         fn not_voter_names_no_key_that_a_voter_holds() {
             solo(|node, tasks| async move {
                 let mut config = config(&node, &tasks, 1, &IDS, &IDS);
-                config.members.push(record(4, 2, 1));
+                let mut card = common::member(2).card.card().clone();
+                card.name = "plant.node4".parse().unwrap();
+                let card = card::Signed::sign(key(4), card, &private(2));
+                config.members.push(Member {
+                    card,
+                    ..common::member(4)
+                });
                 let mesh = Mesh::open(config).await.unwrap();
                 let heartbeat = message(4, 1, Body::Heartbeat { commit: 0 });
                 let refused = mesh.receive(public(2), heartbeat);
@@ -2218,7 +2268,7 @@ mod tests {
             if changes.contains(&Some(home(2))) {
                 gave = gave.saturating_add(1);
             }
-            let end = changes.last().copied().flatten();
+            let end = changes.last().cloned().flatten();
             if end != Some(home(3)) {
                 lost.push((run, end));
             }
@@ -2247,7 +2297,7 @@ mod tests {
                 commit: 1,
             };
             assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
-            let cause = Malformed::Kind { kind: 9 };
+            let cause = Unknown::Kind { kind: 9 };
             let stopped = Error::Stopped(Stopped::Change { at, cause });
             assert_eq!(watch.next().await, Err(stopped.clone()));
             let text = "the group stopped: the committed entry at index 1 of term 5 is \
@@ -2256,6 +2306,113 @@ mod tests {
             // The node does not lead, and the stop comes first.
             assert_eq!(mesh.propose(home(1)).await, Err(stopped.clone()));
             assert_eq!(mesh.answer(public(2), home(2)).await, Err(stopped));
+        });
+    }
+
+    #[test]
+    fn a_committed_change_of_zero_bytes_stops_the_group() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let at = Position {
+                term: Term(5),
+                index: 1,
+            };
+            let data = Data::Bytes(Vec::new());
+            let append = Body::Append {
+                prev: Position::default(),
+                entries: vec![Entry { at, data }],
+                commit: 1,
+            };
+            assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+            let cause = Unknown::Empty;
+            let stopped = Error::Stopped(Stopped::Change { at, cause });
+            assert_eq!(watch.next().await, Err(stopped.clone()));
+            let text = "the group stopped: the committed entry at index 1 of term 5 is \
+                        not a change: a change of 0 bytes has no kind";
+            assert_eq!(stopped.to_string(), text);
+        });
+    }
+
+    /// Ticket 7, which admits `plant.*` any number of times.
+    fn ticket() -> Change {
+        let options = Options {
+            prefix: "plant".parse().unwrap(),
+            reusable: true,
+            expiry: Stamp::from_nanos(1),
+            ephemeral: None,
+        };
+        Change::Ticket {
+            public_key: public(7),
+            options,
+        }
+    }
+
+    /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
+    fn join(id: u8) -> Change {
+        let card = common::member(id).card;
+        Change::Join(Box::new(Join {
+            ticket: public(7),
+            at: Stamp::from_nanos(0),
+            card: card::Unchecked {
+                key: key(id),
+                card: card.card().clone(),
+                signature: *card.signature(),
+            },
+            admission: common::ticket(7).admission(&card),
+            status: common::status([]),
+        }))
+    }
+
+    fn encoded(change: &Change) -> Vec<u8> {
+        let mut data = Vec::new();
+        change.encode(&mut data);
+        data
+    }
+
+    // A body that does not decode is a refusal on every node of this build, not a
+    // stop, so one voter that proposes bad bytes cannot halt the region.
+    #[test]
+    fn a_committed_join_that_does_not_decode_changes_nothing() {
+        let mut over = encoded(&join(5));
+        over.truncate(over.len() - 8);
+        over.extend(common::status_bytes(65));
+        let changes = [
+            encoded(&ticket()),
+            over,
+            encoded(&join(4)),
+            encoded(&home(1)),
+        ];
+        let mut cluster = Cluster::new(1);
+        cluster.script_each(&changes);
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = std::mem::take(&mut *cluster.board.lock().unwrap());
+        assert_eq!(board.led, vec![board.led[0]; 4]);
+        assert_eq!(board.homes, each(&[None, Some(key(1))]));
+        let members = IDS.map(|id| (id, [1, 2, 3, 4].into())).into();
+        assert_eq!(board.members, members);
+    }
+
+    #[test]
+    fn a_committed_join_with_a_forged_card_changes_nothing() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            lead(&mesh, &node.clock(), ticket()).await;
+            let Change::Join(mut forged) = join(3) else {
+                unreachable!()
+            };
+            forged.card.signature[0] ^= 1;
+            mesh.propose(Change::Join(forged)).await.unwrap();
+            mesh.propose(join(4)).await.unwrap();
+            mesh.propose(home(1)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            assert_eq!(mesh.member(key(3)), None);
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(common::member(4).card));
         });
     }
 
@@ -2333,7 +2490,7 @@ mod tests {
             card: card::Signed::sign(key(2), card, &private(3)),
             admission: [1; 64],
             ephemeral: Some(Span::MILLISECOND),
-            status: [("clock.offset".parse().unwrap(), INDEX)].into(),
+            status: common::status([("clock.offset".parse().unwrap(), INDEX)]),
         };
         let cases = [
             ("an equal record", record(2, 2, 1)),
@@ -2349,14 +2506,18 @@ mod tests {
                     let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
                     config.members.insert(at, second);
                     let opened = Mesh::open(config).await.err();
-                    let duplicate = Some(Error::Duplicate(key(2)));
+                    let duplicate =
+                        Some(Error::Member(Unfit::Duplicate { key: key(2) }));
                     assert_eq!(opened, duplicate, "{case} at {at}");
                     assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
                 });
             }
         }
-        let text = format!("node {} has two member records", key(2));
-        assert_eq!(Error::Duplicate(key(2)).to_string(), text);
+        let text = format!("node {} is already a member", key(2));
+        assert_eq!(
+            Error::Member(Unfit::Duplicate { key: key(2) }).to_string(),
+            text
+        );
     }
 
     #[test]

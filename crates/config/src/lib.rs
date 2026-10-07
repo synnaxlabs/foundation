@@ -132,7 +132,7 @@ impl<'a> Found<'a> {
             ));
             return None;
         }
-        let name = self.report(read::name(label)).ok()?;
+        let name = self.report(read::label(label)).ok()?;
         if name.reserved() {
             self.diagnostics.push(Diagnostic::new(
                 RESERVED_NAME,

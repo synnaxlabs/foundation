@@ -3,7 +3,7 @@ use std::fmt;
 use raft::Position;
 use types::node::{self, PublicKey};
 
-use crate::region::Malformed;
+use crate::region::{Unfit, Unknown};
 use crate::{grant, log};
 
 /// Why a mesh call failed.
@@ -34,8 +34,8 @@ pub(crate) enum Error {
     Grant(grant::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
-    /// Two member records name one node.
-    Duplicate(node::Key),
+    /// The region cannot hold a member record of the config.
+    Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
@@ -69,7 +69,7 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
-            Self::Duplicate(key) => write!(f, "node {key} has two member records"),
+            Self::Member(refused) => refused.fmt(f),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
@@ -106,13 +106,13 @@ impl From<grant::Error> for Error {
 pub(crate) enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
-    /// The committed entry at `at` is not a change that this build reads. A new open
-    /// stops at the same entry.
+    /// The committed change at `at` has 0 bytes or a kind that this build does not
+    /// know. A new open stops at the same entry.
     Change {
         /// The position of the entry.
         at: Position,
         /// Why its bytes are not a change.
-        cause: Malformed,
+        cause: Unknown,
     },
     /// Each `Mesh` of the group dropped. Only `Watch::next` gives it: get a new watch
     /// from the mesh that opens next.
