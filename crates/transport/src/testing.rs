@@ -95,6 +95,11 @@ impl Shard {
     }
 }
 
+/// `n` times `span`.
+pub(crate) fn spans(span: Span, n: i64) -> Span {
+    Span::from_nanos(span.nanos() * n)
+}
+
 /// A run from `value` with a client node and a server node.
 pub(crate) fn nodes(value: u64) -> (Sim, Node, Node) {
     let mut sim = Sim::new(sim::Config {

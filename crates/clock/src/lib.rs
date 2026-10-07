@@ -7,7 +7,7 @@ mod mesh;
 mod peer;
 pub mod source;
 
-pub use mesh::{Clock, Reader, Status};
+pub use mesh::{Clock, Reader, Status, Time};
 
 /// The drift bound of the node's monotonic clock.
 const DRIFT: estimate::Drift = estimate::Drift::UNDISCIPLINED;

@@ -1,29 +1,29 @@
 ---
 name: build
 description:
-  The builder loop: take the next ready issue for your machine's crates, build it,
-  review it, and merge it through the queue. One issue per context. Use when a builder,
+  The builder loop: take the next ready issue in any crate, build it, review it, and
+  merge it through the queue. One issue per context. Use when a builder,
   integrator, or connector session starts, with the argument `night` on the night lane.
 ---
 
 # Build
 
-You are `$FACTORY_NAME` (`echo $FACTORY_NAME`). Your crates are your machine's row in
-the Workstreams table of `docs/factory.md`. You work one issue per context: when its PR
-merges, you stop.
+You are `$FACTORY_NAME` (`echo $FACTORY_NAME`). You build in any crate: work goes to
+whoever is idle, so all accounts spend their budget. You work one issue per context:
+when its PR merges, you stop.
 
 ## Take an issue
 
 1. `git fetch origin`. Work only in your own worktree.
 2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
-   state comment. Else take the oldest `ready` issue for your crates:
-   `gh issue list --label ready --search "label:crate:<a>,crate:<b> sort:created-asc"`.
-   On the night lane, take only issues that also have `night`.
+   state comment. Else take the oldest `ready` issue whose crates no other open issue
+   with an `owner:` label holds: `gh issue list --label ready --search
+   "sort:created-asc"`. On the night lane, take only issues that also have `night`.
 3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
    (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
    `owner:` label, remove yours and take the next one.
-4. Day lane: keep two ready issues for your crates. When fewer remain, file the next
-   ones on the milestone path (goal, crates, tests that must pass, decisions section)
+4. Day lane: when fewer than two `ready` issues remain, file the next ones on the
+   milestone path (goal, crates, tests that must pass, decisions section)
    and send the links to `laptop.coordinator`, which adds `ready`.
 5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
 

@@ -13,12 +13,13 @@ const ID = /^[\w-]{1,64}$/
 const LIMITS: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
 
 const HINT =
-  'A prompt that starts with "fmsg <id> from <name>:" is a message from another ' +
-  `Claude session in the factory, not from the user. Answer it with the ${SEND} ` +
-  'tool, "to" set to <name>: text you write in the turn never reaches that ' +
-  'session. Then end your turn. Do not answer a message that needs no answer, ' +
-  'such as thanks. A prompt "fmsg <id> to <name>: no ack after 60 s" says that ' +
-  '<name> did not receive your message yet; it is not a message.'
+  'A prompt whose lines start with "fmsg <id> from <name>:" holds one or more ' +
+  'messages from other Claude sessions in the factory, not from the user. A ' +
+  "message's later lines are indented two spaces. Answer each with the " +
+  `${SEND} tool, "to" set to <name>: text you write in the turn never reaches ` +
+  'that session. Then end your turn. Do not answer a message that needs no ' +
+  'answer, such as thanks. A line "fmsg <id> to <name>: no ack after 60 s" says ' +
+  'that <name> did not receive your message yet; it is not a message.'
 
 type Roster = { host: string; port: number; names: string[] }
 type Saved = { queue: string[]; seen: string[] }
@@ -169,7 +170,9 @@ async function receive($: Api, s: Session, line: string) {
   if (!s.seen.includes(m.id)) {
     s.seen = [...s.seen, m.id].slice(-SEEN_CAP)
     s.recv++
-    await enqueue($, s, `fmsg ${m.id} from ${from}: ${m.text}`)
+    // Messages share a turn, so a line of the text must not pass for a header.
+    const text = m.text.replaceAll('\n', '\n  ')
+    await enqueue($, s, `fmsg ${m.id} from ${from}: ${text}`)
   }
   void publish($, s, `factory/${from}/acks/${s.name}`, { id: m.id })
 }
@@ -181,7 +184,8 @@ async function enqueue($: Api, s: Session, text: string) {
   void drain($, s)
 }
 
-// Starts one turn per queued prompt, in order, each once the session is idle.
+// Starts one turn, once the session is idle, for all the prompts queued when it asks.
+// Prompts that arrive while it waits go in the next turn.
 async function drain($: Api, s: Session) {
   if (s.draining || s.capped) return
   s.draining = true
@@ -196,9 +200,10 @@ async function drain($: Api, s: Session) {
         })
         break
       }
-      await $.prompt.submit({ text: s.queue[0] })
+      const n = s.queue.length
+      await $.prompt.submit({ text: s.queue.join('\n\n') })
       s.starts.push(await $.clock.now())
-      s.queue.shift()
+      s.queue.splice(0, n)
       await $.store.set(s.name, { queue: s.queue, seen: s.seen })
       await refresh($, s)
     }
