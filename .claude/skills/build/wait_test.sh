@@ -3,7 +3,8 @@
 # #1428 to check the query. A stub `gh` acts as gh does: on an answer with an error
 # message, an HTTP error, or no network, it exits 1, prints the body, if any, and
 # prints the error on stderr; with no login, it exits 4. After the answers run out,
-# it fails with "out of answers". A stub `sleep` returns at once, and stops the
+# it fails with "out of answers". `gh api rate_limit` gives the count in
+# `$STUB/left`, 1 when there is none. A stub `sleep` returns at once, and stops the
 # script on its fifth call. Needs `jq`. Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -13,6 +14,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin" "$tmp/live"
 cat > "$tmp/bin/gh" <<'STUB'
 #!/bin/sh
+[ "$2" != rate_limit ] || { cat "$STUB/left" 2>/dev/null || echo 1; exit 0; }
 n=$(($(cat "$STUB/calls") + 1))
 echo "$n" > "$STUB/calls"
 a=$STUB/$n.json
@@ -80,7 +82,8 @@ run() {
     echo "$a" > "$tmp/$i.json"
   done
   echo 0 > "$tmp/calls"
-  rm -f "$tmp/sleeps"
+  rm -f "$tmp/sleeps" "$tmp/left"
+  [ -z "${left-}" ] || echo "$left" > "$tmp/left"
   got=$(STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" 7)
   check "$name" $? "$got" "$(cat "$tmp/calls")" "$code" "$out" "$polls"
 }
@@ -180,22 +183,29 @@ run "no login" 1 "$stop To get started with GitHub CLI, please run:  gh auth log
   3 "no login" "no login" "no login"
 e='{"errors":[{"path":["query","nope"],"extensions":{"code":"undefinedField"},
   "message":"Field '"'nope'"' does not exist on type '"'Query'"'"}]}'
-run "wrong query" 1 "$stop gh: Field 'nope' does not exist on type 'Query'" 3 \
+run "wrong query" 1 "$stop $e
+gh: Field 'nope' does not exist on type 'Query'" 3 \
   "$e" "$e" "$e"
 e='{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND",
   "path":["repository","pullRequest"],
   "message":"Could not resolve to a PullRequest with the number of 7."}]}'
 run "no such PR" 1 \
-  "$stop gh: Could not resolve to a PullRequest with the number of 7." 3 \
+  "$stop $e
+gh: Could not resolve to a PullRequest with the number of 7." 3 \
   "$e" "$e" "$e"
 run "error with no message" 1 "#7 closed" 1 \
   "$(pr CLOSED | jq -c '. + {errors: [{type: "NOT_FOUND"}]}')"
 for n in abc "" 7x; do
   echo 0 > "$tmp/calls"
-  got=$(STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" "$n" 2>&1)
-  check "PR number '$n'" $? "$got" "$(cat "$tmp/calls")" 2 \
-    "usage: wait.sh <PR number>" 0
+  got=$(STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" "$n" 2> "$tmp/err")
+  check "PR number '$n'" $? "$got|$(cat "$tmp/err")" "$(cat "$tmp/calls")" 2 \
+    "|usage: wait.sh <PR number>" 0
 done
+e='{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded."}]}'
+left=0 run "spent rate limit" 0 "#7 merged" 4 "$e" "$e" "$e" "$merged"
+left=1 run "rate limit error with calls left" 1 \
+  "$stop $e
+gh: API rate limit exceeded." 3 "$e" "$e" "$e"
 run "waits at most five times" 143 "" 5 "$(pr OPEN)" "$(pr OPEN)" "$(pr OPEN)" \
   "$(pr OPEN)" "$(pr OPEN)"
 
