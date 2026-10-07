@@ -1765,3 +1765,23 @@ fn a_range_that_holds_two_newest_base_commits_counts() {
         )))
     );
 }
+
+#[test]
+fn a_start_with_an_early_commit_time_reads() {
+    let (repo, _) = Repo::with_pr("early-time");
+    std::fs::write(repo.dir.join("a.txt"), "base, changed\n").unwrap();
+    repo.git(&["add", "a.txt"]);
+    let output = repo
+        .command()
+        .env("GIT_COMMITTER_DATE", "@50 +0000")
+        .args(["commit", "--quiet", "-m", "early"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let from = repo.head();
+    repo.advance_main("c.txt", "c\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.head();
+    assert_eq!(repo.code_change(&from, &end), Ok(None));
+    assert_eq!(repo.reaches(&from, &end), Ok(true));
+}

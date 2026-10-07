@@ -457,7 +457,8 @@ impl<'a> History<'a> {
             args.extend(["-p", parent]);
         }
         let who = OsStr::new("xtask");
-        let when = OsStr::new(when);
+        let when = format!("@{when}");
+        let when = OsStr::new(&when);
         let commit = self.run(
             &args,
             b"",

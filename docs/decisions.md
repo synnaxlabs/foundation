@@ -3160,7 +3160,9 @@ How to read this record:
   leaves no markers, and so is an end that holds more than one newest base commit. In
   the range, a base move counts only through this tree. Decided by the director at
   2026-10-07T18:27:30Z
-  (https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6044222273). Found
+  (https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6044222273).
+  Supersedes the range sentence of
+  https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6043078385. Found
   by the director at 2026-10-07T14:50:33Z
   (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed by
   #1451. An earlier round's skip is taken as written, since a rebase can drop its range
