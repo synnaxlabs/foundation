@@ -118,13 +118,10 @@ fn refuses_an_edge_to_a_key_that_no_channel_has() {
 
 #[test]
 #[should_panic(
-    expected = "`a.time` and `b.time` have the same key 00000000-0000-0000-0000-000000000001"
+    expected = "`a.x` and `b.x` have the same key 00000000-0000-0000-0000-000000000001"
 )]
 fn panics_on_two_channels_with_one_key() {
-    check_all(&[
-        ("b.time", index(1, None, None)),
-        ("a.time", index(1, None, None)),
-    ]);
+    check_all(&[("b.x", index(1, None, None)), ("a.x", index(1, None, None))]);
 }
 
 #[test]
@@ -153,7 +150,8 @@ fn gives_each_problem_a_message_and_a_fix() {
         ),
         (
             wrong(Edge::Index),
-            "the index channel of `a.pressure` is `a.time`, which is not an index channel",
+            "the index channel of `a.pressure` is `a.time`, which is not an index \
+             channel",
             "Point it at an index channel",
         ),
         (
@@ -164,7 +162,8 @@ fn gives_each_problem_a_message_and_a_fix() {
         ),
         (
             wrong(Edge::Error),
-            "the error channel of `a.pressure` is `a.time`, which is not a data channel",
+            "the error channel of `a.pressure` is `a.time`, which is not a data \
+             channel",
             "Point it at a data channel",
         ),
         (

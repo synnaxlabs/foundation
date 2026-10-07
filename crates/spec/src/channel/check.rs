@@ -1,4 +1,4 @@
-//! The checks across channels: each edge points at a channel of the kind it needs.
+//! The checks across channels: each edge points at a channel it may point at.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -34,11 +34,13 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
                     edge,
                     to,
                 }),
-                Some(&(target, to)) if !edge.fits(channel.key, &to.kind) => {
+                Some(&(target_name, target))
+                    if !edge.fits(channel.key, &target.kind) =>
+                {
                     problems.push(Problem::Wrong {
                         from: name.clone(),
                         edge,
-                        to: target.clone(),
+                        to: target_name.clone(),
                     });
                 }
                 Some(_) => {}
@@ -74,7 +76,7 @@ pub enum Problem {
         /// The key the edge points at.
         to: channel::Key,
     },
-    /// The channel `to` is not the kind that `edge` needs.
+    /// The channel `to` is not what `edge` needs.
     Wrong {
         /// The channel the edge starts at.
         from: Name,
