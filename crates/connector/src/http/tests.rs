@@ -526,8 +526,8 @@ fn refuses_a_scheme_other_than_http() {
 #[test]
 fn refuses_user_info_and_keeps_none_of_it() {
     for uri in [
-        "http://admin:secret@10.0.0.2:8086/",
-        "http://admin:secret@[influx]:99999/",
+        "http://admin:hunter2@10.0.0.2:8086/",
+        "http://admin:hunter2@[influx]:99999/",
     ] {
         let error = refused(uri);
         assert!(matches!(error, Error::UserInfo), "{uri}: {error:?}");
@@ -536,10 +536,9 @@ fn refuses_user_info_and_keeps_none_of_it() {
             message,
             "the URI holds user info; give a credential through a secret"
         );
-        // The message names "a secret", so the check is on `:secret`.
         let shown = format!("{message} {error:?}");
         assert!(
-            !shown.contains("admin") && !shown.contains(":secret"),
+            !shown.contains("admin") && !shown.contains("hunter2"),
             "{shown}"
         );
     }
@@ -554,6 +553,9 @@ fn refuses_a_host_that_is_not_valid() {
         ("http://[influx]:99999/", "[influx]"),
         ("http://[fd00::2]x/", "[fd00::2]x"),
         ("http://[fd00::2]8086/", "[fd00::2]8086"),
+        ("http://[fd00::2]x:80/", "[fd00::2]x"),
+        ("http://a[::1]/", "a["),
+        ("http://a[::1]:80/", "a["),
     ] {
         let error = refused(uri);
         assert!(

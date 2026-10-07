@@ -108,13 +108,11 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// - [`Error::Scheme`] when the scheme is not `http`.
-    /// - [`Error::UserInfo`] when the URI holds user info.
-    /// - [`Error::Host`] when the host is empty or a bad IPv6 address.
-    /// - [`Error::Port`] when the port is not a number from 1 to 65535.
+    /// - [`Error::Scheme`], [`Error::UserInfo`], [`Error::Host`], and [`Error::Port`],
+    ///   as each says, checked in that order.
     /// - [`Error::Connect`] when the name lookup failed, or no address of the host
     ///   took the connection.
-    /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
+    /// - [`Error::TimedOut`] when the whole exchange took the timeout or longer.
     /// - [`Error::TooLarge`] when the response body is larger than the cap.
     /// - [`Error::Protocol`] when the stream failed, the server broke HTTP, or the
     ///   server closed early.
@@ -303,16 +301,20 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
     if text.contains('@') {
         return Err(Error::UserInfo);
     }
-    // `http` takes any text after `]`; with no `:`, it is part of the host.
-    let (host, port) = match text[authority.host().len()..].strip_prefix(':') {
-        Some(port) => (authority.host(), port),
+    // `http` takes any text after `]`; it is part of the host up to a `:`.
+    let after = match text.strip_prefix('[') {
+        Some(_) => text.find(']').map_or(text.len(), |end| end + 1),
+        None => 0,
+    };
+    let (host, port) = match text[after..].find(':') {
+        Some(colon) => (&text[..after + colon], &text[after + colon + 1..]),
         None => (text, ""),
     };
     let valid = match host.strip_prefix('[') {
         Some(v6) => v6
             .strip_suffix(']')
             .is_some_and(|v6| v6.parse::<Ipv6Addr>().is_ok()),
-        None => !host.is_empty(),
+        None => !host.is_empty() && !host.contains('['),
     };
     if !valid {
         return Err(Error::Host {
@@ -374,9 +376,11 @@ pub enum Error {
     Scheme,
     /// The URI holds user info. The error keeps none of it.
     UserInfo,
-    /// The URI has no host, or a host in brackets that is not an IPv6 address.
+    /// The URI has no host, a host in brackets that is not an IPv6 address, or a
+    /// `[` in a host that is not in brackets.
     Host {
-        /// The host, as the URI gives it.
+        /// The text of the authority before the `:` of the port, or all of it when
+        /// it has no port.
         host: String,
     },
     /// The port of the URI is not a number from 1 to 65535.
@@ -386,7 +390,7 @@ pub enum Error {
     },
     /// The name lookup failed, or no address of the host took the connection.
     Connect(net::Error),
-    /// The exchange took longer than the timeout.
+    /// The exchange took the timeout or longer.
     TimedOut,
     /// The response body is larger than the cap.
     TooLarge {
