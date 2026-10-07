@@ -413,11 +413,11 @@ impl Shard {
     }
 
     /// Takes the next frame of the reader `session` on the index at `slot`, or `None`
-    /// when none waits.
+    /// when none waits or the reader is closed.
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the shard does not carry `slot`, or its readers never gave `session`.
     pub(crate) fn take(&mut self, slot: Slot, session: delivery::Key) -> Option<Frame> {
         self.readers.take(self.place(slot), session)
     }
@@ -427,7 +427,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the shard does not carry `slot`, or its readers never gave `session`.
     pub(crate) fn close_reader(&mut self, slot: Slot, session: delivery::Key) {
         self.readers.close(self.place(slot), session);
     }
