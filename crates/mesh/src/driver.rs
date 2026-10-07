@@ -62,12 +62,12 @@ pub(crate) struct Config {
     pub(crate) clock: Clock,
     /// Gives each election timeout its random part.
     pub(crate) entropy: Entropy,
-    /// Runs the group's task.
+    /// Runs the group's task and the tasks that send.
     pub(crate) tasks: Tasks,
-    /// Gives the blocks of the log's reads and writes, and of each answer to a
-    /// forwarded proposal. A write that finds the pool full, or that the system refuses
-    /// memory for, waits: the group takes, sends, and applies nothing until that write
-    /// ends.
+    /// Gives the blocks of the log's reads and writes, of each message that the group
+    /// sends, and of each answer to a forwarded proposal. A write that finds the pool
+    /// full, or that the system refuses memory for, waits: the group takes, sends, and
+    /// applies nothing until that write ends. A message that finds no block drops.
     pub(crate) pool: Rc<Pool>,
     /// The transport of this shard. The mesh dials each other member on it.
     pub(crate) transport: Rc<Transport>,
@@ -664,7 +664,7 @@ async fn run(
 mod tests {
     use std::iter;
     use std::mem::ManuallyDrop;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::num::{NonZeroU32, NonZeroUsize};
     use std::path::Path;
     use std::pin::pin;
@@ -711,6 +711,8 @@ mod tests {
         answers: BTreeMap<u8, Message>,
         /// The members from 1 to 9 on each node, when its watch last gave a home.
         members: BTreeMap<u8, BTreeSet<u8>>,
+        /// The voter whose card has no address on each node.
+        hidden: Option<u8>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -760,7 +762,16 @@ mod tests {
         port: u16,
         pool: Rc<Pool>,
     ) -> Transport {
-        let config = transport::Config {
+        bind(node, port, transport_config(node, tasks, id, pool))
+    }
+
+    fn transport_config(
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        id: u8,
+        pool: Rc<Pool>,
+    ) -> transport::Config {
+        transport::Config {
             private_key: private(id),
             message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
             window_bytes: 1 << 20,
@@ -770,7 +781,11 @@ mod tests {
             entropy: node.entropy(),
             tasks: tasks.clone(),
             pool,
-        };
+        }
+    }
+
+    /// A transport with `config` at `port` of `node`.
+    fn bind(node: &sim::node::Node, port: u16, config: transport::Config) -> Transport {
         let at = SocketAddr::new(node.addresses()[0], port);
         let mut parts = Port::bind(&node.net(), at)
             .unwrap()
@@ -926,19 +941,28 @@ mod tests {
             }
         }
 
-        /// Starts each voter. It runs until its node crashes.
+        /// Starts each voter.
         fn start(&self) {
-            for (node, id) in self.nodes.iter().zip(IDS) {
-                let (own, board) = (node.clone(), Arc::clone(&self.board));
-                let config = env::shards::Config {
-                    name: format!("voter-{id}"),
-                    core: None,
-                };
-                let main = move |tasks| async move {
-                    voter(own, tasks, id, board).await;
-                };
-                drop(node.shards().start(config, main).unwrap());
+            for id in IDS {
+                self.start_voter(id);
             }
+        }
+
+        /// Starts voter `id`. It runs until its node crashes.
+        fn start_voter(&self, id: u8) {
+            let (own, board) = (self.node(id).clone(), Arc::clone(&self.board));
+            let config = env::shards::Config {
+                name: format!("voter-{id}"),
+                core: None,
+            };
+            let main = move |tasks| async move {
+                voter(own, tasks, id, board).await;
+            };
+            drop(self.node(id).shards().start(config, main).unwrap());
+        }
+
+        fn node(&self, id: u8) -> &sim::node::Node {
+            &self.nodes[IDS.iter().position(|&own| own == id).unwrap()]
         }
 
         /// Sets what each node proposes.
@@ -959,13 +983,13 @@ mod tests {
 
         /// Sets the chance that a datagram between `a` and `b` is lost, each way.
         fn link(&mut self, a: u8, b: u8, loss: f64) {
-            let node = |id| &self.nodes[IDS.iter().position(|&own| own == id).unwrap()];
             let config = link::Config {
                 loss,
                 ..link::Config::default()
             };
-            self.sim.link(node(a), node(b), config);
-            self.sim.link(node(b), node(a), config);
+            let (a, b) = (self.node(a).clone(), self.node(b).clone());
+            self.sim.link(&a, &b, config);
+            self.sim.link(&b, &a, config);
         }
 
         /// Takes what the voters did so far.
@@ -988,8 +1012,16 @@ mod tests {
     ) -> ! {
         let transport = create_transport(&node, &tasks, id, PORT, create_pool());
         let transport = Rc::new(transport);
+        let hidden = board.lock().unwrap().hidden;
+        let member = |of| {
+            if hidden == Some(of) {
+                common::member(of)
+            } else {
+                create_voter(of)
+            }
+        };
         let config = Config {
-            members: IDS.map(create_voter).into(),
+            members: IDS.map(member).into(),
             transport: Rc::clone(&transport),
             ..config(&node, &tasks, id, &IDS, &IDS)
         };
@@ -1087,6 +1119,41 @@ mod tests {
     }
 
     #[test]
+    fn a_voter_gets_the_home_again_after_its_power_cut() {
+        let mut cluster = Cluster::new(4);
+        cluster.script(home);
+        cluster.start();
+        cluster.run(seconds(5));
+        let (led, _) = cluster.take();
+        let leader = led[0];
+        let cut = IDS.into_iter().find(|&id| id != leader).unwrap();
+        let node = cluster.node(cut).clone();
+        cluster.sim.crash(&node, Crash::Power);
+        cluster.start_voter(cut);
+        cluster.run(seconds(5));
+        let homes = [(cut, vec![None, Some(key(leader))])].into();
+        assert_eq!(cluster.take(), (Vec::new(), homes));
+    }
+
+    #[test]
+    fn the_other_voters_agree_when_the_card_of_a_voter_has_no_address() {
+        let mut cluster = Cluster::new(5);
+        cluster.board.lock().unwrap().hidden = Some(3);
+        cluster.script(home);
+        cluster.start();
+        cluster.run(seconds(10));
+        let (led, homes) = cluster.take();
+        let &[leader] = led.as_slice() else {
+            panic!("the group took a proposal from each of {led:?}");
+        };
+        let home = |id| match id {
+            3 => (id, vec![None]),
+            _ => (id, vec![None, Some(key(leader))]),
+        };
+        assert_eq!(homes, IDS.map(home).into());
+    }
+
+    #[test]
     fn a_leader_with_no_quorum_commits_nothing_and_takes_the_home_of_the_next() {
         let mut cluster = Cluster::new(2);
         cluster.script(home);
@@ -1151,6 +1218,22 @@ mod tests {
 
     fn term(mesh: &Mesh) -> Term {
         mesh.group.borrow().raft.term()
+    }
+
+    /// What `future` gives, or `None` when it waits for longer than `limit`.
+    async fn within<F: Future>(
+        clock: &Clock,
+        limit: Span,
+        mut future: Pin<&mut F>,
+    ) -> Option<F::Output> {
+        let mut end = clock.sleep(limit);
+        poll_fn(|cx| {
+            if let Poll::Ready(output) = future.as_mut().poll(cx) {
+                return Poll::Ready(Some(output));
+            }
+            Pin::new(&mut end).poll(cx).map(|()| None)
+        })
+        .await
     }
 
     /// Gives the output of `future` when it does not wait.
@@ -1328,6 +1411,7 @@ mod tests {
         });
     }
 
+    mod send;
     mod serve;
 
     mod answer {

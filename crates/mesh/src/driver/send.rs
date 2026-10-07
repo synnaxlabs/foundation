@@ -105,18 +105,17 @@ impl Senders {
         message: raft::Message,
     ) -> Result<(), Error> {
         let block = self.block(&Message::Raft(message).encode())?;
-        let sender = match &mut link.sender {
-            Some(sender) => sender,
-            None => {
-                let header = self.block(&wire::header::encode(Protocol::Mesh))?;
-                let session = match &link.session {
-                    Some(session) => session,
-                    None => link.session.insert(self.dial(to).await?),
-                };
-                let mut sender = session.open_sender(Class::Command).await?;
-                sender.send(header).await?;
-                link.sender.insert(sender)
-            }
+        let sender = if let Some(sender) = &mut link.sender {
+            sender
+        } else {
+            let header = self.block(&wire::header::encode(Protocol::Mesh))?;
+            let session = match &link.session {
+                Some(session) => session,
+                None => link.session.insert(self.dial(to).await?),
+            };
+            let mut sender = session.open_sender(Class::Command).await?;
+            sender.send(header).await?;
+            link.sender.insert(sender)
         };
         Ok(sender.send(block).await?)
     }

@@ -3,7 +3,6 @@
 
 use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Class, Code, Session};
-use wire::Protocol;
 
 use super::*;
 
