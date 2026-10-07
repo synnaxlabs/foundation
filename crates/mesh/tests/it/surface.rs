@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use env::tasks::Tasks;
@@ -14,15 +15,18 @@ use mesh::{Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, regi
 use raft::{Position, Term};
 use sim::Sim;
 use transport::stream::Incoming;
-use transport::{Port, Transport};
+use transport::{Address, Class, Code, Peer, Port, Transport};
 use types::channel;
 use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 use types::time::Span;
+use wire::Protocol;
 
 const KEY: node::Key = node::Key::from_u128(1);
 const OTHER: node::Key = node::Key::from_u128(2);
 const INDEX: channel::Key = channel::Key::from_u128(7);
+/// The port of each transport.
+const PORT: u16 = 7000;
 
 type Home = Result<Option<node::Key>, Stopped>;
 
@@ -61,17 +65,25 @@ fn create_member() -> Member {
     }
 }
 
-/// The config of the region `plant`, whose one member and one voter is the node `KEY`.
-fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
+fn create_pool() -> Rc<block::Pool> {
     let budget = block::Config { budget: 1 << 20 };
     let memory = block::Heap::new(budget.reservation());
-    let pool = Rc::new(block::Pool::new(budget, memory));
-    let at = SocketAddr::new(node.addresses()[0], 0);
+    Rc::new(block::Pool::new(budget, memory))
+}
+
+/// A transport of `node` at `PORT`, which proves the public key of `private_key`.
+fn create_transport(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    pool: &Rc<block::Pool>,
+    private_key: PrivateKey,
+) -> Transport {
+    let at = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), at)
         .unwrap()
         .split(NonZeroUsize::MIN);
-    let transport = transport::Config {
-        private_key: private_key(),
+    let config = transport::Config {
+        private_key,
         message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
         window_bytes: 1 << 20,
         streams_max: NonZeroU32::new(16).unwrap(),
@@ -79,8 +91,15 @@ fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),
-        pool: Rc::clone(&pool),
+        pool: Rc::clone(pool),
     };
+    Transport::new(config, parts.pop().unwrap()).unwrap()
+}
+
+/// The config of the region `plant`, whose one member and one voter is the node `KEY`.
+fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
+    let pool = create_pool();
+    let transport = create_transport(node, tasks, &pool, private_key());
     Config {
         key: KEY,
         private_key: private_key(),
@@ -92,7 +111,7 @@ fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
         time: clock::Clock::new(node.clock()).1,
         entropy: node.entropy(),
         tasks: tasks.clone(),
-        transport: Rc::new(Transport::new(transport, parts.pop().unwrap()).unwrap()),
+        transport: Rc::new(transport),
         pool,
     }
 }
@@ -137,6 +156,59 @@ fn the_debug_of_a_config_does_not_show_the_private_key() {
     });
 }
 
+// The peer is not a member. `serve` refuses the bytes before it reads who sent them.
+#[test]
+fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
+    let mut sim = Sim::new(sim::Config::default());
+    let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
+    let at = Address::Udp(SocketAddr::new(nodes[0].addresses()[0], PORT));
+    let served = Arc::new(Mutex::new(None));
+    let sent = Arc::new(Mutex::new(None));
+    let shard = |name: &str| env::shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    let (node, result) = (nodes[0].clone(), Arc::clone(&served));
+    let main = move |tasks: Tasks| async move {
+        let config = create_config(&node, &tasks);
+        let transport = Rc::clone(&config.transport);
+        let mesh = Mesh::open(config).await.unwrap();
+        let session = transport.accept().await.unwrap();
+        let Peer::Node(peer) = session.peer() else {
+            panic!("a peer with no node key opened a session");
+        };
+        let mut incoming = session.accept().await.unwrap();
+        let header = incoming.receiver.recv().await.unwrap().unwrap();
+        let protocol = wire::header::decode(&header).unwrap();
+        assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+        drop(header);
+        *result.lock().unwrap() = Some(mesh.serve(peer, incoming).await);
+        drop(session.closed().await);
+    };
+    drop(nodes[0].shards().start(shard("mesh"), main).unwrap());
+    let (node, result) = (nodes[1].clone(), Arc::clone(&sent));
+    let main = move |tasks: Tasks| async move {
+        let pool = create_pool();
+        let transport = create_transport(&node, &tasks, &pool, PrivateKey([2; 32]));
+        let session = transport.dial(public_key(), &[at]).await.unwrap();
+        let mut sender = session.open_sender(Class::Command).await.unwrap();
+        for bytes in [&wire::header::encode(Protocol::Mesh)[..], &[0xff]] {
+            let mut block = pool.alloc(bytes.len()).unwrap();
+            block.copy_from_slice(bytes);
+            sender.send(block.freeze()).await.unwrap();
+        }
+        node.clock().sleep(Span::SECOND).await;
+        *result.lock().unwrap() = Some(sender.finish());
+        session.close(Code(0));
+        node.clock().sleep(Span::MILLISECOND).await;
+    };
+    drop(nodes[1].shards().start(shard("peer"), main).unwrap());
+    sim.run().unwrap();
+    assert_eq!(*served.lock().unwrap(), Some(Err(Error::Malformed)));
+    let stopped = transport::Error::Stopped { code: Code(2) };
+    assert_eq!(*sent.lock().unwrap(), Some(Err(stopped)));
+}
+
 #[test]
 fn watch_member_next_and_serve_have_the_signatures_that_a_caller_holds() {
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
@@ -147,9 +219,11 @@ fn watch_member_next_and_serve_have_the_signatures_that_a_caller_holds() {
 
 #[test]
 fn an_error_of_open_or_serve_names_its_cause() {
-    let stray = Error::Log(log::Error::Stray {
+    let stray = log::Error::Stray {
         path: PathBuf::from("log/notes"),
-    });
+    };
+    assert_error(&stray);
+    let stray = Error::Log(stray);
     assert_error(&stray);
     assert_eq!(
         stray.to_string(),

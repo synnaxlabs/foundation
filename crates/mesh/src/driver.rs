@@ -76,7 +76,9 @@ pub struct Config {
     /// full, or that the system refuses memory for, waits: the group takes, sends, and
     /// applies nothing until that write ends. A message that finds no block drops.
     pub pool: Rc<Pool>,
-    /// The transport of this shard. The mesh dials each other member on it.
+    /// The transport of this shard, built with `private_key`: each peer checks the key
+    /// that it proves against the card of this node, and [`Mesh::open`] does not. The
+    /// mesh dials each other member on it.
     pub transport: Rc<Transport>,
 }
 
