@@ -3137,30 +3137,24 @@ mod tests {
 
     #[test]
     fn after_a_peer_close_or_a_fault_give_its_error_until_it_drains() {
-        let ends: [(fn(&mut Pair), Error); 2] = [
-            (
-                |pair| {
-                    let (now, key) = (pair.now(), key(&pair.server));
-                    pair.server.endpoint.close(now, key, Code(7));
-                },
-                Error::PeerClosed { code: Code(7) },
-            ),
-            (
-                |pair| drop(raw(pair.server.connection(), Dir::Uni, &[4], false)),
-                Error::Broken {
-                    reason: "a stream of class 4".into(),
-                },
-            ),
-        ];
-        for (end, error) in ends {
+        let broken = Error::Broken {
+            reason: "a stream of class 4".into(),
+        };
+        let ends = [(true, Error::PeerClosed { code: Code(7) }), (false, broken)];
+        for (closed, error) in ends {
             testing::run(1, move |shard| {
                 let mut pair = connected(shard);
+                let server = key(&pair.server);
                 let (now, key) = (pair.now(), key(&pair.client));
                 let opened = pair.client.endpoint.open(now, key, Class::Complete);
                 let (mut sender, mut receiver) = opened.expect("a stream");
                 let mut other = open_sender(&mut pair, Class::Latest);
                 let mut finishing = open_sender(&mut pair, Class::Latest);
-                end(&mut pair);
+                if closed {
+                    pair.server.endpoint.close(now, server, Code(7));
+                } else {
+                    raw(pair.server.connection(), Dir::Uni, &[4], false);
+                }
                 let ended = |event: &&Event| matches!(event, Event::Closed { .. });
                 while !events(&pair.client).iter().any(ended) {
                     pair.run(STEP);
