@@ -917,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_session_closes_with_code_0_and_frees_its_slot() {
+    fn a_dropped_session_closes_with_code_0() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
         testing::carrier(&server, SERVER, |carrier, _| async move {
@@ -928,24 +928,30 @@ mod tests {
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             drop(dialed.expect("a session"));
+            // The shard drops the task, and the close with it, when this ends.
             node.clock().sleep(Span::MILLISECOND).await;
-            assert_eq!(carrier.0.borrow().sessions.len(), 0);
         });
         assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
-    fn a_dropped_dial_frees_its_slot() {
+    fn a_dial_dropped_after_it_connected_closes_with_code_0() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             {
                 let mut dial = pin!(carrier.connect(public(&SERVER), at));
-                poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending())).await;
-                assert_eq!(carrier.0.borrow().sessions.len(), 1);
+                assert!(poll_once(dial.as_mut()).await.is_none());
+                // The task connects while the dial is not polled.
+                node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             }
+            // The shard drops the task, and the close with it, when this ends.
             node.clock().sleep(Span::MILLISECOND).await;
-            assert_eq!(carrier.0.borrow().sessions.len(), 0);
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -1087,7 +1093,9 @@ mod tests {
             drop(session);
             node.pause(spans(Span::MILLISECOND, 150));
             node.clock().sleep(spans(Span::MILLISECOND, 151)).await;
-            assert!(carrier.0.borrow().endpoint.drained());
+            drop(carrier);
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(socket(&node).err(), None);
         });
         assert_eq!(sim.run_for(spans(Span::MILLISECOND, 40)), Ok(()));
         // Only the timer can wake the client's task.
@@ -1115,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn a_carrier_drop_closes_each_session_no_caller_accepted_and_frees_its_slot() {
+    fn a_carrier_drop_closes_each_session_no_caller_accepted() {
         let (mut sim, client, server) = nodes(0);
         let held = sim.node(sim::node::Config::default());
         let at = address(&server);
@@ -1123,7 +1131,6 @@ mod tests {
             let session = carrier.accept().await.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 5)).await;
             drop(carrier);
-            assert_eq!(session.state.borrow().sessions.len(), 1);
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
@@ -1236,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_drops_after_it_drained_frees_the_socket() {
+    fn a_session_held_after_the_drain_does_not_hold_the_socket() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
         testing::carrier(&server, SERVER, |carrier, node| async move {
@@ -1245,11 +1252,8 @@ mod tests {
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
             node.clock().sleep(spans(IDLE, 3)).await;
-            assert!(session.state.borrow().endpoint.drained());
-            assert!(session.state.borrow().task.is_none());
-            drop(session);
-            node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(socket(&node).err(), None);
+            drop(session);
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
@@ -1271,6 +1275,7 @@ mod tests {
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
             let now = node.clock().now();
+            // A private read: no public call gives the drain deadline.
             let drain = session.state.borrow().endpoint.deadline().expect("a drain");
             // The dial of `late` arrives at about 41 ms, before the drain ends.
             assert!(drain - now > spans(Span::MILLISECOND, 30));
@@ -1312,7 +1317,6 @@ mod tests {
                 error: env::net::Error::Io { code: 5 },
             };
             assert_eq!(session.closed().await, network);
-            assert!(carrier.0.borrow().task.is_none());
             let dialed = carrier.connect(public(&SERVER), at).await;
             assert_eq!(dialed.err(), Some(network.clone()));
             assert_eq!(carrier.accept().await.err(), Some(network));
@@ -1351,8 +1355,10 @@ mod tests {
             let closed = Error::Closed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
             node.fail_udp(address(&node));
-            node.clock().sleep(Span::MILLISECOND).await;
-            assert!(carrier.0.borrow().task.is_none());
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(carrier.accept().await.err(), Some(network));
             assert_eq!(session.closed().await, closed);
         });
         assert_eq!(sim.run(), Ok(()));
