@@ -8,7 +8,7 @@
 //! the node limits how many are open.
 //!
 //! The hasher spreads a key by its low bits, so keys that differ only in their top
-//! bits fall in one bucket. A key that the node makes keeps its varying bits low, as
+//! bits fall in few buckets. A key that the node makes keeps its varying bits low, as
 //! the random bits of `channel::Key::v7` are.
 
 use rustc_hash::FxBuildHasher;
