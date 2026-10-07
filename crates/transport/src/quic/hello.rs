@@ -210,21 +210,36 @@ mod tests {
         bytes
     }
 
-    /// The bytes of `pairs`, with varint `i` in 8 bytes when `wide[i]` is true, else
+    /// The bytes of `pairs`, with varint `i` in `lens[i]` bytes when it fits, else
     /// in the fewest bytes. Ids are varints `2k` and values `2k + 1`.
-    fn encode_wide(pairs: &[(u64, u64)], wide: &[bool]) -> Vec<u8> {
+    fn encode_wide(pairs: &[(u64, u64)], lens: &[usize]) -> Vec<u8> {
         let mut bytes = Vec::new();
         let varints = pairs.iter().flat_map(|&(id, value)| [id, value]);
         for (at, varint) in varints.enumerate() {
-            if wide.get(at).copied().unwrap_or(false) {
-                bytes.extend(long(varint));
-            } else {
-                VarInt::from_u64(varint)
+            match widened(varint, lens.get(at).copied().unwrap_or(1)) {
+                Some(wide) => bytes.extend(wide),
+                None => VarInt::from_u64(varint)
                     .expect("a varint")
-                    .encode(&mut bytes);
+                    .encode(&mut bytes),
             }
         }
         bytes
+    }
+
+    /// `varint` in `len` bytes, 2, 4, or 8, when it fits.
+    fn widened(varint: u64, len: usize) -> Option<Vec<u8>> {
+        match len {
+            2 => u16::try_from(varint)
+                .ok()
+                .filter(|&varint| varint < 1 << 14)
+                .map(|varint| (varint | 0x4000).to_be_bytes().to_vec()),
+            4 => u32::try_from(varint)
+                .ok()
+                .filter(|&varint| varint < 1 << 30)
+                .map(|varint| (varint | 0x8000_0000).to_be_bytes().to_vec()),
+            8 => Some(long(varint).to_vec()),
+            _ => None,
+        }
     }
 
     fn fault(reason: &str) -> Result<Hello, Fault> {
@@ -288,6 +303,7 @@ mod tests {
             0_u64..3_000,
             Just(1_471),
             Just(1_472),
+            3_000_u64..1 << 30,
             0..=VarInt::MAX.into_inner(),
         ]
     }
@@ -298,6 +314,7 @@ mod tests {
             4 => 2_u64..64,
             1 => 64_u64..1 << 14,
             1 => Just(1 << 14),
+            1 => (1_u64 << 14) + 1..1 << 30,
             1 => Just(1 << 30),
             // Low bits that match id 0 or 1.
             1 => Just(1 << 61),
@@ -435,12 +452,15 @@ mod tests {
                 (0_u8..4).prop_map(|id| vec![id, 0x40]),
             ],
             // At times, some varints in more bytes than they need.
-            wide in prop_oneof![
+            lens in prop_oneof![
                 3 => Just(vec![]),
-                1 => prop::collection::vec(prop::bool::weighted(0.1), 224),
+                1 => prop::collection::vec(
+                    prop_oneof![27 => Just(1), 1 => Just(2), 1 => Just(4), 1 => Just(8)],
+                    224,
+                ),
             ],
         ) {
-            let mut bytes = encode_wide(&pairs, &wide);
+            let mut bytes = encode_wide(&pairs, &lens);
             bytes.extend(&tail);
             let decoded = Hello::decode(&bytes).map_err(|fault| fault.0);
             prop_assert_eq!(decoded, doc_decode(&pairs, &tail, bytes.len()));
@@ -508,13 +528,24 @@ mod tests {
     }
 
     #[test]
-    fn decode_takes_a_value_that_is_not_the_fewest_bytes() {
+    fn decode_takes_varints_that_are_not_the_fewest_bytes() {
         let mut bytes = vec![0x40, 0x00];
         bytes.extend(long(1_472));
         bytes.extend([0x01, 0x45, 0xc0]);
         let hello = Hello {
             window_bytes: 1_472,
             message_bytes_max: 1_472,
+        };
+        assert_eq!(Hello::decode(&bytes), Ok(hello));
+        // Id 0 and its value in 4 bytes, id 1 in 2 bytes, then unknown id 2^20 with
+        // value 5 in 2 bytes.
+        let bytes = [
+            0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x07, 0xd0, 0x40, 0x01, 0x45, 0xdc,
+            0x80, 0x10, 0x00, 0x00, 0x40, 0x05,
+        ];
+        let hello = Hello {
+            window_bytes: 2_000,
+            message_bytes_max: 1_500,
         };
         assert_eq!(Hello::decode(&bytes), Ok(hello));
     }
