@@ -466,7 +466,7 @@ fn refuses_a_uri_it_cannot_reach() {
 }
 
 #[test]
-fn stream_writes_a_whole_plain_write() {
+fn stream_is_vectored_and_writes_a_whole_plain_write() {
     const HEAD: &[u8] = b"GET / HTTP/1.1\r\nhost: a\r\n\r\n";
     let mut network = Network::new(14);
     let seen = network.serve(|stream, _, _| async { Some(stream) });
@@ -483,6 +483,10 @@ fn stream_writes_a_whole_plain_write() {
         .start(shard("client"), move |_| async move {
             let tcp = net.connect(&config).await.expect("the server listens");
             let mut stream = super::Stream(tcp);
+            assert!(
+                hyper::rt::Write::is_write_vectored(&stream),
+                "hyper copies each body into its buffer unless the stream is vectored"
+            );
             let n = poll_fn(|cx| {
                 hyper::rt::Write::poll_write(std::pin::Pin::new(&mut stream), cx, HEAD)
             })
