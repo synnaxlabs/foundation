@@ -755,6 +755,7 @@ dependencies = [
  "codec",
  "control",
  "delivery",
+ "divan",
  "env",
  "proptest",
  "sim",
