@@ -2,6 +2,7 @@
 //! `hub` do.
 
 use std::collections::BTreeMap;
+use std::future::pending;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
@@ -245,6 +246,8 @@ fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
                 homes.push(home);
             }
             read.lock().unwrap().insert(id, (set, homes));
+            // The other voters need this one until they have each home.
+            pending::<()>().await;
         };
         let shard = env::shards::Config {
             name: format!("voter-{id}"),

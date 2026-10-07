@@ -106,8 +106,12 @@ async fn forward(session: &Session, pool: &Pool, change: Change) -> Option<Posit
         .send(block(pool, &proposal.encode()).ok()?)
         .await
         .ok()?;
-    sender.finish().ok()?;
-    match Message::decode(&receiver.recv().await.ok()??)? {
+    // The stream ends only after the answer. A try that drops before it resets the
+    // stream, so the transport sends a proposal that the leader did not get no more.
+    let answer = receiver.recv().await.ok()??;
+    // The answer stands, whatever the end of the stream gives.
+    drop(sender.finish());
+    match Message::decode(&answer)? {
         Message::Proposed { at } => Some(at),
         Message::Raft(_) | Message::Propose { .. } | Message::NotLeader { .. } => None,
     }

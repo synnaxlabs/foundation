@@ -370,9 +370,8 @@ impl Leader {
         self.peer.node.clock()
     }
 
-    /// The next proposal of node 1, with the stream of its answer. Node 1 ended its
-    /// half of the stream.
-    async fn proposal(&mut self) -> (Change, Sender) {
+    /// The next proposal of node 1, with the stream of its answer.
+    async fn proposal(&mut self) -> (Change, Asked) {
         loop {
             let Incoming {
                 class,
@@ -391,14 +390,12 @@ impl Leader {
             let Some(Message::Propose { change }) = Message::decode(&bytes) else {
                 panic!("node 1 asked with no proposal");
             };
-            let end = receiver.recv().await.unwrap();
-            assert!(end.is_none(), "node 1 sent more than one proposal");
-            return (change, sender);
+            return (change, Asked { receiver, sender });
         }
     }
 
     /// The next proposal of node 1, or `None` when none comes in `span`.
-    async fn proposal_within(&mut self, span: Span) -> Option<(Change, Sender)> {
+    async fn proposal_within(&mut self, span: Span) -> Option<(Change, Asked)> {
         let clock = self.clock();
         within(&clock, span, self.proposal()).await
     }
@@ -423,16 +420,31 @@ impl Leader {
     /// Answers a proposal with the position `at`.
     async fn answer(
         &self,
-        sender: &mut Sender,
+        asked: &mut Asked,
         at: Position,
     ) -> Result<(), transport::Error> {
         let answer = Message::Proposed { at }.encode();
-        sender.send(self.peer.block(&answer)).await?;
-        sender.finish()
+        asked.sender.send(self.peer.block(&answer)).await?;
+        asked.sender.finish()
     }
 
     async fn rest(&self, span: Span) {
         self.clock().sleep(span).await;
+    }
+}
+
+/// The stream of a proposal of node 1, after the proposal.
+struct Asked {
+    receiver: Receiver,
+    sender: Sender,
+}
+
+impl Asked {
+    /// How node 1 ends its half: `Ok` when it ended the stream with no more message.
+    async fn end(&mut self) -> Result<(), transport::Error> {
+        let end = self.receiver.recv().await?;
+        assert!(end.is_none(), "node 1 sent more than one proposal");
+        Ok(())
     }
 }
 
@@ -476,17 +488,18 @@ async fn set(mesh: Mesh) -> (Result<(), Error>, Option<node::Key>) {
 #[test]
 fn a_proposal_with_no_answer_goes_again_on_a_new_stream_after_one_election_timeout() {
     let call = |_, mesh| set(mesh);
-    let (set, (changes, gap, late)) = run(call, |mut leader| async move {
+    let (set, (changes, gap, late, ends)) = run(call, |mut leader| async move {
         let clock = leader.clock();
         let (first, mut old) = leader.proposal().await;
         let start = clock.now();
-        let (second, mut sender) = leader.proposal().await;
+        let (second, mut asked) = leader.proposal().await;
         let gap = clock.now() - start;
         let late = leader.answer(&mut old, at(1)).await;
-        leader.answer(&mut sender, at(1)).await.unwrap();
+        leader.answer(&mut asked, at(1)).await.unwrap();
         leader.append(&home(1), at(1)).await;
         leader.rest(seconds(2)).await;
-        ([first, second], gap, late)
+        let ends = [old.end().await, asked.end().await];
+        ([first, second], gap, late, ends)
     });
     assert_eq!(set, (Ok(()), Some(key(1))));
     assert_eq!(changes, [home(1), home(1)]);
@@ -497,6 +510,9 @@ fn a_proposal_with_no_answer_goes_again_on_a_new_stream_after_one_election_timeo
         "{ms} ms between the two proposals"
     );
     assert_eq!(late, Err(transport::Error::Stopped { code: Code(0) }));
+    // The try that gave up took its proposal back, and the other ended its stream.
+    let reset = transport::Error::Reset { code: Code(0) };
+    assert_eq!(ends, [Err(reset), Ok(())]);
 }
 
 #[test]
@@ -520,10 +536,10 @@ fn an_answer_that_comes_after_its_entry_applied_ends_the_call() {
         (applied, returned, node.clock().now())
     };
     let ((applied, returned, end), ()) = run(call, |mut leader| async move {
-        let (_, mut sender) = leader.proposal().await;
+        let (_, mut asked) = leader.proposal().await;
         leader.append(&home(1), at(1)).await;
         leader.rest(HALF).await;
-        leader.answer(&mut sender, at(1)).await.unwrap();
+        leader.answer(&mut asked, at(1)).await.unwrap();
         leader.rest(seconds(2)).await;
     });
     let (home, start) = applied;
@@ -548,14 +564,101 @@ fn a_dropped_call_that_waits_for_the_answer_stops_its_stream() {
             clock.sleep(Span::MILLISECOND).await;
         }
     };
-    let ((), (late, more)) = run(call, |mut leader| async move {
-        let (_, mut sender) = leader.proposal().await;
+    let ((), (late, end, more)) = run(call, |mut leader| async move {
+        let (_, mut asked) = leader.proposal().await;
         *got.lock().unwrap() = true;
         leader.rest(HALF).await;
-        let late = leader.answer(&mut sender, at(1)).await;
+        let late = leader.answer(&mut asked, at(1)).await;
+        let end = asked.end().await;
         let more = leader.proposal_within(seconds(3)).await;
-        (late, more.map(|(change, _)| change))
+        (late, end, more.map(|(change, _)| change))
     });
     assert_eq!(late, Err(transport::Error::Stopped { code: Code(0) }));
+    assert_eq!(end, Err(transport::Error::Reset { code: Code(0) }));
     assert_eq!(more, None);
+}
+
+/// An index that only a probe for the leader sets.
+const PROBE: channel::Key = channel::Key::from_u128(8);
+
+/// The time between two looks at the board.
+const STEP: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
+
+impl Cluster {
+    /// Runs in steps of 250 ms until `done`.
+    ///
+    /// # Panics
+    ///
+    /// When `done` does not hold after `steps` steps.
+    fn run_until(&mut self, steps: u32, done: impl Fn(&Board) -> bool) {
+        for _ in 0..steps {
+            if done(&self.board.lock().unwrap()) {
+                return;
+            }
+            self.run(STEP);
+        }
+        let done = done(&self.board.lock().unwrap());
+        assert!(done, "not done after {steps} steps");
+    }
+
+    /// Each node that takes a proposal in the next second: the leader.
+    fn leaders(&mut self) -> Vec<u8> {
+        self.board.lock().unwrap().led.clear();
+        self.script(|id| Change::Home {
+            index: PROBE,
+            home: key(id),
+        });
+        self.run(seconds(1));
+        let mut board = self.board.lock().unwrap();
+        board.script.clear();
+        mem::take(&mut board.led)
+    }
+}
+
+/// The home of `INDEX` that the watch of node `id` gave last.
+fn last(board: &Board, id: u8) -> Option<node::Key> {
+    let homes = board.homes.get(&id);
+    homes.and_then(|homes| homes.last().copied()).flatten()
+}
+
+// The first try waits on the session to the old leader, which is cut off, and gives
+// up. A next leader takes a later try, and then a second call. The old leader then
+// leads again, and its link to the caller heals with the session still open.
+#[test]
+fn a_try_that_gave_up_sets_no_home_after_a_later_call_returned() {
+    for run in [0, 1] {
+        let (mut cluster, old, caller, _) = Cluster::led(run);
+        let third = IDS.into_iter().find(|id| ![old, caller].contains(id));
+        let third = third.unwrap();
+        cluster.link_each(old, 1.0);
+        cluster.set(caller, caller);
+        cluster.run_until(32, |board| board.set.len() == 1);
+        cluster.set(caller, third);
+        cluster.run_until(20, |board| board.set.len() == 2);
+        let set = [caller, third].map(|home| (caller, Some(key(home)), Ok(())));
+        assert_eq!(cluster.board.lock().unwrap().set, set, "run {run}");
+        // The old leader gets the log from the third node, with no word of the caller.
+        cluster.link(caller, third, 1.0);
+        cluster.link(old, third, 0.0);
+        cluster.run_until(32, |board| last(board, old) == Some(key(third)));
+        // The two hold the same log, so one of them leads after each cut between them.
+        let mut led = cluster.leaders();
+        for _ in 0..4 {
+            if led == [old] {
+                break;
+            }
+            cluster.link(old, third, 1.0);
+            cluster.run(seconds(3));
+            cluster.link(old, third, 0.0);
+            cluster.run(seconds(3));
+            led = cluster.leaders();
+        }
+        assert_eq!(led, [old], "run {run}");
+        cluster.link_each(caller, 0.0);
+        cluster.run(seconds(15));
+        let board = cluster.board();
+        assert_eq!(board.set.len(), 2, "run {run}");
+        let homes = IDS.map(|id| last(&board, id));
+        assert_eq!(homes, [Some(key(third)); 3], "run {run}");
+    }
 }
