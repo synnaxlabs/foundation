@@ -593,7 +593,12 @@ How to read this record:
   so `hub` takes no pool of its own and the two cannot differ (architect,
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051). `Config`
   takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
-  for monotonic and mesh time. `home::Error` holds only what `write` gives, and each
+  for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
+  the caller gives it with no entry that waits for a commit. The condition is stated
+  and not checked, because `Config` takes the buffer by value, so no later append can
+  come from outside (architect,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6033691871; lost: a
+  check in `Shard::new`). `home::Error` holds only what `write` gives, and each
   other call has its own error. Conversions from `control` errors are private. The `hub`
   row stays as it is. `Shard` gives no stored seq until a caller needs one (architect
   review, https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6031908363).

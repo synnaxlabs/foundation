@@ -572,11 +572,10 @@ impl Shard {
     /// the live frames now on disk. A key is a hint: take from each until
     /// [`take`](Self::take) gives `None`. A complete reader named for a miss
     /// ([`open_complete`](Self::open_complete)) has no frame to take. Call it after
-    /// each write and each commit.
-    /// When a commit ended since the last call, it reads each index with live frames
-    /// queued for complete readers; else it reads none. Pass the same `keys` each
-    /// time: the shard swaps it for its own, so neither allocates once both are large
-    /// enough.
+    /// each write and each commit. When a commit ended since the last call, it reads
+    /// each index with live frames queued for complete readers; else it reads none.
+    /// Pass the same `keys` each time: the shard swaps it for its own, so neither
+    /// allocates once both are large enough.
     pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
@@ -2710,6 +2709,24 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, reader, 0), []);
+            });
+        }
+
+        #[test]
+        fn does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits() {
+            run(111, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_complete(Slot::new(0), 1).into();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                write(&test, &mut shard, a, &[20]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(woken(&mut shard), []);
             });
         }
 
