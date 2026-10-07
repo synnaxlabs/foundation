@@ -1402,6 +1402,25 @@ How to read this record:
   format version. A message has one byte form, and a decode takes nothing else. The
   log (MESH LOG) and the messages share the byte form of an entry. Decided by
   `consensus`, approved by the coordinator (#471).
+- **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on
+  the shard that opened it. The task waits for a tick or a `Ready`, and does each
+  `Ready` in the order of RAFT SURFACE: sign, write and sync, queue the messages,
+  apply. A ticker task and a writer task lost: they need a second waker. A tick is
+  100 ms, a heartbeat is 1 tick, and an election timeout is 10 ticks. A tick that
+  comes due in a write is lost, so the group's time only slows. Before each `step`,
+  `mesh` checks a message in this order: the peer holds the key of the member that
+  the message names (`Error::Spoofed`), a request comes from a voter of this node's
+  configuration (`Error::NotVoter`), and each grant holds (`Error::Grant`). A node
+  with no configuration takes a request from each member, because RAFT VOTERS makes
+  an empty `Start.voters` a node that joins, and its first append comes before its
+  first `Voters` entry (#1054). The messages for one member wait in a queue of 64
+  that drops its oldest, because `raft` sends again. A group stops when a write of
+  the log fails (a write that gets no block from the pool is one), when a committed
+  entry is not a change that this build reads, or when each `Mesh` drops. Each later
+  call gives `Error::Stopped` with the cause. A stopped group does not start again:
+  the node opens the mesh again. Each open applies the log from index 1, until
+  snapshots (#253). A watch does not keep the group running. `open` refuses a node
+  or a voter that is not a member (`Error::NotMember`). Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
