@@ -51,16 +51,18 @@ returns (`git worktree remove --force <path>`).
    fix. It ends with the line `Public surface:` and `none`, or each public item and
    crate dependency that the PR changes (the `architecture` report names them), each
    with the link to the architect's approval once it exists.
-3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
-   the answer, also when the code is already on `main` or another crate does the work. A
-   deferral in a risk crate (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`,
-   `wire`, `home`, `replica`, `transport`) needs the explicit OK of the crate's
-   architect: link its comment. A fix or an answer that makes such a public surface
-   change, or decides what a ruling means, needs the architect's approval too: link its
-   comment. So does a fix that reverses a finding of the architect. A dispute about what
-   a rule in `CLAUDE.md` or `docs/claude/` means goes to `laptop.director`. A refusal
-   that names a trigger for later work is a deferral: file its issue with the trigger,
-   or write the trigger in the decisions entry that the ruling cites.
+3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
+   states the item, linked in the answer, also when the code is already on `main` or
+   another crate does the work. A deferral to an existing issue is a comment on that
+   issue that names the item and links the round comment. A deferral in a risk crate
+   (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
+   `transport`) needs the explicit OK of the crate's architect: link its comment. A fix
+   or an answer that makes such a public surface change, or decides what a ruling means,
+   needs the architect's approval too: link its comment. So does a fix that reverses a
+   finding of the architect. A dispute about what a rule in `CLAUDE.md` or
+   `docs/claude/` means goes to `laptop.director`. A refusal that names a trigger for
+   later work is a deferral: file its issue with the trigger, or write the trigger in
+   the decisions entry that the ruling cites.
 
 ## Rating
 
