@@ -306,12 +306,15 @@ mod tests {
     /// 62.
     fn value() -> impl Strategy<Value = u64> {
         prop_oneof![
+            0_u64..64,
             0_u64..3_000,
             Just(1_471),
             Just(1_472),
             Just(VarInt::MAX.into_inner()),
-            (any::<u64>(), 2_u32..=64)
-                .prop_map(|(bits, shift)| bits.checked_shr(shift).unwrap_or(0)),
+            (any::<u64>(), 0_u32..=62).prop_map(|(bits, len)| match len {
+                0 => 0,
+                _ => bits >> (64 - len) | 1 << (len - 1),
+            }),
         ]
     }
 
@@ -547,8 +550,8 @@ mod tests {
     fn decode_reads_each_varint_in_each_length() {
         let cases = [
             (
-                [(0, 5), (1, 1_472), (2, 7)],
-                fault("a hello with window_bytes 5 below message_bytes_max 1472"),
+                [(0, 63), (1, 1_472), (2, 7)],
+                fault("a hello with window_bytes 63 below message_bytes_max 1472"),
             ),
             (
                 [(0, 2_000), (1, 7), (2, 7)],
