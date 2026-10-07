@@ -2426,10 +2426,14 @@ How to read this record:
   #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
   to the types of other crates. `Config` and `serve` add types that the caller builds:
   `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
-  `env::tasks::Tasks`, `clock::Reader`, `block::Pool`, `transport::Transport`,
+  `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
-  So a crate that opens a region has `env`, `clock`, `block`, and `transport` in its
-  line of the crate map. `open` does not check that the transport proves the key of
+  So a crate that opens a region has `env`, `block`, and `transport` in its line of the
+  crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
+  `Status`, until the join answer of #336 gives them a caller (MESH REGION). Decided by
+  `laptop.architect` (2026-10-07T22:33:29Z), which supersedes the sentence on
+  `Unsynced` and `Status` of the approval below:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563. `open` does not check that the transport proves the key of
   `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
   `Debug` text of a `Config` does not show the private key. The calls that change the
   region and the change records stay private. The surface is approved by the architect,
