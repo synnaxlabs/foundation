@@ -17,14 +17,15 @@ use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use types::channel;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
-use types::time::Span;
+use types::time::{Span, Stamp};
 
 use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
-use crate::region::{self, Change, Malformed, Refused};
+use crate::region::{self, Change, Join, Malformed, Refused, Request};
+use crate::status::Status;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -55,7 +56,10 @@ pub(crate) struct Config {
     pub(crate) files: Files,
     /// Times the ticks of the group.
     pub(crate) clock: Clock,
-    /// Gives each election timeout its random part.
+    /// Gives the mesh time of each join that this node stamps.
+    pub(crate) time: clock::Reader,
+    /// Gives each election timeout its random part, and the random part of each status
+    /// key that this node makes.
     pub(crate) entropy: Entropy,
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
@@ -129,6 +133,8 @@ impl Mesh {
             watches: BTreeMap::new(),
             proposals: Vec::new(),
             slots: 0,
+            time: config.time,
+            entropy: config.entropy.clone(),
         }));
         let weak = Rc::downgrade(&group);
         config
@@ -279,6 +285,37 @@ impl Mesh {
         }
     }
 
+    /// The `Join` of `request` at the later edge of this node's mesh time, with a new
+    /// UUIDv7 key for each status name. The caller proposes it, or forwards it to the
+    /// leader. Each node checks the join when it applies it.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unsynced`] when this node has no mesh time, or when the later edge
+    ///   is before the Unix epoch, where a UUIDv7 key has no time.
+    /// - [`Error::Status`] when `request` names more than 64 status channels.
+    pub(crate) fn stamp(&self, request: Request) -> Result<Change, Error> {
+        let group = self.group.borrow();
+        let mesh = group.time.now().mesh.ok_or(Error::Unsynced)?;
+        let at = mesh.latest;
+        if at < Stamp::from_nanos(0) {
+            return Err(Error::Unsynced);
+        }
+        let key = |name| {
+            let mut random = [0; 16];
+            group.entropy.fill(&mut random);
+            (name, channel::Key::v7(at, u128::from_le_bytes(random)))
+        };
+        let keys = request.status.into_iter().map(key).collect();
+        Ok(Change::Join(Box::new(Join {
+            ticket: request.ticket,
+            at,
+            card: request.card,
+            admission: request.admission,
+            status: Status::new(keys).map_err(Error::Status)?,
+        })))
+    }
+
     /// Waits for the next message for the member `to`. Each message is signed, and
     /// what it relies on is on disk. A message that 64 newer ones follow is
     /// dropped: `raft` sends again. One task at a time waits for one member.
@@ -371,6 +408,8 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
+    time: clock::Reader,
+    entropy: Entropy,
 }
 
 impl Group {
@@ -608,12 +647,12 @@ mod tests {
     use sim::{Crash, Sim, link};
     use transport::Address;
     use types::node::SealKey;
-    use types::time::Stamp;
 
     use super::*;
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
-    use crate::region::{Join, Unfit, Unknown};
+    use crate::region::{Unfit, Unknown};
+    use crate::status::Many;
     use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -640,6 +679,12 @@ mod tests {
         answers: BTreeMap<u8, Message>,
         /// The members from 1 to 9 on each node, when its watch last gave a home.
         members: BTreeMap<u8, BTreeSet<u8>>,
+        /// The records of those members on each node, at the same time.
+        records: BTreeMap<u8, BTreeMap<u8, Member>>,
+        /// The join request that each node stamps.
+        requests: BTreeMap<u8, Request>,
+        /// The join that each node stamped.
+        stamped: BTreeMap<u8, Change>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -673,10 +718,24 @@ mod tests {
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
             clock: node.clock(),
+            time: synced(node),
             entropy: node.entropy(),
             tasks: tasks.clone(),
             pool: create_pool(),
         }
+    }
+
+    /// The wall time at the start of each run: 2026-01-01T00:00:00Z.
+    const NOW: Stamp = Stamp::from_nanos(1_767_225_600 * 1_000_000_000);
+
+    /// A reader of mesh time on `node` that follows the node's wall clock.
+    #[expect(clippy::disallowed_methods, reason = "feeds the mesh clock of a test")]
+    fn synced(node: &sim::node::Node) -> clock::Reader {
+        let (mut clock, reader) = clock::Clock::new(node.clock());
+        let source = clock.add();
+        let wall = clock::source::Wall::new(node.wall(), node.clock());
+        clock.push(source, wall.measure());
+        reader
     }
 
     async fn open(
@@ -793,6 +852,19 @@ mod tests {
             };
             let answer = mesh.answer(public(from), change).await.unwrap();
             board.lock().unwrap().answers.insert(id, answer);
+        }
+    }
+
+    /// Stamps the join request of node `id`, and puts the join on the board.
+    async fn stamp(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let request = board.lock().unwrap().requests.remove(&id);
+            let Some(request) = request else {
+                continue;
+            };
+            let join = mesh.stamp(request).unwrap();
+            board.lock().unwrap().stamped.insert(id, join);
         }
     }
 
@@ -913,13 +985,21 @@ mod tests {
         tasks.spawn(async move {
             answer(answering, clock, id, forwards).await;
         });
+        let (stamping, clock, requests) =
+            (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            stamp(stamping, clock, id, requests).await;
+        });
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();
-            let members = (1..10).filter(|&of| mesh.member(key(of)).is_some());
+            let records: BTreeMap<_, _> = (1..10)
+                .filter_map(|of| Some((of, mesh.member(key(of))?)))
+                .collect();
             let mut board = board.lock().unwrap();
             board.homes.entry(id).or_default().push(home);
-            board.members.insert(id, members.collect());
+            board.members.insert(id, records.keys().copied().collect());
+            board.records.insert(id, records);
         }
     }
 
@@ -2103,34 +2183,60 @@ mod tests {
         });
     }
 
-    /// Ticket 7, which admits `plant.*` any number of times.
-    fn ticket() -> Change {
+    /// Ticket `id`, which admits `plant.*` until `expiry`, any number of times when
+    /// `reusable`.
+    fn ticket_of(id: u8, prefix: &str, reusable: bool, expiry: Stamp) -> Change {
         let options = Options {
-            prefix: "plant".parse().unwrap(),
-            reusable: true,
-            expiry: Stamp::from_nanos(1),
+            prefix: prefix.parse().unwrap(),
+            reusable,
+            expiry,
             ephemeral: None,
         };
         Change::Ticket {
-            public_key: public(7),
+            public_key: public(id),
             options,
         }
     }
 
-    /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
-    fn join(id: u8) -> Change {
-        let card = common::member(id).card;
+    /// Ticket 7, which admits `plant.*` any number of times.
+    fn ticket() -> Change {
+        ticket_of(7, "plant", true, Stamp::from_nanos(1))
+    }
+
+    fn unchecked(card: &card::Signed) -> card::Unchecked {
+        card::Unchecked {
+            key: card.key(),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        }
+    }
+
+    /// The join at `at` of the node of `card`, which ticket `ticket` admits.
+    fn join_with(card: &card::Signed, ticket: u8, at: Stamp) -> Change {
         Change::Join(Box::new(Join {
-            ticket: public(7),
-            at: Stamp::from_nanos(0),
-            card: card::Unchecked {
-                key: key(id),
-                card: card.card().clone(),
-                signature: *card.signature(),
-            },
-            admission: common::ticket(7).admission(&card),
+            ticket: public(ticket),
+            at,
+            card: unchecked(card),
+            admission: common::ticket(ticket).admission(card),
             status: common::status([]),
         }))
+    }
+
+    /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
+    fn join(id: u8) -> Change {
+        join_with(&common::member(id).card, 7, Stamp::from_nanos(0))
+    }
+
+    /// The request of node `id` as `plant.node<id>`, which ticket `ticket` admits, with
+    /// the status channels `status`.
+    fn request(id: u8, ticket: u8, status: &[&str]) -> Request {
+        let card = common::member(id).card;
+        Request {
+            ticket: public(ticket),
+            card: unchecked(&card),
+            admission: common::ticket(ticket).admission(&card),
+            status: status.iter().map(|name| name.parse().unwrap()).collect(),
+        }
     }
 
     fn encoded(change: &Change) -> Vec<u8> {
@@ -2181,6 +2287,239 @@ mod tests {
             assert_eq!(mesh.member(key(3)), None);
             let admitted = mesh.member(key(4)).map(|member| member.card);
             assert_eq!(admitted, Some(common::member(4).card));
+        });
+    }
+
+    /// The leader of the cluster after its first change commits, and a follower.
+    fn roles(cluster: &Cluster) -> (u8, u8) {
+        let led = cluster.board.lock().unwrap().led.clone();
+        let &[leader] = led.as_slice() else {
+            panic!("the group took a proposal from each of {led:?}");
+        };
+        (leader, IDS.into_iter().find(|&id| id != leader).unwrap())
+    }
+
+    // A follower that gets no answer forwards the join again, so the leader applies it
+    // twice: the second is refused before the ticket counts a use.
+    #[test]
+    fn a_join_that_a_follower_stamps_admits_the_node_on_every_member() {
+        let hour = NOW + Span::HOUR;
+        let mut cluster = Cluster::new(2);
+        cluster.script_each(&[encoded(&ticket_of(8, "plant", false, hour))]);
+        cluster.start();
+        cluster.run(seconds(5));
+        let (leader, follower) = roles(&cluster);
+        let names = ["clock.error", "clock.offset"];
+        let request = request(4, 8, &names);
+        cluster
+            .board
+            .lock()
+            .unwrap()
+            .requests
+            .insert(follower, request);
+        cluster.run(seconds(1));
+        let join = cluster
+            .board
+            .lock()
+            .unwrap()
+            .stamped
+            .remove(&follower)
+            .unwrap();
+        for _ in 0..2 {
+            let forward = (follower, join.clone());
+            cluster
+                .board
+                .lock()
+                .unwrap()
+                .forwards
+                .insert(leader, forward);
+            cluster.run(seconds(1));
+            let answer = cluster.board.lock().unwrap().answers.remove(&leader);
+            assert!(
+                matches!(answer, Some(Message::Proposed { .. })),
+                "{answer:?}"
+            );
+        }
+        cluster.script(home);
+        cluster.run(seconds(2));
+        let Change::Join(join) = join else {
+            panic!("{join:?} is not a join")
+        };
+        let given: Vec<_> = join.status.as_map().keys().map(Name::as_str).collect();
+        assert_eq!(given, names);
+        let admitted = Member {
+            status: join.status,
+            admission: join.admission,
+            ..common::member(4)
+        };
+        for (id, records) in cluster.board().records {
+            assert_eq!(records.get(&4), Some(&admitted), "node {id}");
+        }
+    }
+
+    #[test]
+    fn each_refused_join_changes_nothing_on_every_member() {
+        let hour = NOW + Span::HOUR;
+        let card = |id| common::member(id).card;
+        let mut forged = join_with(&card(4), 7, NOW);
+        if let Change::Join(join) = &mut forged {
+            join.admission = common::ticket(6).admission(&card(4));
+        }
+        let changes = [
+            ticket_of(7, "plant", true, hour),
+            ticket_of(8, "plant", false, hour),
+            ticket_of(9, "plant", true, NOW),
+            ticket_of(10, "plant.line", true, hour),
+            join_with(&card(4), 6, NOW),
+            forged,
+            join_with(&card(4), 9, NOW),
+            join_with(&card(4), 10, NOW),
+            join_with(&card(5), 8, NOW),
+            join_with(&card(6), 8, NOW),
+            home(1),
+        ];
+        let mut cluster = Cluster::new(4);
+        cluster.script_each(&changes.each_ref().map(encoded));
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        assert_eq!(board.led, vec![board.led[0]; changes.len()]);
+        assert_eq!(board.homes, each(&[None, Some(key(1))]));
+        let members = IDS.map(|id| (id, [1, 2, 3, 5].into())).into();
+        assert_eq!(board.members, members);
+    }
+
+    #[test]
+    fn a_join_for_a_voter_changes_neither_its_record_nor_the_votes() {
+        let other = common::signed(2, "plant.other");
+        let changes = [
+            encoded(&ticket()),
+            encoded(&join_with(&other, 7, Stamp::from_nanos(0))),
+            encoded(&home(1)),
+        ];
+        let mut cluster = Cluster::new(5);
+        cluster.script_each(&changes);
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        assert_eq!(board.homes, each(&[None, Some(key(1))]));
+        for (id, records) in board.records {
+            assert_eq!(records.get(&2), Some(&common::member(2)), "node {id}");
+        }
+        cluster.script(|_| home(2));
+        cluster.run(seconds(5));
+        let (led, homes) = cluster.take();
+        assert_eq!(led.len(), 1, "the group took {led:?}");
+        assert_eq!(homes, each(&[Some(key(2))]));
+    }
+
+    // A stamp at the midpoint would admit a join with a ticket whose expiry is inside
+    // the interval.
+    #[test]
+    fn a_join_is_stamped_at_the_later_edge_of_mesh_time() {
+        solo(|node, tasks| async move {
+            let time = synced(&node);
+            let config = Config {
+                time: time.clone(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let interval = time.now().mesh.unwrap();
+            let names = ["clock.error", "clock.offset"];
+            let late = mesh.stamp(request(4, 8, &names)).unwrap();
+            let early = mesh.stamp(request(5, 9, &[])).unwrap();
+            let Change::Join(join) = &late else {
+                panic!("{late:?} is not a join")
+            };
+            let at = join.at;
+            assert_eq!(at, interval.latest);
+            assert!(interval.earliest < at - Span::from_nanos(1));
+            let millis = u128::try_from(at.nanos() / 1_000_000).unwrap();
+            for key in join.status.as_map().values() {
+                assert_eq!(key.as_u128() >> 80, millis, "{key:?}");
+            }
+            let keys: BTreeSet<_> = join.status.as_map().values().collect();
+            assert_eq!(keys.len(), names.len());
+            let inside = at - Span::from_nanos(1);
+            let after = at + Span::from_nanos(1);
+            mesh.propose(ticket_of(8, "plant", true, inside))
+                .await
+                .unwrap();
+            mesh.propose(ticket_of(9, "plant", true, after))
+                .await
+                .unwrap();
+            mesh.propose(late).await.unwrap();
+            mesh.propose(early).await.unwrap();
+            mesh.propose(home(2)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(2))));
+            assert_eq!(mesh.member(key(4)), None);
+            assert!(mesh.member(key(5)).is_some());
+        });
+    }
+
+    #[test]
+    fn a_node_with_no_mesh_time_after_the_epoch_stamps_no_join() {
+        for synced_before in [false, true] {
+            solo(move |node, tasks| async move {
+                let time = if synced_before {
+                    node.step_wall(Span::from_nanos(-2 * NOW.nanos()));
+                    synced(&node)
+                } else {
+                    clock::Clock::new(node.clock()).1
+                };
+                let config = Config {
+                    time,
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::open(config).await.unwrap();
+                let stamped = mesh.stamp(request(4, 8, &[]));
+                assert_eq!(stamped, Err(Error::Unsynced), "{synced_before}");
+            });
+        }
+        let text =
+            "this node has no mesh time after the Unix epoch, so it stamps no join";
+        assert_eq!(Error::Unsynced.to_string(), text);
+    }
+
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "feeds the mesh clock of a test")]
+    fn a_node_at_the_unix_epoch_stamps_a_join() {
+        solo(|node, tasks| async move {
+            let (mut clock, time) = clock::Clock::new(node.clock());
+            let config = Config {
+                time,
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            node.step_wall(Span::from_nanos(-node.wall().now().time.nanos()));
+            node.set_wall_error(Some(Span::from_nanos(0)));
+            let source = clock.add();
+            let wall = clock::source::Wall::new(node.wall(), node.clock());
+            clock.push(source, wall.measure());
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
+            let Change::Join(join) = stamped else {
+                panic!("{stamped:?} is not a join")
+            };
+            assert_eq!(join.at, Stamp::from_nanos(0));
+        });
+    }
+
+    #[test]
+    fn a_join_request_with_65_status_names_is_refused() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let names: Vec<_> = (0..65).map(|i| format!("s{i:02}")).collect();
+            let names: Vec<_> = names.iter().map(String::as_str).collect();
+            let refused = mesh.stamp(request(4, 8, &names));
+            let many = Error::Status(Many { count: 65 });
+            assert_eq!(refused, Err(many.clone()));
+            assert_eq!(many.to_string(), "65 status entries, more than 64");
+            let names = &names[..64];
+            mesh.stamp(request(4, 8, names)).unwrap();
         });
     }
 

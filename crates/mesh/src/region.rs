@@ -235,6 +235,19 @@ pub(crate) struct Join {
     pub(crate) status: Status,
 }
 
+/// What a node that joins gives the voter that admits it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Request {
+    /// The public key of the ticket that admits the node.
+    pub(crate) ticket: PublicKey,
+    /// The node's first card, signed by the node.
+    pub(crate) card: card::Unchecked,
+    /// The ticket's signature over the card.
+    pub(crate) admission: [u8; 64],
+    /// The names of the node's status channels, under the node's name.
+    pub(crate) status: BTreeSet<Name>,
+}
+
 const HOME: u8 = 1;
 const JOIN: u8 = 2;
 const TICKET: u8 = 3;

@@ -4,7 +4,7 @@ use raft::Position;
 use types::node::{self, PublicKey};
 
 use crate::region::{Unfit, Unknown};
-use crate::{grant, log};
+use crate::{grant, log, status};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +38,10 @@ pub(crate) enum Error {
     Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
+    /// This node has no mesh time after the Unix epoch, so it stamps no join.
+    Unsynced,
+    /// A join request names more than 64 status channels.
+    Status(status::Many),
     /// The group stopped.
     Stopped(Stopped),
 }
@@ -68,6 +72,10 @@ impl fmt::Display for Error {
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
+            Self::Unsynced => f.write_str(
+                "this node has no mesh time after the Unix epoch, so it stamps no join",
+            ),
+            Self::Status(many) => many.fmt(f),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
         }
     }

@@ -1854,7 +1854,9 @@ How to read this record:
   caller, and the check of a home at apply on each node is #1273. A forwarded change
   applies at least one time: a member that got no answer forwards it again, and the
   leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
-  state of a call that took effect last. A later `Change` kind that is not safe to
+  state of a call that took effect last. `Change::Join` is safe to repeat: every node
+  refuses the second apply as a duplicate (`Unfit::Duplicate`) before the ticket counts
+  a use. A later `Change` kind that is not safe to
   repeat needs a ruling before a member forwards it (decided by the architect,
   2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
@@ -1992,8 +1994,15 @@ How to read this record:
   one `Join` change. Every node that applies it checks the card, and the admission
   against the ticket's public key, scope, uses, and expiry at the change's mesh time
   (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a join
-  answers with the founding voters and their cards, and the node opens with them as
-  `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
+  stamps the `Join` with the later edge of its mesh time interval, so clock error never
+  admits an expired ticket, and every node checks the expiry against the same stamp at
+  every replay. A voter with no mesh time after the Unix epoch stamps no join
+  (`Error::Unsynced`). That voter makes each status key (UUIDv7, X27) from the stamp
+  and its entropy, and the byte form refuses a name twice. Decided by
+  `laptop.architect` (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The
+  voter that admits a join answers with the founding voters and their cards, and the
+  node opens with them as `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
   cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
   and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
   rotation that only the node signs lets a stolen key lock the node out. Lost: a record
