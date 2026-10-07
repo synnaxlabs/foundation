@@ -2037,6 +2037,13 @@ How to read this record:
 - **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
+- **R16-10 (#340)** One exception to one path per item (r16 2): `hub` re-exports each
+  item of another layer-2 crate that its public surface names, at the same path under
+  a module named for that crate (`hub::home::Error` for `home::Error`). Layer 3 names
+  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
+  re-exports, and only items its own signatures use. Layer 2 and `node` name the item
+  at its home. Copies of the types lost: each change in `home` needs a change in
+  `hub`. Decided by the architect (#340).
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
