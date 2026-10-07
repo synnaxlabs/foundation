@@ -2044,6 +2044,52 @@ mod tests {
         });
     }
 
+    /// Fifteen streams each send a message of 16 bytes, one byte of each stream in
+    /// each datagram. The pool gives no block until the messages are whole.
+    #[test]
+    fn a_read_leaves_no_view_of_a_chunk_and_one_buffer_of_the_message() {
+        const STREAMS: usize = 15;
+        const LEN: u8 = 16;
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let start = [byte(Class::Complete), LEN];
+            let connection = pair.client.connection();
+            let ids: Vec<_> = (0..STREAMS)
+                .map(|_| raw(connection, Dir::Uni, &start, false))
+                .collect();
+            pair.run(RUN);
+            let mut receivers: Vec<_> = (0..STREAMS)
+                .map(|_| accept(&mut pair.server).receiver)
+                .collect();
+            pair.server.kept = Some(Vec::new());
+            for have in 1..=LEN {
+                for &id in &ids {
+                    let mut send = pair.client.connection().send_stream(id);
+                    assert_eq!(send.write(&[have]), Ok(1));
+                }
+                pair.run(RUN);
+                let kept = pair.server.kept.replace(Vec::new()).expect("kept");
+                // Else noq or the endpoint copied the bytes, and the test is vacuous.
+                assert!(!kept.iter().all(Bytes::is_unique));
+                let now = pair.now();
+                for receiver in &mut receivers {
+                    let read = pair.server.endpoint.read(now, receiver, |_, _| None);
+                    assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+                    let len = usize::from(LEN);
+                    let held = (vec![(usize::from(have), len)], 0);
+                    assert_eq!(receiver.reader.held(), held);
+                }
+                assert!(kept.iter().all(Bytes::is_unique));
+            }
+            let now = pair.now();
+            for receiver in &mut receivers {
+                let read = next(&mut pair.server, now, receiver);
+                assert_eq!(read, Ok(Poll::Ready(Some((1..=LEN).collect()))));
+                assert_eq!(receiver.reader.held(), (vec![], 0));
+            }
+        });
+    }
+
     #[test]
     fn a_whole_message_that_finds_the_pool_full_keeps_its_room() {
         testing::run(1, |shard| {

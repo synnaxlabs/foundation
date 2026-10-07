@@ -208,6 +208,18 @@ impl Reader {
     }
 }
 
+#[cfg(test)]
+impl Reader {
+    /// The length and capacity of each buffer that holds bytes across reads, and
+    /// the count of chunks held.
+    pub(crate) fn held(&self) -> (Vec<(usize, usize)>, usize) {
+        let buffer = &self.held.buffer;
+        let buffers =
+            (buffer.capacity() > 0).then(|| (buffer.len(), buffer.capacity()));
+        (buffers.into_iter().collect(), self.held.chunks.len())
+    }
+}
+
 impl Held {
     /// Holds `chunk`, the next bytes of a message of `len` bytes.
     fn push(&mut self, len: usize, chunk: Bytes) {
