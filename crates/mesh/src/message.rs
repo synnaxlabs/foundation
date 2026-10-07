@@ -7,8 +7,8 @@ use raft::{Answer, Body, Position, Term};
 use types::node;
 
 use crate::bytes::{
-    put_key, put_optional_proof, put_position, put_signature, take, take_key,
-    take_position, take_present, take_proof, take_signature,
+    put_key, put_optional_proof, put_position, put_signature, take, take_bool,
+    take_key, take_position, take_proof, take_signature,
 };
 use crate::entry;
 use crate::region::Change;
@@ -105,7 +105,7 @@ impl Message {
                 let from = take_key(bytes)?;
                 let to = take_key(bytes)?;
                 let term = Term(u64::from_le_bytes(take(bytes)?));
-                let proof = if take_present(bytes)? {
+                let proof = if take_bool(bytes)? {
                     Some(take_proof(bytes)?)
                 } else {
                     None

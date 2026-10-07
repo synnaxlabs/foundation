@@ -3,14 +3,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use types::channel;
 use types::name::Name;
 use types::node::{self, PublicKey};
 use types::time::Stamp;
-use types::{channel, time};
 
 use crate::bytes::{
-    put_channel, put_key, put_name, put_optional_span, put_status, take, take_channel,
-    take_key, take_name, take_optional_span, take_present, take_status,
+    put_channel, put_key, put_public_key, put_stamp, put_status, take, take_channel,
+    take_key, take_public_key, take_stamp, take_status,
 };
 use crate::card;
 use crate::member::Member;
@@ -226,8 +226,8 @@ impl Change {
             }
             Self::Join(join) => {
                 out.push(JOIN);
-                out.extend(join.ticket.to_bytes());
-                out.extend(join.at.nanos().to_le_bytes());
+                put_public_key(join.ticket, out);
+                put_stamp(join.at, out);
                 join.card.encode(out);
                 out.extend(join.admission);
                 put_status(&join.status, out);
@@ -237,11 +237,8 @@ impl Change {
                 options,
             } => {
                 out.push(TICKET);
-                out.extend(public_key.to_bytes());
-                put_name(&options.prefix, out);
-                out.push(u8::from(options.reusable));
-                out.extend(options.expiry.nanos().to_le_bytes());
-                put_optional_span(options.ephemeral, out);
+                put_public_key(*public_key, out);
+                options.encode(out);
             }
         }
     }
@@ -277,7 +274,7 @@ fn take_home(bytes: &mut &[u8]) -> Option<Change> {
 
 fn take_join(bytes: &mut &[u8]) -> Option<Change> {
     Some(Change::Join(Box::new(Join {
-        ticket: PublicKey::new(take(bytes)?).ok()?,
+        ticket: take_public_key(bytes)?,
         at: take_stamp(bytes)?,
         card: card::Unchecked::decode(bytes)?,
         admission: take(bytes)?,
@@ -286,21 +283,10 @@ fn take_join(bytes: &mut &[u8]) -> Option<Change> {
 }
 
 fn take_ticket(bytes: &mut &[u8]) -> Option<Change> {
-    let public_key = PublicKey::new(take(bytes)?).ok()?;
-    let options = Options {
-        prefix: take_name(bytes)?,
-        reusable: take_present(bytes)?,
-        expiry: take_stamp(bytes)?,
-        ephemeral: take_optional_span(bytes)?,
-    };
     Some(Change::Ticket {
-        public_key,
-        options,
+        public_key: take_public_key(bytes)?,
+        options: Options::decode(bytes)?,
     })
-}
-
-fn take_stamp(bytes: &mut &[u8]) -> Option<Stamp> {
-    take(bytes).map(|nanos| time::Stamp::from_nanos(i64::from_le_bytes(nanos)))
 }
 
 /// Bytes that are not a change record.

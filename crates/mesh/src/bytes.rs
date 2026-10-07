@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use raft::{Grant, Position, Proof, Signature, Term};
 use types::channel;
 use types::name::Name;
-use types::node;
-use types::time::Span;
+use types::node::{self, PublicKey};
+use types::time::{Span, Stamp};
 
 /// Takes `N` bytes.
 pub(crate) fn take<const N: usize>(bytes: &mut &[u8]) -> Option<[u8; N]> {
@@ -54,6 +54,31 @@ pub(crate) fn take_name(bytes: &mut &[u8]) -> Option<Name> {
     std::str::from_utf8(name).ok()?.parse().ok()
 }
 
+/// Adds a public key's 32 bytes.
+pub(crate) fn put_public_key(public_key: PublicKey, out: &mut Vec<u8>) {
+    out.extend(public_key.to_bytes());
+}
+
+/// Takes a public key. `None` when the bytes are not a valid key.
+pub(crate) fn take_public_key(bytes: &mut &[u8]) -> Option<PublicKey> {
+    PublicKey::new(take(bytes)?).ok()
+}
+
+/// Adds a mesh time in nanoseconds as 8 little-endian bytes, signed.
+pub(crate) fn put_stamp(stamp: Stamp, out: &mut Vec<u8>) {
+    out.extend(stamp.nanos().to_le_bytes());
+}
+
+/// Takes a mesh time.
+pub(crate) fn take_stamp(bytes: &mut &[u8]) -> Option<Stamp> {
+    take(bytes).map(|nanos| Stamp::from_nanos(i64::from_le_bytes(nanos)))
+}
+
+/// Adds a flag as one byte: 0 or 1.
+pub(crate) fn put_bool(flag: bool, out: &mut Vec<u8>) {
+    out.push(u8::from(flag));
+}
+
 /// Adds a presence byte, then the span in nanoseconds when there is one.
 pub(crate) fn put_optional_span(span: Option<Span>, out: &mut Vec<u8>) {
     match span {
@@ -71,7 +96,7 @@ pub(crate) fn put_optional_span(span: Option<Span>, out: &mut Vec<u8>) {
     reason = "the outer `None` is bytes not in the form, as for each `take_*`"
 )]
 pub(crate) fn take_optional_span(bytes: &mut &[u8]) -> Option<Option<Span>> {
-    if !take_present(bytes)? {
+    if !take_bool(bytes)? {
         return Some(None);
     }
     Some(Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?))))
@@ -223,8 +248,9 @@ pub(crate) fn put_optional_proof(proof: Option<&Proof>, out: &mut Vec<u8>) {
     }
 }
 
-/// Takes a presence byte. `None` for a byte that is neither value.
-pub(crate) fn take_present(bytes: &mut &[u8]) -> Option<bool> {
+/// Takes what [`put_bool`] gives, or a presence byte. `None` for a byte that is
+/// neither 0 nor 1.
+pub(crate) fn take_bool(bytes: &mut &[u8]) -> Option<bool> {
     match u8::from_le_bytes(take(bytes)?) {
         ABSENT => Some(false),
         PRESENT => Some(true),

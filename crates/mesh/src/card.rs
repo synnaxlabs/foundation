@@ -5,7 +5,9 @@ use std::fmt;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
-use crate::bytes::{put_key, put_name, take, take_key, take_name};
+use crate::bytes::{
+    put_key, put_name, put_public_key, take, take_key, take_name, take_public_key,
+};
 use crate::ed25519;
 
 pub mod addresses;
@@ -33,7 +35,7 @@ impl Card {
     /// address, then the version as 8 little-endian bytes.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         put_name(&self.name, out);
-        out.extend(self.public_key.to_bytes());
+        put_public_key(self.public_key, out);
         out.extend(self.seal_key.to_bytes());
         self.addresses.encode(out);
         out.extend(self.version.to_le_bytes());
@@ -49,7 +51,7 @@ impl Card {
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let name = take_name(bytes)?;
-        let public_key = PublicKey::new(take(bytes)?).ok()?;
+        let public_key = take_public_key(bytes)?;
         let seal_key = SealKey::new(take(bytes)?).ok()?;
         let addresses = addresses::Addresses::decode(bytes)?;
         let version = u64::from_le_bytes(take(bytes)?);

@@ -4,7 +4,6 @@ use std::fmt;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use transport::Address;
-use types::node::PublicKey;
 
 use crate::bytes;
 
@@ -134,7 +133,7 @@ fn put(address: Address, out: &mut Vec<u8>) {
         }
         Address::Relay { node, at } => {
             out.push(RELAY);
-            out.extend(node.to_bytes());
+            bytes::put_public_key(node, out);
             put_socket(at, out);
         }
     }
@@ -146,7 +145,7 @@ fn take(bytes: &mut &[u8]) -> Option<Address> {
         UDP => Address::Udp(take_socket(bytes)?),
         TCP => Address::Tcp(take_socket(bytes)?),
         RELAY => Address::Relay {
-            node: PublicKey::new(bytes::take(bytes)?).ok()?,
+            node: bytes::take_public_key(bytes)?,
             at: take_socket(bytes)?,
         },
         _ => return None,

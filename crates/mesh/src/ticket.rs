@@ -6,6 +6,10 @@ use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
+use crate::bytes::{
+    put_bool, put_name, put_optional_span, put_stamp, take_bool, take_name,
+    take_optional_span, take_stamp,
+};
 use crate::card;
 use crate::ed25519;
 
@@ -23,6 +27,29 @@ pub struct Options {
     /// For an ephemeral node, the time offline after which the region removes it. The
     /// `Member` that the ticket admits takes this value.
     pub ephemeral: Option<Span>,
+}
+
+impl Options {
+    /// Adds the one byte form of the options to `out`: the prefix behind a length byte,
+    /// the reusable byte (0 or 1), the expiry in nanoseconds as 8 little-endian bytes,
+    /// and the ephemeral span behind a presence byte.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_name(&self.prefix, out);
+        put_bool(self.reusable, out);
+        put_stamp(self.expiry, out);
+        put_optional_span(self.ephemeral, out);
+    }
+
+    /// Takes what [`Options::encode`] gives from the start of `bytes`. `None` when the
+    /// bytes do not start with that form; `bytes` is then at no known place.
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        Some(Self {
+            prefix: take_name(bytes)?,
+            reusable: take_bool(bytes)?,
+            expiry: take_stamp(bytes)?,
+            ephemeral: take_optional_span(bytes)?,
+        })
+    }
 }
 
 /// A voter that a joining node dials first.
