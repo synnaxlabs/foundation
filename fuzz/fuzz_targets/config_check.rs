@@ -1,10 +1,10 @@
-//! `config::check` never panics on the documents of HCL files, gives the same result
-//! for the files in either order, and orders its problems as its doc says. Each `\x1e`
-//! in the input starts the next file, up to three.
+//! `config::check` never panics on the documents of HCL files, gives the same entries
+//! for the files in either order or problems in both, and orders its problems as its
+//! doc says. Each `\x1e` in the input starts the next file, up to three.
 
 #![no_main]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use document::diagnostic::Diagnostic;
 use document::{Document, Source};
@@ -21,6 +21,7 @@ fuzz_target!(|text: &str| {
         };
         documents.push(document);
     }
+    passing_files_pass_together(&documents);
     let result = config::check(&documents);
     let mut reversed = documents.clone();
     reversed.reverse();
@@ -40,6 +41,30 @@ fuzz_target!(|text: &str| {
         }
     }
 });
+
+/// Files that each pass alone, with keys that differ in more than case, pass together.
+fn passing_files_pass_together(documents: &[Document]) {
+    let mut passing = Vec::new();
+    let mut union = BTreeMap::new();
+    let mut keys = BTreeSet::new();
+    for document in documents {
+        let Ok(entries) = config::check(std::slice::from_ref(document)) else {
+            continue;
+        };
+        for (key, entry) in entries {
+            if !keys.insert(key.as_str().to_ascii_lowercase()) {
+                return;
+            }
+            union.insert(key, entry);
+        }
+        passing.push(document.clone());
+    }
+    assert_eq!(
+        config::check(&passing),
+        Ok(union),
+        "files that pass alone failed together"
+    );
+}
 
 /// Each block gives one entry, keyed `<label>.@<keyword>` and unique in any case, with
 /// a definition that the spec tree reads back.
