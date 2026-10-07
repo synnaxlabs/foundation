@@ -1589,7 +1589,7 @@ How to read this record:
   gives `TooLarge` and the group does not stop for it (decided by the architect,
   2026-10-07T06:32:47Z:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
-  `Refused` wait decided by the architect:
+  `Refused` wait decided by the architect, 2026-10-07T04:39:07Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
@@ -1601,7 +1601,7 @@ How to read this record:
   snapshots (#253). A watch does not keep the group running, and a dropped watch leaves
   no waker. `open` refuses a node or a voter that is not a member (`Error::NotMember`),
   and a private key that is not the key of this node's member (`Error::WrongKey`).
-  Proposed by box1.builder-3, decided by the architect (#471):
+  Proposed by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
