@@ -102,35 +102,6 @@ pub(crate) fn take_optional_span(bytes: &mut &[u8]) -> Option<Option<Span>> {
     Some(Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?))))
 }
 
-/// Adds a count of status entries, then each entry in name order: the name, then the
-/// channel key as 16 little-endian bytes.
-pub(crate) fn put_status(status: &BTreeMap<Name, channel::Key>, out: &mut Vec<u8>) {
-    put_count(status.len(), out);
-    for (name, &key) in status {
-        put_name(name, out);
-        put_channel(key, out);
-    }
-}
-
-/// The most status entries that a member or a `Join` holds. A node's status channels
-/// are a fixed set per release, and the cap leaves room for later releases.
-pub(crate) const MAX_STATUS: u64 = 64;
-
-/// Takes what [`put_status`] gives. `None` when the names are not in rising order, or
-/// when there are more than [`MAX_STATUS`] entries.
-pub(crate) fn take_status(bytes: &mut &[u8]) -> Option<BTreeMap<Name, channel::Key>> {
-    let mut count = *bytes;
-    if take_count(&mut count)? > MAX_STATUS {
-        return None;
-    }
-    let mut status = BTreeMap::new();
-    take_rising(bytes, take_name, |name, bytes| {
-        status.insert(name, take_channel(bytes)?);
-        Some(())
-    })?;
-    Some(status)
-}
-
 /// Adds a position as its term, then its index.
 pub(crate) fn put_position(at: Position, out: &mut Vec<u8>) {
     out.extend(at.term.0.to_le_bytes());

@@ -9,11 +9,12 @@ use types::node::{self, PublicKey};
 use types::time::Stamp;
 
 use crate::bytes::{
-    put_channel, put_key, put_public_key, put_stamp, put_status, take, take_channel,
-    take_key, take_public_key, take_stamp, take_status,
+    put_channel, put_key, put_public_key, put_stamp, take, take_channel, take_key,
+    take_public_key, take_stamp,
 };
 use crate::card;
 use crate::member::Member;
+use crate::status::Status;
 use crate::ticket::{self, Options, Record};
 
 /// The region state that this node holds: its members, its tickets, and the homes that
@@ -121,7 +122,7 @@ impl State {
     fn insert(&mut self, member: Member, names: Vec<String>) {
         let key = member.card.key();
         self.names.extend(names.into_iter().map(|name| (name, key)));
-        self.status.extend(member.status.values());
+        self.status.extend(member.status.as_map().values());
         self.members.insert(key, member);
     }
 
@@ -146,11 +147,8 @@ impl State {
 
     // The one check of a member against the region, at open and at each join. Gives
     // the member's names in ASCII lower case.
-    fn fits(
-        &self,
-        card: &card::Signed,
-        status: &BTreeMap<Name, channel::Key>,
-    ) -> Result<Vec<String>, Unfit> {
+    fn fits(&self, card: &card::Signed, status: &Status) -> Result<Vec<String>, Unfit> {
+        let status = status.as_map();
         let name = &card.card().name;
         if name.reserved() {
             return Err(Unfit::Reserved { name: name.clone() });
@@ -234,7 +232,7 @@ pub(crate) struct Join {
     /// The ticket's signature over the card.
     pub(crate) admission: [u8; 64],
     /// The node's status channel keys, by name under the node's name.
-    pub(crate) status: BTreeMap<Name, channel::Key>,
+    pub(crate) status: Status,
 }
 
 const HOME: u8 = 1;
@@ -265,7 +263,7 @@ impl Change {
                 put_stamp(join.at, out);
                 join.card.encode(out);
                 out.extend(join.admission);
-                put_status(&join.status, out);
+                join.status.encode(out);
             }
             Self::Ticket {
                 public_key,
@@ -313,7 +311,7 @@ fn take_join(bytes: &mut &[u8]) -> Option<Change> {
         at: take_stamp(bytes)?,
         card: card::Unchecked::decode(bytes)?,
         admission: take(bytes)?,
-        status: take_status(bytes)?,
+        status: Status::decode(bytes)?,
     })))
 }
 
@@ -529,7 +527,8 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{key as node, members, public, signed, ticket};
+    use crate::common::ticket;
+    use crate::common::{key as node, members, public, signed, status, status_bytes};
 
     const EXPIRY: Stamp = Stamp::from_nanos(1_000);
     const BEFORE_EXPIRY: Stamp = Stamp::from_nanos(999);
@@ -571,7 +570,7 @@ mod tests {
                 signature: *card.signature(),
             },
             admission: ticket(ticket_id).admission(&card),
-            status: BTreeMap::from([(name("disk"), index(9))]),
+            status: status([(name("disk"), index(9))]),
         }
     }
 
@@ -638,7 +637,7 @@ mod tests {
             })
         );
         let mut long = members(&[1, 2]);
-        long[1].status = BTreeMap::from([(long_status(256 - 12), index(1))]);
+        long[1].status = status([(long_status(256 - 12), index(1))]);
         assert_eq!(
             State::new(name("plant"), long).unwrap_err(),
             Unfit::Long {
@@ -695,7 +694,7 @@ mod tests {
             card: signed(3, "plant.edge.a"),
             admission,
             ephemeral: Some(EPHEMERAL),
-            status: BTreeMap::from([(name("disk"), index(9))]),
+            status: status([(name("disk"), index(9))]),
         };
         assert_eq!(state.member(node(3)), Some(&expected));
         assert_eq!(state.ticket(public(7)).map(|record| record.uses), Some(1));
@@ -790,7 +789,7 @@ mod tests {
         assert_eq!(state.apply(record(8, options("plant", true))), Ok(None));
         let before = state.clone();
         let mut reserved = join(8, 3, "plant");
-        reserved.status = BTreeMap::from([(name("@changes"), index(9))]);
+        reserved.status = status([(name("@changes"), index(9))]);
         assert_eq!(
             apply_join(&mut state, reserved),
             Err(Unfit::Reserved {
@@ -800,7 +799,7 @@ mod tests {
         );
         assert_eq!(state, before);
         let mut deep = join(8, 3, "plant");
-        deep.status = BTreeMap::from([(name("disk.@a"), index(9))]);
+        deep.status = status([(name("disk.@a"), index(9))]);
         assert_eq!(
             apply_join(&mut state, deep),
             Err(Unfit::Reserved {
@@ -834,7 +833,7 @@ mod tests {
         let before = state.clone();
         // `plant.edge.a.` is 13 bytes.
         let mut long = join(7, 3, "plant.edge.a");
-        long.status = BTreeMap::from([(long_status(256 - 13), index(9))]);
+        long.status = status([(long_status(256 - 13), index(9))]);
         assert_eq!(
             apply_join(&mut state, long),
             Err(Unfit::Long {
@@ -845,7 +844,7 @@ mod tests {
         );
         assert_eq!(state, before);
         let mut longest = join(7, 3, "plant.edge.a");
-        longest.status = BTreeMap::from([(long_status(255 - 13), index(9))]);
+        longest.status = status([(long_status(255 - 13), index(9))]);
         assert_eq!(apply_join(&mut state, longest), Ok(None));
     }
 
@@ -857,10 +856,8 @@ mod tests {
     }
 
     fn with_status(mut join: Join, status: &[(&str, u128)]) -> Join {
-        join.status = status
-            .iter()
-            .map(|&(text, key)| (name(text), index(key)))
-            .collect();
+        let map = status.iter().map(|&(text, key)| (name(text), index(key)));
+        join.status = Status::new(map.collect()).unwrap();
         join
     }
 
@@ -909,17 +906,19 @@ mod tests {
 
     #[test]
     fn a_join_with_more_than_64_status_entries_does_not_decode() {
-        let status: Vec<(String, u128)> =
-            (0..65).map(|i| (format!("s{i:02}"), i)).collect();
-        let status: Vec<(&str, u128)> = status
-            .iter()
-            .map(|(text, key)| (text.as_str(), *key))
-            .collect();
-        let most = with_status(join(7, 3, "plant.edge.a"), &status[..64]);
-        let most = Change::Join(Box::new(most));
-        assert_eq!(Change::decode(&encoded(&most)), Ok(most));
-        let over = with_status(join(7, 3, "plant.edge.a"), &status);
-        let bytes = encoded(&Change::Join(Box::new(over)));
+        let none = with_status(join(7, 3, "plant.edge.a"), &[]);
+        let mut bytes = encoded(&Change::Join(Box::new(none)));
+        let empty = bytes.len() - 8;
+        bytes.truncate(empty);
+        bytes.extend(status_bytes(64));
+        let most = Change::decode(&bytes);
+        let entries = most.map(|change| match change {
+            Change::Join(join) => join.status.as_map().len(),
+            _ => unreachable!(),
+        });
+        assert_eq!(entries, Ok(64));
+        bytes.truncate(empty);
+        bytes.extend(status_bytes(65));
         let length = bytes.len();
         assert_eq!(
             Change::decode(&bytes),
@@ -1004,8 +1003,8 @@ mod tests {
             })
         );
         let mut reused = members(&[1, 2]);
-        reused[0].status = BTreeMap::from([(name("disk"), index(20))]);
-        reused[1].status = BTreeMap::from([(name("disk"), index(20))]);
+        reused[0].status = status([(name("disk"), index(20))]);
+        reused[1].status = status([(name("disk"), index(20))]);
         assert_eq!(
             State::new(name("plant"), reused),
             Err(Unfit::Reused { key: index(20) })
@@ -1019,12 +1018,10 @@ mod tests {
         let mut forged = join(7, 1, "plant.@a");
         forged.card.signature[0] ^= 1;
         let mut outside = join(7, 1, "plants.edge.a");
-        outside.status = BTreeMap::from([(long_status(256 - 14), index(9))]);
+        outside.status = status([(long_status(256 - 14), index(9))]);
         let mut long = join(7, 1, "plant.edge.a");
-        long.status = BTreeMap::from([
-            (long_status(256 - 13), index(9)),
-            (name("t.@a"), index(10)),
-        ]);
+        long.status =
+            status([(long_status(256 - 13), index(9)), (name("t.@a"), index(10))]);
         let cases = [
             (forged, Refused::Forged(card::Forged { node: node(1) })),
             (
@@ -1267,14 +1264,15 @@ mod tests {
         assert_eq!(Change::decode(&encoded(&change)), Ok(change));
     }
 
-    fn status() -> impl Strategy<Value = BTreeMap<Name, channel::Key>> {
+    fn statuses() -> impl Strategy<Value = Status> {
         let name = "[a-z]{1,6}(\\.[a-z]{1,6})?".prop_map(|text| name(&text));
         prop::collection::btree_map(name, any::<u128>().prop_map(index), 0..4)
+            .prop_map(|map| Status::new(map).unwrap())
     }
 
     fn changes() -> impl Strategy<Value = Change> {
         let homes = (any::<u128>(), any::<u128>()).prop_map(|(i, h)| home(i, h));
-        let joins = (any::<u8>(), any::<u8>(), any::<i64>(), status()).prop_map(
+        let joins = (any::<u8>(), any::<u8>(), any::<i64>(), statuses()).prop_map(
             |(ticket_id, id, at, status)| {
                 Change::Join(Box::new(Join {
                     at: Stamp::from_nanos(at),

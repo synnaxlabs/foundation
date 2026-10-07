@@ -1,16 +1,11 @@
 //! The region's record of one node.
 
-use std::collections::BTreeMap;
-
-use types::channel;
-use types::name::Name;
 use types::node::PublicKey;
 use types::time::Span;
 
-use crate::bytes::{
-    put_optional_span, put_status, take, take_optional_span, take_status,
-};
+use crate::bytes::{put_optional_span, take, take_optional_span};
 use crate::card;
+use crate::status::Status;
 
 /// The region's record of one node. Its key is `card.key()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,7 +19,7 @@ pub struct Member {
     /// The node's status channel keys, by name under the node's name: `clock.offset`
     /// is `<card.name>.clock.offset` (X27). A status name keeps its meaning and data
     /// type in every release; a change takes a new name.
-    pub status: BTreeMap<Name, channel::Key>,
+    pub status: Status,
 }
 
 impl Member {
@@ -45,7 +40,7 @@ impl Member {
         self.card.encode(out);
         out.extend(self.admission);
         put_optional_span(self.ephemeral, out);
-        put_status(&self.status, out);
+        self.status.encode(out);
     }
 
     /// Takes one record from the start of `bytes`. `None` when the bytes do not start
@@ -59,7 +54,7 @@ impl Member {
         let card = card::Signed::decode(bytes)?;
         let admission = take(bytes)?;
         let ephemeral = take_optional_span(bytes)?;
-        let status = take_status(bytes)?;
+        let status = Status::decode(bytes)?;
         Some(Self {
             card,
             admission,
@@ -71,16 +66,20 @@ impl Member {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use proptest::prelude::*;
+    use types::channel;
 
     use super::*;
     use crate::bytes::{put_count, put_name};
     use crate::common::{key, member};
 
-    fn status() -> impl Strategy<Value = BTreeMap<Name, channel::Key>> {
+    fn status() -> impl Strategy<Value = Status> {
         let name = "[a-z]{1,6}(\\.[a-z]{1,6})?".prop_map(|name| name.parse().unwrap());
         let key = any::<u128>().prop_map(channel::Key::from_u128);
         prop::collection::btree_map(name, key, 0..6)
+            .prop_map(|map| Status::new(map).unwrap())
     }
 
     fn admission() -> impl Strategy<Value = [u8; 64]> {
@@ -128,7 +127,7 @@ mod tests {
         Member {
             admission: [5; 64],
             ephemeral: Some(Span::from_nanos(-2)),
-            status,
+            status: Status::new(status).unwrap(),
             ..member(3)
         }
     }
@@ -184,7 +183,7 @@ mod tests {
     fn a_member_that_is_not_ephemeral_has_an_absent_byte() {
         let member = Member {
             ephemeral: None,
-            status: BTreeMap::new(),
+            status: Status::new(BTreeMap::new()).unwrap(),
             ..with_status(&[])
         };
         assert_eq!(encoded(&member), entries(&[]));
@@ -203,7 +202,7 @@ mod tests {
         let names: Vec<String> = (0..65).map(|i| format!("s{i:02}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         assert_eq!(
-            decoded(&entries(&names[..64])).map(|m| m.status.len()),
+            decoded(&entries(&names[..64])).map(|m| m.status.as_map().len()),
             Some(64)
         );
         assert_eq!(decoded(&entries(&names)), None);

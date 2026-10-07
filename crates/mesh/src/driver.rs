@@ -207,10 +207,15 @@ impl Mesh {
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead.
     pub(crate) fn propose(&self, change: &Change) -> Result<Position, Error> {
-        let mut group = self.group.borrow_mut();
-        group.running()?;
         let mut data = Vec::new();
         change.encode(&mut data);
+        self.propose_data(data)
+    }
+
+    // Proposes `data` as it is, which need not be a change.
+    fn propose_data(&self, data: Vec<u8>) -> Result<Position, Error> {
+        let mut group = self.group.borrow_mut();
+        group.running()?;
         let at = group.raft.propose(data)?;
         group.wake();
         Ok(at)
@@ -517,9 +522,9 @@ mod tests {
         homes: Homes,
         /// The node of each proposal that the group took, in order.
         led: Vec<u8>,
-        /// The changes that each node proposes in order, each until the group takes
-        /// it.
-        script: BTreeMap<u8, VecDeque<Change>>,
+        /// The byte forms of the changes that each node proposes in order, each until
+        /// the group takes it.
+        script: BTreeMap<u8, VecDeque<Vec<u8>>>,
         /// The members from 1 to 9 on each node, when its watch last gave a home.
         members: BTreeMap<u8, BTreeSet<u8>>,
     }
@@ -643,12 +648,12 @@ mod tests {
         loop {
             clock.sleep(TICK).await;
             let mut board = board.lock().unwrap();
-            let Some(change) =
+            let Some(data) =
                 board.script.get_mut(&id).and_then(|script| script.front())
             else {
                 continue;
             };
-            match mesh.propose(change) {
+            match mesh.propose_data(data.clone()) {
                 Ok(_) => {
                     board.script.get_mut(&id).map(VecDeque::pop_front);
                     board.led.push(id);
@@ -707,12 +712,12 @@ mod tests {
 
         /// Sets what each node proposes.
         fn script(&self, change: impl Fn(u8) -> Change) {
-            let script = IDS.map(|id| (id, [change(id)].into())).into();
+            let script = IDS.map(|id| (id, [encoded(&change(id))].into())).into();
             self.board.lock().unwrap().script = script;
         }
 
-        /// Each node proposes `changes`, in order.
-        fn script_each(&self, changes: &[Change]) {
+        /// Each node proposes the byte forms `changes`, in order.
+        fn script_each(&self, changes: &[Vec<u8>]) {
             let script = IDS.map(|id| (id, changes.iter().cloned().collect())).into();
             self.board.lock().unwrap().script = script;
         }
@@ -1502,25 +1507,31 @@ mod tests {
                 signature: *card.signature(),
             },
             admission: common::ticket(7).admission(&card),
-            status: BTreeMap::new(),
+            status: common::status([]),
         }))
+    }
+
+    fn encoded(change: &Change) -> Vec<u8> {
+        let mut data = Vec::new();
+        change.encode(&mut data);
+        data
     }
 
     // A body that does not decode is a refusal on every node of this build, not a
     // stop, so one voter that proposes bad bytes cannot halt the region.
     #[test]
     fn a_committed_join_that_does_not_decode_changes_nothing() {
-        let Change::Join(mut over) = join(5) else {
-            unreachable!()
-        };
-        over.status = (0..65)
-            .map(|i| {
-                let status = format!("s{i:02}").parse().unwrap();
-                (status, channel::Key::from_u128(100 + i))
-            })
-            .collect();
+        let mut over = encoded(&join(5));
+        over.truncate(over.len() - 8);
+        over.extend(common::status_bytes(65));
+        let changes = [
+            encoded(&ticket()),
+            over,
+            encoded(&join(4)),
+            encoded(&home(1)),
+        ];
         let mut cluster = Cluster::new(1);
-        cluster.script_each(&[ticket(), Change::Join(over), join(4), home(1)]);
+        cluster.script_each(&changes);
         cluster.start();
         cluster.run(seconds(5));
         let board = std::mem::take(&mut *cluster.board.lock().unwrap());
@@ -1626,7 +1637,7 @@ mod tests {
             card: card::Signed::sign(key(2), card, &private(3)),
             admission: [1; 64],
             ephemeral: Some(Span::MILLISECOND),
-            status: [("clock.offset".parse().unwrap(), INDEX)].into(),
+            status: common::status([("clock.offset".parse().unwrap(), INDEX)]),
         };
         let cases = [
             ("an equal record", record(2, 2, 1)),
