@@ -1565,7 +1565,8 @@ mod tests {
             let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
                 .await
                 .unwrap();
-            assert_eq!(stored.entries, entries);
+            let wrote = (Hard::default(), entries.to_vec());
+            assert_eq!((stored.hard, stored.entries), wrote);
         });
     }
 
