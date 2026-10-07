@@ -1374,8 +1374,11 @@ How to read this record:
   `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
   `Head` has no form. The body holds only the series of the reader's view, the index
   series too, written from the frame's block as slices, and both ends charge the frame
-  that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
-  in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
+  that the reader builds (CREDIT RULES, M2). The home's `delivery` spends that charge
+  through a `Charge` of the session's slots, built in #1642 before `node` calls `serve`
+  (the architect, 2026-10-07T22:25:18Z,
+  https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
+  has the place of its first listing in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
   frame (its slot order), the index too, so a place is an entry of the reader's frame
   and a session has `channels` places. An open whose keys do not hold the index is not
   valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
@@ -1432,15 +1435,18 @@ How to read this record:
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
   or breaks a rule above), which every protocol may use. A reset drops the frames in
   flight, which is correct for `FAILED`, since the session cannot go on (lost: a
-  `Reply::Failed` that keeps them, a second end message to fuzz). A reply block holds at
-  most `min(bytes_max, Pool::largest)` bytes, so the pool can always hold each one, and
-  an ends run of a peer with a large `message_bytes_max` takes more messages. The home
+  `Reply::Failed` that keeps them, a second end message to fuzz). Each reply block holds
+  one message. An ends message holds at most the frame's series, at 8 bytes each, the
+  size of their descriptors in the frame's block, so the pool can always hold it (the
+  architect, 2026-10-07T22:17:44Z,
+  https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988; it
+  supersedes the block size rule of 6047519084). The home
   ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait needs
   a clock in `hub` and a wait queue for each session, and the end frees the frames the
   session pins (`mesh` ends its stream in the same case). The class rule and code 18
   were decided by the architect (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
-  and the block size by the architect (2026-10-07T21:47:56Z,
+  by the architect (2026-10-07T21:47:56Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084).
   Lost: a `message_bytes_max` of at least the largest pool block (a client or a
   foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels

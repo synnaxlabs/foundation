@@ -286,7 +286,8 @@ fn reply(state: &RefCell<State>, reply: Reply) -> Result<Block, Error> {
     Ok(block.freeze())
 }
 
-/// A block of `len` bytes, at most the largest, from the home's pool.
+/// A block of `len` bytes from the home's pool, at most the size of the frame's
+/// descriptors.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
     state
         .borrow()
@@ -295,7 +296,9 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
         .alloc(len)
         .map_err(|error| match error {
             block::Error::TooLarge { .. } => {
-                unreachable!("invariant: a reply block is at most the largest")
+                unreachable!(
+                    "invariant: an ends run is smaller than the frame's descriptors"
+                )
             }
             block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
                 Error::Pool(error)
@@ -340,8 +343,7 @@ impl Places {
     ) -> Result<(), Error> {
         let head = self.lay(frame, set);
         sender.send(reply(state, Reply::Head(head))?).await?;
-        let largest = state.borrow().home.pool().largest();
-        for run in self.runs(sender.bytes_max().min(largest)) {
+        for run in self.runs(sender.bytes_max()) {
             let mut block = alloc(state, run.len() * ends::LEN)?;
             ends::encode(
                 run.iter().map(|series| (series.place, series.end)),
