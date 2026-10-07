@@ -13,7 +13,7 @@ use env::net::{Ecn, Error as Net};
 use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
-use super::{after, at, delay, millis, pair, panicked, shard, sim};
+use super::{EIO, after, at, delay, millis, pair, panicked, shard, sim};
 use crate::drivers::yield_now;
 use crate::net::addresses;
 use crate::{Config, Crash, Error, Sim, link, node};
@@ -1370,9 +1370,6 @@ fn polled_around_arrival(early: bool) -> u64 {
 fn the_digest_holds_the_polls_before_an_arrival() {
     assert_ne!(polled_around_arrival(true), polled_around_arrival(false));
 }
-
-/// The error of a receive of a failed socket.
-const EIO: Net = Net::Io { code: 5 };
 
 /// The results of receives into a buffer of 8 bytes: the datagrams of each batch.
 type Results = Arc<Mutex<Vec<Result<Vec<Vec<u8>>, Net>>>>;

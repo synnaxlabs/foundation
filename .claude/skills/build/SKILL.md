@@ -65,6 +65,8 @@ or a line range.
     - Exit 1: read the cause it prints (`gh pr checks <n>`,
       `gh run view <id> --log-failed | tail -60`, or the review). Fix it, run the gate
       on what changed, `gh pr merge <n> --auto`, and wait again.
+      "cannot be read" is three failed `gh` calls in a row: fix what gh printed (a
+      login, a wrong PR number), or wait again once the network is back.
 
 ## Local gate
 
