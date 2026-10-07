@@ -1642,9 +1642,14 @@ How to read this record:
   (its votes in the link's term, then the change), each change an append carries
   (its votes in the entry's term, then the change), then the sender's grant. It
   gives no link of a message for a lower term or of a reply from a node that is not
-  a peer, which `step` does not check (architect, #881,
-  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078 and
-  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  a peer, which `step` does not check. The list is the one `step` reads only when
+  `step` gets the same message, with no call to the node between the two
+  (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
+  2026-10-07T04:31:40Z, and
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
+  2026-10-07T17:08:02Z).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -1673,15 +1678,24 @@ How to read this record:
   term through another node's chain answers a stale message with its hard proof and
   its own chain, which can fall short of the sender's configuration: the sender then
   stays in its term until the leader's chain moves it, and the random runs check that
-  a leader's heartbeat or append is never unproven (builder, #881, PR 2). Known gap:
-  a node that a leave removed can reach, through pre-votes of the old configuration,
-  a term that no configuration entry stands behind; a change that adds it back then
-  needs its ack, and no node passes its term. The random runs reject such a run; the
-  fix is #1485. The chain excludes a leader that a change the node missed made a
-  voter (#1096). The log lists its configuration entries below a term with one
-  forward scan; an index of them waits for a measured scan on a log near its memory
-  bound (architect, #881,
-  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  a leader's heartbeat or append is never unproven (builder, #881,
+  https://github.com/synnaxlabs/foundation/pull/1488). Known gap: a node that a
+  leave removed can reach, through pre-votes of the old configuration, a term that
+  no configuration entry stands behind; a change that adds it back then needs its
+  ack, and no node passes its term. The random runs reject such a run; the fix is
+  #1485 (architect,
+  https://github.com/synnaxlabs/foundation/issues/1485#issuecomment-6042768573,
+  2026-10-07T17:05:00Z). A link is attested by its leader's signature and the votes
+  of its term alone, so a voter that led a term can forge a link to a configuration
+  it never wrote; the proof that a quorum holds the entry is #882. The chain
+  excludes a leader that a change the node missed made a voter (#1096). The log
+  keeps the indexes of its configuration entries, so a chain costs their number, not
+  the log's: the ruling deferred the index until a measured scan on a large log
+  (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
+  2026-10-07T04:31:40Z), and the review of PR 2 measured a leader of 7 voters with
+  1,000,000 entries and 6 silent peers at 41 to 44 ms per tick with the scan
+  (reviewer, https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042889435).
   The advisor required a proof on every message and on each refusal, signatures
   only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks
   the signatures (MESH LOG).
@@ -1779,7 +1793,8 @@ How to read this record:
   `Ready::sign`). A node that missed the change checks the entry with them as a link
   of a chain before it counts a later proof against it, and refuses a link whose
   votes are not `Vote` (RAFT SURFACE; architect, #881,
-  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
+  2026-10-07T04:31:40Z).
   A node uses the latest `Voters` entry in its log from the time it writes it;
   `Start.voters` is the configuration before `Start.entries`. A node that joins
   starts with the founding voters from the answer to its join (decided by the
@@ -1859,8 +1874,10 @@ How to read this record:
   its chain: an 8-byte count of links, always present, then each link's position (8
   bytes of term, 8 of index) and its change in the entry form below, from the
   incoming keys to the signature. A link of a joint entry with 3 incoming, 3
-  outgoing, and 3 signed votes is 457 bytes (architect, #881,
-  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579). A
+  outgoing, and 3 signed votes is 457 bytes, and a chain of 2 such links is 922
+  bytes with its count (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
+  2026-10-07T04:31:40Z). A
   granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
   is the byte 0 alone. An entry is its term and index (8 bytes each), then a data
   byte: empty (0) alone; bytes (1), an 8-byte length, and the bytes; voters (2), the

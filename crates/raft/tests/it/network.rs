@@ -183,8 +183,8 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
-    // Some node refused a reply as unproven during `settle`: a peer sits at a term
-    // the group cannot prove (#1485).
+    // During `settle`, a pre-candidate's reply at a term past every led one was
+    // refused as unproven: the group cannot prove its term (#1485).
     unprovable: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
@@ -324,9 +324,6 @@ impl Network {
         }
     }
 
-    // The configuration `raft` counts as committed: the last configuration entry the
-    // node committed, else the base. `applied` is the node's commit index after each
-    // `collect`.
     pub(crate) fn deliver(&mut self, message: &Message) {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
@@ -660,7 +657,12 @@ impl Network {
                     !self.quorum(to, &proof.voters.keys().copied().collect()),
                     "node {to} refuses a proven {body:?} at {term:?} from {from:?}"
                 );
-                self.unprovable = true;
+                // A pre-candidate at a term past every led one (#1485).
+                if proof.grant == Grant::PreVote
+                    && self.leaders.keys().all(|&led| led < term)
+                {
+                    self.unprovable = true;
+                }
                 return;
             }
             _ => panic!("node {to} in {before:?} refuses {body:?} at {term:?}"),

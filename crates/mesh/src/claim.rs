@@ -265,6 +265,31 @@ mod tests {
         assert_eq!(checked(&both, &members), forged);
     }
 
+    // Every proof is a quorum of no voters, so `step` must refuse such a link.
+    #[test]
+    fn a_link_with_no_voters_does_not_prove_a_leader_with_no_grants() {
+        let link = raft::Link {
+            at: written(),
+            change: signed_change_to(Voters::default()),
+        };
+        let mut heartbeat = message(1, 2, Body::Heartbeat { commit: 0 });
+        heartbeat.term = Term(u64::MAX);
+        heartbeat.proof = Some(Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: BTreeMap::new(),
+        });
+        heartbeat.chain = vec![link];
+        assert_eq!(checked(&heartbeat, members(&[1, 2, 3])), Ok(()));
+        let mut follower = node(key(2));
+        let unproven = raft::Error::Unproven {
+            term: Term(u64::MAX),
+            from: key(1),
+        };
+        assert_eq!(follower.step(heartbeat), Err(unproven));
+        assert_eq!(follower.term(), Term(0));
+    }
+
     #[test]
     fn check_reads_no_link_when_the_proof_is_a_quorum() {
         let mut message = proven();

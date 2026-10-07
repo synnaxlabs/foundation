@@ -146,7 +146,12 @@ state on `main`.
   granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
   proof of the refuser's term, so a node that is behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
-  message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
+  message in term `u64::MAX`. Now that message needs a quorum of grants of a
+  configuration the node holds, or of one that a chain of signed configuration
+  entries proves (#750, #881). A link carries only its leader's signature and the
+  votes of its term, so a voter that led a term at or above the node's committed one
+  can forge a link to a configuration of itself alone, and then prove `u64::MAX`
+  with its own grant. The proof that a quorum holds the entry is #882. `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
   voter that lies can still break safety, because a false `AppendReply` counts as held,
@@ -327,5 +332,5 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages, `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
+messages (#1470), `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
 tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.

@@ -134,7 +134,7 @@ impl Message {
 }
 
 // A chain is a count of links as 8 little-endian bytes, then each link's position
-// and change. The count is there with no proof too, so the form has one shape.
+// and change.
 fn put_chain(chain: &[Link], out: &mut Vec<u8>) {
     put_count(chain.len(), out);
     for link in chain {

@@ -62,6 +62,13 @@ enum Checked {
     AppendReject { hint: Held },
 }
 
+// What `prove` decided: the links of the chain it read, and whether the proof and
+// those links let this node take the message.
+struct Verdict<'a> {
+    read: &'a [Link],
+    proven: bool,
+}
+
 /// What the caller must do after an input, in this order: [`sign`](Self::sign) this
 /// node's grants, write `hard` and `entries` to disk and sync them, send `messages`,
 /// then apply `committed`. Write `hard` and `entries` in any order: a crash between
@@ -269,11 +276,13 @@ impl Raft {
         if let Some(hard) = &hard {
             self.given = hard.clone();
         }
+        let mut messages = std::mem::take(&mut self.outbox);
+        self.chain(&mut messages);
         Ready {
             hard,
             entries: self.log.take_unstable(),
             committed: self.log.take_committed(),
-            messages: std::mem::take(&mut self.outbox),
+            messages,
         }
     }
 
@@ -388,7 +397,8 @@ impl Raft {
     /// - [`Error::Loopback`] when the message names this node as its sender.
     /// - [`Error::Unproven`] when the message claims a higher term, or a leader of
     ///   this node's term that it did not prove, with no proof that a quorum of this
-    ///   node's voters granted it.
+    ///   node's voters granted it, and no chain of configuration entries that leads
+    ///   from this node's committed configuration to one the proof is a quorum of.
     /// - [`Error::EntryOutOfOrder`] when an append's entries do not follow its `prev`.
     /// - [`Error::NoVoters`] when an append carries a configuration with an empty
     ///   `incoming` set.
@@ -416,11 +426,10 @@ impl Raft {
         if from == self.key {
             return Err(Error::Loopback);
         }
-        if term < self.term {
-            self.answer_stale(from, &body);
-            return Ok(());
-        }
-        if body.answers() && !self.peers.contains_key(&from) {
+        if !self.reads(from, term, &body) {
+            if term < self.term {
+                self.answer_stale(from, &body);
+            }
             return Ok(());
         }
         let body = self.check(from, term, body, proof.as_ref(), &chain)?;
@@ -431,15 +440,13 @@ impl Raft {
     }
 
     /// Each claim of `message` that [`step`](Self::step) reads, with its signature:
-    /// the grants of its proof in rising key order; then, for each link of its chain
-    /// that `step` reads, the votes in the link's term and the leader's change;
-    /// then, for each change an append carries, its votes and the change; then the
-    /// sender's grant when the body grants. `step` reads a link only when the proof
-    /// is no quorum of this node's configuration in force or last committed, and
-    /// reads no more once a link makes it one. It reads none of a message for a
-    /// lower term, nor of a reply from a node that is not a peer. The caller checks
-    /// each signature against its signer's key before `step`, and refuses a `None`:
-    /// `step` keeps each signature as it came.
+    /// the grants of its proof in rising key order; then the votes and the change of
+    /// each link of its chain that `step` reads; then the votes and the change of
+    /// each configuration an append carries; then the sender's grant. The list is
+    /// the one `step` reads only when `step` gets the same message, with no call to
+    /// this node between the two. The caller checks each signature against its
+    /// signer's key before `step`, and refuses a `None`: `step` keeps each signature
+    /// as it came.
     pub fn claims<'a>(
         &'a self,
         message: &'a Message,
@@ -452,14 +459,17 @@ impl Raft {
             chain,
             ..
         } = message;
-        let unread =
-            *term < self.term || (body.answers() && !self.peers.contains_key(from));
-        let links = if unread {
-            &[][..]
-        } else {
-            self.prove(*from, *term, body, proof.as_ref(), chain).0
-        };
-        message.claims(links)
+        let read = self.reads(*from, *term, body).then(|| {
+            let links = self.prove(*from, *term, body, proof.as_ref(), chain).read;
+            message.claims(links)
+        });
+        read.into_iter().flatten()
+    }
+
+    // Whether `step` reads a message past its header. A message for a lower term is
+    // stale, and a reply from a node that is not a peer is dropped.
+    fn reads(&self, from: node::Key, term: Term, body: &Body) -> bool {
+        term >= self.term && (!body.answers() || self.peers.contains_key(&from))
     }
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote
@@ -560,7 +570,7 @@ impl Raft {
         {
             return Err(Error::SecondLeader { term, from });
         }
-        if !self.prove(from, term, &body, proof, chain).1 {
+        if !self.prove(from, term, &body, proof, chain).proven {
             return Err(Error::Unproven { term, from });
         }
         Ok(match body {
@@ -781,9 +791,7 @@ impl Raft {
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
         let removed_end = self.removed_end();
-        let (key, term, log, votes) = (self.key, self.term, &self.log, &self.votes);
-        // The chain is scanned once per call, and only for a peer that needs it.
-        let mut links: Option<Vec<Link>> = None;
+        let (key, term, votes) = (self.key, self.term, &self.votes);
         for (&to, peer) in self.peers.range_mut(range) {
             if peer.progress.paused() {
                 continue;
@@ -801,12 +809,9 @@ impl Raft {
             let entries = self.log.slice(next, end, BATCH);
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
             peer.progress.sent(last);
-            let (proof, chain) = match votes {
-                Some(votes) if !peer.answered => {
-                    let links = links.get_or_insert_with(|| log.links(term));
-                    (Some(votes.clone()), links.clone())
-                }
-                _ => (None, Vec::new()),
+            let proof = match votes {
+                Some(votes) if !peer.answered => Some(votes.clone()),
+                _ => None,
             };
             self.outbox.push(Message {
                 from: key,
@@ -818,7 +823,7 @@ impl Raft {
                     commit,
                 },
                 proof,
-                chain,
+                chain: Vec::new(),
             });
         }
     }
@@ -829,13 +834,6 @@ impl Raft {
     // vote request, its pre-votes; a reply, any proof of the term. In this node's own
     // term, only a leader's message needs a proof, and only while the node knows no
     // leader: `check` refused every other sender as a second one.
-    //
-    // When the proof is no quorum of the configuration in force or last committed,
-    // the chain is read from its first link above the commit index until a link's
-    // configuration makes it one. Each link read must rise from the position at the
-    // commit index, or the last link read, and its votes must be a quorum of the
-    // configuration that elected its leader: the last link read, or committed
-    // configuration entry, of a lower term.
     fn prove<'a>(
         &self,
         from: node::Key,
@@ -843,15 +841,16 @@ impl Raft {
         body: &Body,
         proof: Option<&Proof>,
         chain: &'a [Link],
-    ) -> (&'a [Link], bool) {
+    ) -> Verdict<'a> {
+        let unread = |proven| Verdict { read: &[], proven };
         if term == self.term && (!body.leads() || self.led.is_some()) {
-            return (&[], true);
+            return unread(true);
         }
         let grant = match body {
             Body::PreVote { .. }
             | Body::PreVoteReply {
                 answer: Answer::Granted(_),
-            } => return (&[], true),
+            } => return unread(true),
             Body::Heartbeat { .. } | Body::Append { .. } => Some(Grant::Vote),
             Body::Vote { .. } => Some(Grant::PreVote),
             Body::PreVoteReply {
@@ -863,56 +862,79 @@ impl Raft {
             | Body::AppendReject { .. } => None,
         };
         let Some(proof) = proof else {
-            return (&[], false);
+            return unread(false);
         };
         let fits =
             grant.is_none_or(|grant| proof.grant == grant && proof.candidate == from);
         if !fits {
-            return (&[], false);
+            return unread(false);
         }
         // A leader elected under the committed configuration can overwrite a
         // configuration entry that is not committed yet.
         let quorum =
             |voters: &Voters| voters.quorum(|key| proof.voters.contains_key(&key));
         if quorum(&self.voters) || quorum(&self.log.committed_voters()) {
-            return (&[], true);
+            return unread(true);
         }
+        self.walk(term, chain, quorum)
+    }
+
+    // Reads `chain` from its first link above the commit index until a link's
+    // configuration is a `quorum`. Each link read must have a term below `term`,
+    // rise from the position at the commit index or the last link read, hold
+    // voters, and hold the votes of a quorum of the configuration that elected its
+    // leader: the last link read of a lower term, else the last committed
+    // configuration entry of a lower term.
+    fn walk<'a>(
+        &self,
+        term: Term,
+        chain: &'a [Link],
+        quorum: impl Fn(&Voters) -> bool,
+    ) -> Verdict<'a> {
         let committed = self.log.committed();
-        let skipped = chain.partition_point(|link| link.at.index <= committed);
-        let chain = &chain[skipped..];
+        let chain = &chain[chain.partition_point(|link| link.at.index <= committed)..];
+        let Some(first) = chain.first() else {
+            return Verdict {
+                read: chain,
+                proven: false,
+            };
+        };
         let mut prev = self
             .log
             .at(committed)
             .expect("invariant: the commit index is in the log");
-        let mut passed: Vec<&Link> = Vec::new();
+        // The links rise in term, so the last link read of a lower term is the last
+        // link read when the term rises.
+        let mut trusted = self.log.committed_voters_below(first.at.term);
+        let mut last: Option<&Voters> = None;
         for (read, link) in chain.iter().enumerate() {
             let read = &chain[..=read];
-            let rises = link.at.index > prev.index && link.at.term >= prev.term;
-            if !(rises && link.at.term < term && link.change.votes.grant == Grant::Vote)
-            {
-                return (read, false);
+            if let Some(last) = last.filter(|_| link.at.term > prev.term) {
+                trusted = last.clone();
             }
-            let elected = |voters: &Voters| {
-                voters.quorum(|key| link.change.votes.voters.contains_key(&key))
-            };
-            let trusted = passed
-                .iter()
-                .rev()
-                .find(|passed| passed.at.term < link.at.term)
-                .map_or_else(
-                    || self.log.committed_voters_below(link.at.term),
-                    |passed| passed.change.voters.clone(),
-                );
-            if !elected(&trusted) {
-                return (read, false);
+            let rises = link.at.index > prev.index && link.at.term >= prev.term;
+            let votes = &link.change.votes;
+            let elected = rises
+                && link.at.term < term
+                && votes.grant == Grant::Vote
+                && !link.change.voters.incoming.is_empty()
+                && trusted.quorum(|key| votes.voters.contains_key(&key));
+            if !elected {
+                return Verdict {
+                    read,
+                    proven: false,
+                };
             }
             if quorum(&link.change.voters) {
-                return (read, true);
+                return Verdict { read, proven: true };
             }
-            passed.push(link);
+            last = Some(&link.change.voters);
             prev = link.at;
         }
-        (chain, false)
+        Verdict {
+            read: chain,
+            proven: false,
+        }
     }
 
     // Steps down for a message of a higher term that `check` passed, except a PreVote
@@ -1248,9 +1270,8 @@ impl Raft {
             .expect("invariant: `step` drops a reply from a node that is not a peer")
     }
 
-    // Sends `body` to each peer, with `proof` and the chain that goes with it.
+    // Sends `body` to each peer, with `proof`.
     fn broadcast(&mut self, term: Term, body: &Body, proof: Option<&Proof>) {
-        let chain = proof.map_or_else(Vec::new, |_| self.log.links(term));
         for &to in self.peers.keys() {
             self.outbox.push(Message {
                 from: self.key,
@@ -1258,24 +1279,36 @@ impl Raft {
                 term,
                 body: body.clone(),
                 proof: proof.cloned(),
-                chain: chain.clone(),
+                chain: Vec::new(),
             });
         }
     }
 
-    // Sends `body` to `to`, with `proof` and the chain that goes with it.
+    // Sends `body` to `to`, with `proof`.
     fn send(&mut self, to: node::Key, term: Term, body: Body, proof: Option<Proof>) {
-        let chain = proof
-            .as_ref()
-            .map_or_else(Vec::new, |_| self.log.links(term));
         self.outbox.push(Message {
             from: self.key,
             to,
             term,
             body,
             proof,
-            chain,
+            chain: Vec::new(),
         });
+    }
+
+    // Gives each message with a proof the chain of this node's configuration
+    // entries below its term.
+    fn chain(&self, messages: &mut [Message]) {
+        let mut chains: BTreeMap<Term, Vec<Link>> = BTreeMap::new();
+        for message in messages
+            .iter_mut()
+            .filter(|message| message.proof.is_some())
+        {
+            message.chain = chains
+                .entry(message.term)
+                .or_insert_with(|| self.log.links(message.term))
+                .clone();
+        }
     }
 }
 
@@ -2999,7 +3032,11 @@ mod tests {
             flat[1].at.index = 1;
             let mut falling = shrink(&ALL);
             falling[1].at.term = Term(0);
+            // Any proof is a quorum of no voters, so such a link proves nothing.
+            let mut empty = shrink(&ALL);
+            empty[1].change.voters = Voters::default();
             let cases = [
+                ("a configuration with no voters", empty),
                 (
                     "votes that are no quorum of the founding configuration",
                     few,

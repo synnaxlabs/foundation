@@ -257,31 +257,44 @@ fn a_message_claims_each_link_when_its_chain_does_not_prove_it() {
     assert_eq!(raft.step(message), Err(expected));
 }
 
+// A stale message is answered, not read, so a forged grant in it is no claim.
 #[test]
-fn a_stale_message_claims_no_link() {
-    let mut message = outside(7);
-    message.chain = chain();
-    let want = vec![
-        (grant(1, Grant::Vote, 7, 1), Some(signature(1))),
-        (grant(4, Grant::Vote, 7, 1), Some(signature(4))),
-    ];
-    assert_eq!(claims(&receiver(8), &message), want);
+fn a_stale_message_claims_nothing_and_is_answered() {
+    let mut raft = receiver(7);
+    let proof = Proof {
+        grant: Grant::Vote,
+        candidate: key(3),
+        voters: [(key(2), Some(signature(2))), (key(3), Some(signature(3)))].into(),
+    };
+    let mut led = message(8, Body::Heartbeat { commit: 0 }, Some(proof.clone()));
+    led.from = key(3);
+    raft.step(led).unwrap();
+    drop(raft.ready());
+    let mut stale = outside(7);
+    stale.chain = chain();
+    assert_eq!(claims(&raft, &stale), Vec::new());
+    assert_eq!(raft.step(stale), Ok(()));
+    let ready = raft.ready();
+    let [reply] = &ready.messages[..] else {
+        panic!("one reply: {:?}", ready.messages);
+    };
+    let sent = (reply.to, reply.term, &reply.body, reply.proof.as_ref());
+    assert_eq!(sent, (key(1), Term(8), &Body::HeartbeatReply, Some(&proof)));
 }
 
+// A reply from a node that is not a peer is dropped, not read.
 #[test]
-fn a_reply_from_a_node_that_is_not_a_peer_claims_no_link() {
+fn a_reply_from_a_node_that_is_not_a_peer_claims_nothing() {
     let mut message = outside(7);
     message.from = key(9);
     message.body = Body::VoteReply {
         answer: Answer::Granted(Some(signature(9))),
     };
     message.chain = chain();
-    let want = vec![
-        (grant(1, Grant::Vote, 7, 1), Some(signature(1))),
-        (grant(4, Grant::Vote, 7, 1), Some(signature(4))),
-        (grant(9, Grant::Vote, 7, 2), Some(signature(9))),
-    ];
-    assert_eq!(claims(&receiver(0), &message), want);
+    let mut raft = receiver(0);
+    assert_eq!(claims(&raft, &message), Vec::new());
+    assert_eq!(raft.step(message), Ok(()));
+    assert_eq!(raft.ready(), Ready::default());
 }
 
 #[test]

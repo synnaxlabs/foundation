@@ -105,7 +105,8 @@ pub(crate) struct Log {
     committed: u64,
     applied: u64,
     stable: u64,
-    voters: u64,
+    // The indexes of the configuration entries, rising.
+    configs: Vec<u64>,
     base: Voters,
 }
 
@@ -123,7 +124,7 @@ impl Log {
             return Err(Error::AppliedPastLog { applied, last });
         }
         Ok(Self {
-            voters: last_voters(&entries),
+            configs: configs_in(&entries),
             base,
             entries,
             committed: applied,
@@ -154,13 +155,25 @@ impl Log {
     // The configuration in force and where it is: the last configuration entry, or
     // `base` at the zero position.
     pub(crate) fn voters(&self) -> (Position, &Voters) {
-        let Some(at) = self.voters.checked_sub(1) else {
-            return (Position::default(), &self.base);
-        };
-        let entry = &self.entries[usize::try_from(at).expect("invariant: index fits")];
-        let voters =
-            voters_in(entry).expect("invariant: `voters` names a configuration");
-        (entry.at, voters)
+        match self.configs.last() {
+            Some(&index) => {
+                let (at, change) = self.config(index);
+                (at, &change.voters)
+            }
+            None => (Position::default(), &self.base),
+        }
+    }
+
+    // The configuration entry at `index`, one of `configs`.
+    fn config(&self, index: u64) -> (Position, &Change) {
+        let entry =
+            &self.entries[usize::try_from(index - 1).expect("invariant: index fits")];
+        match &entry.data {
+            Data::Voters(change) => (entry.at, change),
+            Data::Empty | Data::Bytes(_) => {
+                unreachable!("invariant: `configs` names configuration entries")
+            }
+        }
     }
 
     // Whether the configuration in force is committed.
@@ -183,27 +196,19 @@ impl Log {
     // The last committed configuration entry with a term below `term`, or the
     // configuration before the entries: what elected a leader of `term`.
     pub(crate) fn committed_voters_below(&self, term: Term) -> Voters {
-        let end = usize::try_from(self.committed).unwrap_or(usize::MAX);
-        let below = self.entries.partition_point(|entry| entry.at.term < term);
-        let end = end.min(below).min(self.entries.len());
-        match self.entries[..end].iter().rev().find_map(voters_in) {
-            Some(voters) => voters.clone(),
-            None => self.before_entries(),
-        }
+        self.voters_through(self.committed.min(self.first_of(term) - 1))
     }
 
     // The configuration entries with a term below `term`, oldest first, as the chain
     // of a message of `term`.
     pub(crate) fn links(&self, term: Term) -> Vec<Link> {
-        self.entries
+        self.configs
             .iter()
-            .take_while(|entry| entry.at.term < term)
-            .filter_map(|entry| match &entry.data {
-                Data::Voters(change) => Some(Link {
-                    at: entry.at,
-                    change: change.clone(),
-                }),
-                Data::Empty | Data::Bytes(_) => None,
+            .map(|&index| self.config(index))
+            .take_while(|(at, _)| at.term < term)
+            .map(|(at, change)| Link {
+                at,
+                change: change.clone(),
             })
             .collect()
     }
@@ -211,10 +216,9 @@ impl Log {
     // The last configuration entry at or below `index`, or the configuration before
     // the entries.
     fn voters_through(&self, index: u64) -> Voters {
-        let end = usize::try_from(index).unwrap_or(usize::MAX);
-        let end = end.min(self.entries.len());
-        match self.entries[..end].iter().rev().find_map(voters_in) {
-            Some(voters) => voters.clone(),
+        let through = self.configs.partition_point(|&config| config <= index);
+        match through.checked_sub(1) {
+            Some(last) => self.config(self.configs[last]).1.voters.clone(),
             None => self.before_entries(),
         }
     }
@@ -226,7 +230,10 @@ impl Log {
         if !self.base.incoming.is_empty() {
             return self.base.clone();
         }
-        let first = self.entries.iter().find_map(voters_in);
+        let first = self
+            .configs
+            .first()
+            .map(|&index| &self.config(index).1.voters);
         first.map_or_else(Voters::default, Voters::replaced)
     }
 
@@ -278,7 +285,7 @@ impl Log {
             index: self.last().index + 1,
         };
         if matches!(data, Data::Voters(_)) {
-            self.voters = at.index;
+            self.configs.push(at.index);
         }
         self.entries.push(Entry { at, data });
         at
@@ -308,11 +315,10 @@ impl Log {
         let kept = usize::try_from(from - 1).unwrap_or(usize::MAX);
         self.entries.truncate(kept);
         self.stable = self.stable.min(from - 1);
-        if self.voters >= from {
-            self.voters = last_voters(&self.entries);
-        }
+        self.configs
+            .truncate(self.configs.partition_point(|&config| config < from));
         self.entries.extend(entries.into_iter().skip(first));
-        self.voters = self.voters.max(last_voters(&self.entries[kept..]));
+        self.configs.extend(configs_in(&self.entries[kept..]));
         Ok(last)
     }
 
@@ -351,13 +357,13 @@ fn voters_in(entry: &Entry) -> Option<&Voters> {
     }
 }
 
-// The index of the last configuration entry in `entries`, or 0 with none.
-fn last_voters(entries: &[Entry]) -> u64 {
+// The indexes of the configuration entries among `entries`, rising.
+fn configs_in(entries: &[Entry]) -> Vec<u64> {
     entries
         .iter()
-        .rev()
-        .find(|entry| voters_in(entry).is_some())
-        .map_or(0, |entry| entry.at.index)
+        .filter(|entry| voters_in(entry).is_some())
+        .map(|entry| entry.at.index)
+        .collect()
 }
 
 // Entries that follow `prev`: indexes in sequence, terms non-decreasing and not
@@ -411,6 +417,8 @@ pub(crate) fn check(prev: Position, entries: Vec<Entry>) -> Result<Run, Error> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn entry(term: u64, index: u64) -> Entry {
@@ -770,5 +778,88 @@ mod tests {
         assert_eq!(log.slice(2, 3, 10), vec![entry(1, 2), entry(2, 3)]);
         assert_eq!(log.slice(3, 2, 10), vec![]);
         assert_eq!(log.slice(4, 2, 10), vec![]);
+    }
+
+    // Entries from index `from`: each `(rise, config)` raises the term by `rise`
+    // and is a configuration entry when `config`.
+    fn entries_from(from: u64, term: u64, kinds: &[(u64, bool)]) -> (Vec<Entry>, u64) {
+        let mut term = term;
+        let entries = kinds
+            .iter()
+            .zip(from..)
+            .map(|(&(rise, config), index)| {
+                term += rise;
+                let data = if config {
+                    change(voters(u128::from(index)))
+                } else {
+                    Data::Bytes(vec![])
+                };
+                Entry {
+                    at: position(term, index),
+                    data,
+                }
+            })
+            .collect();
+        (entries, term)
+    }
+
+    // The links of `entries` below `term`, read with no index.
+    fn links_in(entries: &[Entry], term: Term) -> Vec<Link> {
+        entries
+            .iter()
+            .filter(|entry| entry.at.term < term)
+            .filter_map(|entry| match &entry.data {
+                Data::Voters(change) => Some(Link {
+                    at: entry.at,
+                    change: change.clone(),
+                }),
+                Data::Empty | Data::Bytes(_) => None,
+            })
+            .collect()
+    }
+
+    fn kinds() -> impl Strategy<Value = Vec<(u64, bool)>> {
+        prop::collection::vec((0..3u64, any::<bool>()), 0..12)
+    }
+
+    proptest! {
+        // The index of configuration entries matches the entries after a start, an
+        // append that keeps, truncates, or extends the log, and a push.
+        #[test]
+        fn the_configuration_index_follows_the_entries(
+            start in kinds(),
+            cut in 0..12usize,
+            appended in kinds(),
+            pushed in any::<bool>(),
+            below in 0..6u64,
+        ) {
+            let (mut entries, _) = entries_from(1, 1, &start);
+            let mut log = Log::new(voters(9), entries.clone(), 0).unwrap();
+            let cut = cut.min(entries.len());
+            let prev = entries.get(cut.wrapping_sub(1)).map_or_else(
+                Position::default,
+                |entry| entry.at,
+            );
+            let base = prev.term.0.max(1);
+            let (new, _) = entries_from(prev.index + 1, base, &appended);
+            log.append(run(prev, new.clone())).unwrap();
+            let same = new.iter().zip(&entries[cut..]);
+            let same = same.take_while(|(a, b)| a.at == b.at).count();
+            // A run that the log holds in full changes nothing past it.
+            if same < new.len() {
+                entries.truncate(cut + same);
+                entries.extend(new.into_iter().skip(same));
+            }
+            if pushed {
+                let at = log.push(log.last().term.max(Term(1)), change(voters(0)));
+                entries.push(Entry { at, data: change(voters(0)) });
+            }
+            let fresh = Log::new(voters(9), entries.clone(), 0).unwrap();
+            prop_assert_eq!(log.links(Term(below)), links_in(&entries, Term(below)));
+            prop_assert_eq!(log.voters(), fresh.voters());
+            for index in 0..=u64::try_from(entries.len()).unwrap() {
+                prop_assert_eq!(log.voters_through(index), fresh.voters_through(index));
+            }
+        }
     }
 }

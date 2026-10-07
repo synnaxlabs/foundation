@@ -40,15 +40,6 @@ pub struct Link {
     pub change: Change,
 }
 
-impl Link {
-    // Each claim the link carries: its votes in its term, then the leader's change.
-    pub(crate) fn claims(
-        &self,
-    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
-        self.change.claims(self.at)
-    }
-}
-
 /// What a voter granted a candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
@@ -168,7 +159,7 @@ impl Message {
         links: &'a [Link],
     ) -> impl Iterator<Item = (Claim<'a>, Option<Signature>)> + 'a {
         let proof = self.proof.iter().flat_map(|proof| proof.claims(self.term));
-        let links = links.iter().flat_map(Link::claims);
+        let links = links.iter().flat_map(|link| link.change.claims(link.at));
         let changes = self.body.entries().iter().flat_map(Entry::claims);
         let granted = self
             .body
