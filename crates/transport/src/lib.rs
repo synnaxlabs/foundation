@@ -130,9 +130,10 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Network`] when the socket is broken or breaks during the dial, or
-    /// [`Error::Unreachable`] with the cause at each address when none gives a
-    /// session.
+    /// [`Error::Network`] when the socket is broken, or breaks before an attempt
+    /// connects, or [`Error::Unreachable`] with the cause at each address when none
+    /// gives a session. A session that connected before a break is given, and ends
+    /// with [`Error::Network`].
     ///
     /// ```
     /// use std::net::SocketAddr;

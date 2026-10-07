@@ -1161,16 +1161,18 @@ How to read this record:
   delivery and wire internals delegation.
 - **DIAL ORDER (#68, 2026-10-07)** `Transport::dial` tries a peer's addresses UDP, then
   TCP, then relays, in the given order within a kind. It starts the next address 250 ms
-  after the newest attempt started, or at once when one fails, and keeps the first
-  session that completes; dropping the others closes them. Before it starts a carrier,
+  after the newest attempt started, or at once when the newest fails, and keeps the
+  first session that completes; dropping the others closes them. Before it starts a carrier,
   it checks each address: port 0, an unspecified IP, or a kind with no carrier on this
   node is the cause `Error::Unroutable` in `Error::Unreachable`, so
   `Endpoint::connect` keeps its invariant panic. A broken socket ends the dial with
-  `Error::Network`, unless an attempt connected first. Rejected: the carrier maps
-  noq-proto's invalid address to an error (each later carrier would need its own
-  check), and no new variant (a bad address would look like a timeout). Decided by the
-  architect:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879.
+  `Error::Network`. Rejected: the carrier maps noq-proto's invalid address to an error
+  (each later carrier would need its own check), and no new variant (a bad address
+  would look like a timeout). Decided by the architect:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879. An
+  attempt that connected before the break still wins, and its session ends with
+  `Error::Network`, as `accept` gives such a session. Decided by the `transport`
+  builder in review of #1067, so the result does not depend on the order of attempts.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
