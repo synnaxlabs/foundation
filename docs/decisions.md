@@ -1608,7 +1608,8 @@ How to read this record:
   that is not the key of this node's member (`Error::WrongKey`). `Config.members` is a
   list, and the region state holds each record under the key of its card, so the key of
   a member has one copy. `open` refuses two records of one node (`Error::Duplicate`),
-  and it is the one check of that case (decided by `laptop.architect`:
+  and it is the one check of that case (decided by `laptop.architect`,
+  2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
   reverses the map of the ruling below). Proposed by box1.builder-3, decided by the
   architect (#471):
@@ -1697,7 +1698,7 @@ How to read this record:
   that only the admitting voter checks (a voter that lies admits any key, against BQ12).
   A `card::Signed` holds the `node::Key` that its signature covers (`Signed::key`): the
   key cannot come from the public key, which can rotate, so the signed record is its one
-  place (decided by `laptop.architect`:
+  place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). Decided
   by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).

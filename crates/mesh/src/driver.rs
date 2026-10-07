@@ -481,6 +481,7 @@ mod tests {
     use sim::{Crash, Sim, link};
 
     use super::*;
+    use crate::card;
     use crate::common::{self, key, message, pool, private, proven, public};
     use crate::message::Message;
     use crate::region::Malformed;
@@ -546,6 +547,17 @@ mod tests {
         voters: &[u8],
     ) -> Result<Mesh, Error> {
         Mesh::open(config(node, tasks, id, members, voters)).await
+    }
+
+    /// The record of node `id` with the card of node `signer` at `version`, which
+    /// `signer` signed.
+    fn record(id: u8, signer: u8, version: u64) -> Member {
+        let mut card = common::member(signer).card.card().clone();
+        card.version = version;
+        Member {
+            card: card::Signed::sign(key(id), card, &private(signer)),
+            ..common::member(id)
+        }
     }
 
     /// A pool of one page.
@@ -1443,27 +1455,47 @@ mod tests {
 
     #[test]
     fn member_gives_the_record_that_its_card_names_for_each_order_of_the_records() {
-        solo(|node, tasks| async move {
-            let mut config = config(&node, &tasks, 1, &[2, 3, 1], &[1]);
-            config.members.reverse();
-            let mesh = Mesh::open(config).await.unwrap();
-            for id in [1, 2, 3] {
-                assert_eq!(mesh.member(key(id)), Some(common::member(id)));
-            }
-        });
+        let orders = [
+            [1, 2, 3],
+            [1, 3, 2],
+            [2, 1, 3],
+            [2, 3, 1],
+            [3, 1, 2],
+            [3, 2, 1],
+        ];
+        for order in orders {
+            solo(move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &order, &[1]).await.unwrap();
+                for id in IDS {
+                    let member = Some(common::member(id));
+                    assert_eq!(mesh.member(key(id)), member, "{order:?}");
+                }
+            });
+        }
     }
 
     #[test]
     fn open_refuses_two_records_of_one_node() {
-        solo(|node, tasks| async move {
-            let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
-            config.members.push(common::member(2));
-            let opened = Mesh::open(config).await.err();
-            assert_eq!(opened, Some(Error::Duplicate(key(2))));
-            assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
-            let text = format!("node {} has two member records", key(2));
-            assert_eq!(Error::Duplicate(key(2)).to_string(), text);
-        });
+        let cases = [
+            ("an equal record", record(2, 2, 1)),
+            ("another version", record(2, 2, 2)),
+            ("another signer", record(2, 3, 1)),
+        ];
+        for (case, second) in cases {
+            for at in [0, 3] {
+                let second = second.clone();
+                solo(move |node, tasks| async move {
+                    let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
+                    config.members.insert(at, second);
+                    let opened = Mesh::open(config).await.err();
+                    let duplicate = Some(Error::Duplicate(key(2)));
+                    assert_eq!(opened, duplicate, "{case} at {at}");
+                    assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+                });
+            }
+        }
+        let text = format!("node {} has two member records", key(2));
+        assert_eq!(Error::Duplicate(key(2)).to_string(), text);
     }
 
     #[test]
