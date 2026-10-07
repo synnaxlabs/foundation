@@ -20,8 +20,9 @@
 //! gives the share of sends it timed. In each round, a send of each class must end
 //! while the other class waits, and the round must time at least half its sends so
 //! that its figure stands on enough sends. Over the timed rounds, the `Complete`
-//! sends it timed must be at least twice its `Latest` sends, as the share gives
-//! `Complete` three turns to each of `Latest`. After the rounds, the server must have
+//! sends it timed must be at least twice its `Latest` sends: the share gives
+//! `Complete` 3 bytes for each byte of `Latest`, and both classes send messages of
+//! one size. After the rounds, the server must have
 //! one stream of each class. If not, the bench panics. Its control is `complete 1 KiB
 //! waiting`, whose send must wait in each round. Each poll has a timing cost, so
 //! compare the two lines with their polls per send.
@@ -175,7 +176,8 @@ enum Premise {
     /// A send waits.
     Waits,
     /// A `Latest` send and a `Complete` send each end while a send of the other
-    /// class waits.
+    /// class waits. Over the timed rounds, the timed `Complete` sends must also be at
+    /// least twice the timed `Latest` sends.
     Competes,
 }
 
@@ -423,8 +425,8 @@ async fn open(session: &Session, load: Load) -> Vec<Sender> {
 ///
 /// # Panics
 ///
-/// When a send fails, after a round that does not show `premise`, or when the
-/// classes the server got in `accepted` are not those of `senders`.
+/// When a send fails, when the rounds do not show `premise`, or when the classes the
+/// server got in `accepted` are not those of `senders`.
 async fn compete(
     pool: &Pool,
     senders: &mut [Sender],
@@ -436,7 +438,7 @@ async fn compete(
     let share = SENDS / senders.len();
     let mut nanos = Vec::with_capacity(ROUNDS);
     let (mut allocations, mut polls, mut timed) = (0, 0, 0);
-    let mut timed_of = vec![0; senders.len()];
+    let (mut complete, mut latest) = (0, 0);
     for round in 0..WARMUP + ROUNDS {
         let tally = Tally::new(classes.clone(), premise);
         let tally = RefCell::new(tally);
@@ -447,7 +449,7 @@ async fn compete(
         }
         join(sends).await;
         let tally = tally.into_inner();
-        let sends: u64 = tally.sends.iter().sum();
+        let sends: u64 = tally.sent.iter().sum();
         assert!(
             tally.shown,
             "{} is not {premise:?} in round {round}",
@@ -463,20 +465,11 @@ async fn compete(
             allocations += tally.timed.allocations;
             polls += tally.timed.polls;
             timed += sends;
-            for (total, sends) in timed_of.iter_mut().zip(tally.sends) {
-                *total += sends;
-            }
+            complete += tally.sends(Class::Complete);
+            latest += tally.sends(Class::Latest);
         }
     }
     if let Premise::Competes = premise {
-        let of = |class: Class| -> u64 {
-            let senders = classes.iter().zip(&timed_of);
-            senders
-                .filter(|(of, _)| **of == class)
-                .map(|(_, sends)| sends)
-                .sum()
-        };
-        let (complete, latest) = (of(Class::Complete), of(Class::Latest));
         assert!(
             complete >= 2 * latest,
             "{} times {complete} Complete and {latest} Latest sends: one class",
@@ -521,7 +514,7 @@ struct Tally {
     /// The cost of the timed sends.
     timed: Cost,
     /// The timed sends of each sender.
-    sends: Vec<u64>,
+    sent: Vec<u64>,
     /// The cost so far of the current send of each sender.
     current: Vec<Cost>,
     /// The class of each sender.
@@ -547,7 +540,7 @@ impl Tally {
     fn new(classes: Vec<Class>, premise: Premise) -> Self {
         Self {
             timed: Cost::default(),
-            sends: vec![0; classes.len()],
+            sent: vec![0; classes.len()],
             current: vec![Cost::default(); classes.len()],
             waiting: vec![false; classes.len()],
             turned: vec![false; classes.len()],
@@ -585,7 +578,7 @@ impl Tally {
                 self.timed.nanos += cost.nanos;
                 self.timed.allocations += cost.allocations;
                 self.timed.polls += cost.polls;
-                self.sends[at] += 1;
+                self.sent[at] += 1;
             }
         }
         self.shown |= match self.premise {
@@ -601,6 +594,15 @@ impl Tally {
     fn waits(&self, class: Class) -> bool {
         let mut senders = self.classes.iter().zip(&self.waiting);
         senders.any(|(&of, &waits)| of == class && waits)
+    }
+
+    /// The timed sends of the senders of `class`.
+    fn sends(&self, class: Class) -> u64 {
+        let senders = self.classes.iter().zip(&self.sent);
+        senders
+            .filter(|&(&of, _)| of == class)
+            .map(|(_, sent)| sent)
+            .sum()
     }
 
     /// Whether a sender of `class` finished a send while the other class waited.
