@@ -106,7 +106,8 @@ impl Mesh {
             return Err(Error::NotMember(key));
         }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
-        let written = joins(&stored.entries).collect();
+        let unapplied = joins(&stored.entries).collect();
+        let synced = stored.entries.last().map(|entry| entry.at);
         let start = Start {
             hard: stored.hard,
             voters: Voters {
@@ -130,7 +131,8 @@ impl Mesh {
             watches: BTreeMap::new(),
             proposals: Vec::new(),
             slots: 0,
-            written,
+            unapplied,
+            synced: synced.unwrap_or_default(),
         }));
         let weak = Rc::downgrade(&group);
         config
@@ -197,6 +199,7 @@ impl Mesh {
         }
         grant::check(&mut message, public_key)?;
         group.raft.step(message)?;
+        group.sync();
         group.wake();
         Ok(())
     }
@@ -256,8 +259,10 @@ impl Mesh {
         let proposal = {
             let mut group = self.group.borrow_mut();
             group.running()?;
+            let at = propose(&mut group)?;
+            group.sync();
             let proposal = Rc::new(Proposal {
-                at: propose(&mut group)?,
+                at,
                 held: Cell::new(None),
                 waker: Cell::new(None),
             });
@@ -406,31 +411,45 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
-    // The node key and public key of each join in the log that this node wrote and
-    // has not applied, by index.
-    written: BTreeMap<u64, (node::Key, PublicKey)>,
+    // The node key and public key of each join in the log that `raft` holds and
+    // this node has not applied, by index.
+    unapplied: BTreeMap<u64, (node::Key, PublicKey)>,
+    // The last entry whose join `sync` took.
+    synced: Position,
 }
 
 impl Group {
     // The public key of `key` in the applied state, else in the joins of the log
-    // as written. A node key whose written joins name two public keys has none
-    // until the apply decides: the first can be a forgery.
+    // as `raft` holds it. A node key whose unapplied joins name two public keys has
+    // none until the apply decides: the first can be a forgery.
     fn public_key(&self, key: node::Key) -> Option<PublicKey> {
         if let Some(member) = self.state.member(key) {
             return Some(member.public_key());
         }
-        let mut written = self.written.values().filter(|(of, _)| *of == key);
-        let (_, first) = written.next()?;
-        written.all(|(_, other)| other == first).then_some(*first)
+        let mut unapplied = self.unapplied.values().filter(|(of, _)| *of == key);
+        let (_, first) = unapplied.next()?;
+        unapplied.all(|(_, other)| other == first).then_some(*first)
     }
 
-    // Keeps the joins of `entries`, which the log now holds in place of each entry
-    // from the first index of `entries` on.
-    fn wrote(&mut self, entries: &[Entry]) {
-        if let Some(first) = entries.first() {
-            self.written.split_off(&first.at.index);
-        }
-        self.written.extend(joins(entries));
+    // Takes the joins that `raft` appended since the last sync. It runs after each
+    // change to the log of `raft`, so `unstable` holds each entry since then. When
+    // `unstable` no longer holds the synced entry, a step replaced it, and the joins
+    // from the first unstable index go.
+    fn sync(&mut self) {
+        let unstable = self.raft.unstable();
+        let (Some(first), Some(last)) = (unstable.first(), unstable.last()) else {
+            return;
+        };
+        let synced = self.synced;
+        let mut entries = unstable.iter();
+        let new = if entries.any(|entry| entry.at == synced) {
+            entries.as_slice()
+        } else {
+            self.unapplied.split_off(&first.at.index);
+            unstable
+        };
+        self.unapplied.extend(joins(new));
+        self.synced = last.at;
     }
 
     fn running(&self) -> Result<(), Error> {
@@ -464,7 +483,7 @@ impl Group {
     fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
         if let Some(last) = committed.last() {
             let last = last.at.index;
-            self.written.retain(|&index, _| index > last);
+            self.unapplied.retain(|&index, _| index > last);
         }
         for Entry { at, data } in committed {
             let bytes = match data {
@@ -618,6 +637,7 @@ async fn run(
                 group.raft.tick(rng.next_u64());
                 tick = clock.sleep(TICK);
             }
+            group.sync();
             let ready = group.raft.ready();
             if ready == Ready::default() {
                 group.task = Some(cx.waker().clone());
@@ -652,7 +672,6 @@ async fn run(
             ..
         } = ready;
         let applied = written.map_err(Stopped::Write).and_then(|()| {
-            group.wrote(&entries);
             for proposal in &proposals {
                 proposal.held.set(Some(holds(&entries, proposal.at)));
             }
@@ -1825,7 +1844,7 @@ mod tests {
         }
     }
 
-    mod written {
+    mod unapplied {
         use super::*;
         use crate::common::proven_at;
 
@@ -1984,6 +2003,91 @@ mod tests {
                 let forged = Error::Grant(grant::Error::Forged { voter: key(4) });
                 assert_eq!(mesh.receive(public(2), vote(5, 3)), Err(forged));
                 assert_eq!(mesh.receive(public(2), vote(4, 3)), Ok(()));
+            });
+        }
+
+        // With no ticket 7 the apply refuses both joins, so nothing else removes
+        // their keys.
+        #[test]
+        fn a_refused_join_gives_its_node_no_key_once_applied() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(6)])).await;
+                let commit = proven(2, 1, Body::Heartbeat { commit: 2 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::from_nanos(1_000_000)).await;
+                assert_eq!(mesh.member(key(4)), None);
+                for id in [4, 6] {
+                    let reply = message(id, 1, Body::HeartbeatReply);
+                    let spoofed = Error::Spoofed { from: key(id) };
+                    assert_eq!(mesh.receive(public(id), reply), Err(spoofed));
+                }
+            });
+        }
+
+        // `raft` reads its configuration from the log that it holds, before the
+        // write, so the keys follow that log too.
+        #[test]
+        fn a_forged_join_gives_no_key_once_a_step_appends_the_real_join() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                write(&mesh, changes(&[Change::Join(forged)])).await;
+                let mut data = changes(&[join(4)]);
+                data.extend([voters(&[2, 4], &[2, 3]), voters(&[2, 4], &[])]);
+                let entries = iter::zip(2.., data)
+                    .map(|(index, data)| Entry {
+                        at: Position {
+                            term: common::TERM,
+                            index,
+                        },
+                        data,
+                    })
+                    .collect();
+                let append = Body::Append {
+                    prev: Position {
+                        term: common::TERM,
+                        index: 1,
+                    },
+                    entries,
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+                let forged = heartbeat(2, later(), &[(2, 2), (4, 5)]);
+                let unproven = raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                };
+                assert_eq!(mesh.receive(public(2), forged), Err(Error::Raft(unproven)));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_a_forged_join_removes_its_key_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                write(&mesh, changes(&[Change::Join(forged)])).await;
+                let mut data = changes(&[join(4)]);
+                data.extend([voters(&[2, 3, 4], &[2, 3]), voters(&[2, 3, 4], &[])]);
+                let replace = append(later(), data);
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let next = Term(later().0 + 1);
+                let forged = heartbeat(3, next, &[(3, 3), (4, 5)]);
+                let refused = Error::Grant(grant::Error::Forged { voter: key(4) });
+                assert_eq!(mesh.receive(public(3), forged), Err(refused));
+                assert_eq!(term(&mesh), later());
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(5), reply), Err(spoofed));
             });
         }
 

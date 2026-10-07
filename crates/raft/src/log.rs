@@ -233,8 +233,13 @@ impl Log {
     }
 
     // The entries no `Ready` has given to write yet.
+    pub(crate) fn unstable(&self) -> &[Entry] {
+        let stable = usize::try_from(self.stable).unwrap_or(usize::MAX);
+        &self.entries[stable..]
+    }
+
     pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
-        let entries = self.slice(self.stable + 1, u64::MAX, usize::MAX);
+        let entries = self.unstable().to_vec();
         self.stable = self.last().index;
         entries
     }

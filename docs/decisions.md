@@ -1759,16 +1759,25 @@ How to read this record:
   claim with the node's Ed25519 key over `foundation/grant/1`, the voter (16 bytes,
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
   endian), and the candidate (16 bytes, little endian). The voter in the bytes keeps
-  two members that share a key from sharing a signature. Grants name no region; a
-  second region adds the region key under `foundation/grant/2`. The driver (#471)
-  checks each claim of a message before each `step` against the key of its signer: the
-  key of a member in the applied state, else the key that each join of that node in the
-  log as written and not applied names, when all of them name one key. A later record
-  that replaces a join removes its key. Two joins that name two keys give none until the
-  apply decides: a voter stamps a join with no check, so the first can be forged
-  (decided by `laptop.director`, 2026-10-07T12:48:00Z and 2026-10-07T13:10:50Z:
+  two members that share a key from sharing a signature. Grants name no region; a second
+  region adds the region key under `foundation/grant/2`. The driver (#471) checks each
+  claim of a message before each `step` against the key of its signer: the key of a
+  member in the applied state, else the key that each join of that node in the log as
+  `raft` holds it and not applied names, when all of them name one key. An entry that
+  replaces a join removes its key, at the step that replaces it. Two joins that name two
+  keys give none until the apply decides: a voter stamps a join with no check, so the
+  first can be forged (decided by `laptop.director`, 2026-10-07T12:48:00Z and
+  2026-10-07T13:10:50Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423 and
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429). The
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429). The log
+  is the one that `raft` reads its configuration from, so each `step` and each proposal
+  syncs the keys from `Raft::unstable` before the write (decided by `laptop.architect`,
+  2026-10-07T13:31:26Z:
+  https://github.com/synnaxlabs/foundation/pull/1400#issuecomment-6039027801). The same
+  key serves the check of the sender of a message (`Error::Spoofed`) and of the peer of
+  a forwarded proposal (`Error::PeerNotVoter`) (decided by `laptop.architect`,
+  2026-10-07T13:23:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1400#issuecomment-6038887227). The
   format version stays 1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
