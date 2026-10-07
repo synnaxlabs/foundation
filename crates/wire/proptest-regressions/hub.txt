@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bef1456fca0dbc402b4d297ecbafae18126e246146433facabeadc614e2a4294 # shrinks to bytes = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+cc 3d154642930a726951c9d0c391d72f378eca5e494f38090fb123ff167e420805 # shrinks to open = Open { mode: Latest, channels: [] }, stale = 0
+cc 5eda40c7a580a16a5fd911ee57d1d3aeb440e6be9f19e34cca35be77149884c0 # shrinks to (path, form, range, ends) = (Live, Raw, Range { seq: 0, count: 0 }, []), limit_bytes = 0, stale = 0
+cc a1f4a5a6c67669fd27a7d57be49ba2183e9e59b8ec84ec8410b913f2c17e15ff # shrinks to bytes = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 51, 117, 181]
