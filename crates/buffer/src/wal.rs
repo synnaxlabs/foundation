@@ -144,14 +144,13 @@ impl Layout {
     ///
     /// # Errors
     ///
-    /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under 4087 bytes (one block less the record header), over `u32::MAX`, or so
-    /// large that the largest record does not fit in a `usize`, when `area` is less
-    /// than twice the largest record (a 9-byte header and `body_max`, in whole
-    /// 4096-byte blocks), or when the ring file (two header blocks and the area) does
-    /// not fit in a `u64`. A ring of that length that
-    /// holds only its restart record takes any record, wherever the restart record
-    /// is.
+    /// [`Unfit`] when `body_max` is under 4087 bytes (one block less the record
+    /// header), over `u32::MAX`, or so large that the largest record does not fit in a
+    /// `usize`. Also when `area` is not a multiple of [`ALIGN`], when it is less than
+    /// twice the largest record (a 9-byte header and `body_max`, in whole 4096-byte
+    /// blocks), or when the ring file (two header blocks and the area) does not fit in
+    /// a `u64`. A ring of that length that holds only its restart record takes any
+    /// record, wherever the restart record is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         match window(body_max) {
             Some(window)
@@ -1195,6 +1194,7 @@ mod tests {
                 Small { len: 8191, min }.to_string(),
                 "a ring file of 8191 bytes holds no ring; it needs at least 16384 bytes"
             );
+            let _: &dyn std::error::Error = &Small { len: 8191, min };
         }
 
         #[test]
