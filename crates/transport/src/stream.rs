@@ -376,7 +376,7 @@ mod tests {
     use types::time::Span;
 
     use crate::testing::{self, IDLE, poll_once, spans};
-    use crate::{Class, Code, Config, Error};
+    use crate::{Address, Class, Code, Config, Error, Transport};
 
     /// The messages of [`lossy`].
     const COUNT: u32 = 1000;
@@ -1463,6 +1463,61 @@ mod tests {
                 side.session.close(Code(4));
             },
         );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_on_an_ended_session_errs_while_another_session_waits_for_a_block() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        testing::shard(&server, testing::SERVER, |config, node| async move {
+            let config = scarce(config, heap());
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let ended = transport.accept().await.expect("a session");
+            let waiting = transport.accept().await.expect("a session");
+            let clock = node.clock();
+            let mut first = waiting.accept().await.expect("a stream").receiver;
+            // The first message fills the pool.
+            let held = first.recv().await.expect("a message").expect("a block");
+            let mut second = waiting.accept().await.expect("a stream").receiver;
+            let mut second_read = Box::pin(second.recv());
+            let mut receiver = ended.accept().await.expect("a stream").receiver;
+            let mut closed = pin!(ended.closed());
+            let closed = poll_fn(|cx| {
+                assert!(second_read.as_mut().poll(cx).is_pending());
+                closed.as_mut().poll(cx)
+            })
+            .await;
+            assert_eq!(closed, Error::PeerClosed { code: Code(7) });
+            let read = poll_once(pin!(receiver.recv())).await.map(bytes);
+            assert_eq!(read, Some(Err(Error::PeerClosed { code: Code(7) })));
+            drop(held);
+            let message = second_read.await.expect("a message").expect("a block");
+            assert_eq!(message.to_vec(), vec![1; LARGE]);
+            waiting.close(Code(4));
+            clock.sleep(Span::MILLISECOND).await;
+        });
+        testing::shard(&client, testing::CLIENT, move |config, node| async move {
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let server = crate::tls::public(&testing::SERVER);
+            let ended = transport.dial(server, &at).await.expect("a session");
+            let waiting = transport.dial(server, &at).await.expect("a session");
+            let messages = [(&waiting, 0), (&waiting, 1), (&ended, 2)];
+            for (session, byte) in messages {
+                let opened = session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let block = testing::block(&pool, &vec![byte; LARGE]);
+                sender.send(block).await.expect("sent");
+                sender.finish().expect("finished");
+            }
+            node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            ended.close(Code(7));
+            let closed = Error::PeerClosed { code: Code(4) };
+            assert_eq!(waiting.closed().await, closed);
+        });
         assert_eq!(sim.run(), Ok(()));
     }
 }
