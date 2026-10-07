@@ -1854,7 +1854,8 @@ How to read this record:
   which InfluxDB 1 OSS refuses, until the writer stops writing `u` (#1210). Lost: a
   store that gives a time to a line with none, and one that takes a type conflict, as
   each hides a writer bug; and a test that a line is refused if and only if the writer
-  refuses its input, as it needs a second, hand-written writer. Decided by the architect
+  refuses its input, as the writer also refuses names that InfluxDB stores (a backslash,
+  a tab, NUL), so the two sets differ by design. Decided by the architect
   (`laptop.architect-2`), #1151
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032723969), and in
   the review of #1239
