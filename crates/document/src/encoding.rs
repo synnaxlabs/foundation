@@ -298,7 +298,7 @@ fn enter(depth: usize) -> Option<usize> {
     depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
 }
 
-/// Recurses once per level, so it runs only on a Document that [`check`] accepts.
+/// Recurses once per level, so it runs only on a [`Checked`] Document.
 struct Writer {
     out: Vec<u8>,
 }
