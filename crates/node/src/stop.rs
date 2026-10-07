@@ -33,6 +33,11 @@ impl Stop {
         }
     }
 
+    /// Whether the signal is set.
+    pub(crate) fn raised(&self) -> bool {
+        self.lock().set
+    }
+
     /// A shard's hold on the signal: it completes once the signal is set, and it sets
     /// the signal when dropped, so any shard that ends stops the node.
     pub(crate) fn guard(&self) -> Guard {
