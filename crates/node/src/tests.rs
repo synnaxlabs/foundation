@@ -539,6 +539,21 @@ mod buffer {
         Pin::new(&mut node.interner).poll(&mut cx)
     }
 
+    /// True when each open of `node` has ended, `after` its start.
+    ///
+    /// # Panics
+    ///
+    /// When a shard dropped the interner, or when the opens go on after 10 ms.
+    fn all_opened(node: &mut Node, after: Span) -> bool {
+        let taken = taken(node);
+        assert!(
+            !matches!(taken, Poll::Ready(None)),
+            "no interner, {after:?}"
+        );
+        assert!(after < Span::from_nanos(10_000_000), "the opens go on");
+        taken.is_ready()
+    }
+
     /// A data directory that a node of 3 shards left before the record existed is
     /// made for 3 shards, so a start on 2 cores is refused.
     #[test]
@@ -644,7 +659,7 @@ mod buffer {
         assert_eq!(ring_len(&mut sim, &host, 1), RING);
     }
 
-    /// A ring already there keeps its size, larger or smaller than its new part.
+    /// A ring with a checkpoint keeps its size, larger or smaller than its new part.
     #[test]
     fn a_restart_with_another_disk_budget_opens_the_rings_at_their_sizes() {
         for (first, ring, then) in
@@ -848,18 +863,52 @@ mod buffer {
     #[test]
     fn a_crash_during_the_opens_leaves_rings_the_next_start_opens() {
         for crash in [sim::Crash::Process, sim::Crash::Power] {
-            // The claim ends at about 250 us, and the opens at about 1.3 ms.
-            for step in 0..60 {
+            for after in (0..).step_by(25_000).map(Span::from_nanos) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
-                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-                let after = Span::from_nanos(step * 25_000);
+                let mut node =
+                    Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                let opened = all_opened(&mut node, after);
                 sim.crash(&host, crash);
                 drop(node);
                 assert_eq!(run_on(&mut sim, &host), Ok(()), "{crash:?} at {after:?}");
+                if opened {
+                    break;
+                }
             }
         }
+    }
+
+    /// A crash at any point of the first opens, then a restart with another disk
+    /// budget: a ring with a checkpoint keeps its size and a ring with none takes its
+    /// new part, so the restart opens.
+    #[test]
+    fn a_crash_during_the_opens_then_another_disk_budget_opens() {
+        let mut failed = Vec::new();
+        for crash in [sim::Crash::Process, sim::Crash::Power] {
+            for after in (0..).step_by(25_000).map(Span::from_nanos) {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                let mut node =
+                    Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+                assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                let opened = all_opened(&mut node, after);
+                sim.crash(&host, crash);
+                drop(node);
+                let lens = run_on_disk(&mut sim, &host, 2 * RING)
+                    .map(|()| [0, 1].map(|core| ring_len(&mut sim, &host, core)));
+                let fits = |len: &u64| [RING, DISK.bytes() / 2].contains(len);
+                if !lens.as_ref().is_ok_and(|lens| lens.iter().all(fits)) {
+                    failed.push(format!("{crash:?} at {after:?}: {lens:?}"));
+                }
+                if opened {
+                    assert_eq!(lens, Ok([DISK.bytes() / 2; 2]), "{crash:?}");
+                    break;
+                }
+            }
+        }
+        assert_eq!(failed, Vec::<String>::new());
     }
 
     #[test]

@@ -3,8 +3,8 @@
 
 use std::slice;
 
-use types::byte;
 use types::name::{Error, Name, Selector};
+use types::{byte, time};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
@@ -13,6 +13,7 @@ use crate::{Label, Span};
 const BAD_SIZE: Code = Code::new("document.bad-size");
 const BAD_NAME: Code = Code::new("document.bad-name");
 const BAD_SELECTOR: Code = Code::new("document.bad-selector");
+const BAD_SPAN: Code = Code::new("document.bad-span");
 
 /// Reads a byte size from a string that [`byte::Size`] reads, such as `"200GiB"` or
 /// `"1.5GiB"`.
@@ -70,6 +71,48 @@ fn size_fix(text: &str, error: byte::Error) -> String {
         byte::Error::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
         byte::Error::Range { largest } => format!("Use at most \"{largest}\""),
         byte::Error::Unit { .. } | byte::Error::Fraction => error.fix(),
+    }
+}
+
+/// Reads a span from a string that [`time::Span`] reads, such as `"3d"` or `"1.5s"`.
+///
+/// # Errors
+///
+/// A `document.bad-span` diagnostic at the value's span when the value is not a
+/// string, or when `time::Span` refuses its text.
+pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
+    let bad = |message: String, fix: String| {
+        Diagnostic::new(BAD_SPAN, value.span, message, fix)
+    };
+    let Kind::String(text) = &value.kind else {
+        return Err(bad(
+            format!("a span is a string, not {}", noun(&value.kind)),
+            "Write a string such as \"3d\"".into(),
+        ));
+    };
+    text.parse::<time::Span>().map_err(|error| {
+        bad(
+            format!("cannot read the span {text:?}: {error}"),
+            span_fix(error),
+        )
+    })
+}
+
+/// The fix for `error`, with each span quoted as the file writes it.
+fn span_fix(error: time::Error) -> String {
+    match error {
+        time::Error::Span => {
+            "Write a span such as \"250us\", \"1.5s\", or \"3d\"".into()
+        }
+        time::Error::Long => "Use a span from \"-106751d\" to \"106751d\"".into(),
+        time::Error::Fraction
+        | time::Error::Stamp
+        | time::Error::Date
+        | time::Error::Era
+        | time::Error::Range
+        | time::Error::Reversed
+        | time::Error::Zero
+        | time::Error::Period => error.fix().into(),
     }
 }
 
@@ -764,6 +807,84 @@ mod tests {
         }
     }
 
+    fn refused_span(message: &str, fix: &str) -> Result<time::Span, Diagnostic> {
+        Err(Diagnostic::new(
+            Code::new("document.bad-span"),
+            Some(span()),
+            message.into(),
+            fix.into(),
+        ))
+    }
+
+    #[test]
+    fn reads_a_span() {
+        for (text, read) in [
+            ("3d", time::Span::DAY.nanos() * 3),
+            ("1.5s", 1_500_000_000),
+            ("0s", 0),
+            ("-2h", -time::Span::HOUR.nanos() * 2),
+        ] {
+            assert_eq!(
+                super::span(&string(text)),
+                Ok(time::Span::from_nanos(read)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_span_that_is_not_a_string() {
+        for (kind, name) in [
+            (Kind::Integer(3), "an integer"),
+            (Kind::Reference("d".parse().unwrap()), "a reference"),
+            (Kind::List(Vec::new()), "a list"),
+        ] {
+            assert_eq!(
+                super::span(&value(kind)),
+                refused_span(
+                    &format!("a span is a string, not {name}"),
+                    "Write a string such as \"3d\"",
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_span_that_time_refuses() {
+        for (text, problem, fix) in [
+            (
+                "3 days",
+                "a span is not a number and a unit",
+                "Write a span such as \"250us\", \"1.5s\", or \"3d\"",
+            ),
+            (
+                "0.5ns",
+                "a span is not a whole number of nanoseconds",
+                "Use fewer fraction digits or a smaller unit",
+            ),
+            (
+                "106752d",
+                "a span does not fit in 64-bit nanoseconds",
+                "Use a span from \"-106751d\" to \"106751d\"",
+            ),
+        ] {
+            assert_eq!(
+                super::span(&string(text)),
+                refused_span(&format!("cannot read the span {text:?}: {problem}"), fix),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A text that is often close to a span.
+    fn near_span() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            "-?[0-9]{0,21}[.]?[0-9]{0,20} ?(ns|us|ms|s|m|h|d|x|)",
+        ]
+    }
+
     /// A text that is often close to a byte size.
     fn near() -> impl Strategy<Value = String> {
         prop_oneof![
@@ -808,6 +929,32 @@ mod tests {
                             text
                         );
                     }
+                }
+                (read, parsed) => {
+                    prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
+                }
+            }
+        }
+
+        #[test]
+        fn reads_the_text_of_each_span(nanos in any::<i64>()) {
+            let written = time::Span::from_nanos(nanos);
+            prop_assert_eq!(super::span(&string(&written.to_string())), Ok(written));
+        }
+
+        #[test]
+        fn reads_as_time_span_does(text in near_span()) {
+            match (super::span(&string(&text)), text.parse::<time::Span>()) {
+                (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                (Err(diagnostic), Err(error)) => {
+                    prop_assert_eq!(diagnostic.code, Code::new("document.bad-span"));
+                    prop_assert_eq!(diagnostic.span, Some(span()));
+                    prop_assert_eq!(
+                        diagnostic.message,
+                        format!("cannot read the span {text:?}: {error}")
+                    );
+                    // The fix is the error's, with each span quoted.
+                    prop_assert_eq!(diagnostic.fix.replace('"', ""), error.fix());
                 }
                 (read, parsed) => {
                     prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);

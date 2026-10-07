@@ -46,7 +46,7 @@ impl Card {
     /// [`Addresses::new`](addresses::Addresses::new) refuses; `bytes` is then at no known
     /// place.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "sim")),
         expect(dead_code, reason = "the streams of #471 are the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {

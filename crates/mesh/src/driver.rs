@@ -17,14 +17,15 @@ use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use types::channel;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
-use types::time::Span;
+use types::time::{Span, Stamp};
 
 use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
-use crate::region::{self, Change, Malformed, Refused};
+use crate::region::{self, Change, Join, Malformed, Refused, Request};
+use crate::status::Status;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -55,13 +56,16 @@ pub(crate) struct Config {
     pub(crate) files: Files,
     /// Times the ticks of the group.
     pub(crate) clock: Clock,
-    /// Gives each election timeout its random part.
+    /// Gives the mesh time of each join that this node stamps.
+    pub(crate) time: clock::Reader,
+    /// Gives each election timeout its random part, and the random part of each status
+    /// key that this node makes.
     pub(crate) entropy: Entropy,
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
     /// Gives the blocks of the log's reads and writes. A write that finds the pool
-    /// full, or that the system refuses memory for, waits: the group sends and applies
-    /// nothing until the pool gives the blocks.
+    /// full, or that the system refuses memory for, waits: the group takes, sends, and
+    /// applies nothing until that write ends.
     pub(crate) pool: Rc<Pool>,
 }
 
@@ -74,6 +78,8 @@ pub(crate) struct Config {
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
+    time: clock::Reader,
+    entropy: Entropy,
 }
 
 impl Mesh {
@@ -129,12 +135,21 @@ impl Mesh {
             watches: BTreeMap::new(),
             proposals: Vec::new(),
             slots: 0,
+            waits: None,
         }));
         let weak = Rc::downgrade(&group);
-        config
-            .tasks
-            .spawn(run(weak, log, signer, config.clock, config.entropy));
-        Ok(Self { group })
+        config.tasks.spawn(run(
+            weak,
+            log,
+            signer,
+            config.clock,
+            config.entropy.clone(),
+        ));
+        Ok(Self {
+            group,
+            time: config.time,
+            entropy: config.entropy,
+        })
     }
 
     /// A watch of the home of `index`.
@@ -165,6 +180,8 @@ impl Mesh {
     /// The group does not see a message that fails a check.
     ///
     /// - [`Error::Stopped`] when the group stopped.
+    /// - [`Error::Pool`] from a write of the log that finds no block, until that write
+    ///   ends.
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
@@ -182,7 +199,7 @@ impl Mesh {
         message: raft::Message,
     ) -> Result<(), Error> {
         let mut group = self.group.borrow_mut();
-        group.running()?;
+        group.taking()?;
         let from = message.from;
         let public_key = |key| group.state.member(key).map(Member::public_key);
         if public_key(from) != Some(peer) {
@@ -206,6 +223,8 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block, until
+    ///   that write ends.
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead, or when a new leader replaces the entry before a write holds it.
     pub(crate) async fn propose(&self, change: Change) -> Result<Position, Error> {
@@ -218,7 +237,7 @@ impl Mesh {
     async fn propose_data(&self, data: Vec<u8>) -> Result<Position, Error> {
         let proposal = {
             let mut group = self.group.borrow_mut();
-            group.running()?;
+            group.taking()?;
             let proposal = Rc::new(Proposal {
                 at: group.raft.propose(data)?,
                 held: Cell::new(None),
@@ -252,6 +271,8 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
+    /// - [`Error::Pool`] from an earlier write of the log that finds no block, until
+    ///   that write ends. The group does not see the change.
     /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
     ///   configuration. The group does not see the change.
     pub(crate) async fn answer(
@@ -261,7 +282,7 @@ impl Mesh {
     ) -> Result<Message, Error> {
         {
             let group = self.group.borrow();
-            group.running()?;
+            group.taking()?;
             let Voters { incoming, outgoing } = group.raft.voters();
             let holds = |voter: &node::Key| {
                 group.state.member(*voter).map(Member::public_key) == Some(peer)
@@ -277,6 +298,41 @@ impl Mesh {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// The `Join` of `request` at the later edge of this node's mesh time, with a new
+    /// UUIDv7 key for each status name. The caller proposes it, or forwards it to the
+    /// leader. Each node checks the join when it applies it.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unsynced`] when this node has no mesh time, when its error is
+    ///   unknown, or when the later edge is before the Unix epoch, where a UUIDv7
+    ///   key has no time.
+    /// - [`Error::Status`] when `request` names more than 64 status channels.
+    pub(crate) fn stamp(&self, request: Request) -> Result<Change, Error> {
+        let measurement = match self.time.status() {
+            clock::Status::Synced(measurement)
+            | clock::Status::Holdover(measurement, _) => measurement,
+            clock::Status::Unsynced(_) => return Err(Error::Unsynced),
+        };
+        let at = measurement.interval().latest;
+        if !measurement.known() || at < Stamp::EPOCH {
+            return Err(Error::Unsynced);
+        }
+        let key = |name| {
+            let mut random = [0; 16];
+            self.entropy.fill(&mut random);
+            (name, channel::Key::v7(at, u128::from_le_bytes(random)))
+        };
+        let keys = request.status.into_iter().map(key).collect();
+        Ok(Change::Join(Box::new(Join {
+            ticket: request.ticket,
+            at,
+            card: request.card,
+            admission: request.admission,
+            status: Status::new(keys).map_err(Error::Status)?,
+        })))
     }
 
     /// Waits for the next message for the member `to`. Each message is signed, and
@@ -371,12 +427,23 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
+    // Why the last try of a write of the log found no block, until that write ends.
+    waits: Option<block::Error>,
 }
 
 impl Group {
     fn running(&self) -> Result<(), Error> {
         match self.stopped.get() {
             Some(stopped) => Err(Error::Stopped(stopped.clone())),
+            None => Ok(()),
+        }
+    }
+
+    // Whether the group takes a proposal or a message now.
+    fn taking(&self) -> Result<(), Error> {
+        self.running()?;
+        match &self.waits {
+            Some(cause) => Err(Error::Pool(cause.clone())),
             None => Ok(()),
         }
     }
@@ -554,11 +621,15 @@ async fn run(
         signer.sign(&mut ready);
         // The pool may give the blocks later, so the write runs again at each tick.
         let written = loop {
-            match log.write(ready.hard.clone(), &ready.entries).await {
+            let cause = match log.write(ready.hard.clone(), &ready.entries).await {
                 Err(log::Error::Pool(
-                    block::Error::Exhausted { .. } | block::Error::Refused { .. },
-                )) => {}
+                    cause @ (block::Error::Exhausted { .. }
+                    | block::Error::Refused { .. }),
+                )) => cause,
                 written => break written,
+            };
+            if let Some(group) = group.upgrade() {
+                group.borrow_mut().waits = Some(cause);
             }
             (&mut tick).await;
             tick = clock.sleep(TICK);
@@ -568,6 +639,7 @@ async fn run(
         };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
+        group.waits = None;
         let Ready {
             entries,
             messages,
@@ -608,12 +680,12 @@ mod tests {
     use sim::{Crash, Sim, link};
     use transport::Address;
     use types::node::SealKey;
-    use types::time::Stamp;
 
     use super::*;
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
-    use crate::region::{Join, Unfit, Unknown};
+    use crate::region::{Unfit, Unknown};
+    use crate::status::Many;
     use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -640,6 +712,14 @@ mod tests {
         answers: BTreeMap<u8, Message>,
         /// The members from 1 to 9 on each node, when its watch last gave a home.
         members: BTreeMap<u8, BTreeSet<u8>>,
+        /// The records of those members on each node, at the same time.
+        records: BTreeMap<u8, BTreeMap<u8, Member>>,
+        /// The region state of each node, at the same time.
+        states: BTreeMap<u8, region::State>,
+        /// The join request that each node stamps.
+        requests: BTreeMap<u8, Request>,
+        /// The join that each node stamped.
+        stamped: BTreeMap<u8, Change>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -673,10 +753,24 @@ mod tests {
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
             clock: node.clock(),
+            time: synced(node),
             entropy: node.entropy(),
             tasks: tasks.clone(),
             pool: create_pool(),
         }
+    }
+
+    /// The wall time at the start of each run: 2026-01-01T00:00:00Z.
+    const NOW: Stamp = Stamp::from_nanos(1_767_225_600 * 1_000_000_000);
+
+    /// A reader of mesh time on `node` that follows the node's wall clock.
+    #[expect(clippy::disallowed_methods, reason = "feeds the mesh clock of a test")]
+    fn synced(node: &sim::node::Node) -> clock::Reader {
+        let (mut clock, reader) = clock::Clock::new(node.clock());
+        let source = clock.add();
+        let wall = clock::source::Wall::new(node.wall(), node.clock());
+        clock.push(source, wall.measure());
+        reader
     }
 
     async fn open(
@@ -712,6 +806,15 @@ mod tests {
         let lens = [pool.largest(), 1];
         let blocks = lens.map(|len| iter::from_fn(move || pool.alloc(len).ok()));
         blocks.into_iter().flatten().collect()
+    }
+
+    /// What a group gives while its write of `requested` bytes waits for a block of a
+    /// pool that `fill` took.
+    fn exhausted(requested: usize) -> Error {
+        Error::Pool(block::Error::Exhausted {
+            requested,
+            available: 64,
+        })
     }
 
     /// Sends each message for `to` as one datagram.
@@ -793,6 +896,19 @@ mod tests {
             };
             let answer = mesh.answer(public(from), change).await.unwrap();
             board.lock().unwrap().answers.insert(id, answer);
+        }
+    }
+
+    /// Stamps the join request of node `id`, and puts the join on the board.
+    async fn stamp(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let request = board.lock().unwrap().requests.remove(&id);
+            let Some(request) = request else {
+                continue;
+            };
+            let join = mesh.stamp(request).unwrap();
+            board.lock().unwrap().stamped.insert(id, join);
         }
     }
 
@@ -913,13 +1029,24 @@ mod tests {
         tasks.spawn(async move {
             answer(answering, clock, id, forwards).await;
         });
+        let (stamping, clock, requests) =
+            (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            stamp(stamping, clock, id, requests).await;
+        });
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();
-            let members = (1..10).filter(|&of| mesh.member(key(of)).is_some());
+            let records: BTreeMap<_, _> = (1..10)
+                .filter_map(|of| Some((of, mesh.member(key(of))?)))
+                .collect();
+            // No call of `Mesh` gives the use count of a ticket.
+            let state = mesh.group.borrow().state.clone();
             let mut board = board.lock().unwrap();
+            board.states.insert(id, state);
             board.homes.entry(id).or_default().push(home);
-            board.members.insert(id, members.collect());
+            board.members.insert(id, records.keys().copied().collect());
+            board.records.insert(id, records);
         }
     }
 
@@ -1064,6 +1191,15 @@ mod tests {
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
     }
 
+    /// Polls each call one time.
+    async fn poll_each<F: Future>(calls: &mut [Pin<Box<F>>]) -> Vec<Poll<F::Output>> {
+        poll_fn(|cx| {
+            let polls = calls.iter_mut().map(|call| call.as_mut().poll(cx));
+            Poll::Ready(polls.collect())
+        })
+        .await
+    }
+
     /// Proposes `change`, and gives the result when the call does not wait.
     async fn started(mesh: &Mesh, change: Change) -> Poll<Result<Position, Error>> {
         now(pin!(mesh.propose(change))).await
@@ -1111,30 +1247,26 @@ mod tests {
         });
     }
 
-    // The second proposal comes while the write of the first one waits for a block.
+    // The second proposal comes while the write of the first one is in a disk call.
     #[test]
     fn a_proposal_gives_the_cause_when_the_write_before_its_own_fails() {
         solo(|node, tasks| async move {
-            let pool = small_pool();
-            let config = Config {
-                pool: Rc::clone(&pool),
-                ..config(&node, &tasks, 1, &[1], &[1])
-            };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
             lead(&mesh, &node.clock(), home(1)).await;
-            let held = fill(&pool);
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stopped = fail_sync(&node);
             let results = Rc::new(RefCell::new(Vec::new()));
             for id in [2, 3] {
-                let (other, results) = (mesh.clone(), Rc::clone(&results));
+                let (other, given) = (mesh.clone(), Rc::clone(&results));
                 tasks.spawn(async move {
                     let proposed = other.propose(home(id)).await;
-                    results.borrow_mut().push(proposed);
+                    given.borrow_mut().push(proposed);
                 });
-                node.clock().sleep(TICK).await;
+                node.clock().sleep(Span::NANOSECOND).await;
+                assert_eq!(*results.borrow(), []);
             }
-            let stopped = fail_sync(&node);
-            drop(held);
-            node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
+            node.clock().sleep(TICK).await;
             assert_eq!(results.take(), [Err(stopped.clone()), Err(stopped)]);
         });
     }
@@ -1381,16 +1513,6 @@ mod tests {
             });
         }
 
-        /// The positions that the node gave for `home(3)`.
-        fn positions(answers: &Answers) -> Vec<Position> {
-            let position = |answer| match answer {
-                Ok(Message::Proposed { at }) => Some(at),
-                Ok(Message::NotLeader { leader: None }) => None,
-                other => panic!("the node answered {other:?}"),
-            };
-            answers.take().into_iter().filter_map(position).collect()
-        }
-
         /// Opens node 1 again after the power cut, and gives the position of the
         /// entry that sets the home to node 1, once the node has that home.
         fn lead_again(sim: &mut Sim, node: &sim::node::Node) -> Position {
@@ -1405,48 +1527,40 @@ mod tests {
         }
 
         // The lone voter leads in memory while the write of its term waits for a
-        // block. After a power cut the node leads the same term again, and the
-        // position that it would give for `home(3)` holds `home(1)`.
+        // block. After a power cut the node leads the same term again, so a position
+        // that it gave now would then hold another change.
         #[test]
-        fn a_position_in_an_answer_names_no_other_change_when_the_pool_is_full() {
-            let mut sim = Sim::new(sim::Config::default());
-            let node = sim.node(sim::node::Config::default());
-            let answered = sim
-                .run_on(&node, |node, tasks| async move {
-                    let pool = small_pool();
-                    let config = Config {
-                        pool: Rc::clone(&pool),
-                        ..config(&node, &tasks, 1, &[1], &[1])
-                    };
-                    let mesh = Mesh::open(config).await.unwrap();
-                    // No write of the log ends from here on.
-                    let _held = ManuallyDrop::new(fill(&pool));
-                    let answers = Answers::default();
-                    // Longer than each election timeout.
-                    for _ in 0..30 {
-                        node.clock().sleep(TICK).await;
-                        forward(&mesh, &tasks, &answers);
-                    }
+        fn a_node_gives_no_position_while_the_write_of_its_term_waits() {
+            solo(|node, tasks| async move {
+                let pool = small_pool();
+                let config = Config {
+                    pool: Rc::clone(&pool),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::open(config).await.unwrap();
+                // No write of the log ends from here on.
+                let _held = ManuallyDrop::new(fill(&pool));
+                let answers = Answers::default();
+                // Longer than each election timeout.
+                for _ in 0..30 {
                     node.clock().sleep(TICK).await;
-                    let answered = answers.borrow().len();
-                    assert!(answered < 30, "no change waits for the write");
-                    positions(&answers)
-                })
-                .unwrap();
-            sim.crash(&node, Crash::Power);
-            let taken = lead_again(&mut sim, &node);
-            assert!(
-                !answered.contains(&taken),
-                "the node answered that {taken:?} holds the home {}, and after the \
-                 power cut that position holds the home {}; it gave {answered:?}",
-                key(3),
-                key(1),
-            );
+                    forward(&mesh, &tasks, &answers);
+                }
+                node.clock().sleep(TICK).await;
+                let answers = answers.take();
+                let full = Err(exhausted(200));
+                let waits = answers.iter().position(|answer| *answer == full);
+                let (before, from) = answers.split_at(waits.unwrap());
+                let follows = Ok(Message::NotLeader { leader: None });
+                assert_eq!(before, vec![follows; before.len()]);
+                assert_eq!(from, vec![full; from.len()]);
+                assert_eq!(answers.len(), 30);
+            });
         }
 
-        // The same with no fault but the power cut: the change comes while the node
-        // writes the term that it now leads. A disk call takes 100 us at most, so the
-        // voter gives the change each 10 us for 500 us before and after each tick.
+        // The change comes while the node writes the term that it now leads, and a
+        // power cut follows. A disk call takes 100 us at most, so the voter gives the
+        // change each 10 us for 500 us before and after each tick.
         #[test]
         fn a_position_in_an_answer_names_no_other_change_after_a_power_cut() {
             let mut reused = Vec::new();
@@ -1862,6 +1976,31 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_changes_that_the_pool_cannot_hold_commits() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                pool: small_pool(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            // One poll starts each proposal, so one `Ready` holds the 99 entries.
+            let mut calls: Vec<_> = (2..=100)
+                .map(|id| Box::pin(mesh.propose(home(id))))
+                .collect();
+            let waits = poll_each(&mut calls).await;
+            assert!(waits.iter().all(Poll::is_pending));
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+            let positions = poll_each(&mut calls).await;
+            let expected: Vec<_> = (1..=99)
+                .map(|count| Poll::Ready(Ok(after(first, count))))
+                .collect();
+            assert_eq!(positions, expected);
+            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(100))));
+        });
+    }
+
+    #[test]
     fn a_full_pool_holds_a_message_until_a_block_is_free() {
         solo(|node, tasks| async move {
             let pool = small_pool();
@@ -1903,6 +2042,194 @@ mod tests {
             node.clock().sleep(TICK).await;
             assert!(quiet(&mesh, 2).await);
             assert!(quiet(&mesh, 3).await);
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_for_a_block_takes_no_change() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let held = fill(&pool);
+            let mut waits = pin!(mesh.propose(home(2)));
+            assert!(now(waits.as_mut()).await.is_pending());
+            // The write runs again at each tick, and the group refuses after each.
+            for _ in 0..2 {
+                node.clock().sleep(TICK).await;
+                let refused = mesh.propose(home(3)).await.unwrap_err();
+                assert_eq!(refused, exhausted(93));
+                assert_eq!(
+                    refused.to_string(),
+                    "the pool has no block for the mesh now: pool is full: asked for \
+                     93 bytes, 64 bytes free"
+                );
+            }
+            drop(held);
+            assert_eq!(waits.await, Ok(after(first, 1)));
+            // The change that the group refused took no position.
+            assert_eq!(mesh.propose(home(4)).await, Ok(after(first, 2)));
+            assert_eq!(watch.next().await, Ok(Some(key(4))));
+        });
+    }
+
+    // The write that gets its block is in disk calls for a time.
+    #[test]
+    fn a_group_that_waited_for_a_block_takes_no_change_until_its_write_ends() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            let held = fill(&pool);
+            let mut waits = pin!(mesh.propose(home(2)));
+            assert!(now(waits.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
+            drop(held);
+            let ended = loop {
+                if let Poll::Ready(ended) = now(waits.as_mut()).await {
+                    break ended;
+                }
+                let refused = started(&mesh, home(3)).await;
+                assert_eq!(refused, Poll::Ready(Err(exhausted(93))));
+                node.clock().sleep(Span::from_nanos(10_000)).await;
+            };
+            assert_eq!(ended, Ok(after(first, 1)));
+            assert_eq!(mesh.propose(home(4)).await, Ok(after(first, 2)));
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_gives_the_cause_of_its_last_try() {
+        solo(|node, tasks| async move {
+            let budget = block::Config { budget: 4096 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            let held = fill(&pool);
+            let mut waits = pin!(mesh.propose(home(2)));
+            assert!(now(waits.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
+            let refused = started(&mesh, home(3)).await;
+            assert_eq!(refused, Poll::Ready(Err(exhausted(93))));
+            switch.refuse();
+            drop(held);
+            node.clock().sleep(TICK).await;
+            let cause = block::Error::Refused { requested: 93 };
+            let refused = started(&mesh, home(3)).await;
+            assert_eq!(refused, Poll::Ready(Err(Error::Pool(cause))));
+            switch.allow();
+            assert_eq!(waits.await, Ok(after(first, 1)));
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_for_a_block_takes_no_message() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let held = fill(&pool);
+            let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+            for _ in 0..2 {
+                node.clock().sleep(TICK).await;
+                let refused = mesh.receive(public(2), heartbeat());
+                assert_eq!(refused, Err(exhausted(327)));
+            }
+            drop(held);
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            // The heartbeats that the group refused get no reply.
+            node.clock().sleep(TICK).await;
+            assert!(quiet(&mesh, 2).await);
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+        });
+    }
+
+    // The group drops each message and each forwarded change in a wait, so it pays
+    // for no check of one.
+    #[test]
+    fn a_group_that_waits_for_a_block_checks_the_wait_first() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let held = fill(&pool);
+            let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
+            let mut forged = heartbeat();
+            let proof = forged.proof.as_mut().unwrap();
+            proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+            let stranger = message(4, 1, Body::Heartbeat { commit: 0 });
+            let messages = [
+                (public(3), heartbeat(), Error::Spoofed { from: key(2) }),
+                (public(4), stranger, Error::NotVoter { from: key(4) }),
+                (
+                    public(2),
+                    forged,
+                    Error::Grant(grant::Error::Forged { signer: key(3) }),
+                ),
+            ];
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+            node.clock().sleep(TICK).await;
+            for (peer, message, _) in messages.clone() {
+                assert_eq!(mesh.receive(peer, message), Err(exhausted(327)));
+            }
+            let answer = mesh.answer(public(4), home(4)).await;
+            assert_eq!(answer, Err(exhausted(327)));
+            drop(held);
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            for (peer, message, refused) in messages {
+                assert_eq!(mesh.receive(peer, message), Err(refused));
+            }
+            let answer = mesh.answer(public(4), home(4)).await;
+            assert_eq!(answer, Err(Error::PeerNotVoter { peer: public(4) }));
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_for_refused_memory_gives_that_cause() {
+        solo(|node, tasks| async move {
+            let budget = block::Config { budget: 4 << 20 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let config = Config {
+                pool: Rc::new(Pool::new(budget, memory)),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            switch.refuse();
+            let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+            node.clock().sleep(TICK).await;
+            let refused = mesh.receive(public(2), heartbeat()).unwrap_err();
+            let cause = block::Error::Refused { requested: 327 };
+            assert_eq!(refused, Error::Pool(cause));
+            assert_eq!(
+                refused.to_string(),
+                "the pool has no block for the mesh now: the system refused memory \
+                 for a block of 327 bytes"
+            );
         });
     }
 
@@ -2135,34 +2462,60 @@ mod tests {
         });
     }
 
-    /// Ticket 7, which admits `plant.*` any number of times.
-    fn ticket() -> Change {
+    /// Ticket `id`, which admits `plant.*` until `expiry`, any number of times when
+    /// `reusable`.
+    fn ticket_of(id: u8, prefix: &str, reusable: bool, expiry: Stamp) -> Change {
         let options = Options {
-            prefix: "plant".parse().unwrap(),
-            reusable: true,
-            expiry: Stamp::from_nanos(1),
+            prefix: prefix.parse().unwrap(),
+            reusable,
+            expiry,
             ephemeral: None,
         };
         Change::Ticket {
-            public_key: public(7),
+            public_key: public(id),
             options,
         }
     }
 
-    /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
-    fn join(id: u8) -> Change {
-        let card = common::member(id).card;
+    /// Ticket 7, which admits `plant.*` any number of times.
+    fn ticket() -> Change {
+        ticket_of(7, "plant", true, Stamp::from_nanos(1))
+    }
+
+    fn unchecked(card: &card::Signed) -> card::Unchecked {
+        card::Unchecked {
+            key: card.key(),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        }
+    }
+
+    /// The join at `at` of the node of `card`, which ticket `ticket` admits.
+    fn join_with(card: &card::Signed, ticket: u8, at: Stamp) -> Change {
         Change::Join(Box::new(Join {
-            ticket: public(7),
-            at: Stamp::from_nanos(0),
-            card: card::Unchecked {
-                key: key(id),
-                card: card.card().clone(),
-                signature: *card.signature(),
-            },
-            admission: common::ticket(7).admission(&card),
+            ticket: public(ticket),
+            at,
+            card: unchecked(card),
+            admission: common::ticket(ticket).admission(card),
             status: common::status([]),
         }))
+    }
+
+    /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
+    fn join(id: u8) -> Change {
+        join_with(&common::member(id).card, 7, Stamp::EPOCH)
+    }
+
+    /// The request of node `id` as `plant.node<id>`, which ticket `ticket` admits, with
+    /// the status channels `status`.
+    fn request(id: u8, ticket: u8, status: &[&str]) -> Request {
+        let card = common::member(id).card;
+        Request {
+            ticket: public(ticket),
+            card: unchecked(&card),
+            admission: common::ticket(ticket).admission(&card),
+            status: status.iter().map(|name| name.parse().unwrap()).collect(),
+        }
     }
 
     fn encoded(change: &Change) -> Vec<u8> {
@@ -2213,6 +2566,313 @@ mod tests {
             assert_eq!(mesh.member(key(3)), None);
             let admitted = mesh.member(key(4)).map(|member| member.card);
             assert_eq!(admitted, Some(common::member(4).card));
+        });
+    }
+
+    /// The leader of the cluster after its first change commits, and a follower.
+    fn roles(cluster: &Cluster) -> (u8, u8) {
+        let led = cluster.board.lock().unwrap().led.clone();
+        let &[leader] = led.as_slice() else {
+            panic!("the group took a proposal from each of {led:?}");
+        };
+        (leader, IDS.into_iter().find(|&id| id != leader).unwrap())
+    }
+
+    // A follower that gets no answer forwards the join again, so the leader applies it
+    // twice: the second is refused before the ticket counts a use.
+    #[test]
+    fn a_join_that_a_follower_stamps_admits_the_node_on_every_member() {
+        let hour = NOW + Span::HOUR;
+        let mut cluster = Cluster::new(2);
+        cluster.script_each(&[encoded(&ticket_of(8, "plant", true, hour))]);
+        cluster.start();
+        cluster.run(seconds(5));
+        let (leader, follower) = roles(&cluster);
+        let names = ["clock.error", "clock.offset"];
+        let request = request(4, 8, &names);
+        cluster
+            .board
+            .lock()
+            .unwrap()
+            .requests
+            .insert(follower, request);
+        cluster.run(seconds(1));
+        let join = cluster
+            .board
+            .lock()
+            .unwrap()
+            .stamped
+            .remove(&follower)
+            .unwrap();
+        for _ in 0..2 {
+            let forward = (follower, join.clone());
+            cluster
+                .board
+                .lock()
+                .unwrap()
+                .forwards
+                .insert(leader, forward);
+            cluster.run(seconds(1));
+            let answer = cluster.board.lock().unwrap().answers.remove(&leader);
+            assert!(
+                matches!(answer, Some(Message::Proposed { .. })),
+                "{answer:?}"
+            );
+        }
+        cluster.script(home);
+        cluster.run(seconds(2));
+        let repeat = join.clone();
+        let Change::Join(join) = join else {
+            panic!("{join:?} is not a join")
+        };
+        let given: Vec<_> = join.status.as_map().keys().map(Name::as_str).collect();
+        assert_eq!(given, names);
+        let admitted = Member {
+            status: join.status,
+            admission: join.admission,
+            ..common::member(4)
+        };
+        let board = cluster.board();
+        for (id, records) in board.records {
+            assert_eq!(records.get(&4), Some(&admitted), "node {id}");
+        }
+        for (id, mut state) in board.states {
+            let uses = state.ticket(public(8)).map(|record| record.uses);
+            assert_eq!(uses, Some(1), "node {id}");
+            let again = state.apply(repeat.clone()).unwrap_err();
+            let duplicate = Refused::from(Unfit::Duplicate { key: key(4) });
+            assert_eq!(again, duplicate, "node {id}");
+            assert_eq!(
+                again.to_string(),
+                format!("node {} is already a member", key(4))
+            );
+        }
+    }
+
+    #[test]
+    fn each_refused_join_changes_nothing_on_every_member() {
+        let hour = NOW + Span::HOUR;
+        let card = |id| common::member(id).card;
+        let mut forged = join_with(&card(4), 7, NOW);
+        if let Change::Join(join) = &mut forged {
+            join.admission = common::ticket(6).admission(&card(4));
+        }
+        let changes = [
+            ticket_of(7, "plant", true, hour),
+            ticket_of(8, "plant", false, hour),
+            ticket_of(9, "plant", true, NOW),
+            ticket_of(10, "plant.line", true, hour),
+            join_with(&card(4), 6, NOW),
+            forged,
+            join_with(&card(4), 9, NOW),
+            join_with(&card(4), 10, NOW),
+            join_with(&card(5), 8, NOW),
+            join_with(&card(6), 8, NOW),
+            home(1),
+        ];
+        let mut cluster = Cluster::new(4);
+        cluster.script_each(&changes.each_ref().map(encoded));
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        assert_eq!(board.led, vec![board.led[0]; changes.len()]);
+        assert_eq!(board.homes, each(&[None, Some(key(1))]));
+        let members = IDS.map(|id| (id, [1, 2, 3, 5].into())).into();
+        assert_eq!(board.members, members);
+    }
+
+    #[test]
+    fn a_join_for_a_voter_changes_neither_its_record_nor_the_votes() {
+        let other = common::signed(2, "plant.other");
+        let changes = [
+            encoded(&ticket()),
+            encoded(&join_with(&other, 7, Stamp::EPOCH)),
+            encoded(&home(1)),
+        ];
+        let mut cluster = Cluster::new(5);
+        cluster.script_each(&changes);
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        assert_eq!(board.homes, each(&[None, Some(key(1))]));
+        for (id, records) in board.records {
+            assert_eq!(records.get(&2), Some(&common::member(2)), "node {id}");
+        }
+        cluster.script(|_| home(2));
+        cluster.run(seconds(5));
+        let (led, homes) = cluster.take();
+        assert_eq!(led.len(), 1, "the group took {led:?}");
+        assert_eq!(homes, each(&[Some(key(2))]));
+    }
+
+    // A stamp at the midpoint would admit a join with a ticket whose expiry is inside
+    // the interval.
+    #[test]
+    fn a_join_is_stamped_at_the_later_edge_of_mesh_time() {
+        solo(|node, tasks| async move {
+            let time = synced(&node);
+            let config = Config {
+                time: time.clone(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let interval = time.now().mesh.unwrap();
+            let names = ["clock.error", "clock.offset"];
+            let late = mesh.stamp(request(4, 8, &names)).unwrap();
+            let early = mesh.stamp(request(5, 9, &[])).unwrap();
+            let Change::Join(join) = &late else {
+                panic!("{late:?} is not a join")
+            };
+            let at = join.at;
+            assert_eq!(at, interval.latest);
+            assert!(interval.earliest < at - Span::from_nanos(1));
+            let millis = u128::try_from(at.nanos() / 1_000_000).unwrap();
+            for key in join.status.as_map().values() {
+                assert_eq!(key.as_u128() >> 80, millis, "{key:?}");
+            }
+            let keys: BTreeSet<_> = join.status.as_map().values().collect();
+            assert_eq!(keys.len(), names.len());
+            let inside = at - Span::from_nanos(1);
+            let after = at + Span::from_nanos(1);
+            mesh.propose(ticket_of(8, "plant", true, inside))
+                .await
+                .unwrap();
+            mesh.propose(ticket_of(9, "plant", true, after))
+                .await
+                .unwrap();
+            mesh.propose(late).await.unwrap();
+            mesh.propose(early).await.unwrap();
+            mesh.propose(home(2)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(2))));
+            assert_eq!(mesh.member(key(4)), None);
+            assert!(mesh.member(key(5)).is_some());
+        });
+    }
+
+    // The stamp is the time at which the voter admitted the request, so a commit
+    // after the expiry does not refuse it.
+    #[test]
+    fn a_join_that_commits_after_the_expiry_admits_its_node() {
+        solo(|node, tasks| async move {
+            let time = synced(&node);
+            let config = Config {
+                time: time.clone(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
+            let Change::Join(join) = &stamped else {
+                panic!("{stamped:?} is not a join")
+            };
+            let expiry = join.at + seconds(1);
+            mesh.propose(ticket_of(8, "plant", false, expiry))
+                .await
+                .unwrap();
+            node.clock().sleep(seconds(3600)).await;
+            assert!(time.now().mesh.unwrap().earliest > expiry);
+            mesh.propose(stamped).await.unwrap();
+            mesh.propose(home(2)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(2))));
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(common::member(4).card));
+        });
+    }
+
+    #[test]
+    fn a_node_with_no_mesh_time_of_known_error_at_or_after_the_epoch_stamps_no_join() {
+        for case in ["unsynced", "before the epoch", "unknown error"] {
+            solo(move |node, tasks| async move {
+                let time = match case {
+                    "unsynced" => clock::Clock::new(node.clock()).1,
+                    "before the epoch" => {
+                        node.step_wall(Span::from_nanos(-2 * NOW.nanos()));
+                        synced(&node)
+                    }
+                    _ => {
+                        node.set_wall_error(None);
+                        synced(&node)
+                    }
+                };
+                let config = Config {
+                    time,
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::open(config).await.unwrap();
+                let stamped = mesh.stamp(request(4, 8, &[]));
+                assert_eq!(stamped, Err(Error::Unsynced), "{case}");
+            });
+        }
+        let text = "this node has no mesh time with a known error at or after the Unix \
+                    epoch, so it stamps no join";
+        assert_eq!(Error::Unsynced.to_string(), text);
+    }
+
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "feeds the mesh clock of a test")]
+    fn a_node_at_the_unix_epoch_stamps_a_join() {
+        solo(|node, tasks| async move {
+            let (mut clock, time) = clock::Clock::new(node.clock());
+            let config = Config {
+                time,
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            node.step_wall(Span::from_nanos(-node.wall().now().time.nanos()));
+            node.set_wall_error(Some(Span::from_nanos(0)));
+            let source = clock.add();
+            let wall = clock::source::Wall::new(node.wall(), node.clock());
+            clock.push(source, wall.measure());
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
+            let Change::Join(join) = stamped else {
+                panic!("{stamped:?} is not a join")
+            };
+            assert_eq!(join.at, Stamp::EPOCH);
+        });
+    }
+
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "feeds the mesh clock of a test")]
+    fn a_node_in_holdover_stamps_a_join_at_the_later_edge() {
+        solo(|node, tasks| async move {
+            let (mut clock, time) = clock::Clock::new(node.clock());
+            let config = Config {
+                time: time.clone(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let source = clock.add();
+            let wall = clock::source::Wall::new(node.wall(), node.clock());
+            clock.push(source, wall.measure());
+            clock.remove(source);
+            assert!(matches!(time.status(), clock::Status::Holdover(..)));
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
+            let Change::Join(join) = stamped else {
+                panic!("{stamped:?} is not a join")
+            };
+            assert_eq!(join.at, time.now().mesh.unwrap().latest);
+        });
+    }
+
+    #[test]
+    fn a_join_request_with_65_status_names_is_refused() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let names: Vec<_> = (0..65).map(|i| format!("s{i:02}")).collect();
+            let names: Vec<_> = names.iter().map(String::as_str).collect();
+            let refused = mesh.stamp(request(4, 8, &names));
+            let many = Error::Status(Many { count: 65 });
+            assert_eq!(refused, Err(many.clone()));
+            assert_eq!(many.to_string(), "65 status entries, more than 64");
+            let names = &names[..64];
+            mesh.stamp(request(4, 8, names)).unwrap();
         });
     }
 
