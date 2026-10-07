@@ -42,6 +42,11 @@ pub(crate) fn addresses(node: usize) -> [IpAddr; 2] {
     [IpAddr::V4(Ipv4Addr::from_bits(V4 + host)), IpAddr::V6(v6)]
 }
 
+/// The bytes of the IP header of a packet to `ip`: 20 for IPv4, 40 for IPv6.
+fn ip_header(ip: IpAddr) -> usize {
+    if ip.is_ipv4() { 20 } else { 40 }
+}
+
 /// The node whose address is `ip`, if `ip` is an address that a node can have.
 pub(crate) fn node(ip: IpAddr) -> Option<usize> {
     let host = match ip {
@@ -153,13 +158,23 @@ impl Network {
         tcp::Tcp::new(&mut self.tcp, &mut self.wire)
     }
 
-    /// Ends the TCP streams and listeners of `node` with no segment when its power is
-    /// cut, which comes before the drop of its futures. Returns their wakers, for the
-    /// caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Waker> {
+    /// Drops the packets of `node` that have not left their links by true time `now`,
+    /// and ends its TCP streams and listeners with no segment, when its power is cut.
+    /// This comes before the drop of its futures. Returns the wakers of the streams
+    /// and listeners, for the caller to drop after it releases the lock.
+    pub(crate) fn crash(
+        &mut self,
+        now: Monotonic,
+        node: usize,
+        crash: Crash,
+    ) -> Vec<Waker> {
         match crash {
             Crash::Process => Vec::new(),
-            Crash::Power => self.tcp().cut_power(node),
+            Crash::Power => {
+                self.wire.cut(now, node);
+                self.udp().cut_power(node);
+                self.tcp().cut_power(node)
+            }
         }
     }
 
@@ -168,15 +183,17 @@ impl Network {
         self.tcp.yet()
     }
 
-    /// The true time of the first arrival.
+    /// The true time of the first arrival, or of the first departure that frees a
+    /// send buffer.
     pub(crate) fn first(&self) -> Option<Monotonic> {
-        self.wire.first()
+        self.wire.first().into_iter().chain(self.udp.first()).min()
     }
 
-    /// Delivers the packets that arrive by true time `at`, and returns the wakers of
-    /// the ends that receive them.
+    /// Delivers the packets that arrive by true time `at`, and frees the send buffers
+    /// of the datagrams that leave by then. Returns the wakers of the ends that receive
+    /// and of the sends that find room.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
-        let mut wakers = Vec::new();
+        let mut wakers = self.udp().free(at);
         while let Some(packet) = self.wire.pop(at) {
             match packet {
                 Packet::Datagram(datagram) => {

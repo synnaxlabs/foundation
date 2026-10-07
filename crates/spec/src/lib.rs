@@ -3,9 +3,12 @@
 //! `spec::resolve`.
 
 pub mod access;
+pub mod compression;
 pub mod connector;
 pub mod definition;
 pub mod node_settings;
+pub mod placement;
 pub mod region;
+pub mod time;
 pub mod tree;
 pub mod unit;

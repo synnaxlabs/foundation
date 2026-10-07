@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Answer, Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft,
-    Role, Start, Term, Voters,
+    Answer, Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Proof,
+    Raft, Role, Start, Term, Voters,
 };
 use types::node;
 
@@ -635,4 +635,137 @@ fn a_released_node_with_a_stale_entry_past_the_leave_never_campaigns() {
     assert_eq!(nodes[&key(1)].role(), Role::Leader);
     assert_eq!((to_3, from_3.first().copied()), (vec![], None));
     assert_eq!(nodes[&key(3)].voters(), &left);
+}
+
+fn votes(candidate: u8, voters: &[u8]) -> Proof {
+    Proof {
+        grant: Grant::Vote,
+        candidate: key(candidate),
+        voters: voters.iter().map(|&id| (key(id), None)).collect(),
+    }
+}
+
+// A heartbeat from `from` to node 4 that claims to lead `term` with the votes of
+// `voters`.
+pub(crate) fn heartbeat(from: u8, term: u64, voters: &[u8]) -> Message {
+    Message {
+        from: key(from),
+        to: key(4),
+        term: Term(term),
+        body: Body::Heartbeat { commit: 0 },
+        proof: Some(votes(from, voters)),
+    }
+}
+
+// Node 4, started with no voters, after the first append of leader 1 in term 1 gave
+// it the joint configuration that adds it, with its commit below that entry. Also
+// gives node 4 restarted from what it wrote.
+pub(crate) fn joining() -> (Raft, Raft) {
+    let joint = Voters {
+        incoming: set(&[1, 2, 3, 4]),
+        outgoing: set(&[1, 2, 3]),
+    };
+    let config = Config {
+        key: key(4),
+        election_ticks: ELECTION,
+        heartbeat_ticks: 1,
+    };
+    let mut node = Raft::new(config, Start::default()).unwrap();
+    let at = |index| Position {
+        term: Term(1),
+        index,
+    };
+    let append = Message {
+        from: key(1),
+        to: key(4),
+        term: Term(1),
+        body: Body::Append {
+            prev: Position::default(),
+            entries: vec![
+                Entry {
+                    at: at(1),
+                    data: Data::Empty,
+                },
+                Entry {
+                    at: at(2),
+                    data: Data::Voters(joint.clone()),
+                },
+            ],
+            commit: 1,
+        },
+        proof: Some(votes(1, &[1, 2])),
+    };
+    node.step(append).unwrap();
+    assert_eq!(node.voters(), &joint);
+    let ready = node.ready();
+    let start = Start {
+        hard: ready.hard.unwrap(),
+        entries: ready.entries,
+        applied: 1,
+        ..Start::default()
+    };
+    let restarted = Raft::new(config, start).unwrap();
+    assert_eq!(restarted.voters(), &joint);
+    (node, restarted)
+}
+
+// The leader can fail before the joint entry commits, and a quorum of the outgoing
+// set can elect a node that lacks it. The new node must follow that leader.
+#[test]
+fn a_new_node_follows_a_leader_elected_by_the_outgoing_set() {
+    let (mut node, _) = joining();
+    let unproven = Error::Unproven {
+        term: Term(2),
+        from: key(2),
+    };
+    assert_eq!(node.step(heartbeat(2, 2, &[2, 4])), Err(unproven));
+    node.step(heartbeat(2, 2, &[2, 3])).unwrap();
+    assert_eq!(
+        (node.role(), node.term(), node.leader()),
+        (Role::Follower, Term(2), Some(key(2)))
+    );
+}
+
+// The leader of term 1 won under the founding configuration and then added node 4.
+// Its votes still prove the term to node 4 while its commit is below the change.
+#[test]
+fn a_new_node_that_holds_the_leave_follows_a_leader_elected_before_the_change() {
+    let joint = Voters {
+        incoming: set(&[1, 2, 3, 4]),
+        outgoing: set(&[1, 2, 3]),
+    };
+    let left = Voters {
+        incoming: joint.incoming.clone(),
+        ..Voters::default()
+    };
+    let entries = [Data::Empty, Data::Voters(joint), Data::Voters(left)]
+        .into_iter()
+        .zip(1..)
+        .map(|(data, index)| Entry {
+            at: Position {
+                term: Term(1),
+                index,
+            },
+            data,
+        })
+        .collect();
+    let config = Config {
+        key: key(4),
+        election_ticks: ELECTION,
+        heartbeat_ticks: 1,
+    };
+    let start = Start {
+        hard: Hard {
+            term: Term(1),
+            ..Hard::default()
+        },
+        entries,
+        ..Start::default()
+    };
+    let mut node = Raft::new(config, start).unwrap();
+    node.step(heartbeat(1, 1, &[1, 2])).unwrap();
+    assert_eq!(
+        (node.role(), node.term(), node.leader()),
+        (Role::Follower, Term(1), Some(key(1)))
+    );
 }

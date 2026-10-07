@@ -74,8 +74,8 @@ impl Sender {
     /// `message` back, with nothing of it sent, when the stream cannot take it now:
     /// the messages that the session's streams hold and have not passed to the
     /// carrier leave no room for it within the peer's
-    /// [`Config::window_bytes`](crate::Config::window_bytes), a stream of its class
-    /// or a higher class waits for that room or for the carrier to take more, or the
+    /// [`Config::window_bytes`](crate::Config::window_bytes), a stream that goes
+    /// ahead of it waits for that room or for the carrier to take more, or the
     /// stream still holds part of an earlier message. Like [`send`](Self::send), it
     /// returns once the stream holds the message, not when the peer has it. It never
     /// resets the stream.

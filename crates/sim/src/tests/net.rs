@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -57,6 +57,26 @@ fn send(
         for contents in &datagrams {
             let transmit = transmit(to, contents);
             poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+        }
+    });
+    handle.unwrap()
+}
+
+/// Starts a shard on `node` that sends each of `datagrams` to `to`, in order, and
+/// sleeps for `gap` after each.
+fn send_spaced(
+    node: &node::Node,
+    mut sender: Sender,
+    to: SocketAddr,
+    datagrams: Vec<Vec<u8>>,
+    gap: Span,
+) -> Handle {
+    let clock = node.clock();
+    let handle = node.shards().start(shard("send"), move |_| async move {
+        for contents in &datagrams {
+            let transmit = transmit(to, contents);
+            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+            clock.sleep(gap).await;
         }
     });
     handle.unwrap()
@@ -146,6 +166,420 @@ fn a_datagram_arrives_after_the_delay_of_its_link() {
         *log.lock().unwrap(),
         [(after(delay()), meta, b"abc".to_vec())]
     );
+}
+
+/// A link that carries 1,000 bytes in a millisecond.
+fn rated() -> link::Config {
+    link::Config {
+        rate: NonZeroU64::new(1_000_000),
+        ..link::Config::default()
+    }
+}
+
+#[test]
+fn a_link_with_a_rate_carries_datagrams_sent_at_once_one_after_another() {
+    // With its 28 header bytes, each datagram takes 1,000 bytes of the link.
+    let (_sim, log) = exchange(0, rated(), vec![vec![1; 972], vec![2; 972]]);
+    let left = |n| after(delay()) + millis(n);
+    assert_eq!(times(&log), [left(1), left(2)]);
+    assert_eq!(datagrams(&log), [vec![1; 972], vec![2; 972]]);
+}
+
+#[test]
+fn each_link_of_a_node_has_its_own_rate() {
+    let (mut sim, a, b) = pair(0, rated());
+    let c = sim.node(node::Config::default());
+    let (logs, mut sockets) = ([Log::default(), Log::default()], Vec::new());
+    for (node, log) in [&b, &c].into_iter().zip(&logs) {
+        let (sender, receiver) = udp(node, 4433);
+        sockets.push((sender, receive(node, receiver, log)));
+    }
+    let (sender, _a) = udp(&a, 4433);
+    let to = [at(&b, 4433), at(&c, 4433)];
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        let mut sender = sender;
+        for destination in to {
+            let transmit = transmit(destination, &[0; 972]);
+            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    for log in &logs {
+        assert_eq!(times(log), [after(delay()) + millis(1)]);
+    }
+}
+
+#[test]
+fn a_datagram_sent_on_an_idle_link_with_a_rate_waits_only_for_its_own_transmit() {
+    let (mut sim, a, b) = pair(0, rated());
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let contents = vec![vec![1; 972], vec![2; 972]];
+    let _send = send_spaced(&a, sender, at(&b, 4433), contents, millis(10));
+    sim.run_for(Span::SECOND).unwrap();
+    let left = |n| after(delay()) + millis(n);
+    assert_eq!(times(&log), [left(1), left(11)]);
+}
+
+/// The clock of a sender when each of its sends was ready, and the polls it took.
+type Sent = Arc<Mutex<Vec<(Monotonic, usize)>>>;
+
+/// A socket on `port` of the IPv4 address of `node`, whose send buffer holds `bytes`.
+fn buffered(node: &node::Node, port: u16, bytes: usize) -> (Sender, Receiver) {
+    node.net()
+        .udp(&Udp {
+            local: at(node, port),
+            send_buffer_bytes: bytes,
+            recv_buffer_bytes: 1 << 24,
+        })
+        .unwrap()
+}
+
+/// Starts a shard on `node` that sends each of `datagrams` to `to`, in order, and logs
+/// each send in `sent`.
+fn send_logged(
+    node: &node::Node,
+    mut sender: Sender,
+    to: SocketAddr,
+    datagrams: Vec<Vec<u8>>,
+    sent: &Sent,
+) -> Handle {
+    let (clock, sent) = (node.clock(), Arc::clone(sent));
+    let handle = node.shards().start(shard("send"), move |_| async move {
+        for contents in &datagrams {
+            let (transmit, mut polls) = (transmit(to, contents), 0);
+            poll_fn(|cx| {
+                polls += 1;
+                sender.poll_send(cx, &transmit)
+            })
+            .await
+            .unwrap();
+            sent.lock().unwrap().push((clock.now(), polls));
+        }
+    });
+    handle.unwrap()
+}
+
+/// Sends `count` datagrams of 972 bytes from `sender` to `to` in one send, and runs
+/// until true time `until`.
+fn burst(
+    sim: &mut Sim,
+    node: &node::Node,
+    mut sender: Sender,
+    to: SocketAddr,
+    count: usize,
+    until: Span,
+) {
+    let _burst = node.shards().start(shard("burst"), move |_| async move {
+        let contents = vec![1; 972 * count];
+        let transmit = Transmit {
+            segment: NonZeroUsize::new(972),
+            ..transmit(to, &contents)
+        };
+        poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+    });
+    sim.run_for(until).unwrap();
+}
+
+#[test]
+fn a_send_to_a_full_send_buffer_waits_until_a_datagram_leaves_its_link() {
+    let (mut sim, a, b) = pair(0, rated());
+    let (log, sent) = (Log::default(), Sent::default());
+    // One datagram takes 972 + 768 bytes of the buffer, so the buffer is then full.
+    let (sender, _a) = buffered(&a, 4433, 1740);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let contents = vec![vec![1; 972], vec![2; 972], vec![3; 972]];
+    let _send = send_logged(&a, sender, at(&b, 4433), contents.clone(), &sent);
+    sim.run_for(Span::SECOND).unwrap();
+    let ready = [(0, 1), (1, 2), (2, 2)].map(|(n, polls)| (after(millis(n)), polls));
+    assert_eq!(*sent.lock().unwrap(), ready);
+    assert_eq!(times(&log), [1, 2, 3].map(|n| after(delay()) + millis(n)));
+    assert_eq!(datagrams(&log), contents);
+}
+
+#[test]
+fn a_send_that_waits_wakes_only_when_the_send_buffer_has_room() {
+    let (mut sim, a, b) = pair(0, rated());
+    let sent = Sent::default();
+    let (sender, _a) = buffered(&a, 4433, 1740);
+    let (_b, _receiver) = udp(&b, 4433);
+    let to = at(&b, 4433);
+    burst(
+        &mut sim,
+        &a,
+        sender.clone(),
+        to,
+        2,
+        Span::from_nanos(500_000),
+    );
+    // When the first datagram leaves, the buffer still takes 1,740 bytes.
+    let _send = send_logged(&a, sender, to, vec![vec![2]], &sent);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*sent.lock().unwrap(), [(after(millis(2)), 2)]);
+}
+
+#[test]
+fn a_send_buffer_on_a_link_with_no_rate_never_fills() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let sent = Sent::default();
+    let (sender, _a) = buffered(&a, 4433, 1);
+    let (_b, _receiver) = udp(&b, 4433);
+    let datagrams = vec![vec![1; 972]; 3];
+    let _send = send_logged(&a, sender, at(&b, 4433), datagrams, &sent);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*sent.lock().unwrap(), [(after(millis(0)), 1); 3]);
+}
+
+#[test]
+fn each_send_that_waits_on_a_full_send_buffer_wakes() {
+    let (mut sim, a, b) = pair(0, rated());
+    let sent = Sent::default();
+    let (sender, _a) = buffered(&a, 4433, 4300);
+    let (_b, _receiver) = udp(&b, 4433);
+    let to = at(&b, 4433);
+    burst(
+        &mut sim,
+        &a,
+        sender.clone(),
+        to,
+        3,
+        Span::from_nanos(500_000),
+    );
+    // When the first datagram leaves, the buffer takes 3,480 bytes, and has room for
+    // two sends of one byte, which take 769 bytes each.
+    let _one = send_logged(&a, sender.clone(), to, vec![vec![1]], &sent);
+    let _two = send_logged(&a, sender, to, vec![vec![2]], &sent);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*sent.lock().unwrap(), [(after(millis(1)), 2); 2]);
+}
+
+#[test]
+fn a_datagram_leaves_its_link_after_its_socket_drops() {
+    let (mut sim, a, b) = pair(0, rated());
+    let log = Log::default();
+    let (sender, receiver) = buffered(&a, 4433, 1);
+    drop(receiver);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let _send = send(&a, sender, at(&b, 4433), vec![vec![1; 972]]);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(times(&log), [after(delay()) + millis(1)]);
+}
+
+#[test]
+fn a_send_to_a_full_send_buffer_that_cannot_reach_its_destination_fails_at_once() {
+    let (mut sim, a, b) = pair(0, rated());
+    let (mut sender, _a) = buffered(&a, 4433, 1);
+    let (_b, _receiver) = udp(&b, 4433);
+    let half = Span::from_nanos(500_000);
+    burst(&mut sim, &a, sender.clone(), at(&b, 4433), 1, half);
+    let remote = SocketAddr::new(b.addresses()[1], 4433);
+    let sent = Arc::new(Mutex::new(None));
+    let given = Arc::clone(&sent);
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        let transmit = transmit(remote, b"v6");
+        let result = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
+        *given.lock().unwrap() = Some(result);
+    });
+    // The datagram of the burst leaves at 1 ms.
+    sim.run_for(Span::from_nanos(100_000)).unwrap();
+    let unreachable = Some(Err(Net::Unreachable { remote }));
+    assert_eq!(*sent.lock().unwrap(), unreachable);
+}
+
+#[test]
+fn a_power_cut_leaves_no_event_for_the_datagrams_it_drops() {
+    let (mut sim, a, b) = pair(0, rated());
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, _receiver) = udp(&b, 4433);
+    let _send = send(&a, sender, at(&b, 4433), vec![vec![1; 972]; 100]);
+    sim.run_for(millis(10)).unwrap();
+    sim.crash(&a, Crash::Power);
+    sim.run().unwrap();
+    // The last of the ten that left by the cut arrives last.
+    assert_eq!(b.clock().now(), after(delay()) + millis(10));
+}
+
+#[test]
+fn a_power_cut_of_one_node_keeps_the_send_buffers_of_another() {
+    let (mut sim, a, b) = pair(0, rated());
+    let sent = Sent::default();
+    let (sender, _b) = buffered(&b, 4433, 1740);
+    let (_a, _receiver) = udp(&a, 4433);
+    let contents = vec![vec![1; 972], vec![2; 972]];
+    let _send = send_logged(&b, sender, at(&a, 4433), contents, &sent);
+    sim.run_for(Span::from_nanos(500_000)).unwrap();
+    sim.crash(&a, Crash::Power);
+    sim.run_for(Span::SECOND).unwrap();
+    let ready = [(after(millis(0)), 1), (after(millis(1)), 2)];
+    assert_eq!(*sent.lock().unwrap(), ready);
+}
+
+#[test]
+fn an_empty_send_buffer_of_no_bytes_takes_a_send() {
+    let (mut sim, a, b) = pair(0, rated());
+    let sent = Sent::default();
+    let (sender, _a) = buffered(&a, 4433, 0);
+    let (_b, _receiver) = udp(&b, 4433);
+    let contents = vec![vec![1; 972], vec![2; 972]];
+    let _send = send_logged(&a, sender, at(&b, 4433), contents, &sent);
+    sim.run().unwrap();
+    let ready = [(after(millis(0)), 1), (after(millis(1)), 2)];
+    assert_eq!(*sent.lock().unwrap(), ready);
+}
+
+#[test]
+fn the_two_directions_of_a_link_send_at_once() {
+    let (mut sim, a, b) = pair(0, rated());
+    let (logs, mut sockets) = ([Log::default(), Log::default()], Vec::new());
+    for ((from, to), log) in [(&a, &b), (&b, &a)].into_iter().zip(&logs) {
+        let (receiving, receiver) = udp(to, 4433);
+        let (sender, sending) = udp(from, 4434);
+        let receive = receive(to, receiver, log);
+        let send = send(from, sender, at(to, 4433), vec![vec![1; 972]]);
+        sockets.push((receiving, sending, receive, send));
+    }
+    sim.run_for(Span::SECOND).unwrap();
+    for log in &logs {
+        assert_eq!(times(log), [after(delay()) + millis(1)]);
+    }
+}
+
+#[test]
+fn a_link_carries_its_rate_over_a_burst_of_small_datagrams() {
+    // 56 bytes a nanosecond: ten empty datagrams of 28 header bytes take 5 ns.
+    let link = link::Config {
+        rate: NonZeroU64::new(56_000_000_000),
+        ..link::Config::default()
+    };
+    let (_sim, log) = exchange(0, link, vec![Vec::new(); 10]);
+    let last = after(delay()) + Span::from_nanos(5);
+    assert_eq!(times(&log).last(), Some(&last));
+}
+
+#[test]
+fn a_datagram_over_the_mtu_takes_no_time_on_a_link_with_a_rate() {
+    // With its headers, the first is 1,501 bytes.
+    let contents = vec![vec![1; 1_473], vec![2; 972]];
+    let (_sim, log) = exchange(0, rated(), contents);
+    assert_eq!(times(&log), [after(delay()) + millis(1)]);
+    assert_eq!(datagrams(&log), [vec![2; 972]]);
+}
+
+#[test]
+fn a_lost_datagram_takes_its_time_on_a_link_with_a_rate() {
+    let lossy = link::Config {
+        loss: 1.0,
+        ..rated()
+    };
+    let (mut sim, a, b) = pair(0, lossy);
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let contents = vec![vec![1; 972], vec![2; 972]];
+    let gap = Span::from_nanos(500_000);
+    let _send = send_spaced(&a, sender, at(&b, 4433), contents, gap);
+    sim.run_for(Span::from_nanos(250_000)).unwrap();
+    sim.link(&a, &b, rated());
+    sim.run_for(Span::SECOND).unwrap();
+    // The first leaves at 1 ms and is lost. The second, sent at 0.5 ms, waits for it.
+    assert_eq!(times(&log), [after(delay()) + millis(2)]);
+    assert_eq!(datagrams(&log), [vec![2; 972]]);
+}
+
+#[test]
+fn a_duplicate_takes_no_more_time_on_a_link_with_a_rate() {
+    let link = link::Config {
+        duplication: 1.0,
+        ..rated()
+    };
+    let (_sim, log) = exchange(0, link, vec![vec![1; 972]]);
+    assert_eq!(datagrams(&log), [vec![1; 972], vec![1; 972]]);
+    let left = after(delay()) + millis(1);
+    assert_eq!(BTreeSet::from_iter(times(&log)), BTreeSet::from([left]));
+}
+
+#[test]
+fn a_link_whose_rate_goes_still_sends_one_packet_at_a_time() {
+    let (mut sim, a, b) = pair(0, rated());
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let contents = vec![vec![1; 972], vec![2; 972]];
+    let gap = Span::from_nanos(500_000);
+    let _send = send_spaced(&a, sender, at(&b, 4433), contents.clone(), gap);
+    sim.run_for(Span::from_nanos(250_000)).unwrap();
+    sim.link(&a, &b, link::Config::default());
+    sim.run_for(Span::SECOND).unwrap();
+    // The second, sent at 0.5 ms with no rate, leaves when the first has left, at 1 ms.
+    assert_eq!(datagrams(&log), contents);
+    let left = after(delay()) + millis(1);
+    assert_eq!(BTreeSet::from_iter(times(&log)), BTreeSet::from([left]));
+}
+
+#[test]
+fn a_link_whose_rate_changes_sends_at_the_new_rate_after_the_packets_before() {
+    let (mut sim, a, b) = pair(0, rated());
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let contents = vec![vec![1; 972], vec![2; 972]];
+    let gap = Span::from_nanos(500_000);
+    let _send = send_spaced(&a, sender, at(&b, 4433), contents, gap);
+    sim.run_for(Span::from_nanos(250_000)).unwrap();
+    let fast = link::Config {
+        rate: NonZeroU64::new(2_000_000),
+        ..link::Config::default()
+    };
+    sim.link(&a, &b, fast);
+    sim.run_for(Span::SECOND).unwrap();
+    // The second, sent at 0.5 ms, starts when the first has left, at 1 ms.
+    let left = |nanos| after(delay()) + Span::from_nanos(nanos);
+    assert_eq!(times(&log), [left(1_000_000), left(1_500_000)]);
+}
+
+#[test]
+fn a_datagram_sent_as_its_link_becomes_free_takes_a_transmit_of_its_own() {
+    // Each datagram takes 1,000 bytes of the link: 333,333.3 ns, which rounds up.
+    let link = link::Config {
+        rate: NonZeroU64::new(3_000_000),
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let (contents, gap) = (vec![vec![1; 972]; 2], Span::from_nanos(333_334));
+    let _send = send_spaced(&a, sender, at(&b, 4433), contents, gap);
+    sim.run_for(Span::SECOND).unwrap();
+    let left = |nanos| after(delay()) + Span::from_nanos(nanos);
+    assert_eq!(times(&log), [left(333_334), left(666_668)]);
+}
+
+#[test]
+fn a_power_cut_drops_the_datagrams_that_have_not_left_the_node() {
+    let (mut sim, a, b) = pair(0, rated());
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let _send = send(&a, sender, at(&b, 4433), vec![vec![1; 972]; 100]);
+    sim.run_for(millis(10)).unwrap();
+    sim.crash(&a, Crash::Power);
+    let (sender, _booted) = udp(&a, 4434);
+    let _again = send(&a, sender, at(&b, 4433), vec![vec![2; 972]]);
+    sim.run_for(Span::SECOND).unwrap();
+    // Ten left by the cut. The one sent after the boot finds the link idle.
+    let left = |n| after(delay()) + millis(n);
+    assert_eq!(times(&log), (1..=11).map(left).collect::<Vec<_>>());
+    assert_eq!(datagrams(&log).last(), Some(&vec![2; 972]));
 }
 
 #[test]
@@ -704,6 +1138,12 @@ fn the_same_seed_gives_the_same_digest() {
     assert_eq!(digest(3), digest(3));
     assert_ne!(digest(3), digest(4));
     assert_ne!(Sim::new(Config::default()).digest(), digest(3));
+}
+
+#[test]
+fn a_link_with_no_rate_keeps_the_digest_that_it_had_before_rates() {
+    // `DefaultHasher` makes the digest, so a new toolchain can change this value.
+    assert_eq!(digest(3), 15_790_775_888_564_560_557);
 }
 
 /// The digest of a run that sends `contents` twice from `a` over a link with `loss`
