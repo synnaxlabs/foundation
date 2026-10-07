@@ -8,6 +8,10 @@ use std::str::Utf8Error;
 use influxdb_line_protocol::{FieldValue, ParsedLine};
 use types::time::Stamp;
 
+pub use server::serve;
+
+mod server;
+
 /// The first and last time that InfluxDB stores, in nanoseconds since the Unix epoch.
 const TIMES: std::ops::RangeInclusive<i64> = i64::MIN + 2..=i64::MAX - 1;
 
