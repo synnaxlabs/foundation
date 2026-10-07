@@ -5,7 +5,11 @@ fn gap() -> Gap {
 }
 
 fn named(connector: &str, index: &str) -> Gap {
-    Gap::new(&connector.parse().unwrap(), &index.parse().unwrap())
+    Gap::new(
+        &connector.parse().unwrap(),
+        &index.parse().unwrap(),
+        Path::Live,
+    )
 }
 
 fn written(gap: &mut Gap, seq: u64, stamp: i64) -> String {
@@ -30,6 +34,21 @@ fn writes_one_line_at_the_stamp_after_the_gap() {
     assert_eq!(
         written(&mut gap, 15, 1_000),
         "m v=1 0\nfoundation_gaps,connector=influx,index=edge.time,path=live \
+         count=5i 1000\n"
+    );
+}
+
+#[test]
+fn tags_a_backfill_gap_with_its_path() {
+    let mut gap = Gap::new(
+        &"influx".parse().unwrap(),
+        &"edge.time".parse().unwrap(),
+        Path::Backfill,
+    );
+    gap.add(10..15);
+    assert_eq!(
+        written(&mut gap, 15, 1_000),
+        "m v=1 0\nfoundation_gaps,connector=influx,index=edge.time,path=backfill \
          count=5i 1000\n"
     );
 }
