@@ -36,6 +36,7 @@ pub enum Kind<R = channel::Key> {
 }
 
 /// A data channel: what its values are, their unit, and the channels it points at.
+/// `R` is how an edge names the channel that it points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(clippy::struct_field_names, reason = "the data type of a data channel")]
 pub struct Data<R = channel::Key> {
