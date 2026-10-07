@@ -1452,9 +1452,10 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node refuses a leader
-  that a change made a voter, when the node does not hold that change, and does not get
-  the log from it (a known defect, #1096, that #1107 fixes). A node with no
+  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  configuration refuses a leader that is not a voter of that configuration, when a
+  change that the node does not hold made that leader a voter. The node does not get the
+  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242:
