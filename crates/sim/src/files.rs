@@ -422,7 +422,10 @@ impl Files {
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
                 if let (Some(path), Ok(_)) = (path, &ended.result) {
-                    self.disks[node].commit(&path);
+                    let dir = path.parent().expect("invariant: a file path");
+                    let Ok(()) = self.disks[node].sync_dir(dir) else {
+                        unreachable!("invariant: an open made the file");
+                    };
                 }
                 (ended.result.is_ok(), ended.held)
             } else {

@@ -1247,6 +1247,41 @@ fn rename_in_flight(seed: u64, crash: Crash) -> Vec<PathBuf> {
 }
 
 #[test]
+fn a_power_crash_in_a_create_at_the_old_name_of_a_renamed_file_keeps_the_file() {
+    let mut outcomes = BTreeSet::new();
+    for seed in 0..32 {
+        let (mut sim, node) = disk(seed);
+        crash_after(&mut sim, &node, Crash::Power, |node| async move {
+            let mut file = create_synced(&node).await;
+            file.rename(Path::new("b")).await.unwrap();
+            until_crash(&node).await;
+            let mode = Mode::Create { len: 1_024 };
+            hang(node.files().open(Path::new("a"), mode)).await;
+        });
+        let found = sim
+            .run_on(&node, |node, _| async move {
+                let files = node.files();
+                let mut found = Vec::new();
+                for name in files.list(Path::new("")).await.unwrap() {
+                    let file = files.open(&name, Mode::Read).await.unwrap();
+                    let len = usize::try_from(file.len()).unwrap();
+                    found.push((name, sectors(&read(&file, &pool(), 0, len).await)));
+                }
+                found
+            })
+            .unwrap();
+        outcomes.insert(found);
+    }
+    let old = (PathBuf::from("b"), vec![1, 1]);
+    let all = BTreeSet::from([
+        vec![(PathBuf::from("a"), vec![1, 1])],
+        vec![(PathBuf::from("a"), vec![]), old.clone()],
+        vec![(PathBuf::from("a"), vec![0, 0]), old],
+    ]);
+    assert_eq!(outcomes, all);
+}
+
+#[test]
 fn a_process_crash_applies_a_rename_in_flight_and_a_power_cut_drops_it() {
     for seed in 0..8 {
         let applied = rename_in_flight(seed, Crash::Process);

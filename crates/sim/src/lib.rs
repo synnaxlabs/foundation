@@ -575,8 +575,8 @@ pub enum Crash {
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
     /// - A [`Mode::Create`](env::files::Mode::Create) open in flight that makes a
-    ///   file leaves the file with no bytes or whole, with its entry durable, or,
-    ///   when its entry was not durable, no file.
+    ///   file leaves the file with no bytes or whole, with the entries of its
+    ///   directory durable, or, when its entry was not durable, no file.
     /// - Other file calls in flight have no effect.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.

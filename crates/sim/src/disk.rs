@@ -406,23 +406,6 @@ impl Disk {
         }
     }
 
-    /// Makes the entry at `path` durable, and frees the file that its old durable entry
-    /// kept when nothing else keeps it, as [`Disk::sync_dir`] does.
-    pub(crate) fn commit(&mut self, path: &Path) {
-        let segments = segments(path);
-        let (name, parent) = segments.split_last().expect("invariant: a file path");
-        let Ok(key) = self.dir(parent) else {
-            unreachable!("invariant: an open made the file");
-        };
-        let dir = self.dir_mut(key);
-        let inode = dir.entries[*name];
-        let old = dir.durable.insert(name.into(), inode);
-        self.file(inode).durable = true;
-        if let Some(old) = old.filter(|&old| old != inode) {
-            self.forget(old);
-        }
-    }
-
     /// Cuts the power, as [`Disk::crash`] says.
     fn cut_power(&mut self, rng: &mut Rng) {
         let mut reached = BTreeSet::from([ROOT]);
