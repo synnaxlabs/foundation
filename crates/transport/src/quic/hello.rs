@@ -408,7 +408,7 @@ mod tests {
         #[test]
         fn decode_refuses_only_a_window_bytes_below_the_message_bytes_max(
             message in value().prop_map(|value| value.max(MESSAGE_BYTES_MIN as u64)),
-            offset in -3_i64..=3,
+            offset in -64_i64..=64,
         ) {
             let window = message
                 .saturating_add_signed(offset)
