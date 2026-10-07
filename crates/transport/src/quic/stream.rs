@@ -3660,6 +3660,23 @@ mod tests {
     }
 
     #[test]
+    fn give_the_end_of_the_connection_ahead_of_a_message_no_read_took() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
+            pair.run(RUN);
+            let mut receiver = accept(&mut pair.server).receiver;
+            let (now, server) = (pair.now(), key(&pair.server));
+            pair.server.endpoint.close(now, server, Code(9));
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Err(Error::Closed { code: Code(9) }));
+        });
+    }
+
+    #[test]
     fn reset_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);

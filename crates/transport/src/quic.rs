@@ -431,10 +431,11 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// - [`Error::Reset`] when the peer reset the stream. Each later read gives it
-    ///   too, also once the connection ended.
+    /// - [`Error::Reset`] once a read took the peer's reset of the stream. Each
+    ///   later read gives it too, also once the connection ended.
     /// - Else the error of the connection's [`Event::Closed`] once it ended, also
-    ///   when the stream has a message or a reset that no read took. And
+    ///   when the stream has a message or a reset that no read took.
+    /// - Else [`Error::Reset`] when the peer reset the stream, and
     ///   [`Error::Broken`] when the read finds a fault of the peer's.
     pub(crate) fn read(
         &mut self,

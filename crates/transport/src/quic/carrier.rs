@@ -873,6 +873,7 @@ mod tests {
     use std::future::poll_fn;
     use std::net::SocketAddr;
     use std::pin::pin;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
@@ -1419,7 +1420,10 @@ mod tests {
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
-        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+        shard(&client, CLIENT, move |config, node| async move {
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), address(&node));
+            let carrier = Carrier::new(config, part);
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             let open = poll_fn(|cx| session.poll_open(cx, Class::Complete)).await;
@@ -1429,9 +1433,9 @@ mod tests {
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
             node.clock().sleep(spans(IDLE, 3)).await;
-            // Private reads: no public call shows the drain or gives the pool.
+            // A private read: no public call shows the drain.
             assert!(session.state.borrow().endpoint.drained());
-            let block = || testing::block(&session.state.borrow().endpoint.pool, b"a");
+            let block = || testing::block(&pool, b"a");
             let mut message = Some(block());
             let written = poll_fn(|cx| session.poll_write(cx, &sender, &mut message));
             assert_eq!(written.await, Err(closed.clone()));
