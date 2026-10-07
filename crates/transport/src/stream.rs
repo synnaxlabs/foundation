@@ -1,6 +1,7 @@
 //! The two halves of a stream: an ordered, reliable sequence of whole messages.
 
 use std::future::poll_fn;
+use std::ops::Range;
 use std::rc::Rc;
 use std::task::Poll;
 
@@ -139,6 +140,69 @@ impl Sender {
         todo!("#68")
     }
 
+    /// Sends one message: the bytes of `ranges` of `block`, in order. A range may end
+    /// up to 7 bytes past the block's length; the stream sends zeros for those bytes.
+    /// The stream holds `block` until the carrier takes the message, and copies no
+    /// byte of it before then. Waits, returns, and resets on drop as
+    /// [`send`](Self::send).
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send). [`Error::TooLarge`] when the sum of the range lengths
+    /// is over the peer's message limit.
+    ///
+    /// # Panics
+    ///
+    /// When called after [`finish`](Self::finish), or when a range starts after its
+    /// end or ends more than 7 bytes past the block.
+    ///
+    /// ```
+    /// use transport::{Error, stream::Sender};
+    ///
+    /// async fn series(sender: &mut Sender, frame: block::Block) -> Result<(), Error> {
+    ///     sender.send_ranges(frame, &[0..8, 64..72]).await
+    /// }
+    /// ```
+    pub async fn send_ranges(
+        &mut self,
+        block: Block,
+        ranges: &[Range<usize>],
+    ) -> Result<(), Error> {
+        self.stream.as_mut().ok_or(CANCELLED)?;
+        drop((block, ranges));
+        todo!("#68")
+    }
+
+    /// [`send_ranges`](Self::send_ranges) when the stream can take the message now,
+    /// as [`try_send`](Self::try_send): gives `block` back, with nothing sent, when it
+    /// cannot.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_ranges`](Self::send_ranges).
+    ///
+    /// # Panics
+    ///
+    /// As [`send_ranges`](Self::send_ranges).
+    ///
+    /// ```
+    /// use block::Block;
+    /// use transport::{Error, stream::Sender};
+    ///
+    /// fn live(sender: &mut Sender, frame: Block) -> Result<Option<Block>, Error> {
+    ///     sender.try_send_ranges(frame, &[0..8])
+    /// }
+    /// ```
+    pub fn try_send_ranges(
+        &mut self,
+        block: Block,
+        ranges: &[Range<usize>],
+    ) -> Result<Option<Block>, Error> {
+        self.stream.as_mut().ok_or(CANCELLED)?;
+        drop((block, ranges));
+        todo!("#68")
+    }
+
     /// Ends the stream after the messages already sent. The peer's
     /// [`Receiver::recv`] returns `None` after the last one. The sender stays, so
     /// [`reset`](Self::reset) can still cancel what the peer does not have yet.
@@ -271,6 +335,36 @@ impl Receiver {
             poll_fn(|cx| receiving.session.poll_read(cx, receiving.stream)).await;
         receiving.done = true;
         received
+    }
+
+    /// Waits for the next whole message and writes it to the start of `buffer`.
+    /// Gives its length, or `None` once the sender finished and every message has
+    /// arrived. It uses the same receive budget as [`recv`](Self::recv). If the
+    /// future drops before it gives the length, the message stays queued and `buffer`
+    /// may hold part of it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] with the message length and `buffer.len()` when the
+    /// message is longer than `buffer`; the message stays queued. [`Error::Reset`]
+    /// when the sender cancelled the stream, or the error that ended the session.
+    ///
+    /// ```
+    /// use transport::{Error, stream::Receiver};
+    ///
+    /// async fn next(receiver: &mut Receiver, draft: &mut [u8]) -> Result<(), Error> {
+    ///     while let Some(len) = receiver.recv_into(draft).await? {
+    ///         let _body = &draft[..len];
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn recv_into(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> Result<Option<usize>, Error> {
+        let _ = buffer;
+        todo!("#68")
     }
 
     /// Asks the sender to stop: messages not yet received drop, and the sender sees
