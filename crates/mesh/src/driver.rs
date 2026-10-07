@@ -1553,12 +1553,19 @@ mod tests {
                 index: 1,
             };
             let data = Data::Voters(Voters::default());
-            log.write(None, &[Entry { at, data }]).await.unwrap();
+            let entries = [Entry { at, data }];
+            log.write(None, &entries).await.unwrap();
             drop(log);
             let refused = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
             assert_eq!(refused, Error::Raft(raft::Error::NoVoters));
             let text = "a configuration has an empty incoming voter set";
             assert_eq!(refused.to_string(), text);
+            let again = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
+            assert_eq!(again, Error::Raft(raft::Error::NoVoters));
+            let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
+            assert_eq!(stored.entries, entries);
         });
     }
 
