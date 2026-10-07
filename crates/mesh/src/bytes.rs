@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use raft::{Grant, Position, Proof, Signature, Term};
+use types::name::Name;
 use types::node;
 
 /// Takes `N` bytes.
@@ -24,6 +25,21 @@ pub(crate) fn put_key(key: node::Key, out: &mut Vec<u8>) {
 /// Takes a node key.
 pub(crate) fn take_key(bytes: &mut &[u8]) -> Option<node::Key> {
     take(bytes).map(|key| node::Key::from_u128(u128::from_le_bytes(key)))
+}
+
+/// Adds a name behind a length byte.
+pub(crate) fn put_name(name: &Name, out: &mut Vec<u8>) {
+    let name = name.as_str().as_bytes();
+    out.push(u8::try_from(name.len()).expect("invariant: a name is at most 255 bytes"));
+    out.extend(name);
+}
+
+/// Takes what [`put_name`] gives. `None` when the bytes are not a valid name.
+pub(crate) fn take_name(bytes: &mut &[u8]) -> Option<Name> {
+    let [len] = take(bytes)?;
+    let (name, rest) = bytes.split_at_checked(usize::from(len))?;
+    *bytes = rest;
+    std::str::from_utf8(name).ok()?.parse().ok()
 }
 
 /// Adds a position as its term, then its index.
