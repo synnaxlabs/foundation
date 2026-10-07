@@ -57,8 +57,8 @@ pub(crate) struct Config {
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
     /// Gives the blocks of the log's reads and writes. A write that finds the pool
-    /// full, or that the system refuses memory for, waits: the group sends and applies
-    /// nothing until the pool gives the blocks.
+    /// full, or that the system refuses memory for, waits: the group takes, sends, and
+    /// applies nothing until the pool gives the block.
     pub(crate) pool: Rc<Pool>,
 }
 
@@ -124,6 +124,7 @@ impl Mesh {
             watches: BTreeMap::new(),
             proposals: Vec::new(),
             slots: 0,
+            waits: None,
         }));
         let weak = Rc::downgrade(&group);
         config
@@ -160,6 +161,7 @@ impl Mesh {
     /// The group does not see a message that fails a check.
     ///
     /// - [`Error::Stopped`] when the group stopped.
+    /// - [`Error::Pool`] while a write of the log waits for a block.
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
@@ -177,7 +179,7 @@ impl Mesh {
         message: raft::Message,
     ) -> Result<(), Error> {
         let mut group = self.group.borrow_mut();
-        group.running()?;
+        group.taking()?;
         let from = message.from;
         let public_key = |key| group.state.member(key).map(Member::public_key);
         if public_key(from) != Some(peer) {
@@ -201,12 +203,13 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
+    /// - [`Error::Pool`] while an earlier write of the log waits for a block.
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead, or when a new leader replaces the entry before a write holds it.
     pub(crate) async fn propose(&self, change: Change) -> Result<Position, Error> {
         let proposal = {
             let mut group = self.group.borrow_mut();
-            group.running()?;
+            group.taking()?;
             let mut data = Vec::new();
             change.encode(&mut data);
             let proposal = Rc::new(Proposal {
@@ -244,6 +247,8 @@ impl Mesh {
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
     /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
     ///   configuration. The group does not see the change.
+    /// - [`Error::Pool`] while an earlier write of the log waits for a block. The group
+    ///   does not see the change.
     pub(crate) async fn answer(
         &self,
         peer: PublicKey,
@@ -361,12 +366,23 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
+    // Why the write of the log waits for a block, while it does.
+    waits: Option<block::Error>,
 }
 
 impl Group {
     fn running(&self) -> Result<(), Error> {
         match self.stopped.get() {
             Some(stopped) => Err(Error::Stopped(stopped.clone())),
+            None => Ok(()),
+        }
+    }
+
+    // Whether the group takes a proposal or a message now.
+    fn taking(&self) -> Result<(), Error> {
+        self.running()?;
+        match &self.waits {
+            Some(cause) => Err(Error::Pool(cause.clone())),
             None => Ok(()),
         }
     }
@@ -535,11 +551,15 @@ async fn run(
         signer.sign(&mut ready);
         // The pool may give the blocks later, so the write runs again at each tick.
         let written = loop {
-            match log.write(ready.hard.clone(), &ready.entries).await {
+            let cause = match log.write(ready.hard.clone(), &ready.entries).await {
                 Err(log::Error::Pool(
-                    block::Error::Exhausted { .. } | block::Error::Refused { .. },
-                )) => {}
+                    cause @ (block::Error::Exhausted { .. }
+                    | block::Error::Refused { .. }),
+                )) => cause,
                 written => break written,
+            };
+            if let Some(group) = group.upgrade() {
+                group.borrow_mut().waits = Some(cause);
             }
             (&mut tick).await;
             tick = clock.sleep(TICK);
@@ -549,6 +569,7 @@ async fn run(
         };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
+        group.waits = None;
         let Ready {
             entries,
             messages,
@@ -687,6 +708,15 @@ mod tests {
         let lens = [pool.largest(), 1];
         let blocks = lens.map(|len| iter::from_fn(move || pool.alloc(len).ok()));
         blocks.into_iter().flatten().collect()
+    }
+
+    /// What a group gives while its write of `requested` bytes waits for a block of a
+    /// pool that `fill` took.
+    fn exhausted(requested: usize) -> Error {
+        Error::Pool(block::Error::Exhausted {
+            requested,
+            available: 64,
+        })
     }
 
     /// Sends each message for `to` as one datagram.
@@ -1076,30 +1106,26 @@ mod tests {
         });
     }
 
-    // The second proposal comes while the write of the first one waits for a block.
+    // The second proposal comes while the write of the first one is in a disk call.
     #[test]
     fn a_proposal_gives_the_cause_when_the_write_before_its_own_fails() {
         solo(|node, tasks| async move {
-            let pool = small_pool();
-            let config = Config {
-                pool: Rc::clone(&pool),
-                ..config(&node, &tasks, 1, &[1], &[1])
-            };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
             lead(&mesh, &node.clock(), home(1)).await;
-            let held = fill(&pool);
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stopped = fail_sync(&node);
             let results = Rc::new(RefCell::new(Vec::new()));
             for id in [2, 3] {
-                let (other, results) = (mesh.clone(), Rc::clone(&results));
+                let (other, given) = (mesh.clone(), Rc::clone(&results));
                 tasks.spawn(async move {
                     let proposed = other.propose(home(id)).await;
-                    results.borrow_mut().push(proposed);
+                    given.borrow_mut().push(proposed);
                 });
-                node.clock().sleep(TICK).await;
+                node.clock().sleep(Span::NANOSECOND).await;
+                assert_eq!(*results.borrow(), []);
             }
-            let stopped = fail_sync(&node);
-            drop(held);
-            node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
+            node.clock().sleep(TICK).await;
             assert_eq!(results.take(), [Err(stopped.clone()), Err(stopped)]);
         });
     }
@@ -1353,7 +1379,8 @@ mod tests {
         fn positions(answers: &Answers) -> Vec<Position> {
             let position = |answer| match answer {
                 Ok(Message::Proposed { at }) => Some(at),
-                Ok(Message::NotLeader { leader: None }) => None,
+                Ok(Message::NotLeader { leader: None })
+                | Err(Error::Pool(block::Error::Exhausted { .. })) => None,
                 other => panic!("the node answered {other:?}"),
             };
             answers.take().into_iter().filter_map(position).collect()
@@ -1373,8 +1400,8 @@ mod tests {
         }
 
         // The lone voter leads in memory while the write of its term waits for a
-        // block. After a power cut the node leads the same term again, and the
-        // position that it would give for `home(3)` holds `home(1)`.
+        // block. After a power cut the node leads the same term again, and a
+        // position that it gave for `home(3)` before would hold `home(1)`.
         #[test]
         fn a_position_in_an_answer_names_no_other_change_when_the_pool_is_full() {
             let mut sim = Sim::new(sim::Config::default());
@@ -1396,8 +1423,9 @@ mod tests {
                         forward(&mesh, &tasks, &answers);
                     }
                     node.clock().sleep(TICK).await;
-                    let answered = answers.borrow().len();
-                    assert!(answered < 30, "no change waits for the write");
+                    let full = Err(exhausted(200));
+                    let came = answers.borrow().contains(&full);
+                    assert!(came, "no change came while the write waits");
                     positions(&answers)
                 })
                 .unwrap();
@@ -1855,6 +1883,92 @@ mod tests {
             node.clock().sleep(TICK).await;
             assert!(quiet(&mesh, 2).await);
             assert!(quiet(&mesh, 3).await);
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_for_a_block_takes_no_change() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let held = fill(&pool);
+            let mut waits = pin!(mesh.propose(home(2)));
+            assert!(now(waits.as_mut()).await.is_pending());
+            // The write runs again at each tick, and the group refuses after each.
+            for _ in 0..2 {
+                node.clock().sleep(TICK).await;
+                let refused = mesh.propose(home(3)).await.unwrap_err();
+                assert_eq!(refused, exhausted(93));
+                assert_eq!(
+                    refused.to_string(),
+                    "the pool has no block for the mesh now: pool is full: asked for \
+                     93 bytes, 64 bytes free"
+                );
+            }
+            drop(held);
+            assert_eq!(waits.await, Ok(after(first, 1)));
+            // The change that the group refused took no position.
+            assert_eq!(mesh.propose(home(4)).await, Ok(after(first, 2)));
+            assert_eq!(watch.next().await, Ok(Some(key(4))));
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_for_a_block_takes_no_message() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let held = fill(&pool);
+            let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+            for _ in 0..2 {
+                node.clock().sleep(TICK).await;
+                let refused = mesh.receive(public(2), heartbeat());
+                assert_eq!(refused, Err(exhausted(327)));
+            }
+            drop(held);
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            // The heartbeats that the group refused get no reply.
+            node.clock().sleep(TICK).await;
+            assert!(quiet(&mesh, 2).await);
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+        });
+    }
+
+    #[test]
+    fn a_group_that_waits_for_refused_memory_gives_that_cause() {
+        solo(|node, tasks| async move {
+            let budget = block::Config { budget: 4 << 20 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let config = Config {
+                pool: Rc::new(Pool::new(budget, memory)),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            switch.refuse();
+            let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+            node.clock().sleep(TICK).await;
+            let refused = mesh.receive(public(2), heartbeat()).unwrap_err();
+            let cause = block::Error::Refused { requested: 327 };
+            assert_eq!(refused, Error::Pool(cause));
+            assert_eq!(
+                refused.to_string(),
+                "the pool has no block for the mesh now: the system refused memory \
+                 for a block of 327 bytes"
+            );
         });
     }
 

@@ -1852,8 +1852,16 @@ How to read this record:
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
   system refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
-  and until then no message leaves, nothing applies, and the group gets no tick. Nothing
-  bounds the proposals and the messages that the group takes in that time (#1091). A
+  and until then no message leaves, nothing applies, and the group gets no tick. From
+  the write that finds no block until the write ends, `propose` and `receive` give
+  `Error::Pool` with the cause of the wait, so the group takes no proposal and no
+  message, and what `raft` holds does not grow. A forwarded proposal that gets it did
+  not reach the group. A follower that waits answers no heartbeat and a leader that
+  waits sends none, so the other voters elect a leader that can write (decided by the
+  architect, #1091, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
+  of the variant decided by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
   write holds one block of the pool at a time (MESH LOG), so no record is too large for
   a pool that opens, and a write does not wait for a block of its own (decided by the
   architect, 2026-10-07T08:42:04Z:
