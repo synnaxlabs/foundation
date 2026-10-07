@@ -20,8 +20,9 @@ const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
-/// The check of one kind of block.
-type Check = for<'a> fn(&mut Found<'a>, &'a Block);
+/// The check of one kind of block: its definition, or `None` after it reports why the
+/// block gives none.
+type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, by keyword, and its check.
 const KINDS: [(&str, Check); 2] = [
@@ -65,7 +66,19 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
                 .iter()
                 .find(|(keyword, _)| *keyword == &*block.keyword)
             {
-                Some((_, check_block)) => check_block(&mut found, block),
+                Some((_, check_block)) => {
+                    let key = found.key(block);
+                    let definition = check_block(&mut found, block);
+                    if let (Some((key, label_span)), Some(definition)) =
+                        (key, definition)
+                    {
+                        let entry = Entry {
+                            definition,
+                            label_span,
+                        };
+                        found.entries.insert(key, entry);
+                    }
+                }
                 None => found.diagnostics.push(Diagnostic::new(
                     UNKNOWN_BLOCK,
                     block.keyword_span,
@@ -266,8 +279,8 @@ impl<'a> Found<'a> {
     }
 
     /// The `select` attribute of a policy block. When the block has none, it reports
-    /// `config.missing-attribute` with a fix that names `selects`, what the policy
-    /// selects, such as "nodes that it sets".
+    /// `config.missing-attribute`, and `selects` completes the fix: "Add a `select`
+    /// attribute with the {selects}".
     fn select(&mut self, block: &Block, selects: &str) -> Result<Selector, Reported> {
         if let Some(select) = self.attribute(block, "select", read::selector)? {
             return Ok(select);
@@ -277,19 +290,6 @@ impl<'a> Found<'a> {
         );
         self.missing(block, &["select"], fix);
         Err(Reported)
-    }
-
-    /// Adds `definition` at the key of its block, when the block has one.
-    fn add(&mut self, key: Option<(Name, Option<Span>)>, definition: Definition) {
-        if let Some((key, label_span)) = key {
-            self.entries.insert(
-                key,
-                Entry {
-                    definition,
-                    label_span,
-                },
-            );
-        }
     }
 
     /// Reports that `block` has none of the attributes `keys`.
@@ -657,6 +657,34 @@ mod tests {
             check(&documents),
             Err(vec![missing(0), missing(100), missing(200)])
         );
+    }
+
+    #[test]
+    fn reports_a_missing_select_first_in_a_document_with_no_spans() {
+        let disk = Attribute {
+            key: "disk".into(),
+            key_span: None,
+            value: Value {
+                kind: Kind::Integer(1),
+                span: None,
+            },
+        };
+        let policy = Block {
+            keyword: "node_settings".into(),
+            keyword_span: None,
+            labels: vec![Label {
+                text: "a".into(),
+                span: None,
+            }],
+            body: Document {
+                attributes: Map::new(vec![disk]).unwrap(),
+                blocks: Vec::new(),
+            },
+            span: None,
+        };
+        let diagnostics = check(&[document(vec![policy])]).unwrap_err();
+        let codes: Vec<_> = diagnostics.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["config.missing-attribute", "document.bad-size"]);
     }
 
     #[test]
