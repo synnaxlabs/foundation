@@ -513,6 +513,38 @@ fn each_task_that_sends_ends_when_the_group_stops() {
     });
 }
 
+// The reply to the append is in the queue of node 2 at the stop, so that queue has
+// no waker then.
+#[test]
+fn each_task_that_sends_ends_when_a_committed_entry_stops_the_group() {
+    assert_ends(|node, tasks| async move {
+        let config = create_config(&node, &tasks, create_pool());
+        let transport = Rc::clone(&config.transport);
+        let mesh = Mesh::open(config).await.unwrap();
+        let mut watch = mesh.watch(INDEX);
+        assert_eq!(watch.next().await, Ok(None));
+        node.clock().sleep(seconds(3)).await;
+        let at = Position {
+            term: Term(5),
+            index: 1,
+        };
+        let entry = Entry {
+            at,
+            data: Data::Bytes(vec![9]),
+        };
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: vec![entry],
+            commit: 1,
+        };
+        mesh.receive(public(2), proven(2, 1, append)).unwrap();
+        let cause = Unknown::Kind { kind: 9 };
+        assert_eq!(watch.next().await, Err(Stopped::Change { at, cause }));
+        drop(watch);
+        assert_ended(&node.clock(), transport).await;
+    });
+}
+
 /// Asserts that the session of node 2 ends with code 0 when `end` ran on the mesh
 /// of node 1, whose task for node 2 waits in a send then: node 2 reads nothing
 /// after the first append of node 1.

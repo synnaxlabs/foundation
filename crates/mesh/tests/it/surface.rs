@@ -122,8 +122,19 @@ fn create_voter_config(
     id: u8,
     members: Vec<Member>,
 ) -> Config {
+    create_config_on(node, tasks, id, members, private_key(id))
+}
+
+/// That config, on a transport that proves the public key of `transport_key`.
+fn create_config_on(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    id: u8,
+    members: Vec<Member>,
+    transport_key: PrivateKey,
+) -> Config {
     let pool = create_pool();
-    let transport = create_transport(node, tasks, &pool, private_key(id));
+    let transport = create_transport(node, tasks, &pool, transport_key);
     Config {
         key: key(id),
         private_key: private_key(id),
@@ -159,6 +170,16 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
         assert_eq!(watch.next().await, Ok(None));
         drop(mesh);
         assert_eq!(watch.next().await, Err(Stopped::Dropped));
+    });
+}
+
+// A known gap until #1587: `open` must refuse this transport.
+#[test]
+fn open_takes_a_transport_that_proves_another_key() {
+    solo(|node, tasks| async move {
+        let members = vec![create_member(1, Vec::new())];
+        let config = create_config_on(&node, &tasks, 1, members, private_key(2));
+        drop(Mesh::open(config).await.unwrap());
     });
 }
 

@@ -8,6 +8,7 @@ use transport::{Class, Code};
 
 use super::send::{self, LIMIT, Peer, create_config, stop};
 use super::*;
+use crate::bytes::block;
 
 impl Cluster {
     /// Node `node` sets `home` as the home at its next tick.

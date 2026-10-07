@@ -14,7 +14,8 @@ use transport::{Class, Session, Transport};
 use types::node;
 use wire::Protocol;
 
-use super::{Group, block};
+use super::Group;
+use crate::bytes::block;
 use crate::message::Message;
 
 /// What sends the messages of one group: one task for each member, so a member that
@@ -72,7 +73,7 @@ impl Senders {
     }
 
     // Sends each message for `to`. A message that fails drops, with the part that
-    // failed, the stream or the session of the queue: `raft` sends again.
+    // failed, the stream or the session of the group: `raft` sends again.
     async fn send(self, to: node::Key) {
         let mut stream = None;
         while let Some(message) = self.next(to).await {
@@ -95,7 +96,7 @@ impl Senders {
                     | transport::Error::Broken { .. }
                     | transport::Error::Network { .. } => {
                         stream = None;
-                        self.group().borrow_mut().queue(to).session = None;
+                        self.group().borrow_mut().sessions.remove(&to);
                     }
                     // A stream gives `Reset` only after a dropped send, and this
                     // task ends when it drops one. Only a bind gives `Config`. Only
@@ -152,7 +153,7 @@ impl Senders {
     }
 
     // Sends `message` on `stream`. With no stream it opens one, and with no session
-    // in the queue of `to` it dials first. The header of the protocol goes first on
+    // to `to` in the group it dials first. The header of the protocol goes first on
     // a stream, which `stream` holds only after. Each block is taken just before its
     // send: a dial can wait until it times out.
     async fn pass(
@@ -164,7 +165,7 @@ impl Senders {
         let sender = if let Some(sender) = stream {
             sender
         } else {
-            let held = self.group().borrow_mut().queue(to).session.clone();
+            let held = self.group().borrow().sessions.get(&to).cloned();
             let session = match held {
                 Some(session) => session,
                 None => self.dial(to).await?,
@@ -178,8 +179,8 @@ impl Senders {
         Ok(sender.send(block).await?)
     }
 
-    // Dials `to` at the addresses of its card, as the group holds it now, and puts
-    // the session in the queue of `to`.
+    // Dials `to` at the addresses of its card, as the group holds it now, and gives
+    // the session to the group.
     async fn dial(&self, to: node::Key) -> Result<Session, Failure> {
         let (public_key, addresses) = {
             let group = self.group();
@@ -189,7 +190,10 @@ impl Senders {
             (member.public_key(), addresses)
         };
         let session = self.transport.dial(public_key, &addresses).await?;
-        self.group().borrow_mut().queue(to).session = Some(session.clone());
+        self.group()
+            .borrow_mut()
+            .sessions
+            .insert(to, session.clone());
         Ok(session)
     }
 }

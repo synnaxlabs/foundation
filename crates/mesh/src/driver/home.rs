@@ -12,8 +12,9 @@ use types::time::Span;
 use types::{channel, node};
 use wire::Protocol;
 
-use super::{Mesh, TICK, block};
+use super::{Mesh, TICK};
 use crate::applied::{Floor, Outcome};
+use crate::bytes::block;
 use crate::change::Change;
 use crate::error::Error;
 use crate::message::Message;
@@ -81,10 +82,8 @@ impl Mesh {
         };
         // Only the task that sends to the leader dials it. A follower sends to its
         // leader in each tick, so with no session the leader cannot be reached.
-        let session = leader.and_then(|leader| {
-            let group = self.group.borrow();
-            group.queues.get(&leader)?.session.clone()
-        });
+        let session = leader
+            .and_then(|leader| self.group.borrow().sessions.get(&leader).cloned());
         let Some(session) = session else {
             return Ok(None);
         };
