@@ -58,6 +58,7 @@ impl Kind {
             Self::Compression => "compression",
             Self::Placement => "placement",
             Self::Time => "time",
+            Self::Retention => "retention",
         }
     }
 }
@@ -110,13 +111,14 @@ mod tests {
     use super::*;
 
     /// Each kind with a segment.
-    const KINDS: [(Kind, &str); 6] = [
+    const KINDS: [(Kind, &str); 7] = [
         (Kind::Access, "@access"),
         (Kind::Region, "@region"),
         (Kind::NodeSettings, "@node_settings"),
         (Kind::Compression, "@compression"),
         (Kind::Placement, "@placement"),
         (Kind::Time, "@time"),
+        (Kind::Retention, "@retention"),
     ];
 
     fn name(text: &str) -> Name {
