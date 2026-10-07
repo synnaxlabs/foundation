@@ -9,7 +9,7 @@ use types::time::Span;
 
 use crate::card;
 
-/// The region's record of one node, keyed by its `node::Key`.
+/// The region's record of one node. Its key is `card.key()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     /// What the node states about itself.

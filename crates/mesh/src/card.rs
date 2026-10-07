@@ -71,11 +71,13 @@ impl Card {
 }
 
 /// A card that its own `public_key` signed, over `foundation/card/1`, the node key,
-/// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one.
-/// It proves only that the key in the card signed it. That the node owns the key
-/// comes from its admission.
+/// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one, and
+/// each keeps the node key that the signature covers. It proves only that the public
+/// key in the card signed it. That the node owns the public key comes from its
+/// admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signed {
+    key: node::Key,
     card: Card,
     signature: [u8; 64],
 }
@@ -94,7 +96,11 @@ impl Signed {
             "the card's public key is not the public half of the private key"
         );
         let signature = ed25519::sign(&pair, &statement(key, &card));
-        Self { card, signature }
+        Self {
+            key,
+            card,
+            signature,
+        }
     }
 
     /// Checks `signature` over `card` of node `key`.
@@ -110,7 +116,17 @@ impl Signed {
         if !ed25519::holds(card.public_key, &statement(key, &card), &signature) {
             return Err(Forged { node: key });
         }
-        Ok(Self { card, signature })
+        Ok(Self {
+            key,
+            card,
+            signature,
+        })
+    }
+
+    /// The node that the card is signed for. The signature covers it.
+    #[must_use]
+    pub const fn key(&self) -> node::Key {
+        self.key
     }
 
     /// The card.
@@ -274,8 +290,9 @@ mod tests {
         #[test]
         fn a_signed_card_checks(card in card(3)) {
             let signed = Signed::sign(key(3), card.clone(), &private(3));
-            prop_assert_eq!(signed.card(), &card);
+            prop_assert_eq!((signed.key(), signed.card()), (key(3), &card));
             let checked = Signed::check(key(3), card, *signed.signature());
+            prop_assert_eq!(checked.as_ref().map(Signed::key), Ok(key(3)));
             prop_assert_eq!(checked, Ok(signed));
         }
     }
