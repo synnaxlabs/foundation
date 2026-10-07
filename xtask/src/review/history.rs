@@ -1,6 +1,5 @@
 //! Which commits a review round covers, read from the history with `git`.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
@@ -63,21 +62,20 @@ impl<'a> History<'a> {
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
     /// by its resolution and by the moves of its base side. A `.rs`, `Cargo.toml`, or
-    /// `Cargo.lock` file that `git merge-tree` finds a conflict in between its
-    /// parents gives "resolves a conflict in `<file>` in `<merge>`". A path that is
-    /// not code, that its first parent changes since a merge base with its second
-    /// parent, and that the merge moves into a code file by its own rename detection
-    /// gives "the base moves `<old>`, which the PR changes, into the code file
-    /// `<new>`". Else the change is read to `end` from the
-    /// tree that `git merge-tree` makes of `from` and the newest base commit that
-    /// `end` holds, not from `from`: the base's code does not count, and text of the
-    /// range that the base moves into a code file does. A code file that this tree
-    /// has a conflict in gives "has a conflict in `<file>` between its start and the
-    /// base", so a conflict that leaves no markers fails closed too. Such a move of a
-    /// path that `from` changes, in the merge that makes this tree, gives the same
-    /// phrase as for a merge on the chain. An
-    /// `end` that holds more than one newest base commit gives "holds the base at
-    /// more than one newest commit: `<commit>`, `<commit>`".
+    /// `Cargo.lock` file that `git merge-tree` finds a conflict in between its parents
+    /// gives "resolves a conflict in `<file>` in `<merge>`". A path that is not code,
+    /// that its first parent changes since its merge base with its second parent, as
+    /// the merge reads it, and that the merge moves into a code file by its own rename
+    /// detection gives "the base moves `<old>`, which the PR changes, into the code
+    /// file `<new>`". Else the change is read to `end` from the tree that
+    /// `git merge-tree` makes of `from` and the newest base commit that `end` holds,
+    /// not from `from`: the base's code does not count, and text of the range that the
+    /// base moves into a code file does. A code file that this tree has a conflict in
+    /// gives "has a conflict in `<file>` between its start and the base", so a conflict
+    /// that leaves no markers fails closed too. Such a move of a path that `from`
+    /// changes, in the merge that makes this tree, gives the same phrase as for a merge
+    /// on the chain. An `end` that holds more than one newest base commit gives "holds
+    /// the base at more than one newest commit: `<commit>`, `<commit>`".
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
     /// a removed one.
@@ -297,12 +295,12 @@ impl<'a> History<'a> {
     }
 
     /// The phrase "the base moves `<old>`, which the PR changes, into the code file
-    /// `<new>`" for the first path `<old>` that is not code, that `first` changes
-    /// since a merge base of `first` and `second`, and that their merge, with the
-    /// tree `tree`, moves into the code file `<new>`. The moves are the merge's own:
-    /// `second` is merged again with a child of `first` that gives each such path a
-    /// probe text of its own, and the probe text is read in the code files that the
-    /// two merges make differently.
+    /// `<new>`" for the first path `<old>` that is not code, that `first` changes since
+    /// `merge_base(first, second)`, and that their merge, with the tree `tree`, moves
+    /// into the code file `<new>`. The moves are the merge's own: `second` is merged
+    /// again with a child of `first` that gives each such path a probe text of its own,
+    /// and the probe text is read in the code files that the two merges make
+    /// differently.
     ///
     /// # Errors
     ///
@@ -342,39 +340,60 @@ impl<'a> History<'a> {
     }
 
     /// A child of `first` in which each path that is not code and that `first`
-    /// changes since a merge base of `first` and `second` holds the probe text
-    /// `<PROBE> <n>`, where `paths[n]` is that path. With more than one merge base,
-    /// these paths hold each path that the merge reads as changed by `first`. `None`
-    /// when no such path exists.
+    /// changes since `merge_base(first, second)` holds the probe text `<PROBE> <n>`,
+    /// where `paths[n]` is that path. `None` when no such path exists.
     ///
     /// # Errors
     ///
     /// A failed `git` command.
     fn probe(&self, first: &str, second: &str) -> Result<Option<Probe>, String> {
-        let mut modes = BTreeMap::new();
-        for base in self.git(&["merge-base", "--all", first, second])?.lines() {
-            for entry in self.diff(base, first, &["--diff-filter=M"])? {
-                if !code_path(&String::from_utf8_lossy(&entry.path)) {
-                    modes.insert(entry.path, entry.mode);
-                }
-            }
-        }
-        if modes.is_empty() {
+        let Some(base) = self.merge_base(first, second)? else {
+            return Ok(None);
+        };
+        let changed: Vec<_> = self
+            .diff(&base, first, &["--diff-filter=M"])?
+            .into_iter()
+            .filter(|entry| !code_path(&String::from_utf8_lossy(&entry.path)))
+            .collect();
+        if changed.is_empty() {
             return Ok(None);
         }
-        let files: Vec<_> = modes
+        let files: Vec<_> = changed
             .iter()
             .enumerate()
-            .map(|(n, (path, mode))| File {
-                mode,
-                path,
+            .map(|(n, entry)| File {
+                mode: &entry.mode,
+                path: &entry.path,
                 text: format!("{PROBE} {n}\n"),
             })
             .collect();
         Ok(Some(Probe {
             commit: self.child(first, &files)?,
-            paths: modes.into_keys().collect(),
+            paths: changed.into_iter().map(|entry| entry.path).collect(),
         }))
+    }
+
+    /// The tree-ish that a merge of `first` and `second` reads as their merge base:
+    /// their one merge base, or, with more than one, the merge that `git merge-tree`
+    /// makes of them in turn, as `git merge` does. `None` when they have no merge
+    /// base.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn merge_base(&self, first: &str, second: &str) -> Result<Option<String>, String> {
+        let bases = self.git(&["merge-base", "--all", first, second])?;
+        // `git merge` merges the bases in the reverse of this order.
+        let mut bases = bases.lines().rev();
+        let Some(mut base) = bases.next().map(str::to_string) else {
+            return Ok(None);
+        };
+        let mut tree = base.clone();
+        for next in bases {
+            tree = self.merged(&base, next)?.tree;
+            base = self.commit(&tree, &[&base, next])?;
+        }
+        Ok(Some(tree))
     }
 
     /// A commit with the parent `first` and its tree with `files` in place of its
@@ -411,17 +430,24 @@ impl<'a> History<'a> {
             .map_err(|e| format!("{}: {e}", index.display()));
         let tree = tree?;
         removed?;
+        self.commit(String::from_utf8_lossy(&tree).trim(), &[first])
+    }
+
+    /// A commit of `tree` with `parents`, by a fixed author at a fixed time, so the
+    /// same inputs give the same commit.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git commit-tree`.
+    fn commit(&self, tree: &str, parents: &[&str]) -> Result<String, String> {
+        let mut args = vec!["commit-tree", tree, "-m", "probe"];
+        for parent in parents {
+            args.extend(["-p", parent]);
+        }
         let who = OsStr::new("xtask");
         let when = OsStr::new("@0 +0000");
         let commit = self.run(
-            &[
-                "commit-tree",
-                String::from_utf8_lossy(&tree).trim(),
-                "-p",
-                first,
-                "-m",
-                "probe",
-            ],
+            &args,
             b"",
             &[
                 ("GIT_AUTHOR_NAME", who),

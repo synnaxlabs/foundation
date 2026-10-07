@@ -742,6 +742,32 @@ fn a_base_move_that_a_later_commit_undoes_counts() {
 }
 
 #[test]
+fn a_base_move_before_a_later_merge_of_the_base_counts() {
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let (repo, _) = Repo::with_pr("move-then-merge");
+    repo.advance_main("a.md", text);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.head();
+    repo.commit("a.md", &format!("fn unreviewed() {{}}\n{text}"));
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["mv", "a.md", "a.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "mv"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    repo.commit("a.rs", text);
+    repo.advance_main("c.txt", "c\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some(
+            "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
 fn a_base_move_names_the_path_that_it_moves() {
     let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
     let (repo, _) = Repo::with_pr("move-second");
@@ -913,6 +939,44 @@ fn a_base_move_that_only_one_of_two_merge_bases_shows_counts() {
             "{main_first}"
         );
     }
+}
+
+#[test]
+fn a_base_move_of_a_path_that_only_a_merged_branch_changes_does_not_count() {
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    let (repo, _) = Repo::with_pr("move-stacked");
+    let old = repo.advance_main("a.md", text);
+    // The branch `x` changes `a.md`; the PR is stacked on it.
+    repo.git(&["switch", "--quiet", "-c", "x", &old]);
+    let x = repo.commit("a.md", &format!("{text}x\n"));
+    repo.git(&["switch", "--quiet", "-C", "pr", &x]);
+    let from = repo.commit("b.txt", "pr\n");
+    // The PR merges main before `x` lands.
+    let m0 = repo.advance_main("c.txt", "main\n");
+    repo.git(&["merge", "--quiet", "--no-edit", &m0]);
+    let first = repo.head();
+    // `x` lands on main, and then main moves `a.md` to `a.rs`.
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--no-edit", &x]);
+    repo.git(&["mv", "a.md", "a.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "mv"]);
+    let base = repo.head();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.head();
+    // The PR's tree is the base's tree and `b.txt`: the PR changes no code.
+    assert_eq!(
+        repo.git(&["diff", "--name-only", &base, &end]),
+        "b.txt".to_string()
+    );
+    assert_eq!(
+        repo.git(&["merge-base", "--all", &first, &base])
+            .lines()
+            .count(),
+        2
+    );
+    assert_eq!(repo.code_change(&from, &end), Ok(None));
 }
 
 #[test]
