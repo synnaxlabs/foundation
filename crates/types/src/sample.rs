@@ -94,7 +94,14 @@ pub enum Type {
     },
     /// A fixed array of arrays per sample, row-major. A sample has the bytes of an
     /// array of `rows * columns` elements; the shape is only in the type.
-    Matrix(Matrix),
+    Matrix {
+        /// The element type.
+        element: Scalar,
+        /// Arrays per sample.
+        rows: u16,
+        /// Elements per array.
+        columns: u16,
+    },
     /// A list of at most `max` elements per sample.
     List {
         /// The element type.
@@ -115,9 +122,11 @@ impl Type {
         match self {
             Self::Scalar(s) => Some(s.width()),
             Self::Array { element, len } => Some(element.width() * len as usize),
-            Self::Matrix(matrix) => {
-                Some(matrix.element.width() * matrix.elements() as usize)
-            }
+            Self::Matrix {
+                element,
+                rows,
+                columns,
+            } => Some(element.width() * rows as usize * columns as usize),
             Self::List { .. } | Self::String | Self::Bytes => None,
         }
     }
@@ -130,11 +139,11 @@ impl fmt::Display for Type {
         match *self {
             Self::Scalar(scalar) => f.write_str(scalar.name()),
             Self::Array { element, len } => write!(f, "{}[{len}]", element.name()),
-            Self::Matrix(Matrix {
+            Self::Matrix {
                 element,
                 rows,
                 columns,
-            }) => write!(f, "{}[{rows}][{columns}]", element.name()),
+            } => write!(f, "{}[{rows}][{columns}]", element.name()),
             Self::List { element, max } => {
                 write!(f, "list<{}, {max}>", element.name())
             }
@@ -182,63 +191,14 @@ impl FromStr for Type {
                     element,
                     len: count(len)?,
                 }),
-                Some(columns) => {
-                    Matrix::new(element, count(len)?, count(columns)?).map(Self::Matrix)
-                }
+                Some(columns) => Ok(Self::Matrix {
+                    element,
+                    rows: side(len)?,
+                    columns: side(columns)?,
+                }),
             };
         }
         Scalar::named(text).map(Self::Scalar).ok_or(Error::Syntax)
-    }
-}
-
-/// The shape of a [`Type::Matrix`]. It holds at most `u32::MAX` elements, as an array
-/// does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Matrix {
-    element: Scalar,
-    rows: u32,
-    columns: u32,
-}
-
-impl Matrix {
-    /// A matrix of `rows` arrays of `columns` elements. A size of 0 is valid.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Elements`] when `rows * columns` is more than `u32::MAX`.
-    pub const fn new(element: Scalar, rows: u32, columns: u32) -> Result<Self, Error> {
-        if rows.checked_mul(columns).is_none() {
-            return Err(Error::Elements);
-        }
-        Ok(Self {
-            element,
-            rows,
-            columns,
-        })
-    }
-
-    /// The element type.
-    #[must_use]
-    pub const fn element(self) -> Scalar {
-        self.element
-    }
-
-    /// Arrays per sample.
-    #[must_use]
-    pub const fn rows(self) -> u32 {
-        self.rows
-    }
-
-    /// Elements per array.
-    #[must_use]
-    pub const fn columns(self) -> u32 {
-        self.columns
-    }
-
-    /// Elements per sample: `rows * columns`.
-    #[must_use]
-    pub const fn elements(self) -> u32 {
-        self.rows * self.columns
     }
 }
 
@@ -261,6 +221,11 @@ fn count(text: &str) -> Result<u32, Error> {
     text.parse().map_err(|_not_a_u32| Error::Count)
 }
 
+/// The length of a matrix side that `text` writes as a [`count`].
+fn side(text: &str) -> Result<u16, Error> {
+    u16::try_from(count(text)?).map_err(|_over_u16| Error::Matrix)
+}
+
 /// Why a text is not a sample type. `Display` gives the message: a lower-case clause
 /// with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,8 +242,8 @@ pub enum Error {
     Count,
     /// An array has more than two lengths, as in `u8[1][1][1]`.
     Lengths,
-    /// A matrix has more than `u32::MAX` elements, as in `u8[65536][65536]`.
-    Elements,
+    /// A matrix has a length over 65535, as in `f32[70000][3]`.
+    Matrix,
 }
 
 impl Error {
@@ -297,9 +262,7 @@ impl Error {
             Self::Lengths => {
                 "Use one or two array lengths, such as f32[3] or f32[2][3]"
             }
-            Self::Elements => {
-                "Use fewer rows or columns: rows times columns is at most 4294967295"
-            }
+            Self::Matrix => "Use at most 65535 rows and 65535 columns, or an array",
         }
     }
 }
@@ -325,7 +288,7 @@ impl fmt::Display for Error {
             }
             Self::Count => "expected a count of 0 to 4294967295, with no leading zero",
             Self::Lengths => "expected one or two array lengths",
-            Self::Elements => "expected at most 4294967295 elements in a matrix",
+            Self::Matrix => "expected each matrix length from 0 to 65535",
         })
     }
 }
@@ -345,10 +308,10 @@ mod tests {
             (scalar.clone(), any::<u32>())
                 .prop_map(|(element, len)| Type::Array { element, len }),
             (scalar.clone(), any::<u16>(), any::<u16>()).prop_map(
-                |(element, rows, columns)| {
-                    Type::Matrix(
-                        Matrix::new(element, rows.into(), columns.into()).unwrap(),
-                    )
+                |(element, rows, columns)| Type::Matrix {
+                    element,
+                    rows,
+                    columns,
                 }
             ),
             (scalar, any::<u32>())
@@ -379,7 +342,8 @@ mod tests {
             (matrix(Scalar::F32, 2, 3), "f32[2][3]"),
             (matrix(Scalar::U8, 0, 5), "u8[0][5]"),
             (matrix(Scalar::F32, 1, 3), "f32[1][3]"),
-            (matrix(Scalar::U8, 65535, 65537), "u8[65535][65537]"),
+            (matrix(Scalar::U8, 65535, 65535), "u8[65535][65535]"),
+            (matrix(Scalar::U8, 0, 0), "u8[0][0]"),
             (
                 Type::List {
                     element: Scalar::U8,
@@ -462,49 +426,43 @@ mod tests {
             ("string[2][3]", Error::Element),
             ("u8[1][1][1]", Error::Lengths),
             ("u8[1][1][]", Error::Lengths),
-            ("u8[65536][65536]", Error::Elements),
-            ("u8[4294967295][2]", Error::Elements),
+            ("f32[70000][3]", Error::Matrix),
+            ("u8[65535][65536]", Error::Matrix),
+            ("u8[65536][0]", Error::Matrix),
+            ("u8[4294967295][2]", Error::Matrix),
+            ("u8[2][4294967296]", Error::Count),
         ];
         for (text, error) in cases {
             assert_eq!(text.parse::<Type>(), Err(error), "{text:?}");
         }
     }
 
-    fn matrix(element: Scalar, rows: u32, columns: u32) -> Type {
-        Type::Matrix(Matrix::new(element, rows, columns).unwrap())
+    fn matrix(element: Scalar, rows: u16, columns: u16) -> Type {
+        Type::Matrix {
+            element,
+            rows,
+            columns,
+        }
     }
 
     /// The #1152 test of `f32[2][3]`: it reads as an array of arrays.
     #[test]
     fn reads_two_lengths() {
-        let Ok(Type::Matrix(matrix)) = "f32[2][3]".parse::<Type>() else {
-            panic!("f32[2][3] is not a matrix");
-        };
-        assert_eq!(matrix.element(), Scalar::F32);
-        assert_eq!(
-            (matrix.rows(), matrix.columns(), matrix.elements()),
-            (2, 3, 6)
-        );
-        assert_eq!(Type::Matrix(matrix).width(), Some(24));
+        let read = "f32[2][3]".parse::<Type>();
+        assert_eq!(read, Ok(matrix(Scalar::F32, 2, 3)));
+        assert_eq!(read.unwrap().width(), Some(24));
     }
 
     #[test]
-    fn holds_at_most_u32_max_elements_in_a_matrix() {
-        let max = Matrix::new(Scalar::U64, u32::MAX, 1).unwrap();
-        assert_eq!(max.elements(), u32::MAX);
-        assert_eq!(Type::Matrix(max).width(), Some(8 * 4_294_967_295));
-        assert_eq!(Matrix::new(Scalar::U8, 0, u32::MAX).unwrap().elements(), 0);
-        assert_eq!(
-            Matrix::new(Scalar::U8, 65_535, 65_537).unwrap().elements(),
-            u32::MAX
-        );
-        for (rows, columns) in [(u32::MAX, 2), (65_536, 65_536), (2, u32::MAX)] {
-            assert_eq!(
-                Matrix::new(Scalar::U8, rows, columns),
-                Err(Error::Elements),
-                "{rows} x {columns}"
-            );
-        }
+    fn gives_the_width_of_the_largest_matrix() {
+        let max = matrix(Scalar::Uuid, u16::MAX, u16::MAX);
+        assert_eq!(max.width(), Some(16 * 65_535 * 65_535));
+        assert_eq!(matrix(Scalar::U8, 0, u16::MAX).width(), Some(0));
+    }
+
+    #[test]
+    fn stays_eight_bytes() {
+        assert_eq!(size_of::<Type>(), 8);
     }
 
     #[test]
@@ -534,9 +492,9 @@ mod tests {
                 "Use one or two array lengths, such as f32[3] or f32[2][3]",
             ),
             (
-                Error::Elements,
-                "expected at most 4294967295 elements in a matrix",
-                "Use fewer rows or columns: rows times columns is at most 4294967295",
+                Error::Matrix,
+                "expected each matrix length from 0 to 65535",
+                "Use at most 65535 rows and 65535 columns, or an array",
             ),
         ];
         for (error, message, fix) in cases {

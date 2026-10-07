@@ -423,7 +423,7 @@ const fn written(data_type: Type) -> Option<Scalar> {
     match data_type {
         Type::Scalar(scalar) => Some(scalar),
         Type::Array { .. }
-        | Type::Matrix(_)
+        | Type::Matrix { .. }
         | Type::List { .. }
         | Type::String
         | Type::Bytes => None,
@@ -1353,8 +1353,6 @@ mod tests {
     }
 
     mod unwritten {
-        use types::sample::Matrix;
-
         use super::*;
 
         #[test]
@@ -1379,7 +1377,11 @@ mod tests {
             let element = Scalar::F32;
             let types = [
                 Type::Array { element, len: 3 },
-                Type::Matrix(Matrix::new(element, 2, 3).expect("a matrix")),
+                Type::Matrix {
+                    element,
+                    rows: 2,
+                    columns: 3,
+                },
                 Type::List { element, max: 3 },
                 Type::String,
                 Type::Bytes,

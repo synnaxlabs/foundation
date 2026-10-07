@@ -120,9 +120,9 @@ impl DataType {
             Self::Sample(
                 sample::Type::Scalar(element)
                 | sample::Type::Array { element, .. }
+                | sample::Type::Matrix { element, .. }
                 | sample::Type::List { element, .. },
             ) => *element,
-            Self::Sample(sample::Type::Matrix(matrix)) => matrix.element(),
             Self::Sample(sample::Type::String | sample::Type::Bytes)
             | Self::Quality => {
                 return false;
@@ -191,11 +191,14 @@ mod tests {
         [Scalar::Bool, Scalar::Stamp, Scalar::Span, Scalar::Uuid];
 
     fn shapes(element: Scalar) -> [DataType; 4] {
-        let matrix = sample::Matrix::new(element, 2, 3).unwrap();
         [
             DataType::Sample(sample::Type::Scalar(element)),
             DataType::Sample(sample::Type::Array { element, len: 3 }),
-            DataType::Sample(sample::Type::Matrix(matrix)),
+            DataType::Sample(sample::Type::Matrix {
+                element,
+                rows: 2,
+                columns: 3,
+            }),
             DataType::Sample(sample::Type::List { element, max: 3 }),
         ]
     }
