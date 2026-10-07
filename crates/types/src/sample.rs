@@ -172,13 +172,14 @@ impl FromStr for Type {
     }
 }
 
-/// The scalar that `text` names as the element of an array or a list. A space is a
-/// fault of syntax, not of the element.
+/// The scalar that `text` names as the element of an array or a list. A scalar with
+/// space around it is a fault of syntax, not of the element.
 fn element(text: &str) -> Result<Scalar, Error> {
-    if text.contains(char::is_whitespace) {
-        return Err(Error::Syntax);
+    match Scalar::named(text) {
+        Some(scalar) => Ok(scalar),
+        None if Scalar::named(text.trim()).is_some() => Err(Error::Syntax),
+        None => Err(Error::Element),
     }
-    Scalar::named(text).ok_or(Error::Element)
 }
 
 /// The count that `text` writes in ASCII digits with no leading zero.
@@ -344,6 +345,9 @@ mod tests {
             ("stamp[3]", Error::Element),
             ("list<span, 16>", Error::Element),
             ("f32 [2][3]", Error::Syntax),
+            ("list<u8, 16>[2]", Error::Element),
+            ("list<u8, 16>[2][3]", Error::Element),
+            ("list<list<u8, 16>, 4>", Error::Element),
             ("f32 [03]", Error::Syntax),
             ("list<u8,16>", Error::Syntax),
             ("list<u8, 16> ", Error::Syntax),
