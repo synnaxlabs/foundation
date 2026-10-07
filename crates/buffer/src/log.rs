@@ -300,8 +300,8 @@ impl Logs {
     }
 
     /// Hides the records before the offset `tail` from each later
-    /// [`find`](Self::find). A later sync of a path drops its hidden runs, so this
-    /// call visits no path.
+    /// [`find`](Self::find). A later record that adds a run to a path drops the
+    /// path's hidden runs, so this call visits no path.
     ///
     /// # Panics
     ///
@@ -557,8 +557,8 @@ mod tests {
 
         /// A trim after any record hides the records before its tail. Each read
         /// then finds the oldest record left with an entry past its mark, else
-        /// the durable end when a sample past the mark is lost. A path keeps the
-        /// runs from the tail at its last sync.
+        /// the durable end. A path keeps the runs from the tail at the sync that
+        /// added its newest run.
         #[test]
         fn finds_what_the_trims_left(
             records in prop::collection::vec(
@@ -954,12 +954,16 @@ mod tests {
         logs.hide(8192);
         let all: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
         assert_eq!(all.len(), 3, "a trim visits no path");
-        logs.sync(slot(1), &header(1, Path::Live, 9, 1, None), 16384)
+        logs.sync(slot(1), &header(1, Path::Live, 9, 1, None), 12288)
+            .expect("syncs");
+        let all: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
+        assert_eq!(all.len(), 3, "an entry in the newest record drops no run");
+        logs.sync(slot(1), &header(1, Path::Live, 10, 1, None), 16384)
             .expect("syncs");
         let left: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
         assert_eq!(
             left,
-            [run(3, 0, 8192), run(6, 0, 12288), run(9, 0, 16384)],
+            [run(3, 0, 8192), run(6, 0, 12288), run(10, 0, 16384)],
             "the run at the tail stays"
         );
         let other: Vec<Run> = logs.runs(slot(2), Path::Live).collect();
@@ -969,10 +973,10 @@ mod tests {
             "a path with no sync keeps its runs"
         );
         logs.hide(20480);
-        logs.sync(slot(1), &header(1, Path::Live, 10, 1, None), 20480)
+        logs.sync(slot(1), &header(1, Path::Live, 11, 1, None), 20480)
             .expect("syncs");
         let left: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
-        assert_eq!(left, [run(10, 0, 20480)]);
+        assert_eq!(left, [run(11, 0, 20480)]);
     }
 
     #[test]
