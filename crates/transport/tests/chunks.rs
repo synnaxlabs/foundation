@@ -1,10 +1,11 @@
 //! A read holds at most 64 of the chunks that a message comes in. Each time the list
 //! is full, the read copies it into one heap buffer, so a message in many tiny
 //! frames cannot grow the list. A packet holds at most 1472 bytes, and noq-proto
-//! keeps each packet's bytes in place until their spare bytes pass 32 KiB, which
-//! these messages do not reach. So the only heap block that holds all of a longer
-//! pattern is that buffer. The count covers each thread, so this
-//! binary has no test harness. The sim runs on one thread, so the count is exact.
+//! keeps each packet's bytes in place until their spare bytes pass the larger of
+//! 32 KiB and 1.5 times the bytes it holds, which these messages do not reach. So
+//! the only heap block that holds all of a longer pattern is that buffer. The count
+//! covers each thread, so this binary has no test harness. The sim runs on one
+//! thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -40,6 +41,9 @@ const PAST: usize = 84_900;
 /// between 1000 and 1472 bytes of a message, so the pattern lies past its first 64
 /// packets and inside its first 128: only a second copy of a full list holds it.
 const SECOND: usize = 110_000;
+/// Where the pattern starts in a message of 1 << 18 bytes: past its first 128
+/// packets, and in fewer than 64 after them, so no copy of a full list holds it.
+const LAST: usize = 190_000;
 /// When the server reads after it accepts the stream, once the whole message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its send: past the server's read.
@@ -51,7 +55,13 @@ type Out = (Poll<Result<Option<Vec<u8>>, Error>>, u64);
 
 fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
-    for (len, at, copies) in [(FULL, 0, 0), (PAST, 0, 1), (240_000, SECOND, 1)] {
+    let cases = [
+        (FULL, 0, 0),
+        (PAST, 0, 1),
+        (240_000, SECOND, 1),
+        (1 << 18, LAST, 0),
+    ];
+    for (len, at, copies) in cases {
         let (read, freed) = run(&pattern, len, at);
         let Poll::Ready(Ok(Some(read))) = read else {
             panic!("{len} bytes: the read gave {read:?}");
