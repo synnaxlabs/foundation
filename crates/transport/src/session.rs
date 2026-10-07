@@ -493,34 +493,29 @@ mod tests {
             let first = transport.accept().await.expect("a session");
             let second = transport.accept().await.expect("a session");
             let clock = node.clock();
-            let held = [(); 3].map(|()| pool.alloc(LEN).expect("room"));
+            let held = [(); 2].map(|()| pool.alloc(LEN).expect("room"));
             let mut a = first.accept().await.expect("a stream").receiver;
             let mut b = second.accept().await.expect("a stream").receiver;
-            let mut a_read = Box::pin(a.recv());
-            let mut b_read = Box::pin(b.recv());
-            assert!(poll_once(a_read.as_mut()).await.is_none());
-            assert!(poll_once(b_read.as_mut()).await.is_none());
             let mut stalled = Vec::new();
             for _ in 0..2 {
                 let incoming = first.accept().await.expect("a stream");
                 assert_eq!(incoming.class, Class::Command);
                 stalled.push(incoming.receiver);
             }
-            let [h1, h2, h3] = held;
-            drop((h1, h2));
-            // Each `Command` message takes a block, and holds 40_000 bytes of the
-            // first session's budget, so `a` has no room when the pool next does.
+            // Each `Command` message holds 40_000 bytes of the first session's budget
+            // and no block, so `a` has no room while the pool has one block.
             for receiver in &mut stalled {
                 assert!(poll_once(pin!(receiver.recv())).await.is_none());
             }
-            drop(h3);
+            let mut a_read = Box::pin(a.recv());
+            let mut b_read = Box::pin(b.recv());
             let read = poll_fn(|cx| {
                 assert!(a_read.as_mut().poll(cx).is_pending());
                 b_read.as_mut().poll(cx)
             });
             let message = read.await.expect("a message").expect("a block");
             assert_eq!(message.to_vec(), vec![2; LEN]);
-            drop((message, stalled));
+            drop((message, stalled, held));
             let message = a_read.await.expect("a message").expect("a block");
             assert_eq!(message.to_vec(), vec![1; LEN]);
             first.close(Code(4));
