@@ -417,11 +417,20 @@ fn series(draft: &mut Draft, entry: usize) -> &[u8] {
         .expect("invariant: a checked series is in the frame")
 }
 
+/// The scalar of a series of `data_type`, or `None` for a type the home does not
+/// write.
+const fn written(data_type: Type) -> Option<Scalar> {
+    match data_type {
+        Type::Scalar(scalar) => Some(scalar),
+        Type::Array { .. } | Type::List { .. } | Type::String | Type::Bytes => None,
+    }
+}
+
 /// The first entry of `set` with a type the home does not write, if it has one.
 pub(crate) fn unwritten(set: &KeySet) -> Option<&key_set::Entry> {
     set.entries()
         .iter()
-        .find(|entry| !matches!(entry.data_type, Type::Scalar(_)))
+        .find(|entry| written(entry.data_type).is_none())
 }
 
 /// The scalar of a series of `data_type`.
@@ -430,10 +439,8 @@ pub(crate) fn unwritten(set: &KeySet) -> Option<&key_set::Entry> {
 ///
 /// If the home does not write a series of `data_type`: [`unwritten`] gives its entry.
 fn scalar(data_type: Type) -> Scalar {
-    match data_type {
-        Type::Scalar(scalar) => scalar,
-        other => panic!("home does not write a series of {other:?} yet"),
-    }
+    written(data_type)
+        .unwrap_or_else(|| panic!("home does not write a series of {data_type:?} yet"))
 }
 
 /// Encodes `values`, `count` samples of `scalar`, onto the end of `bytes`, and returns
@@ -487,7 +494,7 @@ mod tests {
     use types::frame::{Form, Frame, Path, Range};
 
     use super::*;
-    use crate::common::{interner, key, pool};
+    use crate::common::{SCALARS, interner, key, pool};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -1350,6 +1357,18 @@ mod tests {
         }
 
         #[test]
+        fn gives_none_for_a_series_of_each_scalar() {
+            for scalar in SCALARS {
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[(key(Slot::new(2)), Type::Scalar(scalar))],
+                }]);
+
+                assert_eq!(unwritten(&set), None, "{scalar:?}");
+            }
+        }
+
+        #[test]
         fn gives_the_first_entry_of_each_type_that_is_not_a_scalar() {
             let element = Scalar::F32;
             let types = [
@@ -1416,23 +1435,6 @@ mod tests {
             }
         }
     }
-
-    const SCALARS: [Scalar; 14] = [
-        Scalar::Bool,
-        Scalar::I8,
-        Scalar::I16,
-        Scalar::I32,
-        Scalar::I64,
-        Scalar::U8,
-        Scalar::U16,
-        Scalar::U32,
-        Scalar::U64,
-        Scalar::F32,
-        Scalar::F64,
-        Scalar::Stamp,
-        Scalar::Span,
-        Scalar::Uuid,
-    ];
 
     /// The values of one series: `count` samples of `width` bytes from `state`, with
     /// runs so that more than one codec applies.

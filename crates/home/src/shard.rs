@@ -34,7 +34,6 @@ use crate::{handoff, order, split, stored};
 /// # use buffer::{Buffer, Layout};
 /// # use types::channel::{Key, Slots};
 /// # use types::frame::key_set::{Group, Interner};
-/// # use types::frame::{Draft, Form};
 /// # use types::sample::{Scalar, Type};
 /// #
 /// # type Error = Box<dyn std::error::Error>;
@@ -59,17 +58,10 @@ use crate::{handoff, order, split, stored};
 /// #     }]);
 /// #     let config = block::Config { budget: 1 << 21 };
 /// #     let heap = Heap::new(config.reservation());
-/// #     let pool = Rc::new(Pool::new(config, heap));
-/// #     let mut frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8), (1, 8)])?;
-/// #     for (entry, sample) in [(0, 10_i64), (1, 7)] {
-/// #         let series = frame.series_mut(entry).expect("the series is present");
-/// #         series.copy_from_slice(&sample.to_le_bytes());
-/// #     }
-/// #     frame.set_count(0, 1);
 /// #     let config = buffer::Config {
 /// #         files: node.files(),
 /// #         dir: PathBuf::from("shard-0"),
-/// #         pool,
+/// #         pool: Rc::new(Pool::new(config, heap)),
 /// #         clock: node.clock(),
 /// #         tasks,
 /// #         entropy: node.entropy(),
@@ -82,7 +74,7 @@ use crate::{handoff, order, split, stored};
 /// #     }
 /// use home::{Config, Outcome, Shard, order, writer};
 /// use types::authority::Authority;
-/// use types::frame::{Label, Path, Range};
+/// use types::frame::{Draft, Form, Label, Path, Range};
 /// use types::time::{Span, Stamp};
 ///
 /// let mut shard = Shard::new(Config {
@@ -96,6 +88,13 @@ use crate::{handoff, order, split, stored};
 /// });
 /// shard.carry(index);
 /// let reader = shard.open_complete(index, 1 << 20);
+///
+/// let mut frame = Draft::new(shard.pool(), &set, Form::Raw, &[(0, 8), (1, 8)])?;
+/// for (entry, sample) in [(0, 10_i64), (1, 7)] {
+///     let series = frame.series_mut(entry).expect("the series is present");
+///     series.copy_from_slice(&sample.to_le_bytes());
+/// }
+/// frame.set_count(0, 1);
 /// let writer = shard.open_writer(writer::Writer {
 ///     subject: "a".parse()?,
 ///     authority: Authority(1),
@@ -313,6 +312,12 @@ impl Shard {
         self.readers.carry(place, slot, live.seq);
     }
 
+    /// The pool of the shard's buffer. Frames that a writer fills come from it.
+    #[must_use]
+    pub fn pool(&self) -> &block::Pool {
+        self.buffer.pool()
+    }
+
     /// Opens `writer` on each index of its key set, and appends a handoff for each
     /// index where it takes control. A handoff that finds no room waits for the next
     /// append on its index. A failed commit fails the next write.
@@ -480,10 +485,13 @@ impl Shard {
     }
 
     /// Opens an unnamed complete reader on the index at `slot`, with a credit of
-    /// `limit_bytes`. From the index's live tail on, it gets each live frame after
-    /// the commit that holds it, while it has credit for the frame. It does not get
-    /// the first frame that it has no credit for, nor any later frame, and no grant
-    /// changes that: close it and open a new reader.
+    /// `limit_bytes`. From the index's live tail on, it gets each live frame with
+    /// samples after the commit that holds it, while the bytes it has spent are
+    /// below its credit. The first such frame that finds the credit spent is a miss:
+    /// the reader gets neither it nor a later frame, no grant changes that, and no
+    /// call reports it. The home does not read a missed frame back from disk yet.
+    /// Close the reader and open a new one. The new one starts at the live tail of
+    /// its open, so the frames from the miss to there reach neither reader.
     ///
     /// # Panics
     ///
@@ -525,8 +533,9 @@ impl Shard {
     }
 
     /// Takes the next frame of the reader `key`, or `None` when none waits or the
-    /// reader is closed. A complete reader that misses a frame for lack of credit
-    /// gets the frames before it, and then `None`.
+    /// reader is closed. A complete reader that misses a frame
+    /// ([`open_complete`](Self::open_complete)) gets the frames before it, and then
+    /// `None`.
     ///
     /// # Panics
     ///
@@ -1209,7 +1218,8 @@ mod tests {
     }
 
     /// The first seq on `path` of the index at `slot` that the ring does not hold
-    /// on disk.
+    /// on disk. It reads the buffer of the shard, because no call of `Shard` gives
+    /// a stored seq, and no reader shows the stored seq of the backfill path.
     fn stored(shard: &Shard, slot: Slot, path: Path) -> u64 {
         shard.buffer.durable(slot, path).seq
     }
@@ -2656,6 +2666,27 @@ mod tests {
         }
 
         #[test]
+        fn does_not_count_a_frame_of_no_samples_as_a_miss_of_a_complete_reader() {
+            run(104, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(2), 0);
+                let reader = reader::Key::from(session);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let empty = frame(&test.pool, &set, &[(2, &[])]);
+                assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(2, 0, 0)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                shard.grant(session, CREDIT);
+                let later = frame(&test.pool, &set, &[(2, &[10])]);
+                assert_eq!(shard.write(a, LIVE, later), Ok(&[applied(2, 0, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 1), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
         fn raises_the_credit_of_a_complete_reader_with_a_grant() {
             run(25, |test| async move {
                 let set = two_indexes();
@@ -3313,6 +3344,32 @@ mod tests {
             let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn refuses_the_type_of_a_series_before_the_panic_of_an_index_not_carried() {
+        run(102, |test| async move {
+            let mut shard = test.shard(AREA).await;
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(3)),
+                data: &[(key(Slot::new(1)), Type::Bytes)],
+            }]);
+            assert_eq!(
+                shard.open_writer(writer("a", 1, &set)),
+                Err(writer::Error::Type {
+                    slot: Slot::new(1),
+                    data_type: Type::Bytes,
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn gives_the_pool_of_its_buffer() {
+        run(103, |test| async move {
+            let shard = test.shard(AREA).await;
+            assert!(std::ptr::eq(shard.pool(), &raw const *test.pool));
         });
     }
 

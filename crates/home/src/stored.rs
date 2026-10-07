@@ -254,24 +254,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::{interner, key, pool};
-
-    const SCALARS: [Scalar; 14] = [
-        Scalar::Bool,
-        Scalar::I8,
-        Scalar::I16,
-        Scalar::I32,
-        Scalar::I64,
-        Scalar::U8,
-        Scalar::U16,
-        Scalar::U32,
-        Scalar::U64,
-        Scalar::F32,
-        Scalar::F64,
-        Scalar::Stamp,
-        Scalar::Span,
-        Scalar::Uuid,
-    ];
+    use crate::common::{SCALARS, interner, key, pool};
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.

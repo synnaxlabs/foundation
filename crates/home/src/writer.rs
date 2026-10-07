@@ -109,6 +109,8 @@ pub(crate) fn lease(span: Span) -> Result<Lease, Error> {
 
 #[cfg(test)]
 mod tests {
+    use types::sample::Scalar;
+
     use super::*;
 
     #[test]
@@ -135,6 +137,22 @@ mod tests {
         assert_eq!(
             series.fix(),
             "Give the channel a type the home writes (a scalar)"
+        );
+    }
+
+    #[test]
+    fn says_each_field_of_a_type_the_home_does_not_write() {
+        let series = Error::Type {
+            slot: Slot::new(3),
+            data_type: Type::Array {
+                element: Scalar::F32,
+                len: 3,
+            },
+        };
+
+        assert_eq!(
+            series.to_string(),
+            "the home does not write a series of Array { element: F32, len: 3 } yet"
         );
     }
 
