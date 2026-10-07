@@ -11,9 +11,11 @@
 //! The `waiting` lines send a round on their streams at once, over a session whose
 //! peer window holds a quarter of a round, so the sends wait for the QUIC window and
 //! for their turn. They time each poll of each send, not the sim or the peer between
-//! polls. A round in which a send of each stream does not wait at once panics, so
-//! `latest and complete 1 KiB waiting` always measures classes that compete. Compare
-//! it with `complete 1 KiB waiting`, which has the same timing cost per poll.
+//! polls. In each round of `latest and complete 1 KiB waiting`, a `Latest` send and a
+//! `Complete` send must wait at once, and the server must get one stream of each
+//! class, or the bench panics. So the line always measures classes that compete. Its
+//! control is `complete 1 KiB waiting`, whose send must wait in each round. Each poll
+//! has a timing cost, so compare the two lines with their polls per send.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
@@ -26,12 +28,13 @@
 
 use std::cell::RefCell;
 use std::future;
+use std::mem;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
@@ -126,19 +129,38 @@ const SCENARIOS: [Scenario; 5] = [
     },
 ];
 
-/// The scenarios whose sends wait, on a session with the room `TIGHT`.
-const WAITING: [Scenario; 2] = [
-    Scenario {
-        name: "complete 1 KiB waiting",
-        load: Load::Streams(&[Class::Complete]),
-        bytes: 1024,
-    },
-    Scenario {
-        name: "latest and complete 1 KiB waiting",
-        load: Load::Streams(&[Class::Latest, Class::Complete]),
-        bytes: 1024,
-    },
+/// The scenarios whose sends wait, on a session with the room `TIGHT`, and what each
+/// round of each must show.
+const WAITING: [(Scenario, Premise); 2] = [
+    (
+        Scenario {
+            name: "complete 1 KiB waiting",
+            load: Load::Streams(&[Class::Complete]),
+            bytes: 1024,
+        },
+        Premise::Waits,
+    ),
+    (
+        Scenario {
+            name: "latest and complete 1 KiB waiting",
+            load: Load::Streams(&[Class::Latest, Class::Complete]),
+            bytes: 1024,
+        },
+        Premise::Competes,
+    ),
 ];
+
+/// What each round of a `WAITING` scenario must show, or the bench panics.
+#[derive(Clone, Copy, Debug)]
+enum Premise {
+    /// A send waits.
+    Waits,
+    /// A `Latest` send and a `Complete` send wait at once.
+    Competes,
+}
+
+/// The class of each stream a server accepted, in the order it accepted them.
+type Accepted = Arc<Mutex<Vec<Class>>>;
 
 /// The result of one scenario.
 struct Measured {
@@ -146,6 +168,7 @@ struct Measured {
     /// The nanoseconds of each timed round, sorted.
     nanos: Vec<u64>,
     allocations: u64,
+    polls: u64,
 }
 
 fn main() {
@@ -156,7 +179,7 @@ fn main() {
     let at = SocketAddr::new(server.addresses()[0], PORT);
     let narrow_at = SocketAddr::new(narrow.addresses()[0], PORT);
     serve(&server, SERVER, WIDE);
-    serve(&narrow, NARROW, TIGHT);
+    let accepted = serve(&narrow, NARROW, TIGHT);
     let lines = sim
         .run_on(&client, move |node, tasks| async move {
             let config = config(&node, tasks, CLIENT, WIDE);
@@ -181,9 +204,10 @@ fn main() {
                 .dial(public(&NARROW), &[Address::Udp(narrow_at)])
                 .await
                 .expect("a session");
-            for scenario in WAITING {
+            for (scenario, premise) in WAITING {
                 let mut senders = open(&session, scenario.load).await;
-                lines.push(compete(&pool, &mut senders, scenario).await);
+                let line = compete(&pool, &mut senders, scenario, premise, &accepted);
+                lines.push(line.await);
                 for sender in &mut senders {
                     sender.finish().expect("the stream finishes");
                 }
@@ -198,12 +222,14 @@ fn main() {
 }
 
 /// Starts a shard on `node` that accepts one session as `key` with `room`, and reads
-/// each stream until the session closes.
+/// each stream until the session closes. Returns the class of each stream it accepts.
 ///
 /// # Panics
 ///
 /// On an error other than the client's close with code 0.
-fn serve(node: &Node, key: PrivateKey, room: Room) {
+fn serve(node: &Node, key: PrivateKey, room: Room) -> Accepted {
+    let accepted = Accepted::default();
+    let classes = Arc::clone(&accepted);
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -215,7 +241,10 @@ fn serve(node: &Node, key: PrivateKey, room: Room) {
         let session = transport.accept().await.expect("a session");
         loop {
             let mut receiver = match session.accept().await {
-                Ok(incoming) => incoming.receiver,
+                Ok(incoming) => {
+                    classes.lock().expect("not poisoned").push(incoming.class);
+                    incoming.receiver
+                }
                 Err(CLOSED) => return,
                 Err(error) => panic!("the server failed to accept: {error}"),
             };
@@ -231,6 +260,7 @@ fn serve(node: &Node, key: PrivateKey, room: Room) {
         }
     });
     drop(started.expect("a shard"));
+    accepted
 }
 
 /// Runs the rounds of `scenario` on `senders`, empty for the control.
@@ -263,6 +293,7 @@ async fn measure(
         name: scenario.name,
         nanos,
         allocations,
+        polls: u64::try_from(ROUNDS * SENDS).expect("fits"),
     }
 }
 
@@ -324,54 +355,65 @@ async fn open(session: &Session, load: Load) -> Vec<Sender> {
     senders
 }
 
-/// Runs the rounds of a `WAITING` scenario: per round, each of `senders` sends its
-/// share of [`SENDS`] blocks, all at once.
+/// Runs the rounds of a `WAITING` scenario: per round, `senders` send [`SENDS`]
+/// blocks at once, split by the share of their classes.
 ///
 /// # Panics
 ///
-/// When a send fails, when the classes of `senders` are not those of `scenario` or
-/// are not all different, or after a round in which a send of each sender did not
-/// wait at once.
-async fn compete(pool: &Pool, senders: &mut [Sender], scenario: Scenario) -> Measured {
+/// When a send fails, after a round that does not show `premise`, or when the
+/// classes the server got in `accepted` are not those of `senders`.
+async fn compete(
+    pool: &Pool,
+    senders: &mut [Sender],
+    scenario: Scenario,
+    premise: Premise,
+    accepted: &Accepted,
+) -> Measured {
     let classes: Vec<Class> = senders.iter().map(Sender::class).collect();
-    assert!(
-        matches!(scenario.load, Load::Streams(load) if load == classes),
-        "{} sends on {classes:?}",
-        scenario.name
-    );
-    for (at, class) in classes.iter().enumerate() {
-        assert!(
-            !classes[..at].contains(class),
-            "{} sends twice on {class:?}",
-            scenario.name
-        );
-    }
-    let share = SENDS / senders.len();
+    // The share sends three `Complete` messages for each `Latest` one, so this split
+    // keeps both classes waiting until the round ends.
+    let weights: Vec<usize> = (classes.iter())
+        .map(|&class| match (premise, class) {
+            (Premise::Competes, Class::Latest) | (Premise::Waits, _) => 1,
+            (Premise::Competes, _) => 3,
+        })
+        .collect();
+    let total: usize = weights.iter().sum();
     let mut nanos = Vec::with_capacity(ROUNDS);
-    let mut allocations = 0;
+    let (mut allocations, mut polls) = (0, 0);
     for round in 0..WARMUP + ROUNDS {
-        let tally = RefCell::new(Tally::new(senders.len()));
+        let tally = RefCell::new(Tally::new(classes.clone(), premise));
         let mut sends: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
         for (at, sender) in senders.iter_mut().enumerate() {
+            let share = SENDS * weights[at] / total;
             let blocks = (0..share).map(|_| filled(pool, scenario.bytes)).collect();
             sends.push(Box::pin(send_each(sender, blocks, at, &tally)));
         }
         join(sends).await;
         let tally = tally.into_inner();
         assert!(
-            tally.competed,
-            "the sends of {classes:?} did not wait at once in round {round}"
+            tally.shown,
+            "{} is not {premise:?} in round {round}",
+            scenario.name
         );
         if round >= WARMUP {
             nanos.push(tally.nanos);
             allocations += tally.allocations;
+            polls += tally.polls;
         }
     }
+    let mut sent = mem::take(&mut *accepted.lock().expect("not poisoned"));
+    let mut asked = classes.clone();
+    for list in [&mut sent, &mut asked] {
+        list.sort_by_key(|&class| classes.iter().position(|&listed| listed == class));
+    }
+    assert_eq!(sent, asked, "the classes {} sends on", scenario.name);
     nanos.sort_unstable();
     Measured {
         name: scenario.name,
         nanos,
         allocations,
+        polls,
     }
 }
 
@@ -395,19 +437,26 @@ async fn send_each(
 struct Tally {
     nanos: u64,
     allocations: u64,
+    polls: u64,
+    /// The class of each sender.
+    classes: Vec<Class>,
     /// Whether the last poll of the current send of each sender waited.
     waiting: Vec<bool>,
-    /// Whether a send of each sender waited at once.
-    competed: bool,
+    premise: Premise,
+    /// Whether the polls so far show `premise`.
+    shown: bool,
 }
 
 impl Tally {
-    fn new(senders: usize) -> Self {
+    fn new(classes: Vec<Class>, premise: Premise) -> Self {
         Self {
             nanos: 0,
             allocations: 0,
-            waiting: vec![false; senders],
-            competed: false,
+            polls: 0,
+            waiting: vec![false; classes.len()],
+            classes,
+            premise,
+            shown: false,
         }
     }
 
@@ -423,8 +472,16 @@ impl Tally {
         let (polled, counted) = ALLOCATOR.count(|| send.poll(cx));
         self.nanos += nanos(Instant::now().duration_since(start));
         self.allocations += counted;
+        self.polls += 1;
         self.waiting[at] = polled.is_pending();
-        self.competed |= self.waiting.iter().all(|&waiting| waiting);
+        let waits = |class| {
+            let mut senders = self.classes.iter().zip(&self.waiting);
+            senders.any(|(&of, &waits)| of == class && waits)
+        };
+        self.shown |= match self.premise {
+            Premise::Waits => self.waiting.iter().any(|&waits| waits),
+            Premise::Competes => waits(Class::Latest) && waits(Class::Complete),
+        };
         polled
     }
 }
@@ -533,14 +590,15 @@ fn print(lines: &[Measured]) {
     println!("ns per send over {ROUNDS} rounds of {SENDS} sends");
     println!("pN: the round at percentile N, over its sends");
     println!(
-        "{:<34} {:>9} {:>9} {:>9} {:>12}",
-        "scenario", "p10", "p50", "p90", "allocs/send"
+        "{:<34} {:>9} {:>9} {:>9} {:>12} {:>11}",
+        "scenario", "p10", "p50", "p90", "allocs/send", "polls/send"
     );
     for line in lines {
         let at = |percent: usize| per(line.nanos[ROUNDS * percent / 100]) / per(SENDS);
         let allocations = per(line.allocations) / per(ROUNDS * SENDS);
+        let polls = per(line.polls) / per(ROUNDS * SENDS);
         println!(
-            "{:<34} {:>9.1} {:>9.1} {:>9.1} {allocations:>12.2}",
+            "{:<34} {:>9.1} {:>9.1} {:>9.1} {allocations:>12.2} {polls:>11.2}",
             line.name,
             at(10),
             at(50),
