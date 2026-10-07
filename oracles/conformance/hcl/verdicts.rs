@@ -341,8 +341,11 @@ fn writes_text_hcl_accepts() {
         let Ok(document) = read(Source(0), text) else {
             continue;
         };
-        match write(&Checked::new(document.clone()).unwrap()) {
-            Ok(written) if read(Source(0), &written).as_ref() != Ok(&document) => {
+        let document = Checked::new(document).unwrap();
+        match write(&document) {
+            Ok(written)
+                if read(Source(0), &written).as_ref() != Ok(document.document()) =>
+            {
                 failures.push(format!(
                     "{name}: write gives {written:?}, which reads as \
                      another Document"

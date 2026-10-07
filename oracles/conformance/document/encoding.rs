@@ -307,7 +307,8 @@ fn nested(level: Level, levels: usize) -> (Vec<u8>, Option<usize>) {
 fn reads_64_levels_and_refuses_65() {
     for level in [Level::Block, Level::List, Level::Map, Level::Call] {
         let (bytes, _) = nested(level, 64);
-        assert_eq!(decode(&bytes).unwrap().encode(), bytes);
+        let document = decode(&bytes).unwrap().into_document();
+        assert_eq!(Checked::new(document).unwrap().encode(), bytes);
         let (bytes, at) = nested(level, 65);
         assert_eq!(decode(&bytes), Err(Error::Depth { at: at.unwrap() }));
     }

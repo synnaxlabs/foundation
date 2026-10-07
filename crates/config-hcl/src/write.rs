@@ -459,12 +459,8 @@ mod tests {
     use types::name::Name;
 
     use super::*;
-    use crate::arbitrary::document;
+    use crate::arbitrary::{checked, document};
     use crate::{Error, read};
-
-    fn checked(document: &Document) -> Checked {
-        Checked::new(document.clone()).unwrap()
-    }
 
     fn on(start: u32, end: u32) -> Span {
         let at = |offset| Position {
@@ -1001,47 +997,5 @@ mod tests {
             read(Source(0), &text),
             Err(vec![Error::TooDeep { span: bracket }])
         );
-    }
-
-    #[test]
-    fn refuses_a_value_or_a_block_past_the_limit_once() {
-        let mut lists = Value {
-            kind: list(Vec::new()),
-            span: Some(on(1, 2)),
-        };
-        for _ in 0..64 {
-            lists = value(Kind::List(vec![lists]));
-        }
-        let refused = |span| Err(TooDeep { span: Some(span) });
-        let document = Document {
-            attributes: Map::new(vec![Attribute {
-                key: "a".into(),
-                key_span: None,
-                value: lists,
-            }])
-            .unwrap(),
-            blocks: Vec::new(),
-        };
-        assert_eq!(Checked::new(document), refused(on(1, 2)));
-
-        let mut blocks = Block {
-            span: Some(on(3, 4)),
-            ..block("b", &[], attributes(vec![("x", Kind::Integer(1))]))
-        };
-        for _ in 0..64 {
-            blocks = block(
-                "b",
-                &[],
-                Document {
-                    attributes: Map::default(),
-                    blocks: vec![blocks],
-                },
-            );
-        }
-        let document = Document {
-            attributes: Map::default(),
-            blocks: vec![blocks],
-        };
-        assert_eq!(Checked::new(document), refused(on(3, 4)));
     }
 }

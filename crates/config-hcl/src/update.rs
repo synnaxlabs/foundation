@@ -568,11 +568,7 @@ mod tests {
 
     use super::*;
     use crate::Expected;
-    use crate::arbitrary::document;
-
-    fn checked(document: &Document) -> Checked {
-        Checked::new(document.clone()).unwrap()
-    }
+    use crate::arbitrary::{checked, document};
 
     fn parsed(text: &str) -> Document {
         read(Source(0), text).unwrap()

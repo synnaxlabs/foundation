@@ -18,10 +18,10 @@ fuzz_target!(|input: &str| {
     let Ok(document) = config_hcl::read(Source(0), new) else {
         return;
     };
-    let checked = Checked::new(document.clone()).expect("a read document is too deep");
-    let updated = config_hcl::update(Source(0), old, &checked);
+    let document = Checked::new(document).expect("a read document is too deep");
+    let updated = config_hcl::update(Source(0), old, &document);
     let own = match config_hcl::read(Source(0), old) {
-        Ok(own) => own,
+        Ok(own) => Checked::new(own).expect("a read document is too deep"),
         Err(problems) => {
             assert_eq!(
                 updated,
@@ -34,16 +34,16 @@ fuzz_target!(|input: &str| {
     let updated = updated.expect("a read text takes a read document");
     assert_eq!(
         config_hcl::read(Source(0), &updated).as_ref(),
-        Ok(&document),
+        Ok(document.document()),
         "the update does not read as its document:\n{updated}"
     );
     assert_eq!(
-        config_hcl::update(Source(0), &updated, &checked).as_deref(),
+        config_hcl::update(Source(0), &updated, &document).as_deref(),
         Ok(updated.as_str()),
         "a second update to the same document changed the text"
     );
     assert_eq!(
-        config_hcl::update(Source(0), old, &Checked::new(own).expect("a read document is too deep")).as_deref(),
+        config_hcl::update(Source(0), old, &own).as_deref(),
         Ok(old),
         "the update to its own document changed the text"
     );
