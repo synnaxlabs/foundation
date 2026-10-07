@@ -284,8 +284,8 @@ impl Store {
         Ok(None)
     }
 
-    /// Ends the close of the file of a dropped put of `digest`, so that the calls of
-    /// the put end before the next open of the file. The digest is `Listed` after it.
+    /// Ends the pending call (close or remove) of a dropped put of `digest`, so that
+    /// it ends before the next open of the file. The digest is `Listed` after it.
     async fn settle(&self, digest: Digest) {
         let ended = Flight::new(self, digest).end().await;
         // The error of a dropped put's call is not this caller's: the next put makes
@@ -849,6 +849,61 @@ mod tests {
             }
         }
 
+        // Known bug, https://github.com/synnaxlabs/foundation/issues/1524: a store
+        // dropped with a dropped put's remove in flight loses the remove, and it
+        // unlinks the file of the next store's put after that put returned. The fix
+        // is in `env`: a write open waits for the calls in flight on the path.
+        #[test]
+        fn after_a_store_dropped_with_a_remove_in_flight_loses_the_chunk() {
+            let (mut sim, node) = create_default_node(336);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(7, 512);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                {
+                    let mut first = pin!(store.put(digest, &block));
+                    assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                }
+                drop(store);
+                let store = open(&node).await.unwrap();
+                store.put(digest, &block).await.unwrap();
+                node.clock().sleep(Span::SECOND).await;
+                let left: Vec<PathBuf> = Vec::new();
+                assert_eq!(node.files().list(Path::new(DIR)).await.unwrap(), left);
+            })
+            .unwrap();
+        }
+
+        // Known bug, https://github.com/synnaxlabs/foundation/issues/1524: a store
+        // dropped with a dropped put's write in flight loses the close of its file,
+        // and the next store's put of the digest finds the file busy.
+        #[test]
+        fn after_a_store_dropped_with_a_write_in_flight_is_busy() {
+            let (mut sim, node) = create_default_node(3);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let store = open(&node).await.unwrap();
+                {
+                    let mut first = pin!(store.put(digest, &block));
+                    assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                }
+                drop(store);
+                let store = open(&node).await.unwrap();
+                let error = store.put(digest, &block).await.unwrap_err();
+                assert_eq!(
+                    error,
+                    Error::Files(files::Error::Busy { path: path(digest) })
+                );
+            })
+            .unwrap();
+        }
+
         #[test]
         fn of_bytes_with_another_digest_writes_nothing() {
             let (mut sim, node) = create_default_node(0);
@@ -1138,6 +1193,37 @@ mod tests {
                 }
                 assert!(stale.await.unwrap().is_none());
                 assert_eq!(&next.await.unwrap().unwrap()[..], &block[..]);
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        // A stale get of torn listed bytes ends after the first flight, a put dropped
+        // after its close, left the digest listed again. The flight's serial is not
+        // the serial of the open, so the get must not forget the whole chunk.
+        #[test]
+        fn of_a_torn_listed_chunk_that_ends_after_the_first_flight_keeps_it() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(8, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                let mut stale = pin!(store.get(digest));
+                for _ in 0..2 {
+                    assert!(poll_once(&mut stale).await.is_pending());
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                }
+                {
+                    let mut put = pin!(store.put(digest, &block));
+                    for _ in 0..4 {
+                        assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                    }
+                }
+                assert!(stale.await.unwrap().is_none());
                 let got = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(&got[..], &block[..]);
             })
