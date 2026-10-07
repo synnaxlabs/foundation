@@ -13,9 +13,11 @@
 //! for their turn. They time each poll of each send, not the sim or the peer between
 //! polls. In each round of `latest and complete 1 KiB waiting`, a `Latest` send and a
 //! `Complete` send must wait at once, and the server must get one stream of each
-//! class, or the bench panics. So the line always measures classes that compete. Its
-//! control is `complete 1 KiB waiting`, whose send must wait in each round. Each poll
-//! has a timing cost, so compare the two lines with their polls per send.
+//! class, or the bench panics. It times a poll only while a send of the other class
+//! waits, so a class that sends alone adds nothing; `timed` gives the share of sends it
+//! timed, and a round that times under half its sends panics. Its control is
+//! `complete 1 KiB waiting`, whose send must wait in each round. Each poll has a
+//! timing cost, so compare the two lines with their polls per send.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
@@ -165,10 +167,12 @@ type Accepted = Arc<Mutex<Vec<Class>>>;
 /// The result of one scenario.
 struct Measured {
     name: &'static str,
-    /// The nanoseconds of each timed round, sorted.
-    nanos: Vec<u64>,
+    /// The nanoseconds per timed send of each round, sorted.
+    nanos: Vec<f64>,
     allocations: u64,
     polls: u64,
+    /// The timed sends of all rounds.
+    sends: u64,
 }
 
 fn main() {
@@ -284,16 +288,18 @@ async fn measure(
         });
         held.clear();
         if round >= WARMUP {
-            nanos.push(span);
+            nanos.push(per(span) / per(SENDS));
             allocations += counted;
         }
     }
-    nanos.sort_unstable();
+    nanos.sort_unstable_by(f64::total_cmp);
+    let sends = u64::try_from(ROUNDS * SENDS).expect("fits");
     Measured {
         name: scenario.name,
         nanos,
         allocations,
-        polls: u64::try_from(ROUNDS * SENDS).expect("fits"),
+        polls: sends,
+        sends,
     }
 }
 
@@ -370,22 +376,14 @@ async fn compete(
     accepted: &Accepted,
 ) -> Measured {
     let classes: Vec<Class> = senders.iter().map(Sender::class).collect();
-    // The share sends three `Complete` messages for each `Latest` one, so this split
-    // keeps both classes waiting until the round ends.
-    let weights: Vec<usize> = (classes.iter())
-        .map(|&class| match (premise, class) {
-            (Premise::Competes, Class::Latest) | (Premise::Waits, _) => 1,
-            (Premise::Competes, _) => 3,
-        })
-        .collect();
-    let total: usize = weights.iter().sum();
+    let share = SENDS / senders.len();
     let mut nanos = Vec::with_capacity(ROUNDS);
-    let (mut allocations, mut polls) = (0, 0);
+    let (mut allocations, mut polls, mut timed) = (0, 0, 0);
     for round in 0..WARMUP + ROUNDS {
-        let tally = RefCell::new(Tally::new(classes.clone(), premise));
+        let tally = Tally::new(classes.clone(), premise);
+        let tally = RefCell::new(tally);
         let mut sends: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
         for (at, sender) in senders.iter_mut().enumerate() {
-            let share = SENDS * weights[at] / total;
             let blocks = (0..share).map(|_| filled(pool, scenario.bytes)).collect();
             sends.push(Box::pin(send_each(sender, blocks, at, &tally)));
         }
@@ -396,10 +394,17 @@ async fn compete(
             "{} is not {premise:?} in round {round}",
             scenario.name
         );
+        assert!(
+            2 * tally.sends >= u64::try_from(SENDS).expect("fits"),
+            "{} times {} of {SENDS} sends in round {round}",
+            scenario.name,
+            tally.sends
+        );
         if round >= WARMUP {
-            nanos.push(tally.nanos);
+            nanos.push(per(tally.nanos) / per(tally.sends));
             allocations += tally.allocations;
             polls += tally.polls;
+            timed += tally.sends;
         }
     }
     let mut sent = mem::take(&mut *accepted.lock().expect("not poisoned"));
@@ -408,12 +413,13 @@ async fn compete(
         list.sort_by_key(|&class| classes.iter().position(|&listed| listed == class));
     }
     assert_eq!(sent, asked, "the classes {} sends on", scenario.name);
-    nanos.sort_unstable();
+    nanos.sort_unstable_by(f64::total_cmp);
     Measured {
         name: scenario.name,
         nanos,
         allocations,
         polls,
+        sends: timed,
     }
 }
 
@@ -433,11 +439,14 @@ async fn send_each(
     }
 }
 
-/// The polls of the sends of one `WAITING` round.
+/// The polls of the sends of one `WAITING` round. Under `Premise::Competes`, only a
+/// poll while a send of the other class waits is timed.
 struct Tally {
     nanos: u64,
     allocations: u64,
     polls: u64,
+    /// The sends whose last poll was timed.
+    sends: u64,
     /// The class of each sender.
     classes: Vec<Class>,
     /// Whether the last poll of the current send of each sender waited.
@@ -453,6 +462,7 @@ impl Tally {
             nanos: 0,
             allocations: 0,
             polls: 0,
+            sends: 0,
             waiting: vec![false; classes.len()],
             classes,
             premise,
@@ -460,7 +470,8 @@ impl Tally {
         }
     }
 
-    /// Polls `send` of sender `at` once, and adds its time and allocations.
+    /// Polls `send` of sender `at` once, and adds its time and allocations when the
+    /// poll is timed.
     #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
     fn poll<F: Future>(
         &mut self,
@@ -468,19 +479,29 @@ impl Tally {
         send: Pin<&mut F>,
         cx: &mut Context<'_>,
     ) -> Poll<F::Output> {
-        let start = Instant::now();
-        let (polled, counted) = ALLOCATOR.count(|| send.poll(cx));
-        self.nanos += nanos(Instant::now().duration_since(start));
-        self.allocations += counted;
-        self.polls += 1;
-        self.waiting[at] = polled.is_pending();
-        let waits = |class| {
-            let mut senders = self.classes.iter().zip(&self.waiting);
+        let waits = |tally: &Self, class| {
+            let mut senders = tally.classes.iter().zip(&tally.waiting);
             senders.any(|(&of, &waits)| of == class && waits)
         };
+        let timed = match (self.premise, self.classes[at]) {
+            (Premise::Waits, _) => true,
+            (Premise::Competes, Class::Latest) => waits(self, Class::Complete),
+            (Premise::Competes, _) => waits(self, Class::Latest),
+        };
+        let start = Instant::now();
+        let (polled, counted) = ALLOCATOR.count(|| send.poll(cx));
+        if timed {
+            self.nanos += nanos(Instant::now().duration_since(start));
+            self.allocations += counted;
+            self.polls += 1;
+            self.sends += u64::from(polled.is_ready());
+        }
+        self.waiting[at] = polled.is_pending();
         self.shown |= match self.premise {
             Premise::Waits => self.waiting.iter().any(|&waits| waits),
-            Premise::Competes => waits(Class::Latest) && waits(Class::Complete),
+            Premise::Competes => {
+                waits(self, Class::Latest) && waits(self, Class::Complete)
+            }
         };
         polled
     }
@@ -587,22 +608,22 @@ fn public(key: &PrivateKey) -> PublicKey {
 
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
 fn print(lines: &[Measured]) {
-    println!("ns per send over {ROUNDS} rounds of {SENDS} sends");
-    println!("pN: the round at percentile N, over its sends");
+    println!("ns per timed send over {ROUNDS} rounds of {SENDS} sends");
+    println!("pN: the round at percentile N, over its timed sends");
     println!(
-        "{:<34} {:>9} {:>9} {:>9} {:>12} {:>11}",
-        "scenario", "p10", "p50", "p90", "allocs/send", "polls/send"
+        "{:<34} {:>9} {:>9} {:>9} {:>12} {:>11} {:>6}",
+        "scenario", "p10", "p50", "p90", "allocs/send", "polls/send", "timed"
     );
     for line in lines {
-        let at = |percent: usize| per(line.nanos[ROUNDS * percent / 100]) / per(SENDS);
-        let allocations = per(line.allocations) / per(ROUNDS * SENDS);
-        let polls = per(line.polls) / per(ROUNDS * SENDS);
+        let at = |percent: usize| line.nanos[ROUNDS * percent / 100];
+        let allocations = per(line.allocations) / per(line.sends);
+        let polls = per(line.polls) / per(line.sends);
+        let timed = per(line.sends) / per(ROUNDS * SENDS);
+        let name = line.name;
+        let (p10, p50, p90) = (at(10), at(50), at(90));
         println!(
-            "{:<34} {:>9.1} {:>9.1} {:>9.1} {allocations:>12.2} {polls:>11.2}",
-            line.name,
-            at(10),
-            at(50),
-            at(90),
+            "{name:<34} {p10:>9.1} {p50:>9.1} {p90:>9.1} {allocations:>12.2} \
+             {polls:>11.2} {timed:>6.2}"
         );
     }
 }
