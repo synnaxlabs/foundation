@@ -788,6 +788,39 @@ mod tests {
     }
 
     #[test]
+    fn a_send_cut_by_this_sides_close_then_finish_gives_the_close() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let body = vec![7; 60_000];
+                let closed = Error::Closed { code: Code(5) };
+                loop {
+                    let mut sending = pin!(sender.send(side.block(&body)));
+                    if let Some(done) = poll_once(sending.as_mut()).await {
+                        done.expect("sent");
+                        continue;
+                    }
+                    side.session.close(Code(5));
+                    let cut = poll_once(sending.as_mut()).await;
+                    assert_eq!(cut, Some(Err(closed.clone())));
+                    break;
+                }
+                assert_eq!(sender.finish(), Err(closed.clone()));
+                let sent = sender.send(side.block(b"a")).await;
+                assert_eq!(sent, Err(closed));
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_finish_right_after_this_side_closes_gives_the_close() {
         let (mut sim, ..) = testing::sessions(
             0,

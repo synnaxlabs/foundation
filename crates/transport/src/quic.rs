@@ -322,18 +322,19 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after an [`Endpoint::finish`] that
-    /// gave `Ok`.
+    /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
+    /// message on a live connection.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        sender.check();
-        sender.check_size(&message)?;
+        sender.check_unfinished();
         let key = sender.key().connection;
         self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
+            sender.check();
+            sender.check_size(&message)?;
             sender.load(message);
             streams.flush(inner, sender, events)
         })
@@ -406,16 +407,17 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after an [`Endpoint::finish`] that
-    /// gave `Ok`.
+    /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
+    /// message on a live connection.
     pub(crate) fn finish(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
     ) -> Result<(), Error> {
-        sender.check();
+        sender.check_unfinished();
         let stream = sender.key();
         self.streams(now, stream.connection, (), |streams, inner, _, _| {
+            sender.check();
             streams.finish(inner, stream.id)?;
             sender.end();
             Ok(())
