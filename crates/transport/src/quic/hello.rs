@@ -331,6 +331,16 @@ mod tests {
     }
 
     #[test]
+    fn decode_reads_each_payload_bit_of_a_varint() {
+        let bytes = [0x00, 0xbf, 0xff, 0xff, 0xff, 0x01, 0x7f, 0xff];
+        let hello = Hello {
+            window_bytes: (1 << 30) - 1,
+            message_bytes_max: (1 << 14) - 1,
+        };
+        assert_eq!(Hello::decode(&bytes), Ok(hello));
+    }
+
+    #[test]
     fn decode_refuses_an_id_at_or_below_the_one_before() {
         assert_eq!(
             Hello::decode(&encode(&[(0, 2_000), (0, 2_000), (1, 1_500)])),
