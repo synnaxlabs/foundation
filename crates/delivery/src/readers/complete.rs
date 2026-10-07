@@ -5,7 +5,8 @@ use std::fmt;
 use crate::Position;
 
 /// A complete session on one index. Keys are unique within one
-/// [`Readers`](crate::Readers).
+/// [`Readers`](crate::Readers). Use a key only with the `Readers` that gave it:
+/// another one, such as a restored one, cannot tell it from its own keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(pub(super) u64);
 

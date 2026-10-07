@@ -464,17 +464,13 @@ impl Readers {
         self.complete.iter().position(|s| s.name() == Some(name))
     }
 
-    /// The open complete session `key`, or `None` when it closed.
-    ///
-    /// # Panics
-    ///
-    /// If this `Readers` never gave `key`.
+    /// The open complete session `key`, or `None` when it closed. Panics on a key
+    /// never given.
     fn find(&self, key: complete::Key) -> Option<usize> {
-        match self.complete.binary_search_by_key(&key, |s| s.key) {
-            Ok(i) => Some(i),
-            Err(_) if key.0 < self.next_complete => None,
-            Err(_) => never_open(key.into()),
+        if key.0 >= self.next_complete {
+            never_open(key.into());
         }
+        self.complete.binary_search_by_key(&key, |s| s.key).ok()
     }
 
     fn remove(&mut self, i: usize) -> Session {
@@ -709,7 +705,7 @@ pub(super) mod tests {
         assert_eq!(format!("{readers:?}"), before);
     }
 
-    /// Checks [`dropped`] on each complete key given that `open` does not hold.
+    /// Checks [`dropped`] on each complete key that `readers` gave and `open` rejects.
     fn dropped_closed(readers: &mut Readers, open: impl Fn(&complete::Key) -> bool) {
         for key in (0..readers.next_complete).map(complete::Key) {
             if !open(&key) {

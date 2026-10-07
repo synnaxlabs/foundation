@@ -8,8 +8,10 @@ use types::time::Stamp;
 
 use super::{Readers, never_open};
 
-/// A latest session on one index. Keys are unique within one [`Readers`]. A latest
-/// key does not compile where only a complete session fits:
+/// A latest session on one index. Keys are unique within one [`Readers`]. Use a key
+/// only with the `Readers` that gave it: another one, such as a restored one, cannot
+/// tell it from its own keys. A latest key does not compile where only a complete
+/// session fits:
 ///
 /// ```compile_fail,E0308
 /// let mut readers = delivery::Readers::new(0);
@@ -95,10 +97,6 @@ impl Readers {
 
     /// Takes the latest session's waiting frame, or `None` when it has none or is
     /// closed.
-    ///
-    /// # Panics
-    ///
-    /// If this `Readers` never gave `key`.
     pub(super) fn take_latest(&mut self, key: Key) -> Option<Frame> {
         let i = self.find_latest(key)?;
         if mem::replace(&mut self.latest[i].waiting, false) {
@@ -109,10 +107,6 @@ impl Readers {
     }
 
     /// Ends the latest session, if it is open. A waiting frame does not go out.
-    ///
-    /// # Panics
-    ///
-    /// If this `Readers` never gave `key`.
     pub(super) fn close_latest(&mut self, key: Key) {
         if let Some(i) = self.find_latest(key) {
             self.latest.remove(i);
@@ -128,17 +122,13 @@ impl Readers {
         Some(self.latest.remove(i).key)
     }
 
-    /// The open latest session `key`, or `None` when it closed.
-    ///
-    /// # Panics
-    ///
-    /// If this `Readers` never gave `key`.
+    /// The open latest session `key`, or `None` when it closed. Panics on a key never
+    /// given.
     fn find_latest(&self, key: Key) -> Option<usize> {
-        match self.latest.binary_search_by_key(&key, |s| s.key) {
-            Ok(i) => Some(i),
-            Err(_) if key.0 < self.next_latest => None,
-            Err(_) => never_open(key.into()),
+        if key.0 >= self.next_latest {
+            never_open(key.into());
         }
+        self.latest.binary_search_by_key(&key, |s| s.key).ok()
     }
 }
 
@@ -433,6 +423,14 @@ mod tests {
             unnamed(&mut readers);
             readers.take(Key(1).into());
         }
+
+        #[test]
+        #[should_panic(expected = "latest session 2 was never open")]
+        fn panics_on_a_key_past_the_next() {
+            let mut readers = Readers::new(0);
+            unnamed(&mut readers);
+            readers.take(Key(2).into());
+        }
     }
 
     mod ack {
@@ -494,6 +492,14 @@ mod tests {
             let mut readers = Readers::new(0);
             complete(&mut readers, "a", live(0));
             readers.close(Key(0).into(), at(0));
+        }
+
+        #[test]
+        #[should_panic(expected = "latest session 2 was never open")]
+        fn panics_on_a_key_past_the_next() {
+            let mut readers = Readers::new(0);
+            unnamed(&mut readers);
+            readers.close(Key(2).into(), at(0));
         }
     }
 

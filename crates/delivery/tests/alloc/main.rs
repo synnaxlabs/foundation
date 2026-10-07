@@ -69,6 +69,14 @@ fn latest(frame: &impl Fn() -> Frame) {
         2 * (SESSIONS + 1),
         "the round takes and wakes the new session"
     );
+
+    let closed = keys[0];
+    readers.close(closed.into(), Stamp::from_nanos(0));
+    let ((), allocations) = ALLOCATOR.count(|| {
+        assert!(readers.take(closed.into()).is_none(), "a closed key takes");
+        readers.close(closed.into(), Stamp::from_nanos(0));
+    });
+    assert_eq!(allocations, 0, "a call on a closed latest key allocated");
 }
 
 fn complete(frame: &impl Fn() -> Frame) {
@@ -111,6 +119,23 @@ fn complete(frame: &impl Fn() -> Frame) {
         6 * SESSIONS + 4,
         "two rounds wake every session and take from the new one once"
     );
+
+    let position = Position {
+        live: seq,
+        backfill: None,
+    };
+    let closed = keys.pop().expect("a session is open");
+    readers.close(closed.into(), Stamp::from_nanos(0));
+    let ((), allocations) = ALLOCATOR.count(|| {
+        for &key in &keys {
+            assert_eq!(readers.ack(key, position), Ok(()), "the ack moves forward");
+        }
+        readers.grant(closed, u64::MAX);
+        assert_eq!(readers.ack(closed, position), Ok(()), "a closed key acks");
+        assert!(readers.take(closed.into()).is_none(), "a closed key takes");
+        readers.close(closed.into(), Stamp::from_nanos(0));
+    });
+    assert_eq!(allocations, 0, "an ack or a call on a closed key allocated");
 }
 
 /// Takes each session's frames, then queues and releases two frames from `seq`.
