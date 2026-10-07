@@ -1838,7 +1838,8 @@ mod tests {
                 extra in 0..8u64,
                 lens in prop::collection::vec((0..=BODY_MAX, any::<bool>()), 0..400),
             ) {
-                let layout = Layout::new((16 + extra) * 4096, BODY_MAX).expect("a ring");
+                let area = (16 + extra) * 4096;
+                let layout = Layout::new(area, BODY_MAX).expect("a ring");
                 let commits = lens.into_iter().map(|(len, late)| {
                     if late { (vec![], vec![len]) } else { (vec![len], vec![]) }
                 });
@@ -2019,6 +2020,20 @@ mod tests {
             ring.reopen(5).expect("the restart record fits");
             assert_eq!(ring.trim(None), Some(at(1, 1)));
             assert_eq!(ring.walk().0.len(), 19);
+        }
+
+        /// The restart record of an open goes over the records after the last data
+        /// record, and the boundary after that data record stays.
+        #[test]
+        fn gives_the_writer_the_end_of_the_last_data_record() {
+            let mut ring =
+                Ring::with(Layout::new(16 * 4096, BODY_MAX).expect("a ring"));
+            ring.append(b"a").expect("the ring has room");
+            ring.append(&[7; BODY_MAX]).expect("the ring has room");
+            let end = ring.head;
+            ring.reopen(5).expect("the restart record fits");
+            assert_eq!(end.offset, 6 * 4096);
+            assert_eq!(ring.trim(None), Some(end));
         }
 
         /// The writer starts before the restart records after the last data record,

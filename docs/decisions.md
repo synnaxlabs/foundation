@@ -290,24 +290,27 @@ How to read this record:
   effect, the B1 warning (#1080). Lost: a `trim` call from the home (it needs the commit
   rate, a late trim gives a second gap, and the edge cases of the ring move up into
   `home`). Decided by the architect (#160,
-  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6030836762). The
-  headroom that `buffer` keeps is twice the larger of the largest record and the last
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6030836762). An
+  open frees to the same headroom as a commit. A checkpoint never passes the newest
+  record of a path unless a later synced record holds that path's tail (seq and stamp),
+  so a restart continues from the disk (A8). That record syncs before the checkpoint, in
+  a sync of its own: a crash can keep the checkpoint and lose a record of the same sync.
+  The cost of a trim grows with the paths that lose their newest record, not with all
+  paths. A carried tail is no sample: a read gives no entry for it, only the gap up to
+  it. The trim does not turn on without the carried tail, and the PR that builds it
+  records its form on disk here. Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113). As
+  built (#1222): the headroom is twice the larger of the largest record and the last
   commit, plus one largest record. The space of a trim is free only after its sync.
   Until then the ring takes the next commit, the records that come while that commit
   syncs, and the blocks that one wrap skips, which are less than one largest record.
-  Twice the last commit alone refused a write at each wrap (#1222). A ring of four of
-  its largest record refuses no write when each commit holds one record. A ring of three
-  of them can refuse one. A trim moves the tail to the boundary after a record of any
-  kind: a wrap record and a restart record also end where a tail can go. An open frees
-  to the same headroom as a commit. A checkpoint never passes the newest record of a
-  path unless a later synced record holds that path's tail (seq and stamp), so a restart
-  continues from the disk (A8). That record syncs before the checkpoint, in a sync of
-  its own: a crash can keep the checkpoint and lose a record of the same sync. The cost
-  of a trim grows with the paths that lose their newest record, not with all paths. A
-  carried tail is no sample: a read gives no entry for it, only the gap up to it. The
-  trim does not turn on without the carried tail, and the PR that builds it records its
-  form on disk here. Decided by the architect (#160,
-  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
+  Twice the last commit alone refused a write at each wrap. Measured with a largest
+  record of four blocks and one record in each commit, for 2000 commits: a ring of 13
+  blocks or more refuses no write, a ring of 12 blocks (three of the largest record)
+  refuses at most 2, and a ring of 8 to 11 blocks refuses up to one write in three.
+  Under three of the largest record the headroom is more than the area, so each trim
+  frees every synced record. A trim moves the tail to the boundary after a record of
+  any kind: a wrap record and a restart record also end where a tail can go.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero

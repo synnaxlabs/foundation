@@ -982,4 +982,35 @@ mod tests {
             );
         assert_eq!(walked, written);
     }
+
+    /// A commit gives the writer the boundaries of its records. No public call
+    /// shows them until a commit trims, so the test asks the writer.
+    #[test]
+    fn a_commit_gives_the_writer_the_boundaries_of_its_records() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let tail = Arc::new(Mutex::new(None));
+        let found = Arc::clone(&tail);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.assign(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                for commit in 0..60 {
+                    let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
+                    buffer.append(batch).expect("the ring has room");
+                    buffer.committed().await.expect("commits");
+                }
+                let trimmed = buffer.shared.state.borrow().writer.trimmed(None);
+                *found.lock().expect("no panic held the lock") = trimmed;
+                buffer
+            },
+        );
+        // The restart record and 60 records of one block are synced. The headroom
+        // is three records of two blocks.
+        let tail = tail.lock().expect("no panic held the lock");
+        assert_eq!(tail.map(crate::wal::Position::offset), Some(3 * 4096));
+    }
 }
