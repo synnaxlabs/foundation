@@ -7,8 +7,10 @@ name = "acceptance"
 version = "0.0.0"
 dependencies = [
  "block",
+ "connector-influx",
  "env",
  "node",
+ "proptest",
  "sim",
  "types",
 ]
@@ -956,6 +958,7 @@ dependencies = [
  "sim",
  "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
@@ -1853,6 +1856,7 @@ dependencies = [
  "counting",
  "divan",
  "proptest",
+ "rustc-hash",
 ]
 
 [[package]]

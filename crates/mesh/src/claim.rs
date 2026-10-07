@@ -15,7 +15,7 @@ use crate::ed25519;
 const GRANT: &[u8] = b"foundation/grant/1";
 const CHANGE: &[u8] = b"foundation/voters/1";
 
-/// Signs this node's grants and changes with its node key.
+/// Signs this node's claims with its node key.
 pub(crate) struct Signer {
     key: node::Key,
     pair: Ed25519KeyPair,

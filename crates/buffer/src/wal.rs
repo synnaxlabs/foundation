@@ -927,7 +927,7 @@ mod tests {
     use proptest::prelude::*;
     use std::{iter, mem};
 
-    const BLOCKS: u64 = 8;
+    const BLOCKS: u64 = 16;
     const AREA: u64 = BLOCKS * 4096;
     const BODY_MAX: usize = 3 * ALIGN;
 
@@ -957,6 +957,12 @@ mod tests {
 
     fn layout() -> Layout {
         Layout::new(AREA, BODY_MAX).expect("the test sizes make a ring")
+    }
+
+    /// A ring of 8 blocks, two of its largest record. The recorded cases of the
+    /// properties ran on it, and replay what they found only on it.
+    fn recorded() -> Layout {
+        Layout::new(8 * 4096, BODY_MAX).expect("the test sizes make a ring")
     }
 
     /// A ring of 32 blocks whose largest record takes 4, so the headroom of a trim
@@ -1341,7 +1347,7 @@ mod tests {
 
         #[test]
         fn checks_a_batch_against_each_limit_at_its_boundary() {
-            let layout = Layout::new(32 * 4096, 60_000).expect("a ring of 32 blocks");
+            let layout = Layout::fit(u64::MAX, 60_000).expect("the largest file");
             let body = |len| Limit::Body { len, max: 60_000 };
             let cases = [
                 ("no entry", (0, 0, 0), Ok(())),
@@ -1389,7 +1395,7 @@ mod tests {
         fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
             assert_eq!(Layout::ENTRY_MAX_MIN, 4032);
             assert_eq!(
-                Layout::new(2 * 4096, 4087).map(Layout::entry_max),
+                Layout::new(4 * 4096, 4087).map(Layout::entry_max),
                 Ok(Layout::ENTRY_MAX_MIN)
             );
         }
@@ -1554,11 +1560,11 @@ mod tests {
 
         #[test]
         fn puts_a_wrap_record_when_a_record_does_not_fit_in_the_rest() {
-            let mut writer = writer(6, 7);
+            let mut writer = writer(14, 15);
             let plan = writer.append(ALIGN).expect("the ring has room");
             assert_eq!(
                 (plan.wrap, plan.place, plan.next),
-                (Some(7 * 4096), 0, 10 * 4096)
+                (Some(15 * 4096), 0, 18 * 4096)
             );
             let (sealed, ends) = plan.seal(9, [[7; ALIGN].as_slice()]);
             let (wrap, after_wrap) = record::header(9, Kind::Wrap, []);
@@ -1566,14 +1572,14 @@ mod tests {
                 record::header(after_wrap, Kind::Data, [[7; ALIGN].as_slice()]);
             let expected = Sealed {
                 wrap: Some(Write {
-                    place: 7 * 4096,
+                    place: 15 * 4096,
                     header: wrap,
                 }),
                 record: Write { place: 0, header },
             };
             let boundaries = Ends {
-                wrap: Some(at(8, after_wrap)),
-                record: at(10, after),
+                wrap: Some(at(16, after_wrap)),
+                record: at(18, after),
             };
             assert_eq!((sealed, ends), (expected, boundaries));
         }
@@ -1645,7 +1651,7 @@ mod tests {
 
         #[test]
         fn is_full_when_the_wrap_passes_the_end_of_the_offsets() {
-            let small = Layout::new(5 * 4096, 4088).expect("the sizes make a ring");
+            let small = Layout::new(15 * 4096, 4088).expect("the sizes make a ring");
             let mut writer = opened(small, u64::MAX - 12287);
             let full = Full {
                 needed: 3 * 4096,
@@ -1658,16 +1664,16 @@ mod tests {
 
         #[test]
         fn wraps_before_the_end_of_the_offsets() {
-            let mut writer = opened(layout(), u64::MAX - 40959);
+            let mut writer = opened(layout(), u64::MAX - 73727);
             let plan = writer.append(ALIGN).expect("fits");
-            assert_eq!(plan.wrap, Some(28672));
+            assert_eq!(plan.wrap, Some(61440));
             assert_eq!(plan.place, 0);
-            assert_eq!(plan.next, u64::MAX - 24575);
+            assert_eq!(plan.next, u64::MAX - 57343);
         }
 
         #[test]
         fn refuses_a_record_that_does_not_fit_before_the_tail() {
-            let mut writer = writer(1, 7);
+            let mut writer = writer(1, 15);
             let head = writer.head();
             let full = Full {
                 needed: 3 * 4096,
@@ -2024,13 +2030,13 @@ mod tests {
 
         /// A ring that holds the long record and its restart record.
         fn long_layout() -> Layout {
-            Layout::new(to_u64(2 * LONG), LONG - HEADER_LEN)
+            Layout::new(to_u64(4 * LONG), LONG - HEADER_LEN)
                 .expect("the long sizes make a ring")
         }
 
         /// The area of [`long_layout`] with one long data record at its start.
         fn long_area() -> Vec<u8> {
-            let mut area = vec![0; 2 * LONG];
+            let mut area = vec![0; 4 * LONG];
             let body = vec![7; LONG - HEADER_LEN];
             put(&mut area, 0, START.chain, Kind::Data.byte(), &body);
             area
@@ -2101,7 +2107,7 @@ mod tests {
             assert_eq!(cursor.writer(0, 1).map(drop), Err(full));
             let (_, cursor) = walk(&ring.area, START).expect("a valid ring");
             let (writer, sealed) = cursor.writer(4096, 1).expect("one block is free");
-            assert_eq!((sealed.record.place, writer.head()), (0, 9 * 4096));
+            assert_eq!((sealed.record.place, writer.head()), (0, 17 * 4096));
         }
 
         /// Each open writes its restart record right after the last data record,
@@ -2123,15 +2129,17 @@ mod tests {
         #[test]
         fn gives_the_writer_the_end_of_each_record() {
             let mut ring = Ring::new();
-            for body in [&b"one"[..], b"two", b"three"] {
+            for body in [&b"one"[..], b"two", &[7; BODY_MAX]] {
                 ring.append(body).expect("the ring has room");
             }
             let three = ring.live.back().expect("three records").clone();
             ring.reopen(5).expect("the restart record fits");
+            let restart = ring.head;
+            ring.append(&[8; BODY_MAX]).expect("the ring has room");
             assert_eq!(ring.trim(Some(three.offset)), Some(three.start));
-            assert_eq!(ring.walk().0, [b"three".to_vec()]);
-            assert_eq!(ring.trim(None), Some(ring.head));
-            assert_eq!(ring.walk().0, Vec::<Vec<u8>>::new());
+            assert_eq!(ring.walk().0, [vec![7; BODY_MAX], vec![8; BODY_MAX]]);
+            assert_eq!(ring.trim(None), Some(restart));
+            assert_eq!(ring.walk().0, [vec![8; BODY_MAX]]);
         }
 
         /// A ring with the same records trims to the same tail after a reopen: the
@@ -2152,8 +2160,7 @@ mod tests {
         /// record, and the boundary after that data record stays.
         #[test]
         fn gives_the_writer_the_end_of_the_last_data_record() {
-            let mut ring =
-                Ring::with(Layout::new(16 * 4096, BODY_MAX).expect("a ring"));
+            let mut ring = Ring::new();
             ring.append(b"a").expect("the ring has room");
             ring.append(&[7; BODY_MAX]).expect("the ring has room");
             let end = ring.head;
@@ -2229,12 +2236,12 @@ mod tests {
                 assert!(matches!(step, Ok(Step::Data(_) | Step::Moved)), "{step:?}");
             }
             let last = Window {
-                place: 7 * 4096,
+                place: 15 * 4096,
                 len: 4096,
             };
             assert_eq!(cursor.window(), last);
             ring.append(b"a").expect("the ring has room");
-            assert_eq!(cursor.next(&ring.area[7 * ALIGN..]), Ok(data(b"a")));
+            assert_eq!(cursor.next(&ring.area[15 * ALIGN..]), Ok(data(b"a")));
             assert_eq!(cursor.window(), Window { place: 0, len: 0 });
             assert_eq!(cursor.next(&[]), Ok(Step::End));
         }
@@ -2283,8 +2290,8 @@ mod tests {
         #[test]
         fn reports_a_record_that_passes_the_end_of_the_offsets() {
             let mut area = vec![0; index(AREA)];
-            let chain = put(&mut area, 6, 5, Kind::Data.byte(), b"x");
-            put(&mut area, 7, chain, Kind::Data.byte(), b"y");
+            let chain = put(&mut area, 14, 5, Kind::Data.byte(), b"x");
+            put(&mut area, 15, chain, Kind::Data.byte(), b"y");
             let tail = Position::new(u64::MAX - 8191, 5).expect("aligned");
             let invalid = Invalid {
                 offset: u64::MAX - 4095,
@@ -2473,25 +2480,141 @@ mod tests {
             assert_eq!(cursor.next(&area[..ALIGN]), Ok(Step::End));
             let last = at(BLOCKS - 1, 5);
             let (header, _) = record::header(5, Kind::Data, [[1; ALIGN].as_slice()]);
-            area[7 * ALIGN..7 * ALIGN + HEADER_LEN].copy_from_slice(&header);
+            area[15 * ALIGN..15 * ALIGN + HEADER_LEN].copy_from_slice(&header);
             let mut cursor = Cursor::new(layout(), last, PIECE);
-            assert_eq!(cursor.next(&area[7 * ALIGN..]), Ok(Step::End));
+            assert_eq!(cursor.next(&area[15 * ALIGN..]), Ok(Step::End));
             assert_eq!(cursor.window().len, 4096);
             let mut cursor = Cursor::new(layout(), at(0, 5), PIECE);
             cursor.at = last;
             assert_eq!(cursor.window().len, 4096);
-            assert_eq!(cursor.next(&area[7 * ALIGN..]), Ok(Step::End));
+            assert_eq!(cursor.next(&area[15 * ALIGN..]), Ok(Step::End));
+        }
+
+        /// A crash in the last write of a ring: the operations before it, its
+        /// body, the sectors of the area that keep the write, a bit of the record
+        /// to flip or not, the chain of the reopen, and the body after it.
+        type Crash = (
+            Vec<Op>,
+            Vec<u8>,
+            Vec<bool>,
+            bool,
+            prop::sample::Index,
+            u32,
+            Vec<u8>,
+        );
+
+        fn crash(layout: Layout) -> impl Strategy<Value = Crash> {
+            let sectors = index(layout.area) / SECTOR;
+            let kept = prop::collection::vec(prop::bool::weighted(0.9), sectors);
+            let flip = any::<prop::sample::Index>();
+            (
+                ops(),
+                body(),
+                kept,
+                any::<bool>(),
+                flip,
+                any::<u32>(),
+                body(),
+            )
+        }
+
+        /// A crash leaves any subset of the sectors of the last write. The record
+        /// is live when every sector it wrote survives; lost padding does not
+        /// count. A flipped bit in it drops it.
+        fn keeps_the_last_record(
+            layout: Layout,
+            (ops, last, kept, damaged, flip, chain, after): Crash,
+        ) -> Result<(), TestCaseError> {
+            let opened = |op: &Op| matches!(op, Op::Reopen(c) if *c == chain);
+            prop_assume!(chain != 1 && !ops.iter().any(opened));
+            let mut ring = Ring::with(layout);
+            run(&mut ring, &ops);
+            let before = ring.area.clone();
+            let Ok(plan) = ring.append(&last) else {
+                return Err(TestCaseError::reject("the ring is full"));
+            };
+            let mut sectors = Vec::new();
+            for (place, len) in plan
+                .wrap
+                .map(|place| (place, HEADER_LEN))
+                .into_iter()
+                .chain([(plan.place, HEADER_LEN + last.len())])
+            {
+                let first = index(place) / SECTOR;
+                sectors.extend(first..=(index(place) + len - 1) / SECTOR);
+            }
+            for (sector, _) in kept.iter().enumerate().filter(|(_, kept)| !**kept) {
+                let bytes = sector * SECTOR..(sector + 1) * SECTOR;
+                ring.area[bytes.clone()].copy_from_slice(&before[bytes]);
+            }
+            let whole = sectors.iter().all(|sector| kept[*sector]);
+            if whole && damaged {
+                let written = HEADER_LEN + last.len();
+                ring.area[index(plan.place) + flip.index(written)] ^= 1;
+            }
+            if !whole || damaged {
+                ring.live.pop_back();
+            }
+            let mut expected = ring.data();
+            let found = ring.reopen(chain);
+            prop_assume!(found.is_ok());
+            prop_assert_eq!(found, Ok(expected.clone()));
+            prop_assume!(ring.append(&after).is_ok());
+            expected.push(after);
+            prop_assert_eq!(ring.walk().0, expected);
+            Ok(())
+        }
+
+        fn gives_the_live_data(
+            layout: Layout,
+            ops: &[Op],
+        ) -> Result<(), TestCaseError> {
+            let mut ring = Ring::with(layout);
+            run(&mut ring, ops);
+            let (data, cursor) = ring.walk();
+            prop_assert_eq!(data, ring.data());
+            prop_assert_eq!(cursor.at, ring.head);
+            prop_assert_eq!(cursor.at.offset, ring.writer.head());
+            Ok(())
+        }
+
+        /// A walk of chained records from a tail at block `tail` ends within one
+        /// lap, whatever the records are.
+        fn ends_within_one_lap(
+            layout: Layout,
+            records: &[(u8, usize)],
+            tail: u64,
+            chain: u32,
+        ) -> Result<(), TestCaseError> {
+            let blocks = index(layout.area) / ALIGN;
+            let mut area = vec![0xEE; index(layout.area)];
+            let (mut block, mut next) = (index(tail), chain);
+            for (kind, len) in records {
+                let record = (HEADER_LEN + len).div_ceil(ALIGN);
+                if block + record > blocks {
+                    block = 0;
+                }
+                next = put(&mut area, block, next, *kind, &vec![*kind; *len]);
+                block += record;
+            }
+            let tail = at(tail, chain);
+            let walked = match walk_in(layout, &area, tail) {
+                Ok((_, cursor)) => cursor.at.offset - tail.offset,
+                Err(invalid) => invalid.offset - tail.offset + 1,
+            };
+            prop_assert!(walked <= layout.area);
+            Ok(())
         }
 
         proptest! {
             #[test]
             fn gives_the_live_data_in_order(ops in ops()) {
-                let mut ring = Ring::new();
-                run(&mut ring, &ops);
-                let (data, cursor) = walk(&ring.area, ring.tail).expect("a valid ring");
-                prop_assert_eq!(data, ring.data());
-                prop_assert_eq!(cursor.at, ring.head);
-                prop_assert_eq!(cursor.at.offset, ring.writer.head());
+                gives_the_live_data(layout(), &ops)?;
+            }
+
+            #[test]
+            fn gives_the_live_data_in_order_on_the_recorded_ring(ops in ops()) {
+                gives_the_live_data(recorded(), &ops)?;
             }
 
             /// A walk from the tail of any trim finds the records after it.
@@ -2504,60 +2627,18 @@ mod tests {
                 prop_assert_eq!(cursor.at, ring.head);
             }
 
-            /// A crash leaves any subset of the sectors of the last
-            /// write. The record is live when every sector it wrote survives;
-            /// lost padding does not count. A flipped bit in it drops it.
             #[test]
             fn keeps_a_last_record_only_when_its_sectors_survive(
-                ops in ops(),
-                last in body(),
-                kept in prop::collection::vec(
-                    prop::bool::weighted(0.9),
-                    index(AREA) / SECTOR,
-                ),
-                damaged in any::<bool>(),
-                flip in any::<prop::sample::Index>(),
-                chain in any::<u32>(),
-                after in body(),
+                crash in crash(layout()),
             ) {
-                let opened = |op: &Op| matches!(op, Op::Reopen(c) if *c == chain);
-                prop_assume!(chain != 1 && !ops.iter().any(opened));
-                let mut ring = Ring::new();
-                run(&mut ring, &ops);
-                let before = ring.area.clone();
-                let Ok(plan) = ring.append(&last) else {
-                    return Err(TestCaseError::reject("the ring is full"));
-                };
-                let mut sectors = Vec::new();
-                for (place, len) in plan
-                    .wrap
-                    .map(|place| (place, HEADER_LEN))
-                    .into_iter()
-                    .chain([(plan.place, HEADER_LEN + last.len())])
-                {
-                    let first = index(place) / SECTOR;
-                    sectors.extend(first..=(index(place) + len - 1) / SECTOR);
-                }
-                for (sector, _) in kept.iter().enumerate().filter(|(_, kept)| !**kept) {
-                    let bytes = sector * SECTOR..(sector + 1) * SECTOR;
-                    ring.area[bytes.clone()].copy_from_slice(&before[bytes]);
-                }
-                let whole = sectors.iter().all(|sector| kept[*sector]);
-                if whole && damaged {
-                    let written = HEADER_LEN + last.len();
-                    ring.area[index(plan.place) + flip.index(written)] ^= 1;
-                }
-                if !whole || damaged {
-                    ring.live.pop_back();
-                }
-                let mut expected = ring.data();
-                let found = ring.reopen(chain);
-                prop_assume!(found.is_ok());
-                prop_assert_eq!(found, Ok(expected.clone()));
-                prop_assume!(ring.append(&after).is_ok());
-                expected.push(after);
-                let (data, _) = walk(&ring.area, ring.tail).expect("a valid ring");
-                prop_assert_eq!(data, expected);
+                keeps_the_last_record(layout(), crash)?;
+            }
+
+            #[test]
+            fn keeps_a_last_record_only_when_its_sectors_survive_on_the_recorded_ring(
+                crash in crash(recorded()),
+            ) {
+                keeps_the_last_record(recorded(), crash)?;
             }
 
             #[test]
@@ -2566,23 +2647,16 @@ mod tests {
                 tail in 0..BLOCKS,
                 chain in any::<u32>(),
             ) {
-                let mut area = vec![0xEE; index(AREA)];
-                let (mut block, mut next) = (index(tail), chain);
-                for (kind, len) in records {
-                    let blocks = (HEADER_LEN + len).div_ceil(ALIGN);
-                    if block + blocks > index(BLOCKS) {
-                        block = 0;
-                    }
-                    next = put(&mut area, block, next, kind, &vec![kind; len]);
-                    block += blocks;
-                }
-                let tail = at(tail, chain);
-                match walk(&area, tail) {
-                    Ok((_, cursor)) => {
-                        prop_assert!(cursor.at.offset - tail.offset <= AREA);
-                    }
-                    Err(invalid) => prop_assert!(invalid.offset - tail.offset < AREA),
-                }
+                ends_within_one_lap(layout(), &records, tail, chain)?;
+            }
+
+            #[test]
+            fn ends_within_one_lap_on_any_chained_records_on_the_recorded_ring(
+                records in prop::collection::vec((0..6u8, 0..6000usize), 0..12),
+                tail in 0..recorded().area / 4096,
+                chain in any::<u32>(),
+            ) {
+                ends_within_one_lap(recorded(), &records, tail, chain)?;
             }
         }
     }
