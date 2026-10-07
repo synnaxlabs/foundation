@@ -304,25 +304,32 @@ How to read this record:
   records of the commit that trims, which are the records not yet synced. The space of a
   trim is free only at its release, after its sync. From one trim to the release of the
   next, the ring takes the records of two commits and the blocks that one wrap skips,
-  which are less than one largest record. So after commits of `c` bytes, the next two
-  commits and the blocks of one wrap skip fit when they are at most `3c`: one commit of
-  up to `2c` less the skip, or a load that grows by the factor `g` with each commit
-  while `g + g²` is under 3, about 30 percent a commit. Above that, `append` gives
-  `Full`, the full commit queue of B5. Lost: twice the records of the commit that trims
-  (it refused a write at each wrap), and twice those records plus one largest record (it
-  refused each commit that was more than one largest record over the commit before it).
-  Measured on a full ring of 1024 blocks after commits of 40 records of one block, where
-  each commit comes while the one before it syncs: a commit of 80 records is not refused
-  and a commit of 81 is, and two commits of 60 records are not refused and commits of 60
-  and 61 are. A commit of 20 records of four blocks is refused when it wraps, because
-  the wrap skips 3 blocks, and a commit of 19 is not. A trim cannot free the commit in
-  its sync, so with one record in each commit, three records and the blocks of one wrap
-  skip must fit in the area. Four of the largest record less one block always hold them,
-  and a smaller ring can refuse a live write under a steady load: with a largest record
-  of four blocks, commits of 2, 4, 4, and 4 blocks get `Full` on a ring of 13 or 14
-  blocks. `Layout::new` accepts two of the largest record today, and #1276 sets the
-  minimum to four before the trim turns on. A trim moves the tail to the boundary after
-  a record of any kind: a wrap record and a restart record also end where a tail can go.
+  which are less than one largest record. So after commits of `c` bytes, the next commit
+  fits when it and the skip are at most `2c`, and the next two fit when they and the
+  skip are at most `3c`. A load that grows by the factor `g` with each commit fits while
+  `g + g²` times `c`, and the skip, are at most `3c`: under about 30 percent a commit.
+  Above that, `append` gives `Full`, the full commit queue of B5. A trim cannot free the
+  commit in its sync, so the bound also needs an area that holds those commits: `3c` and
+  one wrap skip for a steady load, and `4c` when one commit is `2c`. Lost: twice the
+  records of the commit that trims (it refused a write at each wrap), and twice those
+  records plus one largest record (it refused each commit that was more than one largest
+  record over the commit before it). Measured on a full ring of 1024 blocks after
+  commits of 40 records of one block, where each commit comes while the one before it
+  syncs: a commit of 80 records is not refused and a commit of 81 is, and two commits of
+  60 records are not refused and commits of 60 and 61 are. A commit of 20 records of
+  four blocks is refused when it wraps, because the wrap skips 3 blocks, and a commit of
+  19 is not. On the same ring, a steady load of 341 records in each commit is not
+  refused and one of 342 is, at its third commit. A commit of twice the commits before
+  it is not refused after commits of 256 records, and is refused after commits of 257.
+  With one record in each commit, three records and the blocks of one wrap skip must fit
+  in the area. Four of the largest record less one block always hold them, and a smaller
+  ring can refuse a live write under a steady load: with a largest record of four
+  blocks, commits of 2, 4, 4, and 4 blocks get `Full` on a ring of 13 or 14 blocks.
+  `Layout::new` accepts two of the largest record today, and #1276 sets the minimum to
+  four before the trim turns on. That minimum is for one record in each commit: on a
+  ring of 16 blocks, a steady load of one record of four blocks and one of two in each
+  commit is refused at its third commit. A trim moves the tail to the boundary after a
+  record of any kind: a wrap record and a restart record also end where a tail can go.
   Decided by the architect: the headroom (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557), and the
   boundaries and the deferral of the minimum to #1276 (#1222,

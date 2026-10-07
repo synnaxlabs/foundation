@@ -1889,6 +1889,49 @@ mod tests {
             assert_eq!(jumped(51, 20), Some((51, full)));
         }
 
+        /// A trim cannot free the commit in its sync, so the ring must hold the
+        /// commits that the headroom is for: three of a steady load, and four when
+        /// one commit is twice the commit before it.
+        #[test]
+        fn a_ring_that_does_not_hold_the_commits_of_the_headroom_refuses_a_record() {
+            let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
+            let full = Full {
+                needed: 4096,
+                free: 0,
+            };
+            let even = |count: usize| {
+                steady(layout, (0..1000).map(|_| (vec![8; count], vec![])))
+            };
+            assert_eq!(even(341), None);
+            assert_eq!(even(342), Some((2, full)));
+            let doubled = |count: usize| {
+                let counts = iter::repeat_n(count, 400).chain([2 * count, count]);
+                steady(layout, counts.map(|count| (vec![8; count], vec![])))
+            };
+            assert_eq!(doubled(256), None);
+            assert_eq!(doubled(257), Some((400, full)));
+        }
+
+        /// Four of the largest record hold three commits of one record, not of two.
+        #[test]
+        fn a_ring_of_four_records_refuses_a_steady_load_of_two_records_a_commit() {
+            let layout = Layout::new(16 * 4096, BODY_MAX).expect("a ring");
+            let commits = (0..1000).map(|_| (vec![BODY_MAX, ALIGN], vec![]));
+            let full = Full {
+                needed: 28672,
+                free: 16384,
+            };
+            assert_eq!(steady(layout, commits), Some((2, full)));
+        }
+
+        /// A body length whose record takes 1 to 4 blocks, each count as likely.
+        fn bodies() -> impl Strategy<Value = usize> {
+            (1..=4usize, 0..ALIGN).prop_map(|(blocks, less)| {
+                let most = blocks * ALIGN - HEADER_LEN;
+                most.saturating_sub(less).min(BODY_MAX)
+            })
+        }
+
         proptest! {
             /// A ring of four of its largest record refuses no record when each
             /// commit holds one, of any length, placed before or after the release
@@ -1896,7 +1939,7 @@ mod tests {
             #[test]
             fn a_ring_of_four_records_refuses_no_record_of_a_steady_load(
                 extra in 0..8u64,
-                lens in prop::collection::vec((0..=BODY_MAX, any::<bool>()), 0..400),
+                lens in prop::collection::vec((bodies(), any::<bool>()), 0..400),
             ) {
                 let area = (16 + extra) * 4096;
                 let layout = Layout::new(area, BODY_MAX).expect("a ring");
