@@ -3,6 +3,10 @@
 use std::path::Path;
 use std::process::Command;
 
+/// The empty tree, the source of attributes for a merge, so no `.gitattributes` can
+/// pick a merge driver that hides a conflict.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// The history of a git repository, and the branch that PRs in it merge into.
 pub(crate) struct History<'a> {
     root: &'a Path,
@@ -199,6 +203,7 @@ impl<'a> History<'a> {
     /// makes with no conflict.
     fn clean(&self, merge: &str, first: &str, second: &str) -> Result<bool, String> {
         let output = command(self.root)
+            .arg(format!("--attr-source={EMPTY_TREE}"))
             .args(["merge-tree", "--write-tree", first, second])
             .output()
             .map_err(|e| format!("git merge-tree: {e}"))?;
@@ -231,8 +236,9 @@ impl<'a> History<'a> {
     }
 }
 
-/// A `git` command in `root` with no inherited `GIT_*` variable, so no variable such
-/// as `GIT_DIR` can point it at another repository.
+/// A `git` command in `root` that reads no inherited `GIT_*` variable, no global or
+/// system config, and no global attributes file, so the machine's settings cannot
+/// change a verdict and no variable such as `GIT_DIR` can point it elsewhere.
 fn command(root: &Path) -> Command {
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
@@ -240,7 +246,11 @@ fn command(root: &Path) -> Command {
             command.env_remove(key);
         }
     }
-    command.current_dir(root);
+    command
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "core.attributesFile=/dev/null"]);
     command
 }
 

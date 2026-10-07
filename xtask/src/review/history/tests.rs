@@ -22,17 +22,13 @@ impl Repo {
         repo
     }
 
-    /// A `git` command in the repository, with an identity and no global or system
-    /// config, ignore file, or attributes file, so the machine's settings cannot
-    /// change a test.
+    /// A `git` command in the repository as `History` makes it, with an identity and
+    /// no global ignore file, so the machine's settings cannot change a test.
     fn command(&self) -> Command {
         let mut command = command(&self.dir);
         command
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(["-c", "core.excludesFile=/dev/null"])
-            .args(["-c", "core.attributesFile=/dev/null"]);
+            .args(["-c", "core.excludesFile=/dev/null"]);
         command
     }
 
@@ -596,20 +592,72 @@ fn an_inherited_git_environment_does_not_reach_another_repository() {
 }
 
 #[test]
-fn a_global_ignore_file_does_not_break_a_test() {
-    let xdg =
-        std::env::temp_dir().join(format!("xtask-history-xdg-{}", std::process::id()));
-    std::fs::create_dir_all(xdg.join("git")).unwrap();
-    std::fs::write(xdg.join("git/ignore"), "Cargo.lock\n").unwrap();
+fn a_union_resolution_of_a_conflict_does_not_reach() {
+    let (repo, _) = Repo::with_pr("union");
+    let end = repo.commit("a.txt", "pr side\n");
+    repo.advance_main("a.txt", "main side\n");
+    repo.command()
+        .args(["merge", "--no-edit", "origin/main"])
+        .output()
+        .unwrap();
+    std::fs::write(repo.dir.join("a.txt"), "pr side\nmain side\n").unwrap();
+    repo.git(&["add", "a.txt"]);
+    repo.git(&["commit", "--quiet", "--no-edit"]);
+    assert_eq!(repo.reaches(&end, &repo.head()), Ok(false));
+}
+
+#[test]
+fn a_merge_driver_in_the_tree_does_not_hide_a_conflict() {
+    let (repo, _) = Repo::with_pr("tree-driver");
+    repo.commit(".gitattributes", "* merge=union\n");
+    let end = repo.commit("a.txt", "pr side\n");
+    repo.advance_main("a.txt", "main side\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merged = std::fs::read_to_string(repo.dir.join("a.txt")).unwrap();
+    assert_eq!(merged, "pr side\nmain side\n");
+    assert_eq!(repo.reaches(&end, &repo.head()), Ok(false));
+}
+
+#[test]
+fn reaches_through_a_clean_merge_of_a_rename() {
+    let (repo, _) = Repo::with_pr("rename");
+    let lines = (1..=10)
+        .map(|n| format!("line {n}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let main = repo.advance_main("a.txt", &lines);
+    repo.git(&["merge", "--quiet", "--no-edit", &main]);
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["mv", "a.txt", "moved.txt"]);
+    repo.git(&["commit", "--quiet", "-m", "move"]);
+    let moved = repo.head();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &moved]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    let end = repo.commit("a.txt", &lines.replace("line 10", "line ten"));
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(repo.reaches(&end, &repo.head()), Ok(true));
+}
+
+#[test]
+fn the_machine_git_settings_do_not_change_a_test() {
+    let home =
+        std::env::temp_dir().join(format!("xtask-history-home-{}", std::process::id()));
+    std::fs::create_dir_all(home.join("git")).unwrap();
+    std::fs::write(home.join(".gitconfig"), "[diff]\n\trenames = false\n").unwrap();
+    std::fs::write(home.join("git/ignore"), "Cargo.lock\n").unwrap();
+    std::fs::write(home.join("git/attributes"), "* merge=union\n").unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
+            "review::history::tests::a_union_resolution_of_a_conflict_does_not_reach",
+            "review::history::tests::reaches_through_a_clean_merge_of_a_rename",
             "review::history::tests::a_moved_file_and_a_manifest_change_code",
         ])
-        .env("XDG_CONFIG_HOME", &xdg)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
         .output()
         .unwrap();
-    std::fs::remove_dir_all(&xdg).unwrap();
+    std::fs::remove_dir_all(&home).unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("1 passed"), "{output:?}");
+    assert!(stdout.contains("3 passed"), "{output:?}");
 }
