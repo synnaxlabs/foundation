@@ -1970,6 +1970,11 @@ mod tests {
     }
 
     #[test]
+    fn charges_a_body_longer_than_any_pool_holds_as_the_most_credit() {
+        assert_eq!(super::charge(1, usize::MAX), u64::MAX);
+    }
+
+    #[test]
     fn charges_ends_past_the_largest_block_as_the_most_credit_and_drafts_no_block() {
         let set = one_group(&mut interner());
         let ends = [(0, 8), (2, 1 << 32)];
