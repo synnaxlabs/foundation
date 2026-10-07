@@ -186,6 +186,19 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 90
     steps:
+      # A mutant can allocate in a loop until the host runs out of memory. The cgroup
+      # of the runner unit caps the job, so only a test process dies (#803). Hosts
+      # whose template sets no cap: #898.
+      - name: Check the memory cap of the runner
+        run: |
+          d=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+          while [ "$d" != /sys/fs/cgroup ]; do
+            m=$(cat "$d/memory.max" 2>/dev/null || echo max)
+            [ "$m" = max ] || { echo "Memory cap $m at $d"; exit 0; }
+            d=${d%/*}
+          done
+          echo "::error::The runner has no memory cap (#803, #898)."
+          exit 1
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
