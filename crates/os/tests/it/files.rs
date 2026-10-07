@@ -173,29 +173,8 @@ fn create_allocates_an_empty_file_that_is_there() {
 #[cfg(target_os = "linux")]
 #[test]
 fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
-    use rustix::fs::{self, FallocateFlags, OFlags};
-    const LEN: u64 = 4 << 20;
-    // ext4 counts the extent tree of the file in `st_blocks`.
-    const SLACK: u64 = 64 << 10;
     run(|files, data| async move {
-        // What a crash after an allocation that kept the length leaves.
-        let flags = OFlags::WRONLY.union(OFlags::CREATE);
-        let fd =
-            fs::open(data.join("a"), flags, fs::Mode::RUSR | fs::Mode::WUSR).unwrap();
-        fs::fallocate(&fd, FallocateFlags::KEEP_SIZE, 0, 4 * LEN).unwrap();
-        drop(fd);
-        create(&files, "a", LEN).await.close().await;
-        let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert!(
-            (LEN..=LEN + SLACK).contains(&allocated),
-            "{allocated} bytes allocated for {LEN}"
-        );
-        // A truncate to the length frees each block past the end and no other.
-        let fd = fs::open(data.join("a"), OFlags::WRONLY, fs::Mode::empty()).unwrap();
-        fs::ftruncate(&fd, LEN).unwrap();
-        drop(fd);
-        let truncated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert_eq!(truncated, allocated);
+        crate::kept::check(&files, &data).await;
     });
 }
 
