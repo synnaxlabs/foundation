@@ -167,13 +167,17 @@ How to read this record:
   policy.
 - **GATE RULES (write-path, 2026-10-04)** Writers that do not hold control wait. When
   the holder closes or its control lease runs out, the waiter with the highest
-  authority takes control; on a tie, the one that opened first. Each accepted write
-  renews the control lease. A writer whose control lease ran out stays out of the gate
-  until it reopens. Lease and grace times are the home's monotonic time, and the X18
-  grace is a positive span like a control lease. During the grace the recorded holder
-  ranks first: the first writer of its subject takes its place, and a higher authority
-  takes control. A handoff is recorded only when the
-  holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
+  authority takes control; on a tie, the one that opened first. Each write that spends
+  a seq renews the control lease of its index, and only that index: a live frame with
+  no room spends one for its gap, and a backfill frame that gets `Error::Full` spends
+  none. A writer whose indexes have different rates sets its lease by its slowest
+  index. A writer whose control lease ran out stays out of the gate until it reopens.
+  Lease and grace times are the home's monotonic time, and the X18 grace is a positive
+  span like a control lease. During the grace the recorded holder ranks first: the
+  first writer of its subject takes its place, and a higher authority takes control. A
+  handoff is recorded only when the holder's subject or authority changes. Basis: S11,
+  X18, r8 trace (d). The renewal rule was decided by the architect (#1092,
+  https://github.com/synnaxlabs/foundation/issues/1092#issuecomment-6031035230).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It
   may sit on its own index (written on change; a value holds until the next) or share
