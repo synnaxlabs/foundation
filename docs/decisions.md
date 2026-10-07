@@ -612,11 +612,17 @@ How to read this record:
   entry or group count: an entry or group past the key set is absent. A frame is at
   most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
   their order and padding are part of the disk and wire format version (C9d). A change
-  to either needs a new version. The padding is at most 7 bytes for each present
-  series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
-  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
-  records enter (X43). Decided by the coordinator (#306).
+  to either needs a new version. A `Draft` writes zeros in the padding, and no reader
+  reads it, so `frame::check` does not check it. A frame from a peer may hold other
+  bytes there, which `replica` stores and copy mode (X43) sends as they are (decided by
+  the architect, #1064:
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642, worded in
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031226370). The
+  padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
+  1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
+  body at its `(tag, end)` pairs and panics on ends that do not fit. Copy mode runs
+  `frame::check` once where remote records enter (X43). Decided by the coordinator
+  (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -979,34 +985,57 @@ How to read this record:
   for the kind of time (two checks where one kind byte does the work).
 - **HUB WIRE (#561)** A remote reader session is one hub stream of class `Complete` or
   `Latest`. After the header, the reader's node sends `wire::hub::Open`: the mode and
-  the number of channels, all on one index. A latest session gets the newest live
-  frame before its commit. A complete session gets each live frame after its commit,
-  and `Open` carries its first grant in bytes (CREDIT RULES). The home answers
-  `Opened`; the reader sends `Credit`, its total grant since the open; the home sends
-  each frame as a `Head` (path, seq, count, and the number of series). Every frame is
-  encoded (X35), so `Head` has no form. The body holds only the series of the
-  reader's view, the index series too, written from the frame's block as slices, and
-  both ends charge `View::charge` (M2). A series has the place of its first listing in
-  the open; the index, when the open does not list it, has the next place.
-  Only the fixed part of `Open` and of `Head` is one message. The rest is one run of
-  bytes, in messages of at most the peer's `message_bytes_max`, back to back with no
-  prefix: after `Open`, the keys; after `Head`, the end of each series in the body,
-  then the body. So no count of channels or series has a cap, and the reader fills
-  one block of the length of the last end. The home checks each key as it arrives and
-  never allocates by the peer's count. A head with more series than places is not
-  valid. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
+  the number of channels, all on one index. A latest session gets the newest live frame
+  before its commit. A complete session gets each live frame after its commit, and
+  `Open` carries its first grant in bytes (CREDIT RULES). The home answers `Opened`; the
+  reader sends `Credit`, its total grant since the open; the home sends each frame as a
+  `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
+  `Head` has no form. The body holds only the series of the reader's view, the index
+  series too, written from the frame's block as slices, and both ends charge
+  `View::charge` (M2). A series has the place of its first listing in the open, from 0;
+  the index, when the open does not list it, has place `channels`. An open of no channel
+  is not valid. Only the fixed part of `Open` and of `Head` is one message. The rest is
+  one run of bytes, in messages of at most the peer's `message_bytes_max`, back to back
+  with no prefix: after `Open`, the keys; after `Head`, the place and end of each series
+  in the body, then the body. A message never splits a key or an end, so each side
+  decodes each message as it arrives. The keys run holds exactly `channels` keys and the
+  ends run exactly the head's number of series, so each side counts them to find where a
+  run ends, and the body starts a new message. So no count of channels or series has a
+  cap, and the reader fills one block of the length of the last end. A run message with
+  more keys or ends than remain is not valid. A head of no series is not valid, since a
+  frame holds its index. The home checks each key as it arrives and never allocates by
+  the peer's count. A head with more series than places, or an end with a place the
+  session does not have or that repeats in its frame, is not valid; the reader's `hub`
+  checks this when it maps a place to its key. The body is laid out as the series bytes
+  of the frame of only the view's series that `View::charge` charges (FRAME LAYOUT), in
+  the home's entry order, with ends the home computes for those series: the first series
+  starts at 0, and each other at the end before it rounded up to a multiple of 8. An end
+  below the start of its series is not valid; `types::frame::check` refuses it. The
+  padding may hold any bytes (FRAME LAYOUT), and the reader ignores it: the reader
+  copies each series into a frame of its own, whose entry order follows its own slots,
+  and its `Draft` writes zeros in the padding of that frame. Each direction has its own
+  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
+  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
   (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode or comes from the wrong side), which every protocol may use.
-  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
-  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91
-  channels a session, the most that fit in 1472 bytes; the index in its own field of
+  that does not decode, comes from the wrong side, or breaks a rule above), which every
+  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
+  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
+  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
   `Open`, because the home knows its index and a second copy needs a check; the whole
   `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
-  open needs no mesh time (READER RULES), and a later named open can add one; grants
-  for many sessions in one message, which wait until a link carries a second session.
-  The coordinator approved the messages (2026-10-05); the architect decided the rest
-  (#561, 2026-10-06) and the run, the index place, and `MALFORMED` on #1064. The byte
-  form is recorded when it merges.
+  open needs no mesh time (READER RULES), and a later named open can add one; grants for
+  many sessions in one message, which wait until a link carries a second session. The
+  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
+  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
+  whole keys and ends and one message type for each direction
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
+  open of no channel and the place checks in `hub`
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). The byte
+  form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
+  `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
+  is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
+  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
