@@ -8,7 +8,7 @@ use std::io::Write as _;
 use connector_influx::sim::Store;
 
 #[global_allocator]
-static ALLOCATOR: counting::Allocator = counting::Allocator::new();
+static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
 /// The points of each write order. The lab's data lines take `LAB` points.
 const POINTS: usize = 200_000;
