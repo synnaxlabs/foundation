@@ -260,7 +260,7 @@ mod tests {
             |(blocks, tail, chain, seq)| {
                 let most = usize::try_from(blocks * 4096).expect("a small size") - 9;
                 (4087..=most).prop_map(move |body_max| {
-                    header(2 * blocks * 4096, body_max, tail * 4096, chain, seq)
+                    header(4 * blocks * 4096, body_max, tail * 4096, chain, seq)
                 })
             },
         )
@@ -270,17 +270,17 @@ mod tests {
     /// less the CRC itself.
     #[test]
     fn lays_out_the_fields_little_endian_then_the_crc() {
-        let block = header(8 * 4096, 3 * 4096, 2 * 4096, 0x0102_0304, 7).encode();
+        let block = header(16 * 4096, 3 * 4096, 2 * 4096, 0x0102_0304, 7).encode();
         let mut expected = b"FNDNRING".to_vec();
         expected.extend([1, 0]);
-        expected.extend((8 * 4096u64).to_le_bytes());
+        expected.extend((16 * 4096u64).to_le_bytes());
         expected.extend((3 * 4096u32).to_le_bytes());
         expected.extend((2 * 4096u64).to_le_bytes());
         expected.extend(0x0102_0304u32.to_le_bytes());
         expected.extend(7u64.to_le_bytes());
         assert_eq!(&block[..CRC_AT], &expected[..]);
         assert_eq!(CRC_AT, 42);
-        assert_eq!(block[CRC_AT..CRC_AT + 4], [0xAF, 0xFD, 0x89, 0xEE]);
+        assert_eq!(block[CRC_AT..CRC_AT + 4], [0x47, 0x75, 0xA4, 0x87]);
         assert!(block[CRC_AT + 4..].iter().all(|byte| *byte == 0));
     }
 
