@@ -2321,9 +2321,10 @@ How to read this record:
   allocates it, because a crash between the create and the allocation leaves one. It
   opens any other file that is there as it is. A create that gives `Full` leaves no
   file at the path and keeps no blocks. Another error can leave an empty file at the
-  path, as a crash can. `os` and `sim` both do this. Lost: an atomic create through a temporary name
-  and a rename, so that the path never shows an empty file; the temporary file would
-  show in `list` and need a sweep after a crash. Decided by the architect, #1117
+  path, as a crash can. `os` and `sim` both do this. Lost: an atomic create through a
+  temporary name and a rename, so that the path never shows an empty file; the
+  temporary file would show in `list` and need a sweep after a crash. Decided by the
+  architect, #1117
   (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031488357).
   Amended (2026-10-07, #1112): on `os`, a write open can lock a new empty file before
   its create does. The create gives `Busy`, the empty file stays, and the next create
