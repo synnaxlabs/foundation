@@ -10,7 +10,7 @@ use crate::network::{Action, ELECTION, Network, run, run_of_many};
 
 // The signed pre-vote that node `voter` grants to node `candidate` in `term`.
 fn grant(voter: usize, candidate: usize, term: Term) -> Body {
-    let signature = Network::signature(&Claim {
+    let signature = Network::signature(&Claim::Grant {
         voter: Network::key(voter),
         grant: Grant::PreVote,
         term,
@@ -154,7 +154,7 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
             voters: (0..3)
                 .map(Network::key)
                 .map(|voter| {
-                    let signature = Network::signature(&Claim {
+                    let signature = Network::signature(&Claim::Grant {
                         voter,
                         grant: Grant::Vote,
                         term: Term(u64::MAX),

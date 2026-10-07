@@ -90,7 +90,7 @@ impl fmt::Display for Error {
             Self::Unsynced => f.write_str("the node has no mesh time yet"),
             Self::Lease { span } => control::lease::Error { span }.fmt(f),
             Self::Type { data_type, .. } => {
-                write!(f, "the home does not write a series of {data_type:?} yet")
+                write!(f, "the home does not write a series of {data_type} yet")
             }
         }
     }
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(lease.fix(), "Give a lease longer than zero, or none");
         assert_eq!(
             series.to_string(),
-            "the home does not write a series of String yet"
+            "the home does not write a series of string yet"
         );
         assert_eq!(
             series.fix(),
@@ -152,7 +152,7 @@ mod tests {
 
         assert_eq!(
             series.to_string(),
-            "the home does not write a series of Array { element: F32, len: 3 } yet"
+            "the home does not write a series of f32[3] yet"
         );
     }
 
