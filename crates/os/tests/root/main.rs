@@ -101,8 +101,9 @@ fn a_create_after_a_failed_create_gives_full_again() {
 fn a_create_on_fragmented_free_space_frees_the_blocks_past_the_end() {
     use rustix::fs::{self, FallocateFlags, OFlags};
     run(|files, data| async move {
-        // Each free block is alone, so each block of the file is an extent of its
-        // own, and the extent tree needs blocks.
+        // Each free block is alone, but for the root reserve, which `kept::check`
+        // gives to `a` before the create. So each block of the create is an extent
+        // of its own, and the extent tree needs blocks.
         let stat = fs::statvfs(&data).unwrap();
         let block = stat.f_bsize;
         let flags = OFlags::WRONLY.union(OFlags::CREATE);
