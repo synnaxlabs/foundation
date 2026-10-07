@@ -558,7 +558,13 @@ How to read this record:
   other call has its own error. Conversions from `control` errors are private. The `hub`
   row stays as it is. `Shard` gives no stored seq until a caller needs one (architect
   review, https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6031908363).
-  Lost: the lost designs of the plan
+  Lost: `control` and `delivery` in the `hub` row, because `hub` then knows how the home
+  is built and a `control` change becomes a `hub` change. Lost: no call surface, with
+  requests through a ring, because on one shard a call costs nothing and a message
+  costs a copy and a wake, and it adds a second protocol beside `wire`. Lost: one
+  reader key and a panic at a grant to a latest reader, because the precondition is
+  not in the type. Lost: one `home::Error` for every call, because `write` would list
+  `Unsynced` and `Lease`, which it never gives. The plan has the full text
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
