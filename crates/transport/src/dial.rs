@@ -2,6 +2,7 @@
 //! address, staggered, until one gives a session.
 
 use std::future::poll_fn;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -117,19 +118,15 @@ impl Dial<'_> {
     ///
     /// [`Error::Network`] when the socket broke.
     fn start(&mut self, index: usize) -> Result<(), Error> {
-        let started = match self.addresses[index] {
-            Address::Udp(remote) => self.carrier.dial(self.peer, remote),
-            // This node runs no carrier for them.
-            Address::Tcp(_) | Address::Relay { .. } => Err(Error::Unroutable),
-        };
-        match started {
-            Ok(session) => {
+        match self.addresses[index] {
+            Address::Udp(remote) if routable(remote) => {
+                let session = self.carrier.dial(self.peer, remote)?;
                 self.flying.push((index, session));
                 self.causes.push(None);
                 self.sleep.reset(self.clock.now() + STAGGER);
             }
-            Err(Error::Unroutable) => self.causes.push(Some(Error::Unroutable)),
-            Err(error) => return Err(error),
+            // This node runs no carrier for TCP or relays.
+            _ => self.causes.push(Some(Error::Unroutable)),
         }
         Ok(())
     }
@@ -146,6 +143,11 @@ impl Dial<'_> {
             attempts,
         }
     }
+}
+
+/// Whether a datagram can go to `remote`: its port is not 0 and its IP is specified.
+fn routable(remote: SocketAddr) -> bool {
+    remote.port() != 0 && !remote.ip().is_unspecified()
 }
 
 #[cfg(test)]

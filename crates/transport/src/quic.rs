@@ -23,8 +23,7 @@ use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
 use noq_proto::{
-    ConnectError, ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple,
-    SendDatagramError,
+    ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
 };
 use types::node::PublicKey;
 use types::time::Monotonic;
@@ -140,28 +139,30 @@ impl Endpoint {
     }
 
     /// Dials `remote` and expects it to prove `peer`. The dial ends in
-    /// [`Event::Connected`] or [`Event::Closed`] for the key. `None` when no datagram
-    /// can go to `remote`: its port is 0 or its IP is unspecified.
+    /// [`Event::Connected`] or [`Event::Closed`] for the key.
+    ///
+    /// # Panics
+    ///
+    /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
     pub(crate) fn connect(
         &mut self,
         now: Monotonic,
         peer: PublicKey,
         remote: SocketAddr,
-    ) -> Option<connection::Key> {
+    ) -> connection::Key {
         let now = self.instant(now);
         let dial = self.settings.client(peer);
-        let (handle, inner) = match self.inner.connect(now, dial, remote, SERVER_NAME) {
-            Ok(connection) => connection,
-            Err(ConnectError::InvalidRemoteAddress(_)) => return None,
-            Err(error) => {
-                panic!("invariant: a dial fails only on its address: {error}")
-            }
-        };
+        let (handle, inner) = self
+            .inner
+            .connect(now, dial, remote, SERVER_NAME)
+            .unwrap_or_else(|error| {
+                panic!("a dial fails only on its address: {error}")
+            });
         let key = self.insert(handle, |key, streams| {
             Connection::dialed(key, inner, peer, streams)
         });
         self.drive(handle, now);
-        Some(key)
+        key
     }
 
     /// Takes one received batch: `meta.len` bytes of `batch`, in datagrams of
@@ -854,19 +855,17 @@ mod tests {
         }
 
         #[test]
-        fn to_port_zero_or_an_unspecified_ip_gives_none() {
+        #[should_panic(
+            expected = "a dial fails only on its address: invalid remote address: \
+                        127.0.0.1:0"
+        )]
+        fn to_port_zero_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
-                for remote in [
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433),
-                ] {
-                    let dialed = endpoint.connect(Monotonic(0), server(), remote);
-                    assert_eq!(dialed, None);
-                }
-                assert!(endpoint.drained());
+                let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+                endpoint.connect(Monotonic(0), server(), remote);
             });
         }
     }
@@ -990,13 +989,11 @@ mod tests {
                 let mut endpoint =
                     Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
                 let mut buffer = Vec::new();
-                let dialed = endpoint.connect(Monotonic(0), server(), pair::SERVER);
-                dialed.expect("a dial");
+                endpoint.connect(Monotonic(0), server(), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
                 let earliest = endpoint.deadline().expect("a deadline");
                 let later = pair::at(Duration::from_millis(500));
-                let dialed = endpoint.connect(later, server(), pair::SERVER);
-                dialed.expect("a dial");
+                endpoint.connect(later, server(), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
             });

@@ -123,10 +123,10 @@ impl Transport {
 
     /// Connects to `peer` at one of `addresses`, and checks that the peer holds
     /// `peer`'s private key. It tries direct UDP addresses first, then direct TCP,
-    /// then relays. It starts the next address 250 ms after the last, or at once when
-    /// the last fails, and keeps the first session that completes (RFC 8305). An
-    /// address where some other key answers counts as a failure, because addresses
-    /// can be stale.
+    /// then relays. It starts the next address 250 ms after the newest attempt
+    /// started, or at once when it fails, and keeps the first session that completes
+    /// (RFC 8305). An address where some other key answers counts as a failure,
+    /// because addresses can be stale.
     ///
     /// # Errors
     ///

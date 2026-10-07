@@ -65,6 +65,10 @@ impl Carrier {
     ///
     /// As [`Carrier::dial`], or why the dial ended before the handshake finished, as
     /// [`Session::closed`] gives it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Carrier::dial`].
     #[cfg(test)]
     pub(crate) async fn connect(
         &self,
@@ -107,8 +111,11 @@ impl Carrier {
     ///
     /// # Errors
     ///
-    /// As [`Carrier::check`], or [`Error::Unroutable`] when no datagram can go to
-    /// `remote`: its port is 0 or its IP is unspecified.
+    /// As [`Carrier::check`].
+    ///
+    /// # Panics
+    ///
+    /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
     pub(crate) fn dial(
         &self,
         peer: PublicKey,
@@ -117,8 +124,7 @@ impl Carrier {
         self.check()?;
         let mut state = self.0.borrow_mut();
         let now = state.clock.now();
-        let key =
-            (state.endpoint.connect(now, peer, remote)).ok_or(Error::Unroutable)?;
+        let key = state.endpoint.connect(now, peer, remote);
         state.sessions.insert(key, Slot::default());
         state.wake();
         Ok(self.session(key))
