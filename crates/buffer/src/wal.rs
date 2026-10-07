@@ -46,8 +46,10 @@ fn to_u64(len: usize) -> u64 {
 /// over `u32::MAX`.
 fn window(body_max: usize) -> Option<u64> {
     let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
-    body.contains(&body_max)
-        .then(|| to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN)))
+    let window = HEADER_LEN
+        .checked_add(body_max)?
+        .checked_next_multiple_of(ALIGN)?;
+    body.contains(&body_max).then(|| to_u64(window))
 }
 
 /// The smallest area with a largest record of `window` bytes: the restart record,
@@ -1205,11 +1207,12 @@ mod tests {
                 body_max in BODY_MIN..=3 * ALIGN - HEADER_LEN,
             ) {
                 let min = Layout::fit(0, body_max).expect_err("no ring in 0 bytes").min;
+                prop_assert!(Layout::new(min - 8192 - 4096, body_max).is_err());
                 prop_assert_eq!(Layout::fit(min, body_max).map(Layout::file_len), Ok(min));
                 match Layout::fit(len, body_max) {
                     Ok(layout) => {
                         prop_assert!(min <= len);
-                        prop_assert_eq!(layout.body_max(), body_max);
+                        prop_assert_eq!(Layout::new(layout.area(), body_max), Ok(layout));
                         prop_assert!(layout.file_len() <= len);
                         prop_assert!(layout.file_len() + 4096 > len);
                     }
