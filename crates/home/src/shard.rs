@@ -199,8 +199,9 @@ struct Scratch {
 /// What became of one group of a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Queued for the next group commit. A group with no samples stores nothing and
-    /// is applied with an empty range, also when a live write found no room.
+    /// A group with samples is queued for the next group commit. A group with no
+    /// samples stores nothing and is applied with an empty range, also when a live
+    /// write found no room.
     Applied {
         /// The slot of the group's index.
         slot: Slot,
@@ -208,7 +209,8 @@ pub enum Outcome {
         range: frame::Range,
     },
     /// A live group with samples found no room in the ring or the pool. Its seq is a
-    /// gap in the log.
+    /// gap in the log. The gap is durable only when a later group with samples of the
+    /// index is on disk. A restart before that gives the next frame the same seq.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -400,8 +402,8 @@ impl Shard {
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
     /// whose bodies no record or no block of the pool holds; no seq moves for either.
-    /// A handoff with no room decides before the size: each group with samples of a
-    /// live frame is lost, and a backfill frame gets [`Error::Full`]. [`Error::Disk`]
+    /// A handoff with no room decides before the size: the groups with samples of a
+    /// live frame are lost, and a backfill frame gets [`Error::Full`]. [`Error::Disk`]
     /// after a failed commit, before any other error but [`Error::Resend`].
     ///
     /// # Panics
@@ -479,8 +481,9 @@ impl Shard {
     /// Resolves when every group that [`write`](Self::write) gave as
     /// [`Outcome::Applied`] and every handoff appended before the call is on disk: at
     /// once when none of them waits for a commit, else at the end of the group commit
-    /// that holds the last of them. A lost group and a handoff that found no room are
-    /// not appended, so it does not wait for them. Commits run without this future,
+    /// that holds the last of them. A lost group, a group with no samples, and a
+    /// handoff that found no room are not appended, so it does not wait for them.
+    /// Commits run without this future,
     /// so a caller may drop it. Call [`woken`](Self::woken) after it resolves.
     /// [`Commit`] says when one held past the drop of the shard resolves.
     ///
@@ -2331,6 +2334,38 @@ mod tests {
                 Ok(&[refused(2, Refusal::Order(ahead))][..])
             );
         });
+    }
+
+    #[test]
+    fn continues_at_a_lost_range_after_a_power_cut_after_an_empty_group() {
+        let (mut sim, node) = create_node(120);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
+            drop(blocks);
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(0, 2, 0)][..]));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+            assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
+        })
+        .expect("the run after the cut ends");
     }
 
     #[test]
