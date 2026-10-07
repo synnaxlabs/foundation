@@ -239,7 +239,7 @@ mod tests {
     use types::frame::{self, Draft, Form};
 
     use super::*;
-    use crate::common::{key, pool};
+    use crate::common::{create_pool, key};
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -254,7 +254,7 @@ mod tests {
                 data: &[],
             };
             Self {
-                pool: pool(4096),
+                pool: create_pool(4096),
                 set: Interner::new().intern(&[index]),
             }
         }

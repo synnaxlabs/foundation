@@ -254,7 +254,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::{SCALARS, interner, key, pool};
+    use crate::common::{SCALARS, create_pool, interner, key};
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.
@@ -288,7 +288,7 @@ mod tests {
             index: key(Slot::new(1)),
             data: &[],
         }]);
-        let pool = pool(4096);
+        let pool = create_pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
         joined(&body(&pool, &frame, &set).expect("room"))
     }
@@ -311,7 +311,7 @@ mod tests {
                     data: &data,
                 },
             ]);
-            let pool = pool(4096);
+            let pool = create_pool(4096);
             let lens = [(1, 2), (2, 16)];
             let mut draft =
                 Draft::new(&pool, &set, Form::Encoded, &lens).expect("a valid frame");
@@ -344,9 +344,9 @@ mod tests {
                 index: key(Slot::new(1)),
                 data: &[],
             }]);
-            let frames = pool(4096);
+            let frames = create_pool(4096);
             let frame = frame(&frames, &set, &[]);
-            let heads = pool(4096);
+            let heads = create_pool(4096);
             let mut held = Vec::new();
             while let Ok(block) = heads.alloc(COUNT) {
                 held.push(block);
@@ -372,7 +372,7 @@ mod tests {
                 index: channel::Key::from_u128(u128::from_le_bytes(index)),
                 data: &data,
             }]);
-            let pool = pool(4096);
+            let pool = create_pool(4096);
             let stamps = [7; 16];
             let frame = frame(&pool, &set, &[(0, &stamps), (1, &[1, 2, 3])]);
             let parts = body(&pool, &frame, &set).expect("room");
@@ -432,7 +432,7 @@ mod tests {
                 index: key(Slot::new(1)),
                 data: &data,
             }]);
-            let pool = pool(4096);
+            let pool = create_pool(4096);
             let series: Vec<(usize, &[u8])> = (0..set.entries().len())
                 .map(|entry| (entry, &[][..]))
                 .collect();
@@ -461,9 +461,9 @@ mod tests {
                 index: key(Slot::new(1)),
                 data: &[],
             }]);
-            let frames = pool(4096);
+            let frames = create_pool(4096);
             let frame = frame(&frames, &set, &[(0, &[0; 8])]);
-            let heads = pool(4096);
+            let heads = create_pool(4096);
             let mut held = Vec::new();
             while let Ok(block) = heads.alloc(COUNT + DESCRIPTOR) {
                 held.push(block);
@@ -495,7 +495,7 @@ mod tests {
                     index: key(Slot::new(1)),
                     data: &[],
                 }]);
-                let pool = pool(4096);
+                let pool = create_pool(4096);
                 let frame = draft(&pool, &set, Form::Raw, &[(0, &[0; 8])]);
                 drop(body(&pool, &frame, &set));
             }
@@ -510,7 +510,7 @@ mod tests {
                         data: &[],
                     }])
                 });
-                let pool = pool(4096);
+                let pool = create_pool(4096);
                 let frame = frame(&pool, &of, &[(0, &[0; 8])]);
                 drop(body(&pool, &frame, &other));
             }
@@ -522,7 +522,7 @@ mod tests {
                     index: key(Slot::new(slot)),
                     data: &[],
                 }));
-                let pool = pool(4096);
+                let pool = create_pool(4096);
                 let frame = frame(&pool, &set, &[(0, &[0; 8]), (1, &[0; 8])]);
                 drop(body(&pool, &frame, &set));
             }
@@ -668,7 +668,7 @@ mod tests {
                     .filter(|&e| entries[e].present && entries[set.index(e)].present)
                     .map(|entry| (entry, &entries[entry].bytes[..]))
                     .collect();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let frame = frame(&pool, &set, &series);
 
                 let parts = body(&pool, &frame, &set).expect("room");

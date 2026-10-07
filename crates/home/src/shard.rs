@@ -798,7 +798,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{interner, key, pool};
+    use crate::common::{create_pool, interner, key};
 
     const DIR: &str = "shard-0";
     const RING: &str = "shard-0/ring";
@@ -1708,7 +1708,7 @@ mod tests {
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             // The shard's largest block is 1835008 bytes. The writer's pool has larger
             // blocks, and scattered values do not compress.
-            let writers = pool(4 * POOL);
+            let writers = create_pool(4 * POOL);
             let len = 240_000;
             let stamps: Vec<i64> = (10..).take(len).collect();
             let values = scattered(len);
@@ -1775,7 +1775,7 @@ mod tests {
             let values = scattered(len);
             let series: [(usize, &[i64]); 3] =
                 [(0, &stamps), (1, &values), (2, &[stamp])];
-            let huge = frame(&pool(4 * POOL), &set, &series);
+            let huge = frame(&create_pool(4 * POOL), &set, &series);
             assert_eq!(
                 shard.write(b, LIVE, huge),
                 Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
