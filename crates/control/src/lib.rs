@@ -10,14 +10,15 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 mod gate;
+pub mod lease;
 
 use std::fmt;
 
 use types::authority::Authority;
 use types::name::Name;
-use types::time::Span;
 
 pub use gate::{Gate, Key, Permit};
+pub use lease::Lease;
 
 /// A writer as the gate sees it. The holder's value is what the home records and
 /// publishes.
@@ -35,30 +36,6 @@ impl fmt::Display for Writer {
     }
 }
 
-/// A control lease: a holder that does not write for this long loses control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Lease(Span);
-
-impl Lease {
-    /// Makes a control lease of `span`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Lease`] when `span` is not longer than zero.
-    pub fn new(span: Span) -> Result<Self, Error> {
-        if span <= Span::ZERO {
-            return Err(Error::Lease { span });
-        }
-        Ok(Self(span))
-    }
-
-    /// The length of the control lease.
-    #[must_use]
-    pub fn span(self) -> Span {
-        self.0
-    }
-}
-
 /// A change of holder, borrowed from the [`Gate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handoff<'a> {
@@ -66,7 +43,7 @@ pub struct Handoff<'a> {
     pub to: Option<&'a Writer>,
 }
 
-/// Why the gate refused a control lease or a write.
+/// Why the gate refused a write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// Another writer holds control.
@@ -76,11 +53,6 @@ pub enum Error {
     Reserved,
     /// The writer's control lease ran out. It stays out of the gate until it reopens.
     Expired,
-    /// A control lease must be longer than zero.
-    Lease {
-        /// The span that was asked for.
-        span: Span,
-    },
 }
 
 impl fmt::Display for Error {
@@ -95,9 +67,6 @@ impl fmt::Display for Error {
             Self::Expired => {
                 f.write_str("control lease ran out: reopen the writer to take control")
             }
-            Self::Lease { span } => {
-                write!(f, "control lease must be longer than zero, got {span}")
-            }
         }
     }
 }
@@ -107,32 +76,6 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    mod lease {
-        use super::*;
-
-        #[test]
-        fn keeps_a_positive_span() {
-            let lease = Lease::new(Span::NANOSECOND).expect("positive lease");
-            assert_eq!(lease.span(), Span::NANOSECOND);
-        }
-
-        #[test]
-        fn rejects_zero() {
-            let err = Lease::new(Span::ZERO).expect_err("zero lease");
-            assert_eq!(err, Error::Lease { span: Span::ZERO });
-            assert_eq!(
-                err.to_string(),
-                "control lease must be longer than zero, got 0s"
-            );
-        }
-
-        #[test]
-        fn rejects_a_negative_span() {
-            let span = Span::from_nanos(-1);
-            assert_eq!(Lease::new(span), Err(Error::Lease { span }));
-        }
-    }
 
     #[test]
     fn errors_say_what_to_do() {
