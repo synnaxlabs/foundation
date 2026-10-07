@@ -64,6 +64,8 @@ enum State {
     Sized { len: usize },
     /// A message of `len` bytes, over the limit.
     Over { len: u64 },
+    /// A message that the stream's end cut short.
+    Cut,
     /// A message of `len` bytes that has room, with `have` of its bytes in `buffer`
     /// and the reader's chunks. A chunk of the source can keep its whole receive
     /// buffer alive, so a chunk lives only inside the read that took it, and
@@ -127,7 +129,7 @@ impl Reader {
     ///
     /// After an error inside a message's body, the reader holds no bytes of the
     /// message. After any other error, it holds at most the 8 bytes of a length
-    /// prefix.
+    /// prefix. After the framing breaks, each later read gives its error again.
     ///
     /// # Errors
     ///
@@ -182,12 +184,17 @@ impl Reader {
                             self.chunks.push(chunk);
                             continue;
                         }
-                        Ok(Poll::Ready(None)) => ended(),
+                        Ok(Poll::Ready(None)) => {
+                            self.state = State::Cut;
+                            self.chunks.clear();
+                            return Err(ended());
+                        }
                         Err(error) => error,
                     };
                     self.clear();
                     return Err(error);
                 }
+                State::Cut => return Err(ended()),
                 State::Body { len, .. } => return Ok(Step::Block(*len)),
             }
         }
@@ -877,6 +884,21 @@ mod tests {
                     reason: "the stream ended inside a message".to_owned()
                 })
             );
+        }
+
+        #[test]
+        fn after_the_stream_ends_inside_a_message_each_read_fails() {
+            let mut source = Source::new(vec![0x05, 1, 2], 64);
+            let mut reader = Reader::new(16);
+            let ended = Err(Error::Broken {
+                reason: "the stream ended inside a message".to_owned(),
+            });
+            assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Room(5)));
+            reader.admit();
+            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
+            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
+            // Private: no call shows the heap that the reader keeps.
+            assert_eq!(reader.held(), (None, 0));
         }
 
         #[test]
