@@ -24,14 +24,18 @@ impl Mesh {
     /// later entry may change it again. It proposes again when a new leader replaces
     /// the entry. It has no time limit: while no leader takes the change, it tries
     /// again after each tick. A drop of the future ends the call, but a leader that
-    /// took the change can still commit it.
+    /// took the change can still commit it. A try that gives up resets its stream,
+    /// but a proposal that the network delivers late, before the reset, can still
+    /// apply after a later call returned, and set the older home again.
     ///
     /// # Errors
     ///
     /// [`Error::NoVote`] when this node is not a voter, [`Error::NotMember`] when
     /// `home` is not a member of the region, and [`Error::Stopped`] when the group
-    /// stopped. The first two read what this node applied, so a node that has not
-    /// applied a promotion or a join yet gives them.
+    /// stopped. `NoVote` reads the configuration of the log of this node, which
+    /// changes when the node appends a change of voters, before the commit: a new
+    /// leader that replaces that entry changes the result back. `NotMember` reads
+    /// what this node applied, so a node that has not applied a join yet gives it.
     pub async fn set_home(
         &self,
         index: channel::Key,

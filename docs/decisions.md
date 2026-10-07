@@ -2193,8 +2193,13 @@ How to read this record:
   home of a forwarded change: `Error::NotMember` checks only the argument of a local
   caller, and the check of a home at apply on each node is #1273. A forwarded change
   applies at least one time: a member that got no answer forwards it again, and the
-  leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
-  state of a call that took effect last. `Change::Join` is safe to repeat while no
+  leader then appends a second entry. A try of `set_home` that gives up resets its
+  stream. A proposal that the network delivers late, before the reset, can still apply
+  after a later call returned and set the older home, until #1273 refuses it. This
+  replaces the sentence that a repeat of `Change::Home` gives the state of a call that
+  took effect last (ruled by the architect, 2026-10-07T20:58:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  `Change::Join` is safe to repeat while no
   change removes a member: a repeat finds its node a member and is refused
   (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
   must keep a repeat of an older `Join` from admitting the node again, and needs a
@@ -2332,13 +2337,19 @@ How to read this record:
   the term of the last entry, so it holds one pair while no call waits (MEMORY BOUNDS).
   A dropped call leaves no waker and no floor, and its stream stops. A node that is not
   a voter gets `NoVote` and does not wait, because the leader gives it only code 16,
-  which a full pool also gives. A node that a voter promoted gets `NoVote` until it
-  applies that change, and the caller tries again (approved by the architect with two
-  changes, `NoVote` and the bound of `Applied`, 2026-10-07T11:54:56Z:
-  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407).
-  `Ok` means that the entry at the position of the try applied. That is an entry that
-  sets the home only while `State::apply` never refuses a home change. A change kind
-  that lets `apply` refuse a home change (such as a removal of a member) must also make
+  which a full pool also gives (approved by the architect with two changes, `NoVote` and
+  the bound of `Applied`, 2026-10-07T11:54:56Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407). The
+  `NoVote` check reads the configuration of this node's log, which changes when the node
+  appends a change of voters, before the commit. A promoted node gets `NoVote` until it
+  appends that change, and a new leader that replaces the entry changes the result back.
+  `NotMember` reads what this node applied. This replaces the sentence "A node that a
+  voter promoted gets `NoVote` until it applies that change" (ruled by the architect,
+  2026-10-07T20:58:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849). `Ok`
+  means that the entry at the position of the try applied. That is an entry that sets
+  the home only while `State::apply` never refuses a home change. A change kind that
+  lets `apply` refuse a home change (such as a removal of a member) must also make
   `set_home` tell a refused entry from one that set the home. The surface as built, the
   doc of `set_home`, and the four points that the plan did not state (a joint
   configuration, `Error::Pool`, the time to a stop in a forward, and `NoVote` before
@@ -2378,9 +2389,11 @@ How to read this record:
   `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
   `Debug` text of a `Config` does not show the private key. `Mesh::set_home` is the
   first public call that changes the region (#471), and `Error::NoVote` is public with
-  it (MESH DRIVER). The other calls that change the
-  region and the change records stay private. The surface is approved by the architect,
-  2026-10-07T16:24:54Z:
+  it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. This
+  replaces the sentence that each call that changes the region stays private. The other
+  calls that change the region and the change records stay private. The surface is
+  approved by the architect, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   surface as built, with the types that the caller builds and the sentence on the key of
   the transport, is approved by the architect, 2026-10-07T19:55:12Z:
