@@ -3223,16 +3223,26 @@ How to read this record:
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
   invariants in `oracles/invariants/`.
-- **R16-7 (2026-10-04)** `clippy.toml` bans `std::collections::HashMap`, `HashSet`,
-  and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
-  fixed hasher, so a simulated run replays. A map keyed by outside input will get a
-  keyed hasher with its key from `env` randomness. Decided by the advisor under the
-  quality delegation. The fixed hasher is the Fx hasher of `rustc-hash`
-  (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
-  8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
-  Iteration order never decides behavior, so a test that breaks on the new order shows a
-  defect in the code. Decided by `laptop.architect` (2026-10-07T09:59:29Z):
+- **R16-7 (2026-10-04)** `clippy.toml` bans `std::collections::HashMap`, `HashSet`, and
+  `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a fixed
+  hasher, so a simulated run replays. Decided by the advisor under the quality
+  delegation. The fixed hasher is the Fx hasher of `rustc-hash` (`FxBuildHasher`), not
+  SipHash with fixed keys: SipHash cost the `transport` write 8.5 ns of 131 ns per 64 B
+  message (Xeon 8488C), and its public keys stop no flood. Iteration order never decides
+  behavior, so a test that breaks on the new order shows a defect in the code. Decided
+  by `laptop.architect` (2026-10-07T09:59:29Z):
   https://github.com/synnaxlabs/foundation/issues/1321
+  A map whose keys a party outside the node picks is a `BTreeMap`, whose lookup is
+  O(log n) compares for each set of keys, unless the node limits the keys that the party
+  puts in the map to a small count, as `streams_max` limits the streams of one session.
+  A keyed hasher, with its key from `env` randomness, comes only when a benchmark shows
+  that such a `BTreeMap` is too slow. Decided by `laptop.architect`
+  (2026-10-07T17:36:18Z):
+  https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6043338861. It
+  supersedes "A map keyed by outside input will get a keyed hasher with its key from
+  `env` randomness." The first PR that gives `Interner::intern` a subset of channels
+  that a party outside the node picks makes `Interner.sets` a `BTreeMap` and limits the
+  key sets of outside sessions (#1513).
   "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
   ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
   are open, so a set of keys that collide costs the peer many streams and a lookup in a
@@ -3794,6 +3804,7 @@ How to read this record:
 | REMOTE CONTROL, `inbox:<name>` issues | MESSAGES |
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
+| R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 
 ---
 
