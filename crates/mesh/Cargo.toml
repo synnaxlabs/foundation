@@ -13,6 +13,7 @@ raft = { path = "../raft" }
 types = { path = "../types" }
 
 [dev-dependencies]
+block = { path = "../block", features = ["sim"] }
 proptest.workspace = true
 sim = { path = "../sim" }
 

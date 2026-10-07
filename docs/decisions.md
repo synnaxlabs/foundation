@@ -1417,20 +1417,22 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
-  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
-  first `Voters` entry shows the configuration before the entries: a joint entry's
-  outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
-  starts at index 1, so that entry is the joint entry of the group's first change, and
-  the node checks proofs as a founder with the same log does, gaps included (#881,
-  #1005). Lost: an empty committed set proves nothing (the new node then refuses a
-  leader that the outgoing set elects when the old leader fails before the joint entry
-  commits); a joining node starts with the group's configuration (the caller must know
-  it, and it removes the operator's recovery of a wiped voter); the founding
-  configuration as entry 1, as in etcd (a wider change that alone leaves the node open
-  until it holds that entry). A `Voters` entry with an empty `incoming` set, in
-  `Start.entries` or in an `Append`, is `Error::NoVoters`: a group with no voter can
-  never commit or elect.
+  `Start.entries`. A node that joins starts with the founding voters from the answer to
+  its join (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). An empty
+  `Start.voters` is a voter that an operator wiped. It takes any proof until it holds a
+  `Voters` entry (#1004). Then its first `Voters` entry shows the configuration before
+  the entries: a joint entry's outgoing set, or for a leave its own set (#928,
+  coordinator, 2026-10-06). A log starts at index 1, so that entry is the joint entry of
+  the group's first change, and the node checks proofs as a founder with the same log
+  does, gaps included (#881, #1005). Lost: an empty committed set proves nothing (the
+  node then refuses a leader that the outgoing set elects when the old leader fails
+  before the joint entry commits); a joining node starts with the group's current
+  configuration (the caller must know it, and it removes the operator's recovery of a
+  wiped voter); the founding configuration as entry 1, as in etcd (a wider change that
+  alone leaves the node open until it holds that entry). A `Voters` entry with an empty
+  `incoming` set, in `Start.entries` or in an `Append`, is `Error::NoVoters`: a group
+  with no voter can never commit or elect.
   A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
@@ -1526,6 +1528,43 @@ How to read this record:
   format version. A message has one byte form, and a decode takes nothing else. The
   log (MESH LOG) and the messages share the byte form of an entry. Decided by
   `consensus`, approved by the coordinator (#471).
+- **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
+  shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
+  the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
+  task and a writer task lost: they need a second waker. A tick is 100 ms, a heartbeat
+  is 1 tick, and an election timeout is 10 ticks. A tick that comes due in a write is
+  lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
+  this order: the peer holds the key of the member that the message names
+  (`Error::Spoofed`), a request comes from a voter of this node's configuration
+  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  configuration refuses a leader that is not a voter of that configuration, when a
+  change that the node does not hold made that leader a voter. The node does not get the
+  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
+  configuration takes no request. Only a voter that an operator wiped is such a node
+  (#881), because a node that joins opens with the founding voters from its join answer
+  (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
+  messages for one member wait in a queue of 64 that drops its oldest, because `raft`
+  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
+  system refuses memory for (`Refused`), does not stop the group, because each may
+  succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
+  and until then no message leaves, nothing applies, and the group gets no tick. Nothing
+  bounds the proposals and the messages that the group takes in that time, and a record
+  that the pool can never hold waits with no end (#1091). A pool whose budget holds no
+  block (`TooLarge`) stops the group (the `Refused` wait decided by the architect:
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
+  stops when a write of the log fails, when a committed entry is not a change that this
+  build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
+  the first cause, and a watch gives it also after each `Mesh` drops. A stopped group
+  does not start again: the node opens the mesh again (#1066 for an open after a failed
+  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
+  and a write that waits for a block ends at the next tick; until then a new open gives
+  `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
+  does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
+  node or a voter that is not a member (`Error::NotMember`), and a private key that is
+  not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
+  decided by the architect (#471):
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
