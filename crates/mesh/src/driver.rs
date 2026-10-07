@@ -505,7 +505,7 @@ struct Group {
     // Each join and configuration entry in the log that `raft` holds and this
     // node has not applied, by index.
     unapplied: BTreeMap<u64, Written>,
-    // The last entry whose join `sync` took.
+    // The last entry whose join or configuration entry `sync` took.
     synced: Position,
     // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
@@ -548,10 +548,10 @@ impl Group {
         one(joins(named)).map(Known::Unapplied)
     }
 
-    // Takes the joins that `raft` appended since the last sync. It runs after each
-    // step and proposal; a tick adds no join. When `unstable` no longer holds the
-    // synced entry, a step can have replaced it, and the joins from the first
-    // unstable index go.
+    // Takes the joins and configuration entries that `raft` appended since the last
+    // sync. It runs after each step and proposal; a tick adds none. When `unstable`
+    // no longer holds the synced entry, a step can have replaced it, and the
+    // entries from the first unstable index go.
     fn sync(&mut self) {
         let unstable = self.raft.unstable();
         let (Some(first), Some(last)) = (unstable.first(), unstable.last()) else {
@@ -2818,7 +2818,10 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 let mut data = changes(&[stale_join(), join(4)]);
-                data.push(voters(TERM, &[2, 4], &[2, 3]));
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
                 write(&mesh, data).await;
                 let elected = heartbeat(2, later(), &[(2, 2), (4, 4)]);
                 let unproven = Error::Raft(raft::Error::Unproven {
@@ -2828,6 +2831,64 @@ mod tests {
                 assert_eq!(mesh.receive(public(2), elected), Err(unproven));
                 assert_eq!(term(&mesh), common::TERM);
             });
+        }
+
+        // A later change that names 4 again does not move the line: the joins below
+        // the first one decide.
+        #[test]
+        fn the_first_change_that_names_a_node_decides() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = stale_second();
+                data.push(voters(TERM, &[2, 3, 4], &[2, 4]));
+                write(&mesh, data).await;
+                let (replace, _) = replace_second(2);
+                assert_eq!(mesh.receive(public(2), replace), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            });
+        }
+
+        // Node 1 campaigns under the change to 1, 2 and 4, and 4 answers on the
+        // stream of the key of its stale join with a vote that its real key signs.
+        #[test]
+        fn a_vote_reply_that_fails_under_the_written_join_of_its_sender_is_forged() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut data = changes(&[stale_join()]);
+                data.push(voters(TERM, &[1, 2, 4], &[1, 2, 3]));
+                write(&mesh, data).await;
+                let sent = mesh.outgoing(key(2)).await.unwrap();
+                assert!(matches!(sent.body, Body::PreVote { .. }));
+                let answer = Answer::Granted(None);
+                let reply = raft::Message {
+                    term: sent.term,
+                    ..message(2, 1, Body::PreVoteReply { answer })
+                };
+                assert_eq!(mesh.receive(public(2), sign(2, reply)), Ok(()));
+                let vote = loop {
+                    let sent = mesh.outgoing(key(4)).await.unwrap();
+                    if matches!(sent.body, Body::Vote { .. }) {
+                        break sent;
+                    }
+                };
+                let reply = raft::Message {
+                    term: vote.term,
+                    ..message(4, 1, Body::VoteReply { answer })
+                };
+                let forged = Error::Claim(claim::Error::Forged { signer: key(4) });
+                assert_eq!(mesh.receive(public(5), sign(4, reply)), Err(forged));
+            });
+        }
+
+        /// `message` with each claim signed by the key of `signer`.
+        fn sign(signer: u8, message: raft::Message) -> raft::Message {
+            let mut ready = Ready {
+                messages: vec![message],
+                ..Ready::default()
+            };
+            common::signer(signer).sign(&mut ready);
+            ready.messages.remove(0)
         }
 
         // As above, with node 4 as the leader: its key is the real one.

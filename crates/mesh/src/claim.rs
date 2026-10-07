@@ -161,7 +161,12 @@ fn verify(
     public_key: impl Fn(node::Key) -> Option<Known>,
 ) -> Result<(), Error> {
     let signer = claim.signer();
-    let known = public_key(signer).expect(NO_SENDER_KEY);
+    let known = public_key(signer).unwrap_or_else(|| {
+        panic!(
+            "invariant: the sender {signer} of a reply that grants has a key; check \
+             the sender first"
+        )
+    });
     if holds(known.public_key(), claim, signature) {
         Ok(())
     } else {
@@ -175,11 +180,6 @@ fn holds(public: PublicKey, claim: &Claim<'_>, signature: Option<Signature>) -> 
         signature.expect("invariant: decode gives each claim a signature");
     ed25519::holds(public, &statement(claim), &bytes)
 }
-
-// The panic of `verify` for a sender with no key. `check` removes every other
-// claim of a signer with no key before `verify`.
-const NO_SENDER_KEY: &str =
-    "invariant: the sender of a reply that grants has a key; check the sender first";
 
 /// Why [`check`] refused a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -584,10 +584,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "invariant: the sender of a reply that grants has a key; check the \
-                    sender first"
-    )]
     fn verify_panics_for_a_signer_with_no_key() {
         let change = signed_change();
         let joint = joint();
@@ -596,7 +592,23 @@ mod tests {
             at: written(),
             voters: &joint,
         };
-        verify(&claim, change.signature, members(&[2, 3])).unwrap();
+        let panic = std::panic::catch_unwind(|| {
+            verify(&claim, change.signature, members(&[2, 3])).unwrap();
+        });
+        assert_eq!(panicked(panic), no_sender_key(key(1)));
+    }
+
+    // The message of a panic of a sender with no key.
+    fn no_sender_key(signer: node::Key) -> String {
+        format!(
+            "invariant: the sender {signer} of a reply that grants has a key; check \
+             the sender first"
+        )
+    }
+
+    // The message of `panic`. A `panic!` with arguments gives a `String`.
+    fn panicked(panic: std::thread::Result<()>) -> String {
+        *panic.unwrap_err().downcast::<String>().unwrap()
     }
 
     #[test]
@@ -752,13 +764,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "invariant: the sender of a reply that grants has a key; check the \
-                    sender first"
-    )]
     fn check_panics_for_a_grant_whose_sender_has_no_key() {
         let mut reply = granted(3, Grant::Vote, 1);
-        checked(&mut reply, members(&[1, 2])).unwrap();
+        let panic = std::panic::catch_unwind(move || {
+            checked(&mut reply, members(&[1, 2])).unwrap();
+        });
+        assert_eq!(panicked(panic), no_sender_key(key(3)));
     }
 
     // An append of the change of leader 1 at index 2 of `TERM`, proven by 1.
