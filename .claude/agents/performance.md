@@ -25,6 +25,12 @@ Run the benchmarks for the crates touched (`cargo bench -p <crate>`) on `main` a
 the change, and report both numbers with the machine. Never infer a number you did not
 measure. A report without both numbers is not a review.
 
+Each changed function on a per-sample, per-frame, or per-message path has a benchmark,
+or the report names the one that covers it. In the same run, report one benchmark whose
+code did not change. If it moves over 2%, or a changed result is within 2 points of 5%,
+the run cannot show the 5% check: it is a finding until the PR links the coordinator's
+rerun on a quiet Linux host (BENCH BASELINES).
+
 A regression over 5% is a finding, not a verdict. Report it as the P1 judgment:
 
 - how often the path runs: per sample, frame, session, or start;

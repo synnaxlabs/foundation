@@ -20,7 +20,7 @@ Launch in parallel every reviewer the PR needs:
 | --- | --- |
 | Every PR | `reviewer` |
 | A code PR: it changes a `.rs` file, a `Cargo.toml`, or `Cargo.lock` | add `architecture` and `breaker` |
-| A hot path: its Performance section answers the six questions | add `performance`. It must report measured numbers for `main` and the PR, with the machine. Run it again if it does not |
+| A hot path: it changes code that runs once per sample, series, frame, or message, whatever its body says | add `performance`. It must report measured numbers for `main` and the PR, with the machine. Run it again if it does not |
 | A flagged oracle weakening | add one `reviewer` per weakening, told to argue for fixing the code instead |
 
 When the PR changes a public surface or a crate's dependencies, also send its link to
@@ -33,12 +33,14 @@ The breaker runs in its own worktree. Remove it when the breaker returns
 
 1. Check each finding against the code yourself. Drop the ones you cannot confirm, and
    say so.
-2. Post one PR comment with the confirmed findings, most severe first: file and line,
-   what goes wrong, and the fix.
+2. Post one PR comment for each round, also a round that finds nothing: its reviewers,
+   its range (`<from>..<head sha>`), and the confirmed findings, most severe first: file
+   and line, what goes wrong, and the fix.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
    the answer. A deferral in a risk crate (`raft`, `buffer`, `delivery`, `block`,
    `ring`, `codec`, `wire`, `home`, `replica`, `transport`) needs the explicit OK of
-   `laptop.architect`: link its comment.
+   `laptop.architect`: link its comment. An answer that decides what a public doc or a
+   ruling means needs the architect's approval too.
 
 ## Second round
 
@@ -46,6 +48,15 @@ In 4 of the 5 worst escaped defects, the defect came in through a fix or a defer
 nothing checked again. So when round 1 led to fix commits:
 
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
-   with the round 1 comment attached.
+   with the round 1 comment attached. The `reviewer` also gets each answer that changed
+   no code, and checks it against the code. When a fix commit changes code on a hot
+   path, run `performance` again on it too, and update the Performance section with its
+   numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing.
+
+## Done
+
+Review is done when the last round comment ends at the PR head, finds nothing, and
+names each reviewer that the table requires, and each deferral in a risk crate links its
+OK. Only then does the author run `gh pr ready`.

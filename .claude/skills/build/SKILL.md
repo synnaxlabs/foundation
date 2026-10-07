@@ -53,8 +53,9 @@ or a line range.
 6. Run `/eb-review` on the diff. Put its Complexity and Shape decisions in the PR body.
 7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.
 8. `/review <pr>`. It runs the reviewers by tier and the second round.
-9. If review changed code, run the gate again. Then `gh pr ready <n>` and
-   `gh pr merge <n> --auto`. The merge queue takes it when the checks pass.
+9. If review changed code, run the gate again. When review is done (`/review`,
+   "Done"), run `gh pr ready <n>` and `gh pr merge <n> --auto`. The merge queue takes
+   it when the checks pass.
 10. **Wait once.** Run `.claude/skills/build/wait.sh <n>` with `run_in_background`.
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
