@@ -2646,7 +2646,7 @@ mod tests {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 write(&mesh, changes(&[stale_join()])).await;
                 assert_eq!(mesh.receive(public(3), replacing_forged()), Ok(()));
-                let next = Term(later().0 + 1);
+                let next = Term(later().0.checked_add(1).unwrap());
                 let forged = heartbeat(3, next, &[(3, 3), (4, 5)]);
                 assert_eq!(mesh.receive(public(3), forged), Err(forged_unproven()));
                 assert_eq!(term(&mesh), later());
@@ -2830,6 +2830,65 @@ mod tests {
                 });
                 assert_eq!(mesh.receive(public(2), elected), Err(unproven));
                 assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // The heartbeat of leader 2 in the term after `later`, which 2 and 4
+        // elected, with the chain of leader 3 of `later` that makes 4 a voter from
+        // index 2.
+        fn elected_through_chain() -> raft::Message {
+            let at = |index| Position {
+                term: later(),
+                index,
+            };
+            let set = |outgoing: &[u8]| Voters {
+                incoming: [2, 3, 4].map(key).into(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            };
+            let link = |(index, voters)| {
+                let entry = common::change_voted(3, at(index), voters, &[2, 3]);
+                let Data::Voters(change) = entry.data else {
+                    unreachable!()
+                };
+                raft::Link {
+                    at: entry.at,
+                    change,
+                }
+            };
+            let next = Term(later().0.checked_add(1).unwrap());
+            let mut elected = heartbeat(2, next, &[(2, 2), (4, 4)]);
+            elected.chain = [(2, set(&[2, 3])), (3, set(&[]))].map(link).into();
+            elected
+        }
+
+        // Node 1 holds the real join of 4 at 1 and a stale join at 2, and the
+        // change that names 4 in the chain only. A link proves the entry in the
+        // log of its sender, not the joins below it here, so 4 has no key and the
+        // leader is unproven. A limit of liveness, until #1623.
+        #[test]
+        fn a_leader_whose_chain_only_names_a_node_with_two_joins_is_unproven() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), stale_join()])).await;
+                let unproven = Error::Raft(raft::Error::Unproven {
+                    term: Term(later().0 + 1),
+                    from: key(2),
+                });
+                let elected = elected_through_chain();
+                assert_eq!(mesh.receive(public(2), elected), Err(unproven));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // With the real join alone, the same heartbeat is proven.
+        #[test]
+        fn takes_a_leader_whose_chain_only_names_a_node_with_one_join() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4)])).await;
+                let elected = elected_through_chain();
+                assert_eq!(mesh.receive(public(2), elected), Ok(()));
+                assert_eq!(term(&mesh), Term(later().0 + 1));
             });
         }
 
