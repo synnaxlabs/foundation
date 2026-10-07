@@ -3,7 +3,7 @@ use std::fmt;
 use raft::Position;
 use types::node;
 
-use crate::region::{Malformed, Unfit};
+use crate::region::{Unfit, Unknown};
 use crate::{grant, log};
 
 /// Why a mesh call failed.
@@ -87,13 +87,13 @@ impl From<grant::Error> for Error {
 pub(crate) enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
-    /// The committed entry at `at` is empty or has a kind that this build does not
+    /// The committed change at `at` has 0 bytes or a kind that this build does not
     /// know. A new open stops at the same entry.
     Change {
         /// The position of the entry.
         at: Position,
         /// Why its bytes are not a change.
-        cause: Malformed,
+        cause: Unknown,
     },
     /// Each `Mesh` of the group dropped. Only `Watch::next` gives it: get a new watch
     /// from the mesh that opens next.

@@ -342,7 +342,9 @@ impl Group {
                 Err(Malformed::Body { kind, length }) => {
                     Err(Refused::Body { kind, length })
                 }
-                Err(cause) => return Err(Stopped::Change { at, cause }),
+                Err(Malformed::Unknown(cause)) => {
+                    return Err(Stopped::Change { at, cause });
+                }
             };
             // A refused change is a no-op on every node.
             if let Ok(Some(_)) = applied {
@@ -499,7 +501,7 @@ mod tests {
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
-    use crate::region::{Join, Unfit};
+    use crate::region::{Join, Unfit, Unknown};
     use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -1421,13 +1423,53 @@ mod tests {
                 commit: 1,
             };
             assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
-            let cause = Malformed::Kind { kind: 9 };
+            let cause = Unknown::Kind { kind: 9 };
             let stopped = Error::Stopped(Stopped::Change { at, cause });
             assert_eq!(watch.next().await, Err(stopped.clone()));
             let text = "the group stopped: the committed entry at index 1 of term 5 is \
                         not a change: change kind 9 is unknown";
             assert_eq!(stopped.to_string(), text);
         });
+    }
+
+    #[test]
+    fn a_committed_change_of_zero_bytes_stops_the_group() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let at = Position {
+                term: Term(5),
+                index: 1,
+            };
+            let data = Data::Bytes(Vec::new());
+            let append = Body::Append {
+                prev: Position::default(),
+                entries: vec![Entry { at, data }],
+                commit: 1,
+            };
+            assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+            let cause = Unknown::Empty;
+            let stopped = Error::Stopped(Stopped::Change { at, cause });
+            assert_eq!(watch.next().await, Err(stopped.clone()));
+            let text = "the group stopped: the committed entry at index 1 of term 5 is \
+                        not a change: a change of 0 bytes has no kind";
+            assert_eq!(stopped.to_string(), text);
+        });
+    }
+
+    /// Ticket 7, which admits `plant.*` any number of times.
+    fn ticket() -> Change {
+        let options = Options {
+            prefix: "plant".parse().unwrap(),
+            reusable: true,
+            expiry: Stamp::from_nanos(1),
+            ephemeral: None,
+        };
+        Change::Ticket {
+            public_key: public(7),
+            options,
+        }
     }
 
     /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
@@ -1454,6 +1496,7 @@ mod tests {
             let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(None));
+            lead(&mesh, &node.clock(), ticket()).await;
             let Change::Join(mut over) = join(3) else {
                 unreachable!()
             };
@@ -1465,10 +1508,13 @@ mod tests {
                     )
                 })
                 .collect();
-            lead(&mesh, &node.clock(), Change::Join(over)).await;
+            mesh.propose(&Change::Join(over)).unwrap();
+            mesh.propose(&join(4)).unwrap();
             mesh.propose(&home(1)).unwrap();
             assert_eq!(watch.next().await, Ok(Some(key(1))));
             assert_eq!(mesh.member(key(3)), None);
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(common::member(4).card));
         });
     }
 
@@ -1480,17 +1526,7 @@ mod tests {
             let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(None));
-            let options = Options {
-                prefix: "plant".parse().unwrap(),
-                reusable: true,
-                expiry: Stamp::from_nanos(1),
-                ephemeral: None,
-            };
-            let ticket = Change::Ticket {
-                public_key: public(7),
-                options,
-            };
-            lead(&mesh, &node.clock(), ticket).await;
+            lead(&mesh, &node.clock(), ticket()).await;
             let Change::Join(mut forged) = join(3) else {
                 unreachable!()
             };

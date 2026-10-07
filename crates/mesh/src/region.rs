@@ -282,15 +282,15 @@ impl Change {
     ///
     /// # Errors
     ///
-    /// [`Malformed::Kind`] when the kind byte is unknown, and [`Malformed::Body`] when
-    /// the rest is not the byte form of a body of that kind.
+    /// [`Malformed::Unknown`] when the bytes are empty or the kind byte is unknown, and
+    /// [`Malformed::Body`] when the rest is not the byte form of a body of that kind.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
-        let (&kind, mut rest) = bytes.split_first().ok_or(Malformed::Empty)?;
+        let (&kind, mut rest) = bytes.split_first().ok_or(Unknown::Empty)?;
         let take_body = match kind {
             HOME => take_home,
             JOIN => take_join,
             TICKET => take_ticket,
-            _ => return Err(Malformed::Kind { kind }),
+            _ => return Err(Unknown::Kind { kind }.into()),
         };
         take_body(&mut rest)
             .filter(|_| rest.is_empty())
@@ -327,13 +327,8 @@ fn take_ticket(bytes: &mut &[u8]) -> Option<Change> {
 /// Bytes that are not a change record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Malformed {
-    /// The bytes are empty.
-    Empty,
-    /// The kind byte names no change.
-    Kind {
-        /// The kind byte.
-        kind: u8,
-    },
+    /// The bytes are not a change of a kind that this build knows.
+    Unknown(Unknown),
     /// The rest of the bytes is not the body of a change of that kind.
     Body {
         /// The kind byte.
@@ -346,8 +341,7 @@ pub(crate) enum Malformed {
 impl fmt::Display for Malformed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => f.write_str("a change of 0 bytes has no kind"),
-            Self::Kind { kind } => write!(f, "change kind {kind} is unknown"),
+            Self::Unknown(unknown) => unknown.fmt(f),
             Self::Body { kind, length } => write!(
                 f,
                 "a change of kind {kind} and {length} bytes is not in the byte form of its \
@@ -358,6 +352,35 @@ impl fmt::Display for Malformed {
 }
 
 impl std::error::Error for Malformed {}
+
+impl From<Unknown> for Malformed {
+    fn from(unknown: Unknown) -> Self {
+        Self::Unknown(unknown)
+    }
+}
+
+/// Bytes that are not a change of a kind that this build knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Unknown {
+    /// The bytes are empty.
+    Empty,
+    /// The kind byte names no change.
+    Kind {
+        /// The kind byte.
+        kind: u8,
+    },
+}
+
+impl fmt::Display for Unknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("a change of 0 bytes has no kind"),
+            Self::Kind { kind } => write!(f, "change kind {kind} is unknown"),
+        }
+    }
+}
+
+impl std::error::Error for Unknown {}
 
 /// Why every node refuses a change. A refused change changes no state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1191,7 +1214,7 @@ mod tests {
     #[test]
     fn decode_refuses_empty_bytes() {
         let error = Change::decode(&[]).unwrap_err();
-        assert_eq!(error, Malformed::Empty);
+        assert_eq!(error, Malformed::Unknown(Unknown::Empty));
         assert_eq!(error.to_string(), "a change of 0 bytes has no kind");
     }
 
@@ -1201,7 +1224,7 @@ mod tests {
         for kind in [0, 4] {
             bytes[0] = kind;
             let error = Change::decode(&bytes).unwrap_err();
-            assert_eq!(error, Malformed::Kind { kind });
+            assert_eq!(error, Malformed::Unknown(Unknown::Kind { kind }));
             assert_eq!(error.to_string(), format!("change kind {kind} is unknown"));
         }
     }
