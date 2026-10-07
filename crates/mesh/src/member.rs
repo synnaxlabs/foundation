@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use types::channel;
 use types::name::Name;
+use types::node::PublicKey;
 use types::time::Span;
 
 use crate::card;
@@ -21,4 +22,11 @@ pub struct Member {
     /// is `<card.name>.clock.offset` (X27). A status name keeps its meaning and data
     /// type in every release; a change takes a new name.
     pub status: BTreeMap<Name, channel::Key>,
+}
+
+impl Member {
+    /// The key that the node's peer proves and that signs the node's grants.
+    pub(crate) const fn public_key(&self) -> PublicKey {
+        self.card.card().public_key
+    }
 }

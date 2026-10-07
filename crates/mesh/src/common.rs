@@ -7,9 +7,11 @@ use std::rc::Rc;
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::Pool;
 use raft::{Answer, Body, Grant, Message, Proof, Ready, Signature, Term};
-use types::node::{self, PrivateKey, PublicKey};
+use types::node::{self, PrivateKey, PublicKey, SealKey};
 
+use crate::card::{self, Card};
 use crate::grant::Signer;
+use crate::member::Member;
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);
@@ -31,8 +33,26 @@ pub(crate) fn public(id: u8) -> PublicKey {
     PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
 }
 
-pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, PublicKey> {
-    ids.iter().map(|&id| (key(id), public(id))).collect()
+/// The record of node `id`, whose card holds and is signed with the key of node
+/// `holder`.
+pub(crate) fn member(id: u8, holder: u8) -> Member {
+    let card = Card {
+        name: format!("plant.node{id}").parse().unwrap(),
+        public_key: public(holder),
+        seal_key: SealKey::new([9; 32]).unwrap(),
+        addresses: Vec::new(),
+        version: 1,
+    };
+    Member {
+        card: card::Signed::sign(key(id), card, &private(holder)),
+        admission: [0; 64],
+        expiry: None,
+        status: BTreeMap::new(),
+    }
+}
+
+pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, Member> {
+    ids.iter().map(|&id| (key(id), member(id, id))).collect()
 }
 
 /// A pool of 4 MiB.

@@ -21,6 +21,7 @@ use types::time::Span;
 use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
+use crate::member::Member;
 use crate::region::{self, Change};
 
 /// The time of one `raft` tick.
@@ -38,9 +39,9 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// The public key of each member of the region, this node included. A member's
-    /// peer proves the key, and the key signs the member's grants.
-    pub(crate) members: BTreeMap<node::Key, PublicKey>,
+    /// Each member of the region, this node included. A member's peer proves the
+    /// public key of its card, and that key signs the member's grants.
+    pub(crate) members: BTreeMap<node::Key, Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
@@ -86,7 +87,9 @@ impl Mesh {
         let signer = Signer::new(config.key, &config.private_key);
         match config.members.get(&config.key) {
             None => return Err(Error::NotMember(config.key)),
-            Some(&public) if !signer.owns(public) => return Err(Error::WrongKey),
+            Some(own) if !signer.owns(own.public_key()) => {
+                return Err(Error::WrongKey);
+            }
             Some(_) => {}
         }
         let mut voters = config.voters.iter();
@@ -140,6 +143,12 @@ impl Mesh {
         }
     }
 
+    /// The member with `key` in this node's view of the region, or `None` when the
+    /// region has no such member.
+    pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
+        self.group.borrow().members.get(&key).cloned()
+    }
+
     /// Gives the group `message`, which `peer` sent.
     ///
     /// # Errors
@@ -166,7 +175,7 @@ impl Mesh {
         let mut group = self.group.borrow_mut();
         group.running()?;
         let from = message.from;
-        if group.members.get(&from) != Some(&peer) {
+        if group.members.get(&from).map(Member::public_key) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
         let Voters { incoming, outgoing } = group.raft.voters();
@@ -277,7 +286,7 @@ impl Drop for Watch {
 
 struct Group {
     raft: Raft,
-    members: BTreeMap<node::Key, PublicKey>,
+    members: BTreeMap<node::Key, Member>,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
@@ -1390,6 +1399,16 @@ mod tests {
             let text = format!("node {} is not a member of the region", key(3));
             assert_eq!(refused.to_string(), text);
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+        });
+    }
+
+    #[test]
+    fn member_gives_the_record_of_a_member_and_none_for_another_node() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            assert_eq!(mesh.member(key(2)), Some(common::member(2, 2)));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1, 1)));
+            assert_eq!(mesh.member(key(9)), None);
         });
     }
 

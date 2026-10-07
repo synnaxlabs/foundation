@@ -11,6 +11,7 @@ use types::node::{self, PrivateKey, PublicKey};
 
 use crate::bytes::{put_grant, put_key};
 use crate::ed25519;
+use crate::member::Member;
 
 const TAG: &[u8] = b"foundation/grant/1";
 
@@ -65,14 +66,14 @@ impl Signer {
 /// When a grant has no signature. A decoded message gives each grant one.
 pub(crate) fn check(
     message: &Message,
-    members: &BTreeMap<node::Key, PublicKey>,
+    members: &BTreeMap<node::Key, Member>,
 ) -> Result<(), Error> {
     for (claim, signature) in message.claims() {
         let voter = claim.voter;
-        let public = members.get(&voter).ok_or(Error::NotMember { voter })?;
+        let member = members.get(&voter).ok_or(Error::NotMember { voter })?;
         let Signature(bytes) =
             signature.expect("invariant: decode gives each grant a signature");
-        if !ed25519::holds(*public, &statement(&claim), &bytes) {
+        if !ed25519::holds(member.public_key(), &statement(&claim), &bytes) {
             return Err(Error::Forged { voter });
         }
     }
@@ -129,7 +130,7 @@ mod tests {
     use super::*;
     use crate::bytes::put_optional_proof;
     use crate::common::{
-        self, TERM, granted, key, members, message, public, reply_body, signature,
+        self, TERM, granted, key, member, members, message, reply_body, signature,
         signer,
     };
 
@@ -272,7 +273,7 @@ mod tests {
     #[test]
     fn check_refuses_a_signature_of_another_voter_with_the_same_key() {
         let mut members = members(&[1, 2]);
-        members.insert(key(3), public(2));
+        members.insert(key(3), member(3, 2));
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::Forged { voter: key(3) });
@@ -330,7 +331,7 @@ mod tests {
     // message before `step`, as the driver does.
     struct Group {
         nodes: Vec<(Raft, Signer)>,
-        members: BTreeMap<node::Key, PublicKey>,
+        members: BTreeMap<node::Key, Member>,
         flight: Vec<Vec<u8>>,
         committed: Vec<Vec<Data>>,
     }
