@@ -39,4 +39,8 @@ exclude_re = [
   # A `Tcp` has no write buffer, so a flush is ready at once. `Poll::Ready(Ok(()))` is
   # what the body returns.
   'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
+  # macOS only, and CI runs Linux. On macOS, `free_drops_by_the_bytes_of_a_created_file`
+  # fails when the call allocates nothing. No test gives it a full disk: that test
+  # would fill the disk of its host.
+  'crates/os/src/allocate\.rs:',
 ]
