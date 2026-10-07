@@ -338,17 +338,16 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Opens the ring in `config.dir`, or creates it, makes the ring and its
-    /// directory durable, and recovers the tail of every path from its records. A
-    /// ring file with no checkpoint holds no record: the open makes it again. Each
-    /// recovered index gets its slot from `slots`. Starts the commit task. Each tail
-    /// it reports is durable. It reads the header and the records from the ring's
-    /// tail and writes them again, so its time grows with the records. Open one
-    /// directory at most one time at once. Opens at once can fail with `Busy`,
-    /// `Files(Length)`, or `Files(Full)`, and a dropped open can make a later one lose
-    /// its ring (#1310). Dropping this future before it ends and then opening the same
+    /// Opens the ring in `config.dir`, or creates it, makes the ring and its directory
+    /// durable, and recovers the tail of every path from its records. A ring file with
+    /// no checkpoint holds no record: the open makes it again. Each recovered index
+    /// gets its slot from `slots`. Starts the commit task. Each tail it reports is
+    /// durable. It reads the header and the records from the ring's tail and writes
+    /// them again, so its time grows with the records. Open one directory at most one
+    /// time at once. Opens at once can fail with `Busy`, `Files(Length)`, or
+    /// `Files(Full)`. Dropping this future before it ends and then opening the same
     /// directory again in this process can lose the commits of the second open, because
-    /// a remove of the first can still run.
+    /// a remove of the first can still run (#1310).
     ///
     /// # Errors
     ///
