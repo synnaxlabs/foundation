@@ -6,14 +6,29 @@ use std::fmt;
 use types::{channel, node};
 
 use crate::bytes::put_key;
+use crate::member::Member;
 
-/// The region state that this node applied.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// The region state that this node holds: its members, and the homes that it applied.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct State {
+    members: BTreeMap<node::Key, Member>,
     homes: BTreeMap<channel::Key, node::Key>,
 }
 
 impl State {
+    /// A state with `members` and no home.
+    pub(crate) const fn new(members: BTreeMap<node::Key, Member>) -> Self {
+        Self {
+            members,
+            homes: BTreeMap::new(),
+        }
+    }
+
+    /// The member with `key`, or `None` when the region has no such member.
+    pub(crate) fn member(&self, key: node::Key) -> Option<&Member> {
+        self.members.get(&key)
+    }
+
     /// The home of `index`, or `None` when none is set.
     pub(crate) fn home(&self, index: channel::Key) -> Option<node::Key> {
         self.homes.get(&index).copied()
@@ -129,7 +144,7 @@ mod tests {
 
     #[test]
     fn a_home_is_none_until_a_change_sets_it() {
-        let mut state = State::default();
+        let mut state = State::new(BTreeMap::new());
         assert_eq!(state.home(index(7)), None);
         let moved = state.apply(Change::Home {
             index: index(7),
@@ -142,7 +157,7 @@ mod tests {
 
     #[test]
     fn a_change_to_the_same_home_moves_nothing() {
-        let mut state = State::default();
+        let mut state = State::new(BTreeMap::new());
         let change = Change::Home {
             index: index(7),
             home: node(1),
@@ -227,7 +242,7 @@ mod tests {
         fn the_state_keeps_the_last_home_of_each_index(
             changes in prop::collection::vec((0..4u128, 0..3u128), 0..32),
         ) {
-            let mut state = State::default();
+            let mut state = State::new(BTreeMap::new());
             let mut last = BTreeMap::new();
             for (i, h) in changes {
                 let before = last.insert(i, h);
