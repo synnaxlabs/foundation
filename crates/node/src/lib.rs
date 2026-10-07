@@ -2,6 +2,7 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
+mod directory;
 mod handoff;
 #[cfg_attr(
     not(test),
@@ -14,7 +15,6 @@ mod stop;
 mod tests;
 
 use std::fmt;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
@@ -43,7 +43,8 @@ pub struct Config<M> {
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
     /// Makes the files of the node's data directory. Each shard calls it once on its
     /// own thread, because a `Files` cannot leave the thread that made it. `node`
-    /// opens the buffer of shard `i` in directory `shard-<i>` inside them.
+    /// records the shard count in directory `shards-<n>` inside them, and opens the
+    /// buffer of shard `i` in directory `shard-<i>`.
     pub files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
@@ -93,11 +94,13 @@ impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
     /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
-    /// takes the remainder. Each shard opens its buffer in directory `shard-<i>` of
-    /// its files, and makes it there when it is not there. The shards open their
-    /// buffers one after another, in order of core. Returns once each shard
-    /// runs or one has failed to start. A failed start, a shard with no memory, or a
-    /// buffer that does not open stops the node, and [`Node::join`] returns its error.
+    /// takes the remainder. The start first records the shard count in the data
+    /// directory, or checks the one there. Each shard opens its buffer in directory
+    /// `shard-<i>` of its files, and makes it there when it is not there. The shards
+    /// open their buffers one after another, in order of core. Returns once each
+    /// shard runs or one has failed to start. A failed start, a shard with no memory,
+    /// a data directory made for another shard count, or a buffer that does not open
+    /// stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -114,10 +117,11 @@ impl Node {
             entropy,
         } = config;
         let (mesh, _reader) = clock::Clock::new(monotonic.clone());
-        let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
-        give.give(Interner::new());
+        // Shard 0 runs the mesh clock, and gives the first interner once it has
+        // claimed the data directory.
+        let mut first = Some((mesh, wall, give));
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
@@ -140,24 +144,26 @@ impl Node {
                 name: format!("shard-{core}"),
                 core: pinnable.then_some(core),
             };
-            // Only the first shard gets the mesh clock.
-            let mesh = mesh.take();
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
             let open = Open {
                 core,
                 take,
                 give,
-                files: Arc::clone(&files),
                 clock: monotonic.clone(),
                 entropy: entropy.clone(),
                 failed: Arc::clone(&failed),
             };
+            let first = first.take();
+            let files = Arc::clone(&files);
             let main = move |tasks: env::tasks::Tasks| {
-                if let Some((mesh, wall)) = mesh {
+                let files = files();
+                if let Some((mesh, wall, give)) = first {
+                    let failed = Arc::clone(&open.failed);
                     tasks.spawn(async { mesh.run(wall).await });
+                    tasks.spawn(claim(files.clone(), cores, give, failed));
                 }
-                open.serve(Rc::new(pool), tasks, guard)
+                open.serve(files, Rc::new(pool), tasks, guard)
             };
             match shards.start(shard, main) {
                 Ok(handle) => started.push(Shard { handle, failed }),
@@ -187,9 +193,11 @@ impl Node {
     /// # Errors
     ///
     /// The first failure: [`Error::Start`] for a shard that could not start or pin,
-    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Buffer`] for
-    /// the first shard by core whose buffer did not open, else [`Error::Panicked`]
-    /// for the first shard by core that panicked. Any failed shard stops the node.
+    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Shards`] or
+    /// [`Error::Directory`] for a data directory that shard 0 could not claim, else
+    /// [`Error::Buffer`] for the first shard by core whose buffer did not open, else
+    /// [`Error::Panicked`] for the first shard by core that panicked. Any failed
+    /// shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let mut first = self.failed;
         let mut panicked = None;
@@ -212,10 +220,25 @@ struct Open {
     core: usize,
     take: Take<Interner>,
     give: Give<Interner>,
-    files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
     failed: Arc<OnceLock<Error>>,
+}
+
+/// Claims the data directory for `cores` shards, then gives the node's first
+/// interner. A failed claim goes into `failed` and gives none, so no ring opens.
+async fn claim(
+    files: env::files::Files,
+    cores: usize,
+    give: Give<Interner>,
+    failed: Arc<OnceLock<Error>>,
+) {
+    match directory::claim(&files, cores).await {
+        Ok(()) => give.give(Interner::new()),
+        Err(error) => failed
+            .set(error)
+            .expect("invariant: shard 0 opens no ring after a failed claim"),
+    }
 }
 
 impl Open {
@@ -223,11 +246,12 @@ impl Open {
     /// drops `guard`, which stops the node.
     async fn serve(
         self,
+        files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
     ) {
-        if let Some(buffer) = self.run(pool, tasks).await {
+        if let Some(buffer) = self.run(files, pool, tasks).await {
             guard.await;
             drop(buffer);
         }
@@ -238,13 +262,14 @@ impl Open {
     /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
     async fn run(
         self,
+        files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Option<buffer::Buffer> {
         let mut interner = self.take.await?;
         let config = buffer::Config {
-            files: (self.files)(),
-            dir: PathBuf::from(format!("shard-{}", self.core)),
+            files,
+            dir: directory::shard(self.core),
             pool,
             clock: self.clock,
             tasks,
@@ -293,6 +318,17 @@ pub enum Error {
         /// Why it did not open.
         error: buffer::Error,
     },
+    /// The data directory holds the buffers of `stored` shards, and this node starts
+    /// one shard on each of its `cores` cores.
+    Shards {
+        /// The shard count the data directory was made for.
+        stored: usize,
+        /// The shard count of this start.
+        cores: usize,
+    },
+    /// A file call that reads or records the shard count of the data directory
+    /// failed.
+    Directory(env::files::Error),
 }
 
 impl fmt::Display for Error {
@@ -306,6 +342,15 @@ impl fmt::Display for Error {
             Self::Buffer { core, error } => {
                 write!(f, "cannot open the buffer of shard-{core}: {error}")
             }
+            Self::Shards { stored, cores } => write!(
+                f,
+                "the data directory holds {stored} shards, but this node starts \
+                 {cores}; start it on {stored} cores"
+            ),
+            Self::Directory(error) => write!(
+                f,
+                "cannot read or record the shard count of the data directory: {error}"
+            ),
         }
     }
 }
