@@ -207,7 +207,7 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
         (
             2,
             forged,
-            Error::Grant(grant::Error::Forged { voter: key(3) }),
+            Error::Grant(grant::Error::Forged { signer: key(3) }),
         ),
         (
             2,

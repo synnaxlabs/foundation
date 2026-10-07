@@ -10,6 +10,8 @@ use raft::{
 };
 use types::node;
 
+use crate::network::change;
+
 fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
 }
@@ -94,8 +96,8 @@ fn cluster(term: u64) -> BTreeMap<node::Key, Raft> {
     };
     let log = vec![
         entry(1, Data::Empty),
-        entry(2, Data::Voters(joint)),
-        entry(3, Data::Voters(new.clone())),
+        entry(2, change(key(1), joint)),
+        entry(3, change(key(1), new.clone())),
     ];
     [
         node(1, term, new.clone(), log.clone(), 3),
