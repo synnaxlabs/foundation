@@ -1,10 +1,11 @@
-use super::{BEHIND, Error, HEAD, Head, OPENED, Open, Reply, ends, rest_of_run};
+use super::{BEHIND, Error, HEAD, Head, Mode, OPENED, Open, Reply, ends, rest_of_run};
 
 /// The decoder at the reader's node: it takes each message from the home, in order,
 /// and checks the order and the runs of the session.
 #[derive(Debug)]
 pub struct Reader {
     places: u32,
+    latest: bool,
     next: Next,
 }
 
@@ -13,9 +14,9 @@ pub struct Reader {
 enum Next {
     Opened,
     Head,
+    Ended,
     Ends { remain: u32 },
     Body { end: usize, remain: usize },
-    Ended,
 }
 
 /// A message from the home, decoded.
@@ -56,6 +57,7 @@ impl Reader {
         assert!(open.channels > 0, "an open names at least one channel");
         Self {
             places: open.channels,
+            latest: open.mode == Mode::Latest,
             next: Next::Opened,
         }
     }
@@ -65,16 +67,17 @@ impl Reader {
     /// # Errors
     ///
     /// The [`Error`] of a message that does not decode, or that breaks the order or a
-    /// run of the session: [`Error::Unopened`] for a head before `Opened`,
+    /// run of the session: [`Error::Unopened`] for a head or a behind before `Opened`,
     /// [`Error::Reopen`] for a second `Opened`, [`Error::Places`] for a head with more
-    /// series than places, [`Error::Run`] for a message with more ends than remain,
-    /// [`Error::Body`] for a message longer than the rest of the body, and
-    /// [`Error::Ended`] for a message after `Behind`. A message of a run has no kind,
-    /// so a message where a run continues is read as one. The session is then not
-    /// valid ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
+    /// series than places, [`Error::Latest`] for a behind in a latest session,
+    /// [`Error::Run`] for a message with more ends than remain, [`Error::Body`] for a
+    /// message longer than the rest of the body, and [`Error::Ended`] for a message
+    /// after `Behind`. A message of a run has no kind, so a message where a run
+    /// continues is read as one. The session is then not valid
+    /// ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromHome<'m>, Error> {
         let (event, next) = match self.next {
-            Next::Opened | Next::Head => self.reply(message)?,
+            Next::Opened | Next::Head | Next::Ended => self.reply(message)?,
             Next::Ends { remain } => {
                 let ends = ends::decode(message)?;
                 let remain = rest_of_run(remain, ends.len())?;
@@ -110,7 +113,6 @@ impl Reader {
                     next,
                 )
             }
-            Next::Ended => return Err(Error::Ended),
         };
         self.next = next;
         Ok(event)
@@ -127,10 +129,14 @@ impl Reader {
     }
 
     fn reply<'m>(&self, message: &[u8]) -> Result<(FromHome<'m>, Next), Error> {
+        if let Next::Ended = self.next {
+            return Err(Error::Ended);
+        }
         match (Reply::decode(message)?, self.next) {
             (Reply::Opened, Next::Opened) => Ok((FromHome::Opened, Next::Head)),
             (Reply::Head(_), Next::Opened) => Err(Error::Unopened { kind: HEAD }),
             (Reply::Behind, Next::Opened) => Err(Error::Unopened { kind: BEHIND }),
+            (Reply::Behind, _) if self.latest => Err(Error::Latest { kind: BEHIND }),
             (Reply::Behind, _) => Ok((FromHome::Behind, Next::Ended)),
             (Reply::Opened, _) => Err(Error::Reopen { kind: OPENED }),
             (Reply::Head(head), _) if head.series > self.places => Err(Error::Places {
@@ -162,14 +168,11 @@ mod tests {
     use types::frame::{Path, Range};
 
     use super::*;
-    use crate::hub::{
-        Mode,
-        tests::{cut, encode_ends, encode_reply},
-    };
+    use crate::hub::tests::{cut, encode_ends, encode_reply};
 
     fn open(channels: u32) -> Open {
         Open {
-            mode: Mode::Latest,
+            mode: Mode::Complete { limit_bytes: 0 },
             channels,
         }
     }
@@ -281,6 +284,20 @@ mod tests {
             Some(Error::Unopened { kind: 3 })
         );
         assert_eq!(event(&mut reader, &[OPENED]), Ok(Event::Opened));
+    }
+
+    #[test]
+    fn refuses_a_behind_in_a_latest_session() {
+        let mut reader = Reader::new(&Open {
+            mode: Mode::Latest,
+            channels: 1,
+        });
+        assert_eq!(event(&mut reader, &[OPENED]), Ok(Event::Opened));
+        assert_eq!(
+            reader.decode(&[BEHIND]).err(),
+            Some(Error::Latest { kind: 3 })
+        );
+        assert_eq!(event(&mut reader, &head(1)), Ok(Event::Head(1)));
     }
 
     #[test]
