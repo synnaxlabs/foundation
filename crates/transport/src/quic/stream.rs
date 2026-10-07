@@ -6045,6 +6045,52 @@ mod tests {
         }
 
         #[test]
+        fn reset_at_the_hello_each_waiting_reply_stopped_before_it() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let connection = foreign(&mut pair);
+                let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                let mut ids = Vec::new();
+                for _ in 0..2 {
+                    let id = raw(connection, Dir::Bi, &[1], false);
+                    let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                    stopped.expect("stopped");
+                    ids.push(id);
+                }
+                pair.run(RUN);
+                let resets = |pair: &mut Pair| {
+                    let stats = foreign(pair).stats();
+                    stats.frame_rx.reset_stream
+                };
+                let before = resets(&mut pair);
+                let mut send = foreign(&mut pair).send_stream(hello);
+                let own = OWN.encode();
+                assert_eq!(send.write(&own), Ok(own.len()));
+                send.finish().expect("finished");
+                pair.run(RUN);
+                assert_eq!(
+                    resets(&mut pair) - before,
+                    2,
+                    "a reset of each at the hello"
+                );
+                for &id in &ids {
+                    let mut send = foreign(&mut pair).send_stream(id);
+                    assert_eq!(send.write(&[1, b'b']), Ok(2));
+                    send.finish().expect("finished");
+                }
+                pair.run(RUN);
+                for _ in &ids {
+                    let incoming = accept(&mut pair.server);
+                    let reply = incoming.sender.expect("a two-way stream");
+                    let (now, message) = (pair.now(), shard.block(b"b"));
+                    let written =
+                        pair.server.endpoint.write(now, &reply, &mut Some(message));
+                    assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+                }
+            });
+        }
+
+        #[test]
         fn leave_the_peer_streams_max_one_way_streams() {
             testing::run(1, |shard| {
                 let one = |config: &mut Config| config.streams_max = NonZeroU32::MIN;
