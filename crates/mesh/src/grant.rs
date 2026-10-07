@@ -175,8 +175,12 @@ mod tests {
         let members = members(&[1, 2, 3]);
         for leader in 1..=3 {
             let to = leader % 3 + 1;
-            let message = common::proven(leader, to, Body::Heartbeat { commit: 0 });
+            let body = Body::Heartbeat {
+                commit: u64::from(leader),
+            };
+            let message = common::proven(leader, to, body.clone());
             assert_eq!((message.from, message.to), (key(leader), key(to)));
+            assert_eq!(message.body, body);
             assert_eq!(check(&message, &members), Ok(()), "leader {leader}");
         }
     }
