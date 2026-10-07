@@ -532,6 +532,21 @@ mod buffer {
         Pin::new(&mut node.interner).poll(&mut cx)
     }
 
+    /// True when each open of `node` has ended, `after` its start.
+    ///
+    /// # Panics
+    ///
+    /// When a shard dropped the interner, or when the opens go on after 10 ms.
+    fn all_opened(node: &mut Node, after: Span) -> bool {
+        let taken = taken(node);
+        assert!(
+            !matches!(taken, Poll::Ready(None)),
+            "no interner, {after:?}"
+        );
+        assert!(after < Span::from_nanos(10_000_000), "the opens go on");
+        taken.is_ready()
+    }
+
     /// A data directory that a node of 3 shards left before the record existed is
     /// made for 3 shards, so a start on 2 cores is refused.
     #[test]
@@ -845,7 +860,7 @@ mod buffer {
                 let host = host(&mut sim, 2);
                 let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
-                let opened = matches!(taken(&mut node), Poll::Ready(Some(_)));
+                let opened = all_opened(&mut node, after);
                 sim.crash(&host, crash);
                 drop(node);
                 assert_eq!(run_on(&mut sim, &host), Ok(()), "{crash:?} at {after:?}");
@@ -868,7 +883,7 @@ mod buffer {
                 let host = host(&mut sim, 2);
                 let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
-                let opened = matches!(taken(&mut node), Poll::Ready(Some(_)));
+                let opened = all_opened(&mut node, after);
                 sim.crash(&host, crash);
                 drop(node);
                 let lens = run_on_disk(&mut sim, &host, 2 * RING)

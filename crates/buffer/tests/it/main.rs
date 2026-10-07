@@ -1906,12 +1906,13 @@ fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
 
 /// Two opens at once of a ring that is not there, on a new node with `seed`. The
 /// first commits one entry with a commit span of 1 ns and drops its buffer. The second
-/// starts `gap` nanoseconds later and keeps its buffer. Then a kill and an open.
-/// Returns what the first commit gave, what the second open gave (the tail of the
-/// entry), and the tail after the kill.
+/// starts `gap` nanoseconds later with `layout` and keeps its buffer. Then a kill and
+/// an open. Returns what the first commit gave, what the second open gave (the tail
+/// of the entry), and the tail after the kill.
 fn commit_and_close_during_another_open(
     seed: u64,
     gap: i64,
+    layout: Layout,
 ) -> (Result<(), Error>, Result<Tail, Error>, Tail) {
     let (mut sim, node) = one_node(seed);
     let committed = Arc::new(Mutex::new(None));
@@ -1939,7 +1940,11 @@ fn commit_and_close_during_another_open(
     drop(on_node(&node, "second", move |tasks| async move {
         own.clock().sleep(Span::from_nanos(gap)).await;
         let mut slots = Slots::new();
-        let buffer = Buffer::open(node_config(&own, tasks, DIR), &mut slots).await;
+        let config = Config {
+            layout,
+            ..node_config(&own, tasks, DIR)
+        };
+        let buffer = Buffer::open(config, &mut slots).await;
         let slot = slots.assign(key(1));
         let gave = match &buffer {
             Ok(buffer) => Ok(buffer.tail(slot, Path::Live)),
@@ -1965,28 +1970,102 @@ fn commit_and_close_during_another_open(
     (committed, opened, recovered.expect("the last open ends"))
 }
 
+/// Each seed and gap of a run where an open makes the ring, commits, and closes
+/// between the first look of a later open and its create.
+///
+/// The runs hang on the delay of each file call. After a change that moves those
+/// delays, the later open of a run can get `Busy`, and the tests of these runs fail:
+/// a search of the first 200,000 values of `seed` at these 3 gaps then finds such
+/// runs again.
+const CLOSED_BEFORE_THE_CREATE: [(u64, i64); 6] = [
+    (83_501, 100_000),
+    (4_232, 125_000),
+    (20_350, 125_000),
+    (21_616, 125_000),
+    (6_747, 150_000),
+    (30_651, 150_000),
+];
+
 /// An open that finds no ring makes one later, with `Mode::Create`. Another open can
 /// make the ring, commit, and close in between. The later open then recovers the
 /// entry, and the entry stays.
-///
-/// The 6 runs hang on the delay of each file call. After a change that moves those
-/// delays, the later open of a run can get `Busy` and this fails: a search of the
-/// first 200,000 values of `seed` at these 3 gaps then finds such runs again.
 #[test]
 fn an_open_at_once_with_one_that_commits_and_closes_keeps_the_commit() {
-    let cases = [
-        (83_501, 100_000),
-        (4_232, 125_000),
-        (20_350, 125_000),
-        (21_616, 125_000),
-        (6_747, 150_000),
-        (30_651, 150_000),
-    ];
     let kept = tail(3, Some(30));
-    for (seed, gap) in cases {
-        let found = commit_and_close_during_another_open(seed, gap);
+    for (seed, gap) in CLOSED_BEFORE_THE_CREATE {
+        let same = layout(AREA, BODY_MAX);
+        let found = commit_and_close_during_another_open(seed, gap, same);
         let expected = (Ok(()), Ok(kept), kept);
         assert_eq!(found, expected, "seed {seed}, gap {gap} ns");
+    }
+}
+
+/// As the test before this one, with another layout for the later open. Its create
+/// asks for its own length, so it fails with the `Length` of `env::files`, where an
+/// open after it takes the layout of the ring. The entry stays.
+#[test]
+fn an_open_with_another_layout_at_once_with_one_that_closes_gets_length() {
+    let kept = tail(3, Some(30));
+    let length = Error::Files(FileError::Length {
+        path: PathBuf::from(RING),
+        expected: AREA_START + 2 * AREA,
+        found: AREA_START + AREA,
+    });
+    for (seed, gap) in CLOSED_BEFORE_THE_CREATE {
+        let other = layout(2 * AREA, BODY_MAX);
+        let found = commit_and_close_during_another_open(seed, gap, other);
+        let expected = (Ok(()), Err(length.clone()), kept);
+        assert_eq!(found, expected, "seed {seed}, gap {gap} ns");
+    }
+}
+
+/// A failed read of the header blocks fails the open with its error and leaves the
+/// ring: the next open makes a ring that was not there, and recovers the entry of a
+/// ring with a checkpoint.
+#[test]
+fn a_failed_read_of_the_header_blocks_fails_the_open_and_keeps_the_ring() {
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::ReadAt,
+        code: 5,
+    });
+    for committed in [false, true] {
+        let (mut sim, node) = one_node(11);
+        if committed {
+            sim.run_on(&node, |node, tasks| async move {
+                let mut slots = Slots::new();
+                let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                    .await
+                    .expect("opens");
+                let slot = slots.assign(key(1));
+                let parts = Parts::default();
+                buffer
+                    .append([entry(1, slot, Path::Live, 0, 3, Some(30), parts)])
+                    .expect("queues");
+                buffer.committed().await.expect("commits");
+            })
+            .expect("the run ends");
+            sim.crash(&node, sim::Crash::Process);
+        }
+        node.fail_file(FilePath::new(RING), Operation::ReadAt);
+        let opened = sim.run_on(&node, |node, tasks| async move {
+            let config = node_config(&node, tasks, DIR);
+            Buffer::open(config, &mut Slots::new()).await.map(drop)
+        });
+        assert_eq!(opened, Ok(Err(failed.clone())), "committed: {committed}");
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens again");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        let kept = if committed {
+            tail(3, Some(30))
+        } else {
+            tail(0, None)
+        };
+        assert_eq!(recovered, Ok(kept), "committed: {committed}");
     }
 }
 
