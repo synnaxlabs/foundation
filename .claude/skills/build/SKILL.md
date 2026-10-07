@@ -114,4 +114,6 @@ take the next issue meanwhile.
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling
   to the crate's section of `docs/decisions.md` in your PR, with who decided and the
   comment link.
+- Send the architect only a change to the public surface or to the meaning of a ruling.
+  A fix of wording or links in a ruling needs no new approval.
 - Before you stop, comment your state on the issue: done, next step, open questions.

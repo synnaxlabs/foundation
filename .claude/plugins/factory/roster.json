@@ -19,6 +19,7 @@
     "box2.red-team"
   ],
   "turnCaps": {
-    "laptop.coordinator": 600
+    "laptop.coordinator": 600,
+    "laptop.architect": 600
   }
 }
