@@ -2027,12 +2027,50 @@ How to read this record:
   writes one answer on its reply half, and then both halves end. So a proposal and its
   answers name no sender and carry no request number (#779): a request number makes the
   node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
-  and HUB WIRE already answers on the stream that asks. A two-way stream whose first
-  message is not a proposal, or a proposal on a one-way stream, breaks the protocol, and
-  the receiver ends the stream with code 2 (`wire::header::MALFORMED`) (decided by the
-  architect, 2026-10-07T08:15:18Z:
-  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
-  has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
+  and HUB WIRE already answers on the stream that asks. A stream breaks the protocol
+  when a message is the byte form of no message, when a one-way stream carries a
+  proposal or an answer, when a two-way stream does not start with a proposal, or when
+  it carries a second message. The receiver stops the stream with code 2
+  (`wire::header::MALFORMED`), the code that HUB WIRE gives for a broken protocol rule
+  (decided by the architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025, and
+  2026-10-07T09:42:17Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035294122, point 3).
+  A second message comes after the answer, and a reset takes back an answer that the
+  peer does not have yet. So there the receiver stops only the half that it reads. At
+  each other break of a two-way stream, it stops the half that it reads and resets its
+  reply half, each with code 2: a two-way stream that ends with no message is such a
+  break (approved by the architect, 2026-10-07T12:52:00Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038303084). A message
+  that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
+  stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
+  a reply half with the same code. A group that stopped gives code 16 on a one-way
+  stream. On a stream that goes both ways it gives no mesh code: it can stop in the
+  write of the entry, which then applies after a new open. A `raft` message that finds
+  no block in the pool is not a refusal: the receiver drops it, the stream goes on, and
+  `raft` sends it again. The receiver holds no block while the group writes the entry:
+  it drops the block of the proposal before it gives the change to the group, and takes
+  the block of the answer after the answer. With no block for the answer, the peer gets
+  no answer: the group can hold the entry of the proposal. The reply half ends with no
+  answer and no mesh code. A reply half that ends with no answer and with no code 2 or
+  16 says nothing about the change, and the peer forwards it again. Lost: the block of
+  the answer first, because a block held while the group writes can take the room that
+  the write needs, and only the end of the write frees it (decided by the architect,
+  2026-10-07T13:07:00Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823). The
+  sentences on a group that stopped and on an answer with no block are from a later
+  ruling. Lost there: code 16 that says nothing about the change after a stop, because
+  code 16 carries no cause, so the peer cannot tell a stop from a refusal (decided by
+  the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458).
+  Supersedes, for a stream that goes both ways, point 2 of
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501, and the
+  sentence "the group took the proposal" of
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823. The
+  receiver does not check the class of a stream: the class sets only the priority of the
+  sender (approved by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
+  message has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
   messages share the byte form of an entry. Decided by `consensus`, approved by the
   coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
   gives the fuzz target `mesh_change` the decode and encode of a change record; no
@@ -2097,10 +2135,14 @@ How to read this record:
   not reach the group. A leader that waits sends no heartbeat, so the other voters elect
   a new leader. A follower that waits answers no message and falls behind until its
   write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
-  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
-  of the variant decided by the architect, 2026-10-07T11:52:00Z:
-  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
-  of the two cases by the architect, 2026-10-07T12:08:39Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the doc
+  text of the variant decided by the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458, which
+  supersedes the doc texts of
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 and
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823, and the
+  Display text of the first (2026-10-07T11:52:00Z) stands; the text of the two cases by
+  the architect, 2026-10-07T12:08:39Z:
   https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
   checks the wait before each other check of a message or of a forwarded proposal, so
   each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
