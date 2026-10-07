@@ -585,10 +585,15 @@ mod tests {
             assert_eq!(decoded(&encoded(&card)), Some(card), "{name}");
         }
         let ips = Card {
-            addresses: ["255.255.255.255:1", "[::ffff:1.2.3.4]:1", "[::]:1"]
-                .into_iter()
-                .map(|at| Address::Udp(at.parse().unwrap()))
-                .collect(),
+            addresses: [
+                "255.255.255.255:65535",
+                "[::ffff:1.2.3.4]:1",
+                "[::]:0",
+                "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:1",
+            ]
+            .into_iter()
+            .map(|at| Address::Udp(at.parse().unwrap()))
+            .collect(),
             ..fixed()
         };
         assert_eq!(decoded(&encoded(&ips)), Some(ips), "edge IPs");
