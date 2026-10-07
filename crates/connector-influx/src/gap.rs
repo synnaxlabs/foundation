@@ -20,11 +20,16 @@ pub struct Gap {
 }
 
 impl Gap {
-    /// An empty gap, with `connector` and `index` as its tags.
+    /// An empty gap, with `connector`, `index`, and `path=live` as its tags. The
+    /// connector reads only the live path for now.
     #[must_use]
     #[expect(clippy::missing_panics_doc, reason = "a name is a valid tag value")]
     pub fn new(connector: &Name, index: &Name) -> Self {
-        let tags = [("connector", connector.as_str()), ("index", index.as_str())];
+        let tags = [
+            ("connector", connector.as_str()),
+            ("index", index.as_str()),
+            ("path", "live"),
+        ];
         Self {
             measurement: Measurement::new(MEASUREMENT, &tags, &["count"])
                 .expect("invariant: a name is a valid tag value"),
