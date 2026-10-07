@@ -1,6 +1,6 @@
 //! Drives the `raft` group of one region on one shard.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::poll_fn;
 use std::mem;
@@ -110,7 +110,7 @@ impl Mesh {
             members: config.members,
             state: region::State::default(),
             queues: BTreeMap::new(),
-            stopped: None,
+            stopped: Rc::default(),
             task: None,
             watches: BTreeMap::new(),
             watched: 0,
@@ -129,6 +129,7 @@ impl Mesh {
         group.watched = slot.wrapping_add(1);
         Watch {
             group: Rc::downgrade(&self.group),
+            stopped: Rc::clone(&group.stopped),
             slot,
             index,
             given: None,
@@ -221,6 +222,8 @@ impl Mesh {
 /// A watch of the home of one index.
 pub(crate) struct Watch {
     group: Weak<RefCell<Group>>,
+    // The cause of the group's stop, which this watch gives after the group drops.
+    stopped: Rc<OnceCell<Stopped>>,
     // The key of this watch's waker in the group.
     slot: u64,
     index: channel::Key,
@@ -240,14 +243,17 @@ impl Watch {
     /// # Errors
     ///
     /// [`Error::Stopped`] with the cause, at once, on each call after the group stops
-    /// or each [`Mesh`] of it drops.
+    /// or each [`Mesh`] of it drops. A group that stopped keeps its cause when each
+    /// [`Mesh`] drops.
     pub(crate) async fn next(&mut self) -> Result<Option<node::Key>, Error> {
         poll_fn(|cx| {
+            if let Some(stopped) = self.stopped.get() {
+                return Poll::Ready(Err(Error::Stopped(stopped.clone())));
+            }
             let Some(group) = self.group.upgrade() else {
                 return Poll::Ready(Err(Error::Stopped(Stopped::Dropped)));
             };
             let mut group = group.borrow_mut();
-            group.running()?;
             let home = group.state.home(self.index);
             if self.called && self.given == home {
                 group.watches.insert(self.slot, cx.waker().clone());
@@ -273,7 +279,8 @@ struct Group {
     members: BTreeMap<node::Key, PublicKey>,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
-    stopped: Option<Stopped>,
+    // Why the group stopped. Each watch shares it, so the cause outlives the group.
+    stopped: Rc<OnceCell<Stopped>>,
     // The task of `run`, while it waits for an input.
     task: Option<Waker>,
     // The task of each watch that waits in `Watch::next`.
@@ -284,7 +291,7 @@ struct Group {
 
 impl Group {
     fn running(&self) -> Result<(), Error> {
-        match &self.stopped {
+        match self.stopped.get() {
             Some(stopped) => Err(Error::Stopped(stopped.clone())),
             None => Ok(()),
         }
@@ -321,7 +328,7 @@ impl Group {
     }
 
     fn stop(&mut self, stopped: Stopped) {
-        self.stopped = Some(stopped);
+        self.stopped.get_or_init(|| stopped);
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
         waiting.for_each(Waker::wake);
@@ -1242,6 +1249,45 @@ mod tests {
             );
             let text = "the group stopped: each mesh of the group dropped";
             assert_eq!(dropped.to_string(), text);
+        });
+    }
+
+    #[test]
+    fn a_watch_keeps_the_cause_of_a_stop_after_each_mesh_drops() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stopped = fail_sync(&node);
+            mesh.propose(home(2)).unwrap();
+            assert_eq!(watch.next().await, Err(stopped.clone()));
+            drop(mesh);
+            assert_eq!(watch.next().await, Err(stopped));
+        });
+    }
+
+    #[test]
+    fn a_watch_that_waits_gets_the_cause_of_a_stop_when_its_mesh_drops_first() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            lead(&mesh, &node.clock(), home(1)).await;
+            node.clock().sleep(TICK).await;
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let given = Rc::new(RefCell::new(None));
+            let slot = Rc::clone(&given);
+            tasks.spawn(async move {
+                *slot.borrow_mut() = Some(watch.next().await);
+            });
+            node.clock().sleep(TICK).await;
+            let stopped = fail_sync(&node);
+            mesh.propose(home(2)).unwrap();
+            assert_eq!(mesh.outgoing(key(2)).await, Err(stopped.clone()));
+            drop(mesh);
+            node.clock().sleep(TICK).await;
+            assert_eq!(given.take(), Some(Err(stopped)));
         });
     }
 
