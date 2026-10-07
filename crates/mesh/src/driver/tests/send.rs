@@ -340,10 +340,7 @@ fn create_stranger(node: &sim::node::Node, tasks: &Tasks) -> (Config, raft::Mess
     };
     let append = Body::Append {
         prev: Position::default(),
-        entries: vec![Entry {
-            at: at(1),
-            data: Data::Voters(voters),
-        }],
+        entries: vec![common::change(2, at(1), voters)],
         commit: 0,
     };
     (config, proven(2, 1, append))
