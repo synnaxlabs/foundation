@@ -104,7 +104,7 @@ pub struct Entry {
     pub first: u64,
     /// How many samples. A caller record has `len` 0.
     pub len: u32,
-    /// Mesh time at which the home stored it; retention trims by it.
+    /// Mesh time at which the home stored it; retention caps holds by it.
     pub stored_at: Stamp,
     /// The newest stamp of the samples, `None` for a caller record.
     pub last: Option<Stamp>,

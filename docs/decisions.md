@@ -243,20 +243,27 @@ How to read this record:
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
 - **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps the holds
-  on the indexes it selects: past `keep` after its store time, `buffer` trims a sample,
-  also when a reader holds it. It keeps no history window. An index that no policy
-  selects has no time cap. `keep` is zero or more. At `0s` no hold keeps a sample after
-  its store time, so a reader that is behind gets a gap. Most specific wins as a whole
-  policy (X25), equal specificity is a plan error (S12), and a data channel takes its
-  index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", and a
-  size cap per index. In `config`, `select` and `keep` are both required. `keep` reads
-  with `document::read::span` (`document.bad-span`), where a negative span reads, and
-  `config` refuses it with `config.negative-span` at the `keep` value. The code names
-  the defect, so a later span bound (a reader `hold`, S10) uses it too.
+  on the indexes it selects: past `keep` after its store time, no hold keeps a sample,
+  so `buffer` may trim it (STORE TRIM). Retention deletes nothing. It keeps no history
+  window. An index that no policy selects has no time cap. `keep` is zero or more. At
+  `0s` no hold keeps a sample after its store time, so a reader that is behind gets a
+  gap for each sample that `buffer` trims before the reader gets it. Most specific wins
+  as a whole policy (X25), equal specificity is a plan error (S12), and a data channel
+  takes its index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no
+  cap", and a size cap per index. In `config`, `select` and `keep` are both required.
+  `keep` reads with `document::read::span` (`document.bad-span`), where a negative span
+  reads, and `config` refuses it with `config.negative-span` at the `keep` value. The
+  code names the defect, so a later span bound (a reader `hold`, S10) uses it too.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
-  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160.
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. A ring
+  frees only at its tail, so a time on one index cannot free its samples, and the cap
+  is not a trim. Lost: a read that reports each sample past `keep` as a gap while its
+  bytes are on disk. At `0s` a reader a few milliseconds behind then loses each sample
+  it reads from disk, and each read needs `keep` and a clock. Stale commands are the
+  job of `max_age` (A20) (decided by `laptop.architect`, 2026-10-07T12:30:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637).
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on
   each write (B7) is the only source, and a write with no label is live. The person
@@ -275,8 +282,11 @@ How to read this record:
   has no backfill position. An open session holds all data it has not received. A closed
   named reader holds from its position until `hold` after the close, in mesh time; an
   unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
-  a negative hold (#94). The floor per path is the lowest held position, or none;
-  `buffer` trims below it, past retention (by store time), and under disk pressure. A
+  a negative hold (#94). The floor per path is the lowest held position, or none.
+  Retention caps it: `buffer` raises it past each sample stored more than `keep` ago
+  (RETENTION). A trim follows STORE TRIM: under disk pressure, at the tail of the ring,
+  whatever the floors (decided by `laptop.architect`, 2026-10-07T12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739). A
   resume takes, per path, the position the reader's `hub` presents, then the position at
   this home, then the home's fallback. A position below the floor or past the head is
   accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
