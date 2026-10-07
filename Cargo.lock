@@ -955,6 +955,7 @@ dependencies = [
  "sim",
  "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
@@ -1852,6 +1853,7 @@ dependencies = [
  "counting",
  "divan",
  "proptest",
+ "rustc-hash",
 ]
 
 [[package]]

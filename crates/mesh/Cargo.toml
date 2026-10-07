@@ -16,6 +16,7 @@ env = { path = "../env" }
 raft = { path = "../raft" }
 transport = { path = "../transport" }
 types = { path = "../types" }
+wire = { path = "../wire" }
 
 [dev-dependencies]
 block = { path = "../block", features = ["sim"] }
