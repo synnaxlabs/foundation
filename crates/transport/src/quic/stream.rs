@@ -901,6 +901,9 @@ impl Streams {
                     self.halves.remove(&id);
                     return Ok(None);
                 }
+                if mem::replace(&mut half.notified, true) {
+                    return Ok(None);
+                }
                 Ok(Some(Event::Writable { stream: stream(id) }))
             }
             StreamEvent::Available { .. } => Ok(Some(Event::Available { key })),
@@ -1030,9 +1033,6 @@ impl Streams {
             let Some(half) = self.halves.get_mut(&id) else {
                 continue;
             };
-            if !half.holds() {
-                continue;
-            }
             let caller = half.rest == Rest::Caller;
             if !caller && self.sending.write(inner, half).is_pending() {
                 continue;
@@ -1425,15 +1425,18 @@ mod tests {
         }
     }
 
-    /// The half that `side`'s connection keeps of `sender`'s stream. Tests read it
-    /// for state no call shows: a header split across writes, the class a reply
-    /// counts in, and whether a sender holds part of a message.
+    /// The halves that `side`'s connection of `sender` keeps. Tests read them for
+    /// state no call shows: a header split across writes, the class a reply counts
+    /// in, whether a sender holds part of a message, and whether a half is gone.
+    fn halves<'a>(side: &'a mut Side, sender: &Sender) -> &'a Map<StreamId, Half> {
+        let key = sender.key().connection;
+        let connection = crate::quic::find(&mut side.endpoint.connections, key);
+        &connection.expect("a connection").streams.halves
+    }
+
+    /// The half that `side`'s connection keeps of `sender`'s stream.
     fn half<'a>(side: &'a mut Side, sender: &Sender) -> &'a Half {
-        let key = sender.key();
-        let connection =
-            crate::quic::find(&mut side.endpoint.connections, key.connection);
-        let streams = &connection.expect("a connection").streams;
-        streams.halves.get(&key.id).expect("a half")
+        halves(side, sender).get(&sender.key().id).expect("a half")
     }
 
     /// The next stream the peer opened on `side`.
@@ -4081,12 +4084,7 @@ mod tests {
                 });
             assert!(got(&pair.client, seen, &second_writable));
             assert!(!got(&pair.client, seen, &first_writable));
-            let connection = crate::quic::find(
-                &mut pair.client.endpoint.connections,
-                first.key().connection,
-            );
-            let streams = &connection.expect("a connection").streams;
-            assert!(!streams.halves.contains_key(&id));
+            assert!(!halves(&mut pair.client, &first).contains_key(&id));
         });
     }
 
@@ -4227,6 +4225,43 @@ mod tests {
             };
             let ids = [first.key().id, second.key().id];
             assert_eq!(writable(&mut pair, &ids), [woken]);
+        });
+    }
+
+    #[test]
+    fn a_sender_that_waits_again_gets_a_writable_again() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let woken = || Event::Writable {
+                stream: first.key(),
+            };
+            let id = first.key().id;
+            assert_eq!(writable(&mut pair, &[id]), [woken()]);
+            let now = pair.now();
+            let written = pair.client.endpoint.write(now, &first, &mut None);
+            assert_eq!(written, Ok(Poll::Pending));
+            assert_eq!(writable(&mut pair, &[id]), [woken()]);
+        });
+    }
+
+    #[test]
+    fn a_stop_after_a_writable_that_no_write_answered_gives_no_second_writable() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut sender);
+            let seen = pair.client.events.len();
+            free(&mut pair);
+            let stopped = pair.server.connection();
+            let stopped = stopped.recv_stream(sender.key().id).stop(7u32.into());
+            stopped.expect("stopped");
+            pair.run(RUN);
+            let woken = Event::Writable {
+                stream: sender.key(),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&woken]);
         });
     }
 
