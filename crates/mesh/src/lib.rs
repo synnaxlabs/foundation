@@ -20,6 +20,11 @@ pub mod card;
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
+mod change;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
 mod claim;
 #[cfg(test)]
 mod common;
