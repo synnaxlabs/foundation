@@ -2183,7 +2183,7 @@ mod tests {
             pair.run(Duration::from_secs(3));
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut after, |_, _| None);
-            assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+            assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
             // Private: tests/held.rs checks this drop through the heap.
             assert_eq!(after.reader.held(), (None, 0));
         });
