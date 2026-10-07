@@ -183,6 +183,8 @@ mod tests {
         assert_eq!(applied.outcome(&floor, at(1, 0)), Outcome::Pending);
     }
 
+    // The pairs that stay only take memory, which no call shows, so the tests of the
+    // bound read `terms`.
     #[test]
     fn it_holds_one_pair_while_no_try_is_open() {
         let (mut applied, floor) = create_applied(&[1, 2, 3, 3, 4], 0);

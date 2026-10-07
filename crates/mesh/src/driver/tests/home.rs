@@ -162,6 +162,29 @@ fn set_home_refuses_each_home_on_a_node_that_is_not_a_voter() {
     });
 }
 
+// The check reads the voters of the log, which change when the node appends the
+// entry, before the commit.
+#[test]
+fn a_promoted_node_sets_a_home_from_the_append_of_its_promotion() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+        let set = now(pin!(mesh.set_home(INDEX, key(2)))).await;
+        assert_eq!(set, Poll::Ready(Err(Error::NoVote)));
+        let promoted = Voters {
+            incoming: IDS.map(key).into(),
+            outgoing: [].into(),
+        };
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: vec![common::change(2, at(1), promoted)],
+            commit: 0,
+        };
+        assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+        let set = now(pin!(mesh.set_home(INDEX, key(2)))).await;
+        assert_eq!(set, Poll::Pending);
+    });
+}
+
 // Node 2 is the leader of a joint configuration: node 1 votes only in the half that
 // leaves, and node 3 in no half.
 #[test]
@@ -211,7 +234,11 @@ fn set_home_gives_the_cause_when_the_write_of_its_entry_stops_the_group() {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         lead(&mesh, &node.clock(), home(1)).await;
         let stopped = Error::Stopped(fail_sync(&node));
+        let clock = node.clock();
+        let start = clock.now();
         assert_eq!(mesh.set_home(INDEX, key(1)).await, Err(stopped.clone()));
+        // The call waits for no next try.
+        assert!(clock.now() - start < TICK);
         let again = now(pin!(mesh.set_home(INDEX, key(1)))).await;
         assert_eq!(again, Poll::Ready(Err(stopped.clone())));
         assert_eq!(
@@ -219,6 +246,20 @@ fn set_home_gives_the_cause_when_the_write_of_its_entry_stops_the_group() {
             "the group stopped: sync of log/log-0 failed with OS error 5"
         );
     });
+}
+
+#[test]
+fn set_home_gives_the_cause_of_a_stop_before_each_other_refusal() {
+    let cases = [("no voter", [2, 3].as_slice(), 2), ("no member", &IDS, 9)];
+    for (case, voters, home) in cases {
+        solo(move |node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, voters).await.unwrap();
+            let stopped = stop(&node, &mesh);
+            node.clock().sleep(Span::MILLISECOND).await;
+            let set = now(pin!(mesh.set_home(INDEX, key(home)))).await;
+            assert_eq!(set, Poll::Ready(Err(Error::Stopped(stopped))), "{case}");
+        });
+    }
 }
 
 // The pool has no block for the entry of an earlier proposal, so the group takes no
@@ -292,6 +333,31 @@ fn a_call_that_waits_for_its_entry_gets_the_cause_when_the_group_stops() {
     });
 }
 
+// One reply of node 2 commits the entry of the call and, after it, an entry that is
+// not a change.
+#[test]
+fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let first = elect(&mesh).await;
+        let mut call = pin!(mesh.set_home(INDEX, key(2)));
+        wait_for_outcome(&mesh, &node.clock(), call.as_mut()).await;
+        let bad = mesh.propose_data(vec![9]).await.unwrap();
+        assert_eq!(bad, after(first, 2));
+        let reply = raft::Message {
+            term: first.term,
+            ..message(2, 1, Body::AppendReply { last: bad.index })
+        };
+        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+        assert_eq!(call.await, Ok(()));
+        let cause = Unknown::Kind { kind: 9 };
+        let stopped = Stopped::Change { at: bad, cause };
+        assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+    });
+}
+
+// A waker or a floor that stays only takes memory, which no call shows, so this
+// test reads the group.
 #[test]
 fn a_dropped_call_that_waits_for_its_entry_leaves_no_waker_and_no_floor() {
     solo(|node, tasks| async move {
@@ -325,6 +391,8 @@ const HALF: Span = Span::from_nanos(5 * TICK.nanos());
 /// each 300 ms.
 struct Leader {
     peer: Peer,
+    /// Whether node 2 sends no more heartbeat.
+    silent: Rc<Cell<bool>>,
     /// The session that node 2 dialed, for its `raft` messages.
     dialed: Session,
     /// The session that node 1 dialed.
@@ -339,8 +407,10 @@ impl Leader {
         let dialed = peer.transport.dial(public(1), &addresses).await.unwrap();
         let mut beats = Self::open(&peer, &dialed).await;
         let (clock, pool) = (peer.node.clock(), Rc::clone(&peer.pool));
+        let silent = Rc::new(Cell::new(false));
+        let ended = Rc::clone(&silent);
         peer.tasks.spawn(async move {
-            loop {
+            while !ended.get() {
                 let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 let beat = block(&pool, &Message::Raft(beat).encode()).unwrap();
                 beats.send(beat).await.unwrap();
@@ -351,6 +421,7 @@ impl Leader {
         let session = peer.session().await;
         Self {
             peer,
+            silent,
             dialed,
             session,
             held: Vec::new(),
@@ -401,9 +472,14 @@ impl Leader {
 
     /// Sends node 1 the entry of `change` at `at`, as committed.
     async fn append(&self, change: &Change, at: Position) {
+        self.append_data(encoded(change), at).await;
+    }
+
+    /// Sends node 1 an entry of `data` at `at`, as committed.
+    async fn append_data(&self, data: Vec<u8>, at: Position) {
         let entry = Entry {
             at,
-            data: Data::Bytes(encoded(change)),
+            data: Data::Bytes(data),
         };
         let append = Body::Append {
             prev: Position::default(),
@@ -514,22 +590,28 @@ fn a_proposal_with_no_answer_goes_again_on_a_new_stream_after_one_election_timeo
     assert_eq!(ends, [Err(reset), Ok(())]);
 }
 
+/// The next value of `watch`, which comes while `call` waits.
+async fn next_before<F: Future>(
+    watch: &mut Watch,
+    mut call: Pin<&mut F>,
+) -> Result<Option<node::Key>, Stopped> {
+    let mut next = pin!(watch.next());
+    poll_fn(|cx| {
+        let Poll::Pending = call.as_mut().poll(cx) else {
+            panic!("the call returned before the watch gave a value");
+        };
+        next.as_mut().poll(cx)
+    })
+    .await
+}
+
 #[test]
 fn an_answer_that_comes_after_its_entry_applied_ends_the_call() {
     let call = |node: sim::node::Node, mesh: Mesh| async move {
         let mut watch = mesh.watch(INDEX);
         assert_eq!(watch.next().await, Ok(None));
         let mut call = pin!(set(mesh.clone()));
-        let applied = {
-            let mut next = pin!(watch.next());
-            let applied = poll_fn(|cx| {
-                let Poll::Pending = call.as_mut().poll(cx) else {
-                    panic!("the call returned before the answer");
-                };
-                next.as_mut().poll(cx)
-            });
-            applied.await
-        };
+        let applied = next_before(&mut watch, call.as_mut()).await;
         let applied = (applied, node.clock().now());
         let returned = call.await;
         (applied, returned, node.clock().now())
@@ -575,6 +657,166 @@ fn a_dropped_call_that_waits_for_the_answer_stops_its_stream() {
     assert_eq!(late, Err(transport::Error::Stopped { code: Code(0) }));
     assert_eq!(end, Err(transport::Error::Reset { code: Code(0) }));
     assert_eq!(more, None);
+}
+
+// Node 2 sends no heartbeat after the stop: `accept` takes no stream that the group
+// refuses.
+#[test]
+fn a_call_that_waits_for_the_answer_gets_the_cause_after_the_group_stops() {
+    let call = |node: sim::node::Node, mesh: Mesh| async move {
+        let clock = node.clock();
+        let mut watch = mesh.watch(INDEX);
+        assert_eq!(watch.next().await, Ok(None));
+        let mut call = pin!(mesh.set_home(INDEX, key(1)));
+        let stopped = next_before(&mut watch, call.as_mut()).await;
+        let start = clock.now();
+        (stopped, call.await, clock.now() - start)
+    };
+    let ((stopped, set, waited), end) = run(call, |mut leader| async move {
+        let (_, mut asked) = leader.proposal().await;
+        leader.silent.set(true);
+        leader.rest(BEAT).await;
+        leader.append_data(vec![9], at(1)).await;
+        asked.end().await
+    });
+    let cause = Unknown::Kind { kind: 9 };
+    let cause = Stopped::Change { at: at(1), cause };
+    assert_eq!(stopped, Err(cause.clone()));
+    assert_eq!(set, Err(Error::Stopped(cause)));
+    // The try has one election timeout, and the next one starts a tick later.
+    let limit = Span::from_nanos(11 * TICK.nanos());
+    assert!(
+        waited <= limit,
+        "the call returned {waited:?} after the stop"
+    );
+    // The group dropped its sessions at the stop, so the try held the last handle
+    // of this one.
+    assert_eq!(end, Err(transport::Error::PeerClosed { code: Code(0) }));
+}
+
+/// How node 2 refuses a proposal.
+enum Refusal {
+    /// It answers with these bytes, and ends its half.
+    Answer(Vec<u8>),
+    /// It ends its half with no answer.
+    End,
+    /// It resets its half and stops the other one, as `serve` does.
+    Reset,
+}
+
+#[test]
+fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
+    let follower = |leader| Message::NotLeader { leader }.encode();
+    let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
+    let cases = [
+        ("no leader", Refusal::Answer(follower(None))),
+        ("a leader", Refusal::Answer(follower(Some(key(3))))),
+        (
+            "a `raft` message",
+            Refusal::Answer(Message::Raft(beat).encode()),
+        ),
+        ("a proposal", {
+            let change = home(1);
+            Refusal::Answer(Message::Propose { change }.encode())
+        }),
+        ("no message", Refusal::Answer(vec![0xff])),
+        ("an end", Refusal::End),
+        ("a reset", Refusal::Reset),
+    ];
+    for (case, refusal) in cases {
+        let call = |_, mesh| set(mesh);
+        let (set, (changes, gap)) = run(call, |mut leader| async move {
+            let clock = leader.clock();
+            let (
+                first,
+                Asked {
+                    receiver,
+                    mut sender,
+                },
+            ) = leader.proposal().await;
+            match refusal {
+                Refusal::Answer(bytes) => {
+                    sender.send(leader.peer.block(&bytes)).await.unwrap();
+                    sender.finish().unwrap();
+                }
+                Refusal::End => sender.finish().unwrap(),
+                Refusal::Reset => {
+                    sender.reset(Code(16));
+                    receiver.stop(Code(16));
+                }
+            }
+            let start = clock.now();
+            let (second, mut asked) = leader.proposal().await;
+            let gap = clock.now() - start;
+            leader.answer(&mut asked, at(1)).await.unwrap();
+            leader.append(&home(1), at(1)).await;
+            leader.rest(seconds(2)).await;
+            ([first, second], gap)
+        });
+        assert_eq!(set, (Ok(()), Some(key(1))), "{case}");
+        assert_eq!(changes, [home(1), home(1)], "{case}");
+        let ms = gap.nanos() / Span::MILLISECOND.nanos();
+        assert!(
+            (100..200).contains(&ms),
+            "{case}: {ms} ms between the two proposals"
+        );
+    }
+}
+
+/// The session to node 2 that the group of `mesh` holds, when it has one.
+async fn session_to_leader(mesh: &Mesh, clock: &Clock) -> Session {
+    loop {
+        let held = mesh.group.borrow().sessions.get(&key(2)).cloned();
+        if let Some(session) = held {
+            return session;
+        }
+        clock.sleep(Span::MILLISECOND).await;
+    }
+}
+
+#[test]
+fn no_proposal_goes_to_the_leader_while_the_pool_has_no_block() {
+    let call = |node: sim::node::Node, mesh: Mesh| async move {
+        let clock = node.clock();
+        session_to_leader(&mesh, &clock).await;
+        let held = fill(&mesh.pool);
+        let mut call = pin!(set(mesh.clone()));
+        let end = clock.now() + seconds(2);
+        while clock.now() < end {
+            assert_eq!(now(call.as_mut()).await, Poll::Pending);
+            clock.sleep(Span::MILLISECOND).await;
+        }
+        drop(held);
+        call.await
+    };
+    let (set, (early, change)) = run(call, |mut leader| async move {
+        let early = leader.proposal_within(seconds(1)).await;
+        let (change, mut asked) = leader.proposal().await;
+        leader.answer(&mut asked, at(1)).await.unwrap();
+        leader.append(&home(1), at(1)).await;
+        leader.rest(seconds(2)).await;
+        (early.map(|(change, _)| change), change)
+    });
+    assert_eq!(set, (Ok(()), Some(key(1))));
+    assert_eq!((early, change), (None, home(1)));
+}
+
+#[test]
+fn a_proposal_goes_on_the_next_session_when_the_session_to_the_leader_closed() {
+    let call = |node: sim::node::Node, mesh: Mesh| async move {
+        let session = session_to_leader(&mesh, &node.clock()).await;
+        session.close(Code(7));
+        set(mesh).await
+    };
+    let (set, change) = run(call, |mut leader| async move {
+        leader.session = leader.peer.session().await;
+        let (change, mut asked) = leader.proposal().await;
+        leader.answer(&mut asked, at(1)).await.unwrap();
+        leader.append(&home(1), at(1)).await;
+        leader.rest(seconds(2)).await;
+        change
+    });
+    assert_eq!((set, change), ((Ok(()), Some(key(1))), home(1)));
 }
 
 /// An index that only a probe for the leader sets.
