@@ -948,10 +948,15 @@ How to read this record:
   entry or group count: an entry or group past the key set is absent. A frame is at
   most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
   their order and padding are part of the disk and wire format version (C9d). A change
-  to either needs a new version. A `Draft` writes zeros in the padding, and no reader
-  reads it, so `frame::check` does not check it. A frame from a peer may hold other
-  bytes there, which `replica` stores and copy mode (X43) sends as they are (decided by
-  the architect, #1064:
+  to either needs a new version. `Layout::draft` writes zeros in the padding of a frame
+  from lengths. A frame from ends gets its padding from `Draft::body_mut`, which the
+  caller fills whole (decided by the architect, #1246, 2026-10-07T15:17:43Z:
+  https://github.com/synnaxlabs/foundation/issues/1246#issuecomment-6040879844).
+  Supersedes the zero padding of every draft in
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642. No
+  reader reads the padding, so `frame::check` does not check it. A frame from a peer may
+  hold other bytes there, which `replica` stores and copy mode (X43) sends as they are
+  (decided by the architect, #1064:
   https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642, worded in
   https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031226370). The
   padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
