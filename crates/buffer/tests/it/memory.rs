@@ -94,8 +94,8 @@ fn key(path: &Path) -> PathBuf {
 }
 
 /// Whether `path` ends in `/` or `/.`, as `a/` does. Such a path names only a
-/// directory: a disk gives `EISDIR` (21) on a create and `ENOTDIR` (20) on a
-/// file that is there.
+/// directory. The driver gives `EISDIR` (21) on a create and `ENOTDIR` (20) on
+/// a file that is there, as a disk does for a path ending in `/`.
 fn slashed(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
     bytes.ends_with(b"/") || bytes.ends_with(b"/.")
