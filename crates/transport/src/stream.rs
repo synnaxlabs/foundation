@@ -28,7 +28,7 @@ const CANCELLED: Error = Error::Reset { code: Code(0) };
 pub struct Part {
     /// The bytes of the block to send.
     pub range: Range<usize>,
-    /// The zero bytes to send after them, at most 7.
+    /// The zero bytes to send after them.
     pub zeros: u8,
 }
 
@@ -51,6 +51,7 @@ pub struct Part {
 pub struct Sender {
     session: Rc<quic::Session>,
     class: Class,
+    bytes_max: usize,
     /// `None` once a dropped send future reset the stream.
     stream: Option<quic::stream::Sender>,
 }
@@ -64,6 +65,7 @@ impl Sender {
         Self {
             session,
             class,
+            bytes_max: stream.bytes_max(),
             stream: Some(stream),
         }
     }
@@ -80,10 +82,24 @@ impl Sender {
         self.class
     }
 
+    /// The largest message the peer takes: its `message_bytes_max`. It does not
+    /// change during the session. A message over it gives [`Error::TooLarge`].
+    ///
+    /// ```
+    /// fn fits(sender: &transport::stream::Sender, frame: &block::Block) -> bool {
+    ///     frame.len() <= sender.bytes_max()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn bytes_max(&self) -> usize {
+        self.bytes_max
+    }
+
     /// Sends `message` whole. It waits while the peer's flow control has no room,
     /// and returns once the stream holds the message, not when the peer has it. If the
-    /// future drops before it completes, the stream resets with `Code(0)`, because
-    /// part of the message may be sent.
+    /// future drops after the stream took the message and before it completes, the
+    /// stream resets with `Code(0)`, because part of the message may be sent. If it
+    /// drops before that, nothing is sent.
     ///
     /// # Errors
     ///
@@ -104,6 +120,7 @@ impl Sender {
     /// }
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
+        let bytes_max = self.bytes_max;
         let mut sending = Sending {
             session: &self.session,
             stream: &mut self.stream,
@@ -112,7 +129,10 @@ impl Sender {
         let mut message = Some(message);
         let sent = poll_fn(|cx| {
             let Some(stream) = sending.stream else {
-                return Poll::Ready(Err(CANCELLED));
+                // Only a dropped send future resets the stream, so this is the first
+                // poll, and the message is in hand.
+                let bytes = message.as_ref().map_or(0, |message| message.len());
+                return Poll::Ready(cancelled(bytes, bytes_max));
             };
             sending.session.poll_write(cx, stream, &mut message)
         })
@@ -151,7 +171,9 @@ impl Sender {
     /// }
     /// ```
     pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
-        self.stream.as_mut().ok_or(CANCELLED)?;
+        if self.stream.is_none() {
+            return cancelled(message.len(), self.bytes_max);
+        }
         drop(message);
         todo!("#68")
     }
@@ -170,7 +192,7 @@ impl Sender {
     /// # Panics
     ///
     /// When called after [`finish`](Self::finish), or when a range starts after its
-    /// end, ends past the block, or has more than 7 zeros.
+    /// end or ends past the block.
     ///
     /// ```
     /// use transport::Error;
@@ -262,6 +284,13 @@ impl Sender {
     }
 }
 
+/// What a send of a message of `bytes` gives after a dropped send future reset the
+/// stream: the size error first, as on an open stream.
+fn cancelled<T>(bytes: usize, bytes_max: usize) -> Result<T, Error> {
+    quic::stream::check_size(bytes, bytes_max)?;
+    Err(CANCELLED)
+}
+
 impl Drop for Sender {
     fn drop(&mut self) {
         if let Some(stream) = self.stream.take()
@@ -327,11 +356,15 @@ impl Receiver {
     /// Waits for the next whole message. It lands in one block from the shard's pool.
     /// Returns `None` once the sender finished and every message has arrived.
     ///
+    /// It also waits while the pool has no block for the message. The message stays
+    /// queued and flow control holds the peer. The reads of one transport that wait
+    /// take blocks highest class first, then oldest first. Drop the future to end the
+    /// wait.
+    ///
     /// # Errors
     ///
-    /// [`Error::Reset`] when the sender cancelled the stream, [`Error::Pool`] when the
-    /// pool has no room for the next message (it stays queued), or the error that
-    /// ended the session.
+    /// [`Error::Reset`] when the sender cancelled the stream, or the error that ended
+    /// the session.
     ///
     /// ```
     /// use block::Block;
@@ -476,13 +509,19 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::task::{Context, Waker};
 
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::Poll;
+
     use block::Block;
+    use block::testing::Scarce;
     use sim::Sim;
     use sim::node::Node;
     use types::time::Span;
 
-    use crate::testing::{self, IDLE, poll_once, spans};
-    use crate::{Class, Code, Config, Error};
+    use crate::testing::{self, IDLE, MESSAGE_BYTES_MAX, poll_once, spans};
+    use crate::{Address, Class, Code, Config, Error, Transport};
 
     /// The messages of [`lossy`].
     const COUNT: u32 = 1000;
@@ -730,6 +769,43 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_before_or_after_finish_gives_the_peer_its_code() {
+        for finished in [false, true] {
+            let (mut sim, ..) = testing::sessions(
+                0,
+                same,
+                move |side| async move {
+                    let opened = side.session.open(Class::Complete).await;
+                    let (mut sender, mut receiver) = opened.expect("a stream");
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(b"b".to_vec())));
+                    // Too large for one flight, so the peer cannot have it all yet.
+                    let message = vec![7; 32 << 10];
+                    sender.send(side.block(&message)).await.expect("sent");
+                    if finished {
+                        sender.finish().expect("finished");
+                    }
+                    sender.reset(Code(16));
+                    let closed = Error::PeerClosed { code: Code(4) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+                move |side| async move {
+                    let mut incoming = side.session.accept().await.expect("a stream");
+                    let read = incoming.receiver.recv().await;
+                    assert_eq!(bytes(read), Ok(Some(b"a".to_vec())));
+                    let reply = incoming.sender.as_mut().expect("a reply half");
+                    reply.send(side.block(b"b")).await.expect("sent");
+                    let error = until_error(&mut incoming.receiver).await;
+                    let reset = Error::Reset { code: Code(16) };
+                    assert_eq!(error, reset, "finished: {finished}");
+                    side.session.close(Code(4));
+                },
+            );
+            assert_eq!(sim.run(), Ok(()));
+        }
+    }
+
+    #[test]
     fn a_dropped_send_resets_the_stream_and_each_later_call_gives_why() {
         let (mut sim, ..) = testing::sessions(
             0,
@@ -753,7 +829,93 @@ mod tests {
                 assert_eq!(sender.send(side.block(b"a")).await, Err(CANCELLED));
                 let tried = sender.try_send(side.block(b"a")).map(|_| ());
                 assert_eq!(tried, Err(CANCELLED));
+                let part = [super::Part {
+                    range: 0..1,
+                    zeros: 0,
+                }];
+                let sent = sender.send_parts(side.block(b"a"), &part).await;
+                assert_eq!(sent, Err(CANCELLED));
+                let tried = sender.try_send_parts(side.block(b"a"), &part);
+                assert_eq!(tried.map(|_| ()), Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
+                assert_eq!(sender.bytes_max(), MESSAGE_BYTES_MAX);
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let reply = incoming.sender.as_mut().expect("a reply half");
+                reply.send(side.block(b"b")).await.expect("sent");
+                let reply = incoming.sender.as_mut().expect("a reply half");
+                reply.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                assert_eq!(until_error(&mut incoming.receiver).await, CANCELLED);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_send_future_dropped_before_its_first_poll_sends_nothing() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                drop(sender.send(side.block(b"b")));
+                sender.send(side.block(b"c")).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                for message in [b"a", b"c"] {
+                    let read = incoming.receiver.recv().await;
+                    assert_eq!(bytes(read), Ok(Some(message.to_vec())));
+                }
+                assert_eq!(bytes(incoming.receiver.recv().await), Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_over_the_peers_largest_is_too_large_after_a_dropped_send() {
+        let small = |config| Config {
+            message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
+            window_bytes: 2 * 1472,
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            small,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, mut receiver) = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(b"b".to_vec())));
+                let body = vec![7; 1473];
+                while let Some(done) =
+                    poll_once(pin!(sender.send(side.block(&body[1..])))).await
+                {
+                    done.expect("sent");
+                }
+                let large = Err(Error::TooLarge {
+                    bytes: 1473,
+                    bytes_max: 1472,
+                });
+                assert_eq!(sender.send(side.block(&body)).await, large);
+                let tried = sender.try_send(side.block(&body)).map(|_| ());
+                assert_eq!(tried, large);
+                let sent = sender.send(side.block(&body[1..])).await;
+                assert_eq!(sent, Err(CANCELLED));
+                let tried = sender.try_send(side.block(&body[1..])).map(|_| ());
+                assert_eq!(tried, Err(CANCELLED));
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
             },
@@ -804,6 +966,35 @@ mod tests {
     }
 
     #[test]
+    fn each_half_gives_the_peers_largest_message() {
+        let small = |config| Config {
+            message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            small,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, _receiver) = opened.expect("a stream");
+                assert_eq!(sender.bytes_max(), 1472);
+                sender.send(side.block(b"a")).await.expect("sent");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let incoming = side.session.accept().await.expect("a stream");
+                let reply = incoming.sender.as_ref().expect("a reply half");
+                assert_eq!(reply.bytes_max(), MESSAGE_BYTES_MAX);
+                let opened = side.session.open_sender(Class::Complete).await;
+                assert_eq!(opened.expect("a stream").bytes_max(), MESSAGE_BYTES_MAX);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_message_over_the_peers_largest_is_too_large() {
         let small = |config| Config {
             message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
@@ -815,9 +1006,10 @@ mod tests {
             |side| async move {
                 let opened = side.session.open_sender(Class::Complete).await;
                 let mut sender = opened.expect("a stream");
+                assert_eq!(sender.bytes_max(), 1472);
                 let large = Error::TooLarge {
                     bytes: 1473,
-                    bytes_max: 1472,
+                    bytes_max: sender.bytes_max(),
                 };
                 let body = vec![7; 1473];
                 assert_eq!(sender.send(side.block(&body)).await, Err(large));
@@ -889,6 +1081,8 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // Compares `Debug` output: a log tells the halves of two sessions apart only by
+    // the session key in it.
     #[test]
     fn a_half_shows_its_session_key() {
         let (mut sim, ..) = testing::sessions(
@@ -1166,6 +1360,536 @@ mod tests {
                 incoming.receiver.stop(Code(3));
                 let closed = Error::PeerClosed { code: Code(5) };
                 assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// The bytes of each message in the tests of reads that wait for a block. The
+    /// pool of [`scarce`] holds one.
+    const LARGE: usize = 40_000;
+
+    /// `config` with a pool of 64 KiB on `memory`, and messages up to its largest.
+    fn scarce(config: Config, memory: impl block::Memory + 'static) -> Config {
+        let pool = block::Pool::new(block::Config { budget: 1 << 16 }, memory);
+        Config {
+            message_bytes_max: NonZeroUsize::new(pool.largest()).expect("not zero"),
+            pool: Rc::new(pool),
+            ..config
+        }
+    }
+
+    fn heap() -> block::Heap {
+        block::Heap::new(block::Config { budget: 1 << 16 }.reservation())
+    }
+
+    /// Opens a one-way stream of each of `classes` in order, sends a [`LARGE`]
+    /// message that holds its index in each byte, and finishes it. Waits `pause`
+    /// after each stream.
+    async fn send_large(side: &testing::Side, classes: &[Class], pause: Span) {
+        for (index, &class) in (0..).zip(classes) {
+            let opened = side.session.open_sender(class).await;
+            let mut sender = opened.expect("a stream");
+            sender
+                .send(side.block(&vec![index; LARGE]))
+                .await
+                .expect("sent");
+            sender.finish().expect("finished");
+            side.node.clock().sleep(pause).await;
+        }
+    }
+
+    /// Polls each of `reads` until `span` passes, and checks that none completes.
+    async fn pending_for<F: Future + Unpin>(
+        clock: &env::clock::Clock,
+        span: Span,
+        reads: &mut [F],
+    ) {
+        let mut sleep = pin!(clock.sleep(span));
+        poll_fn(|cx| {
+            for read in &mut *reads {
+                assert!(Pin::new(read).poll(cx).is_pending());
+            }
+            sleep.as_mut().poll(cx)
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_recv_with_a_full_pool_waits_until_a_block_frees() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete], Span::ZERO).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let none = crate::Status {
+                    waited: Span::ZERO,
+                    refusals: 0,
+                };
+                assert_eq!(side.transport.status(), none);
+                let held = side.pool.alloc(LARGE).expect("room");
+                let start = clock.now();
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut read = pin!(incoming.receiver.recv());
+                pending_for(
+                    &clock,
+                    spans(Span::MILLISECOND, 100),
+                    &mut [read.as_mut()],
+                )
+                .await;
+                drop(held);
+                let message = read.await.expect("a message").expect("not finished");
+                assert_eq!(message.to_vec(), vec![0; LARGE]);
+                let waited = side.transport.status().waited;
+                assert!(waited > spans(Span::MILLISECOND, 50), "{waited:?}");
+                assert!(waited <= clock.now() - start, "{waited:?}");
+                clock.sleep(spans(Span::MILLISECOND, 50)).await;
+                assert_eq!(
+                    side.transport.status(),
+                    crate::Status {
+                        waited,
+                        refusals: 0
+                    }
+                );
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_whose_commit_the_system_refuses_counts_it_and_waits() {
+        let (memory, switch) =
+            Scarce::new(block::Config { budget: 1 << 16 }.reservation());
+        let (mut sim, ..) = testing::sessions(
+            0,
+            move |config| scarce(config, memory),
+            |side| async move {
+                send_large(&side, &[Class::Complete], Span::ZERO).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            move |side| async move {
+                let clock = side.node.clock();
+                switch.refuse();
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut read = pin!(incoming.receiver.recv());
+                pending_for(
+                    &clock,
+                    spans(Span::MILLISECOND, 100),
+                    &mut [read.as_mut()],
+                )
+                .await;
+                let refused = side.transport.status().refusals;
+                // The first try and at least one retry.
+                assert!(refused > 1, "{refused}");
+                switch.allow();
+                let message = read.await.expect("a message").expect("not finished");
+                assert_eq!(message.to_vec(), vec![0; LARGE]);
+                assert_eq!(side.transport.status().refusals, refused);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn reads_that_wait_take_blocks_highest_class_first_then_oldest() {
+        let classes = [
+            Class::CatchUp,
+            Class::Complete,
+            Class::Complete,
+            Class::Command,
+        ];
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            move |side| async move {
+                let pause = spans(Span::MILLISECOND, 20);
+                send_large(&side, &classes, pause).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let held = side.pool.alloc(LARGE).expect("room");
+                let mut receivers = Vec::new();
+                for _ in 0..4 {
+                    let incoming = side.session.accept().await.expect("a stream");
+                    receivers.push(incoming.receiver);
+                }
+                let mut reads: Vec<_> = receivers
+                    .iter_mut()
+                    .map(|r| Some(Box::pin(r.recv())))
+                    .collect();
+                let freed = async {
+                    clock.sleep(spans(Span::MILLISECOND, 100)).await;
+                    drop(held);
+                };
+                let mut order = Vec::new();
+                let taken = poll_fn(|cx| {
+                    for slot in &mut reads {
+                        if let Some(read) = slot
+                            && let Poll::Ready(message) = read.as_mut().poll(cx)
+                        {
+                            let block = message.expect("a message").expect("a block");
+                            order.push(block[0]);
+                            *slot = None;
+                        }
+                    }
+                    if order.len() == 4 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                });
+                testing::join(taken, freed).await;
+                assert_eq!(order, [3, 1, 2, 0]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dropped_recv_that_waited_first_gives_the_block_to_the_next() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                let pause = spans(Span::MILLISECOND, 50);
+                send_large(&side, &[Class::Complete, Class::Complete], pause).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let held = side.pool.alloc(LARGE).expect("room");
+                let wait = spans(Span::MILLISECOND, 30);
+                let mut second;
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                let mut first_read = Box::pin(first.recv());
+                pending_for(&clock, wait, &mut [first_read.as_mut()]).await;
+                second = side.session.accept().await.expect("a stream").receiver;
+                let mut second_read = Box::pin(second.recv());
+                pending_for(
+                    &clock,
+                    wait,
+                    &mut [first_read.as_mut(), second_read.as_mut()],
+                )
+                .await;
+                drop(first_read);
+                drop(held);
+                let message = second_read.await.expect("a message").expect("a block");
+                assert_eq!(message.to_vec(), vec![1; LARGE]);
+                drop(message);
+                let message = first.recv().await.expect("a message").expect("a block");
+                assert_eq!(message.to_vec(), vec![0; LARGE]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_that_waits_for_a_block_holds_the_peers_send() {
+        let narrow = |config| {
+            let config = scarce(config, heap());
+            Config {
+                window_bytes: config.message_bytes_max.get(),
+                ..config
+            }
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            |side| async move {
+                let clock = side.node.clock();
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender
+                    .send(side.block(&vec![0; LARGE]))
+                    .await
+                    .expect("sent");
+                let mut send = Box::pin(sender.send(side.block(&vec![1; LARGE])));
+                pending_for(
+                    &clock,
+                    spans(Span::MILLISECOND, 100),
+                    &mut [send.as_mut()],
+                )
+                .await;
+                send.await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let held = side.pool.alloc(LARGE).expect("room");
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut read = Box::pin(incoming.receiver.recv());
+                pending_for(
+                    &clock,
+                    spans(Span::MILLISECOND, 150),
+                    &mut [read.as_mut()],
+                )
+                .await;
+                drop(held);
+                let message = read.await.expect("a message").expect("a block");
+                assert_eq!(message.to_vec(), vec![0; LARGE]);
+                drop(message);
+                let read = incoming.receiver.recv().await;
+                let message = read.expect("a message").expect("a block");
+                assert_eq!(message.to_vec(), vec![1; LARGE]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_session_that_ends_while_a_read_waits_ends_the_read_and_its_wait() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete], Span::ZERO).await;
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                side.session.close(Code(6));
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let _held = side.pool.alloc(LARGE).expect("room");
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let read = incoming.receiver.recv().await;
+                assert_eq!(bytes(read), Err(Error::PeerClosed { code: Code(6) }));
+                let status = side.transport.status();
+                assert!(status.waited > Span::ZERO, "{status:?}");
+                clock.sleep(spans(Span::MILLISECOND, 50)).await;
+                assert_eq!(side.transport.status(), status);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_read_that_needs_no_block_ends_while_another_read_waits_for_one() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                let pause = spans(Span::MILLISECOND, 50);
+                send_large(&side, &[Class::Complete, Class::Complete], pause).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                // The first message fills the pool.
+                let held = first.recv().await.expect("a message").expect("a block");
+                let mut second =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut second_read = Box::pin(second.recv());
+                pending_for(
+                    &clock,
+                    spans(Span::MILLISECOND, 30),
+                    &mut [second_read.as_mut()],
+                )
+                .await;
+                // The first stream finished: its read needs no block.
+                let mut end = Box::pin(first.recv());
+                let mut deadline = pin!(clock.sleep(spans(Span::SECOND, 2)));
+                let ended = poll_fn(|cx| {
+                    assert!(second_read.as_mut().poll(cx).is_pending());
+                    if let Poll::Ready(read) = end.as_mut().poll(cx) {
+                        return Poll::Ready(Some(bytes(read)));
+                    }
+                    deadline.as_mut().poll(cx).map(|()| None)
+                })
+                .await;
+                assert_eq!(ended, Some(Ok(None)), "the end waits behind the block");
+                drop(end);
+                drop(held);
+                let message = second_read.await.expect("a message").expect("a block");
+                assert_eq!(message.to_vec(), vec![1; LARGE]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn two_reads_of_messages_that_each_fill_the_pool_each_get_theirs() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete, Class::Complete], Span::ZERO)
+                    .await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let mut a = side.session.accept().await.expect("a stream").receiver;
+                let mut b = side.session.accept().await.expect("a stream").receiver;
+                let mut reads = [Some(Box::pin(a.recv())), Some(Box::pin(b.recv()))];
+                let mut got = Vec::new();
+                let mut deadline = pin!(clock.sleep(spans(Span::SECOND, 5)));
+                let done = poll_fn(|cx| {
+                    for slot in &mut reads {
+                        if let Some(read) = slot
+                            && let Poll::Ready(message) = read.as_mut().poll(cx)
+                        {
+                            // Each message drops at once.
+                            let block = message.expect("a message").expect("a block");
+                            got.push(block[0]);
+                            *slot = None;
+                        }
+                    }
+                    if got.len() == 2 {
+                        return Poll::Ready(true);
+                    }
+                    deadline.as_mut().poll(cx).map(|()| false)
+                })
+                .await;
+                assert!(done, "only {got:?} arrived");
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_on_an_ended_session_errs_while_another_session_waits_for_a_block() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        testing::shard(&server, testing::SERVER, |config, node| async move {
+            let config = scarce(config, heap());
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let ended = transport.accept().await.expect("a session");
+            let waiting = transport.accept().await.expect("a session");
+            let clock = node.clock();
+            let mut first = waiting.accept().await.expect("a stream").receiver;
+            // The first message fills the pool.
+            let held = first.recv().await.expect("a message").expect("a block");
+            let mut second = waiting.accept().await.expect("a stream").receiver;
+            let mut second_read = Box::pin(second.recv());
+            let mut receiver = ended.accept().await.expect("a stream").receiver;
+            let mut closed = pin!(ended.closed());
+            let closed = poll_fn(|cx| {
+                assert!(second_read.as_mut().poll(cx).is_pending());
+                closed.as_mut().poll(cx)
+            })
+            .await;
+            assert_eq!(closed, Error::PeerClosed { code: Code(7) });
+            let read = poll_once(pin!(receiver.recv())).await.map(bytes);
+            assert_eq!(read, Some(Err(Error::PeerClosed { code: Code(7) })));
+            drop(held);
+            let message = second_read.await.expect("a message").expect("a block");
+            assert_eq!(message.to_vec(), vec![1; LARGE]);
+            waiting.close(Code(4));
+            clock.sleep(Span::MILLISECOND).await;
+        });
+        testing::shard(&client, testing::CLIENT, move |config, node| async move {
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let server = crate::tls::public(&testing::SERVER);
+            let ended = transport.dial(server, &at).await.expect("a session");
+            let waiting = transport.dial(server, &at).await.expect("a session");
+            let messages = [(&waiting, 0), (&waiting, 1), (&ended, 2)];
+            for (session, byte) in messages {
+                let opened = session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let block = testing::block(&pool, &vec![byte; LARGE]);
+                sender.send(block).await.expect("sent");
+                sender.finish().expect("finished");
+            }
+            node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            ended.close(Code(7));
+            let closed = Error::PeerClosed { code: Code(4) };
+            assert_eq!(waiting.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_after_a_dropped_wait_and_a_drained_session_gives_the_end() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete, Class::Complete], Span::ZERO)
+                    .await;
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                side.session.close(Code(4));
+                let closed = Error::Closed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                let held = first.recv().await.expect("a message").expect("a block");
+                let mut second =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert!(poll_once(pin!(second.recv())).await.is_none());
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+                clock.sleep(spans(IDLE, 3)).await;
+                let mut read = pin!(second.recv());
+                let mut deadline = pin!(clock.sleep(Span::SECOND));
+                let read = poll_fn(|cx| {
+                    if let Poll::Ready(read) = read.as_mut().poll(cx) {
+                        return Poll::Ready(Some(bytes(read)));
+                    }
+                    deadline.as_mut().poll(cx).map(|()| None)
+                })
+                .await;
+                assert_eq!(read, Some(Err(closed)));
+                drop(held);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_that_waits_for_a_block_gives_a_reset_at_once() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let sent = sender.send(side.block(&vec![0; LARGE])).await;
+                sent.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                sender.reset(Code(9));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let held = side.pool.alloc(LARGE).expect("room");
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut read = pin!(incoming.receiver.recv());
+                let mut deadline = pin!(side.node.clock().sleep(spans(IDLE, 1)));
+                let read = poll_fn(|cx| {
+                    if let Poll::Ready(read) = read.as_mut().poll(cx) {
+                        return Poll::Ready(Some(bytes(read)));
+                    }
+                    deadline.as_mut().poll(cx).map(|()| None)
+                })
+                .await;
+                assert_eq!(read, Some(Err(Error::Reset { code: Code(9) })));
+                drop(held);
+                side.session.close(Code(4));
             },
         );
         assert_eq!(sim.run(), Ok(()));

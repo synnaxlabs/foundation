@@ -100,15 +100,10 @@ impl Set {
         readers.open(Reader::Unnamed, start, limit_bytes).key
     }
 
-    /// Opens an unnamed latest reader on the index at `place`. It wakes at once when
-    /// the index has a newest frame.
+    /// Opens an unnamed latest reader on the index at `place`. It is not woken for the
+    /// newest frame it can take at once.
     pub(crate) fn open_latest(&mut self, place: usize) -> delivery::latest::Key {
-        let entry = &mut self.entries[place];
-        let opened = entry.readers.open_latest();
-        if opened.woken {
-            wake(&mut self.keys, entry.slot, &[opened.key]);
-        }
-        opened.key
+        self.entries[place].readers.open_latest().key
     }
 
     /// Raises the credit of the complete reader `session` on the index at `place`, as
@@ -134,6 +129,19 @@ impl Set {
         session: delivery::Key,
     ) -> Option<Frame> {
         self.entries[place].readers.take(session)
+    }
+
+    /// Whether the complete reader `session` on the index at `place` missed a frame.
+    ///
+    /// # Panics
+    ///
+    /// If the index never gave `session`.
+    pub(crate) fn behind(
+        &self,
+        place: usize,
+        session: delivery::complete::Key,
+    ) -> bool {
+        self.entries[place].readers.behind(session)
     }
 
     /// Closes the reader `session` on the index at `place`. Its waiting frames do not
@@ -201,7 +209,7 @@ impl Set {
             });
         }
         keys.clear();
-        mem::swap(keys, &mut self.keys);
+        keys.append(&mut self.keys);
         keys.sort_unstable();
         keys.dedup();
     }
@@ -239,7 +247,7 @@ mod tests {
     use types::frame::{self, Draft, Form};
 
     use super::*;
-    use crate::common::{key, pool};
+    use crate::common::{create_pool, key};
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -254,7 +262,7 @@ mod tests {
                 data: &[],
             };
             Self {
-                pool: pool(4096),
+                pool: create_pool(4096),
                 set: Interner::new().intern(&[index]),
             }
         }
@@ -400,12 +408,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn wakes_at_once_when_the_index_has_a_newest_frame() {
+        fn does_not_wake_for_the_newest_frame_it_can_take_at_once() {
             let frames = Frames::new();
             let mut set = carried(1);
             set.applied(0, frames.frame(Path::Live, 0..1), 0..1);
+            let _woken = woken(&mut set);
             let latest = set.open_latest(0);
-            assert_eq!(woken(&mut set), [reader(0, latest)]);
+            assert_eq!(woken(&mut set), []);
             assert_eq!(taken(&mut set, 0, latest), [range(0, 1)]);
         }
     }

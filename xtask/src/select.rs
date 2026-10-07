@@ -149,11 +149,11 @@ mod tests {
             for (package, error) in [
                 (
                     serde_json::json!({ "id": "a-id", "name": "a" }),
-                    "cargo JSON has no array field `targets`",
+                    "JSON has no array field `targets`",
                 ),
                 (
                     serde_json::json!({ "name": "a", "targets": [] }),
-                    "cargo JSON has no string field `id`",
+                    "JSON has no string field `id`",
                 ),
             ] {
                 let metadata = serde_json::json!({ "packages": [package] });

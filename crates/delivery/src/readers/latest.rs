@@ -315,7 +315,87 @@ mod tests {
             let new = complete(&mut readers, "a", live(0));
             assert_eq!(new, complete::Key(0));
             dropped(&mut readers, old.into());
+            let open = Record {
+                reader: name("a"),
+                position: live(0),
+                hold: Span::from_nanos(10),
+                closed: None,
+            };
+            assert_eq!(readers.records().collect::<Vec<_>>(), [open]);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
+        }
+
+        #[test]
+        fn leaves_the_complete_session_that_took_over_as_it_was() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let old = readers.open_named_latest(name("a"), at(0)).key;
+            let first = frames.frame(1);
+            let reader = Reader::Named {
+                name: name("a"),
+                hold: Span::from_nanos(10),
+            };
+            let new = readers.open(reader, Start::At(live(0)), first.charge()).key;
+            assert_eq!(readers.records().count(), 1);
+            readers.queue(&first, 0..1);
+            readers.queue(&frames.frame(2), 1..2);
+            dropped(&mut readers, old.into());
+            readers.flush();
+            assert_eq!(readers.records().count(), 0);
+            assert_eq!(readers.release(2), [new]);
+            dropped(&mut readers, old.into());
+            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+            assert!(readers.take(new.into()).is_none());
+            assert!(readers.behind(new));
+        }
+
+        #[test]
+        fn leaves_credit_holds_and_keys_after_a_late_call() {
+            let frames = Frames::new(4);
+            let mut readers = Readers::new(0);
+            let gone = complete(&mut readers, "b", live(0));
+            readers.close_named(gone, at(0));
+            let old = readers.open_named_latest(name("a"), at(0)).key;
+            let first = frames.frame(1);
+            let reader = Reader::Named {
+                name: name("a"),
+                hold: Span::from_nanos(10),
+            };
+            let limit = 2 * first.charge();
+            let new = readers.open(reader, Start::At(live(0)), limit).key;
+            readers.queue(&first, 0..1);
+            assert_eq!(readers.release(1), [new]);
+            readers.records().for_each(drop);
+            assert_eq!(readers.ack(new, live(1)), Ok(()));
+            dropped(&mut readers, old.into());
+            readers.flush();
+            let acked = Record {
+                reader: name("a"),
+                position: live(1),
+                hold: Span::from_nanos(10),
+                closed: None,
+            };
+            assert_eq!(readers.records().collect::<Vec<_>>(), [acked]);
+            readers.queue(&frames.frame(2), 1..2);
+            readers.queue(&frames.frame(3), 2..3);
+            assert_eq!(readers.release(3), []);
+            assert!(readers.behind(new));
+            dropped(&mut readers, old.into());
+            assert_eq!(readers.open_latest().key, Key(1));
+            let next = complete(&mut readers, "c", live(3));
+            assert_eq!(next, complete::Key(2));
+            assert!(!readers.behind(next));
+            let missed = readers.open(Reader::Unnamed, Start::At(live(2)), 0).key;
+            assert!(readers.behind(missed));
+            let reader = Reader::Named {
+                name: name("b"),
+                hold: Span::from_nanos(10),
+            };
+            let resume = Start::Resume {
+                presented: None,
+                otherwise: live(9),
+            };
+            assert_eq!(readers.open(reader, resume, 0).position, live(0));
         }
     }
 
@@ -610,6 +690,11 @@ mod tests {
                     }
                 }
             }
+            for (&key, mailbox) in &model.mailboxes {
+                assert_eq!(taken(&mut readers, key), *mailbox);
+            }
+            let open: Vec<Key> = model.mailboxes.keys().copied().collect();
+            assert_eq!(put(&mut readers, frames.frame(n + 1)), open);
         }
 
         proptest! {

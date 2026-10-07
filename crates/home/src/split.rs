@@ -494,7 +494,7 @@ mod tests {
     use types::frame::{Form, Frame, Path, Range};
 
     use super::*;
-    use crate::common::{SCALARS, interner, key, pool};
+    use crate::common::{SCALARS, create_interner, create_pool, key};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -638,7 +638,7 @@ mod tests {
     }
 
     fn one_index() -> Arc<KeySet> {
-        interner().intern(&[Group {
+        create_interner().intern(&[Group {
             index: key(Slot::new(1)),
             data: &[],
         }])
@@ -658,7 +658,7 @@ mod tests {
             index: key(Slot::new(3)),
             data: &[(key(Slot::new(4)), Type::Scalar(Scalar::U16))],
         };
-        interner().intern(&[zero, one])
+        create_interner().intern(&[zero, one])
     }
 
     /// A write of both groups of [`two_groups`], with every entry present.
@@ -694,7 +694,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        let set = interner().intern(&[
+        let set = create_interner().intern(&[
             Group {
                 index: key(Slot::new(1)),
                 data: &data[0],
@@ -729,7 +729,7 @@ mod tests {
             let set = two_groups();
             let write = both();
             for form in [Form::Raw, Form::Encoded] {
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
 
                 let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
@@ -747,7 +747,7 @@ mod tests {
         fn gives_only_the_present_groups() {
             let set = two_groups();
             let write = BTreeMap::from([(1, both()[&1].clone())]);
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut scratch = Scratch::default();
 
             let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
@@ -789,7 +789,7 @@ mod tests {
                         "vector 0 needs 16 bytes, but 12 are left",
                     ),
                 ] {
-                    let pool = pool(1 << 16);
+                    let pool = create_pool(1 << 16);
                     let mut scratch = Scratch::default();
 
                     let mut split =
@@ -812,7 +812,7 @@ mod tests {
             fn refuses_an_encoded_index_of_too_few_stamps_with_the_decode_error() {
                 let set = two_groups();
                 let write = both();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut draft = draft(&pool, &set, Form::Encoded, &write);
                 draft.set_count(1, 3);
                 let mut scratch = Scratch::default();
@@ -844,7 +844,7 @@ mod tests {
                 let set = two_groups();
                 let write = both();
                 let named = [Form::Raw, Form::Encoded].map(|form| {
-                    let pool = pool(1 << 16);
+                    let pool = create_pool(1 << 16);
                     let mut draft = draft(&pool, &set, form, &write);
                     draft.set_count(1, 3);
                     let mut scratch = Scratch::default();
@@ -862,7 +862,7 @@ mod tests {
             #[test]
             fn refuses_an_encoded_series_with_a_header_codec_does_not_take() {
                 let set = two_groups();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut draft = draft(&pool, &set, Form::Encoded, &both());
                 for (entry, series) in draft.iter_mut() {
                     if entry == 1 {
@@ -890,7 +890,7 @@ mod tests {
             fn refuses_a_series_whose_count_was_never_set() {
                 let set = two_groups();
                 let write = both();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let lens: Vec<(usize, usize)> = write[&1]
                     .series
                     .iter()
@@ -926,7 +926,7 @@ mod tests {
         #[test]
         fn gives_the_error_of_an_encoded_index_from_its_stamps() {
             let set = one_index();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
             index[0] = 9;
             let mut scratch = Scratch::default();
@@ -953,7 +953,7 @@ mod tests {
             };
             let write = BTreeMap::from([(0, samples)]);
             for form in [Form::Raw, Form::Encoded] {
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
 
@@ -972,7 +972,7 @@ mod tests {
         #[test]
         fn gives_the_blocks_of_a_raw_frame_back_after_the_last_group() {
             let set = two_groups();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &both()));
             let mut held = Vec::new();
@@ -997,7 +997,7 @@ mod tests {
             let vector = encoded(&set, 0, &[7_u64.to_le_bytes(); 1024].concat());
             let count = 1 << 22;
             let index = vector.repeat(count / 1024);
-            let pool = pool(1 << 20);
+            let pool = create_pool(1 << 20);
             let draft = encoded_index(
                 &pool,
                 &set,
@@ -1022,7 +1022,7 @@ mod tests {
         #[test]
         fn refuses_an_empty_index_that_claims_u32_max_stamps() {
             let set = one_index();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let draft = encoded_index(&pool, &set, u32::MAX, &[]);
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, draft);
@@ -1048,7 +1048,7 @@ mod tests {
         #[test]
         fn refuses_an_encoded_index_with_bytes_after_its_last_vector() {
             let set = one_index();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
             index.push(0);
             let mut scratch = Scratch::default();
@@ -1071,7 +1071,7 @@ mod tests {
         )]
         fn panics_after_the_frame_of_its_group() {
             let set = one_index();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let index = encoded(&set, 0, &5_u64.to_le_bytes());
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, encoded_index(&pool, &set, 1, &index));
@@ -1089,7 +1089,7 @@ mod tests {
             let set = two_groups();
             let write = both();
             for form in [Form::Raw, Form::Encoded] {
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
 
@@ -1105,7 +1105,7 @@ mod tests {
         fn makes_the_index_frames_of_a_frame_of_many_series() {
             let (set, write) = many_series();
             for form in [Form::Raw, Form::Encoded] {
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
 
@@ -1121,7 +1121,7 @@ mod tests {
         fn keeps_the_frame_of_one_encoded_group_with_no_copy() {
             let set = two_groups();
             let write = BTreeMap::from([(0, both()[&0].clone())]);
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut scratch = Scratch::default();
             let mut split =
                 scratch.split(&set, draft(&pool, &set, Form::Encoded, &write));
@@ -1137,7 +1137,7 @@ mod tests {
         fn returns_the_pool_error_when_the_pool_is_full() {
             let set = two_groups();
             let write = both();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
             let mut held = Vec::new();
@@ -1163,7 +1163,7 @@ mod tests {
         fn makes_the_frame_after_a_pool_error_once_the_pool_has_room() {
             let set = two_groups();
             let write = both();
-            let pool = pool(1 << 16);
+            let pool = create_pool(1 << 16);
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
             let mut held = Vec::new();
@@ -1184,7 +1184,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is of key set 1, not of key set 0")]
             fn on_a_frame_of_another_key_set() {
-                let mut interner = interner();
+                let mut interner = create_interner();
                 let set = interner.intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[],
@@ -1200,7 +1200,7 @@ mod tests {
                         series: BTreeMap::from([(0, 5_u64.to_le_bytes().to_vec())]),
                     },
                 )]);
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
 
                 Scratch::default().split(&set, draft(&pool, &other, Form::Raw, &write));
             }
@@ -1210,7 +1210,7 @@ mod tests {
             fn on_an_absent_group() {
                 let set = two_groups();
                 let write = BTreeMap::from([(0, both()[&0].clone())]);
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split =
                     scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
@@ -1230,7 +1230,7 @@ mod tests {
                     .expect("group 0")
                     .series
                     .insert(1, vec![0; 8]);
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split =
                     scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
@@ -1242,7 +1242,7 @@ mod tests {
             #[should_panic(expected = "group 0 failed its check")]
             fn on_a_group_whose_encoded_index_is_not_valid() {
                 let set = one_index();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
                 index[0] = 9;
                 let mut scratch = Scratch::default();
@@ -1258,7 +1258,7 @@ mod tests {
                                        0 has tag 9")]
             fn on_a_group_read_past_the_decode_error_of_its_index() {
                 let set = one_index();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
                 index[0] = 9;
                 let mut scratch = Scratch::default();
@@ -1279,7 +1279,7 @@ mod tests {
                                        01000000-0000-0000-0000-000000000001: vector \
                                        0 has tag 9")]
             fn on_a_group_with_the_error_of_its_first_series_by_entry() {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(2)),
                     data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I32))],
                 }]);
@@ -1291,7 +1291,7 @@ mod tests {
                     ]),
                 };
                 let write = BTreeMap::from([(0, samples)]);
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut draft = draft(&pool, &set, Form::Encoded, &write);
                 for (entry, series) in draft.iter_mut() {
                     series[0] = if entry == 0 { 9 } else { 8 };
@@ -1306,7 +1306,7 @@ mod tests {
             #[should_panic(expected = "the index frame of group 1 was made already")]
             fn on_a_group_made_twice() {
                 let set = two_groups();
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split =
                     scratch.split(&set, draft(&pool, &set, Form::Raw, &both()));
@@ -1317,7 +1317,7 @@ mod tests {
 
             /// Splits a frame of one stamp at `count` and a `String` series after it.
             fn split_a_string_series(count: u32) {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::String)],
                 }]);
@@ -1329,7 +1329,7 @@ mod tests {
                     ]),
                 };
                 let write = BTreeMap::from([(0, samples)]);
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
 
                 Scratch::default().split(&set, draft(&pool, &set, Form::Raw, &write));
             }
@@ -1359,7 +1359,7 @@ mod tests {
         #[test]
         fn gives_none_for_a_series_of_each_scalar() {
             for scalar in SCALARS {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::Scalar(scalar))],
                 }]);
@@ -1378,7 +1378,7 @@ mod tests {
                 Type::Bytes,
             ];
             for data_type in types {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[
                         (key(Slot::new(2)), Type::Scalar(Scalar::U8)),
@@ -1414,7 +1414,7 @@ mod tests {
             let (large, many) = many_series();
             let small = two_groups();
             for form in [Form::Raw, Form::Encoded] {
-                let pool = pool(1 << 16);
+                let pool = create_pool(1 << 16);
                 let mut scratch = Scratch::default();
                 let mut split =
                     scratch.split(&large, draft(&pool, &large, form, &many));
@@ -1494,7 +1494,7 @@ mod tests {
                         data,
                     })
                     .collect();
-                let set = interner().intern(&shapes);
+                let set = create_interner().intern(&shapes);
                 let mut write = BTreeMap::new();
                 for (n, (index, data)) in data.iter().enumerate() {
                     let &(_, present, count) = &groups[n];
@@ -1527,7 +1527,7 @@ mod tests {
         #[test]
         fn makes_the_index_frame_of_any_write((set, write) in writes(), raw in any::<bool>()) {
             let form = if raw { Form::Raw } else { Form::Encoded };
-            let pool = pool(1 << 20);
+            let pool = create_pool(1 << 20);
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
 
@@ -1550,7 +1550,7 @@ mod tests {
         fn reuses_its_buffers_across_writes(
             writes in prop::collection::vec((writes(), any::<bool>()), 1..4),
         ) {
-            let pool = pool(1 << 20);
+            let pool = create_pool(1 << 20);
             let mut scratch = Scratch::default();
 
             for ((set, write), raw) in &writes {

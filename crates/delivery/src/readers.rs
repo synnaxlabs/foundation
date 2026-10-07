@@ -741,10 +741,12 @@ pub(super) mod tests {
         drained(readers);
     }
 
-    /// Makes each call on the closed session `key`, and asserts that it changes
-    /// nothing.
+    /// Makes each call on the closed session `key`, and asserts that they do not
+    /// change the floor, the deadline, or whether a frame is pending. The caller
+    /// checks its records, open sessions, key counters, and queued end after it: only
+    /// an open or a panic of `queue` shows the last two.
     pub(super) fn dropped(readers: &mut Readers, key: Key) {
-        let before = format!("{readers:?}");
+        let before = (readers.floor(), readers.deadline(), readers.pending());
         if let Key::Complete(key) = key {
             readers.grant(key, u64::MAX);
             assert_eq!(readers.ack(key, live(0)), Ok(()));
@@ -754,16 +756,10 @@ pub(super) mod tests {
         if let Key::Complete(key) = key {
             readers.close_named(key, at(i64::MAX));
         }
-        assert_eq!(format!("{readers:?}"), before);
-    }
-
-    /// Checks [`dropped`] on each complete key that `readers` gave and `open` rejects.
-    fn dropped_closed(readers: &mut Readers, open: impl Fn(&complete::Key) -> bool) {
-        for key in (0..readers.next_complete).map(complete::Key) {
-            if !open(&key) {
-                dropped(readers, key.into());
-            }
-        }
+        assert_eq!(
+            (readers.floor(), readers.deadline(), readers.pending()),
+            before
+        );
     }
 
     mod open {
@@ -1017,6 +1013,18 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn after_a_close_leaves_an_open_reader_with_nothing_to_flush() {
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(2)), 0).key;
+            readers.close_named(old, at(1));
+            readers.open(named("b", 10), Start::At(live(3)), 0);
+            drained(&mut readers);
+            dropped(&mut readers, old.into());
+            readers.flush();
+            assert_eq!(drained(&mut readers), []);
+        }
+
+        #[test]
         fn after_a_takeover_by_a_complete_session_leaves_it_open() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
@@ -1043,6 +1051,34 @@ pub(super) mod tests {
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+        }
+
+        /// Queues frame 1 of `frames` at seq 0..2 to a named and an unnamed session,
+        /// closes the named one at 1, and makes each late call on it.
+        fn closed_with_a_queue(frames: &Frames) -> Readers {
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            readers.queue(&frames.frame(1), 0..2);
+            readers.close_named(old, at(1));
+            dropped(&mut readers, old.into());
+            readers
+        }
+
+        #[test]
+        fn after_a_close_leaves_the_key_counters() {
+            let mut readers = closed_with_a_queue(&Frames::new(1));
+            let next = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
+            assert_eq!(next, complete::Key(2));
+            assert_eq!(readers.open_latest().key, latest::Key(0));
+        }
+
+        #[test]
+        #[should_panic(expected = "live frame at seq 1..2 queued after seq 2")]
+        fn after_a_close_keeps_the_end_of_the_queued_frames() {
+            let frames = Frames::new(2);
+            let mut readers = closed_with_a_queue(&frames);
+            readers.queue(&frames.frame(2), 1..2);
         }
 
         #[test]
@@ -1900,6 +1936,26 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn gives_a_named_reader_that_resumes_the_frames_past_its_position() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = readers
+                .open(named("a", 10), Start::At(live(0)), 10 * CHARGE)
+                .key;
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), [key]);
+            assert_eq!(taken(&mut readers, key), [1]);
+            assert_eq!(readers.ack(key, live(1)), Ok(()));
+            readers.close_named(key, at(0));
+            let later = readers
+                .open(named("a", 10), resume(live(0)), 10 * CHARGE)
+                .key;
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [later]);
+            assert_eq!(taken(&mut readers, later), [2]);
+        }
+
+        #[test]
         fn drops_the_queued_frames_when_a_latest_session_takes_over_the_last() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
@@ -2023,6 +2079,8 @@ pub(super) mod tests {
         struct Model {
             open: BTreeMap<complete::Key, (Option<usize>, Position, i64)>,
             closed: BTreeMap<usize, (Position, i64, i64)>,
+            /// Each key ever opened.
+            given: BTreeSet<complete::Key>,
         }
 
         impl Model {
@@ -2030,13 +2088,15 @@ pub(super) mod tests {
                 self.closed.retain(|_, (_, hold, at)| *at + *hold > now);
             }
 
+            /// Opens the next key, and returns it with the start position and the
+            /// session it replaces.
             fn open(
                 &mut self,
-                key: complete::Key,
                 name: Option<usize>,
                 hold: i64,
                 start: Start,
-            ) -> (Position, Option<Key>) {
+            ) -> (complete::Key, Position, Option<Key>) {
+                let key = complete::Key(self.given.last().map_or(0, |key| key.0 + 1));
                 let session = self
                     .open
                     .iter()
@@ -2070,7 +2130,8 @@ pub(super) mod tests {
                     }
                 };
                 self.open.insert(key, (name, position, hold));
-                (position, session.map(|(key, _)| Key::Complete(key)))
+                self.given.insert(key);
+                (key, position, session.map(|(key, _)| Key::Complete(key)))
             }
 
             fn ack(&mut self, key: complete::Key, to: Position) -> Result<(), Error> {
@@ -2185,6 +2246,17 @@ pub(super) mod tests {
             }
         }
 
+        /// Checks [`dropped`] on each key that `model` gave that is no longer open.
+        fn dropped_closed(readers: &mut Readers, model: &Model) {
+            for key in model
+                .given
+                .iter()
+                .filter(|key| !model.open.contains_key(key))
+            {
+                dropped(readers, (*key).into());
+            }
+        }
+
         /// Closes the open session `key` at `now` with the call for its kind.
         fn close(readers: &mut Readers, model: &Model, key: complete::Key, now: i64) {
             match model.open[&key].0 {
@@ -2214,8 +2286,11 @@ pub(super) mod tests {
                         Start::At(start)
                     };
                     let opened = readers.open(reader, start, 0);
-                    let expected = model.open(opened.key, name, hold, start);
-                    assert_eq!((opened.position, opened.replaced), expected);
+                    let expected = model.open(name, hold, start);
+                    assert_eq!(
+                        (opened.key, opened.position, opened.replaced),
+                        expected
+                    );
                 }
                 Input::Ack {
                     session,
@@ -2258,8 +2333,8 @@ pub(super) mod tests {
                 readers.advance(at(now));
                 model.forget(now);
                 apply(&mut readers, &mut model, input, now);
+                dropped_closed(&mut readers, &model);
                 records.extend(readers.records());
-                dropped_closed(&mut readers, |key| model.open.contains_key(key));
             }
             if flushed {
                 readers.flush();
@@ -2315,11 +2390,17 @@ pub(super) mod tests {
 
         #[derive(Clone, Copy, Debug)]
         enum Live {
-            Open(u64),
+            /// Opens a session at the count below 4 past the end of the newest gone
+            /// frame, unnamed, or as a named reader that resumes, with that position
+            /// as the fallback.
+            Open(u64, Option<usize>),
             Close(usize),
             Ack(usize, u64),
             Grant(usize, u64),
-            Queue { gap: u64, len: u64 },
+            Queue {
+                gap: u64,
+                len: u64,
+            },
             Release(u64),
             Take(usize),
         }
@@ -2328,7 +2409,6 @@ pub(super) mod tests {
         /// by number, and how many it took.
         #[derive(Default)]
         struct Got {
-            position: u64,
             behind: bool,
             /// The session missed a frame in the last release.
             missed: bool,
@@ -2338,10 +2418,11 @@ pub(super) mod tests {
             taken: usize,
         }
 
-        /// The live path stated a second way: open sessions by key, and each queued
-        /// frame.
+        /// The live path stated a second way: the readers and their positions, what
+        /// each open session got, by key, and each queued frame.
         #[derive(Default)]
         struct Flows {
+            readers: Model,
             open: BTreeMap<complete::Key, Got>,
             queued: Vec<Queued>,
         }
@@ -2380,7 +2461,13 @@ pub(super) mod tests {
                 queued.any(|queued| queued.held && !queued.seq.is_empty())
             }
 
-            fn close(&mut self, key: complete::Key) {
+            /// The live position of the open session `key`.
+            fn position(&self, key: complete::Key) -> u64 {
+                self.readers.open[&key].1.live
+            }
+
+            fn close(&mut self, key: complete::Key, now: i64) {
+                self.readers.close(key, now);
                 self.open.remove(&key);
                 if self.open.is_empty() {
                     for queued in &mut self.queued {
@@ -2417,8 +2504,9 @@ pub(super) mod tests {
                 let held = self.queued.iter_mut().filter(|queued| queued.held);
                 for queued in held.filter(|queued| queued.seq.end <= durable) {
                     queued.held = false;
-                    for got in self.open.values_mut() {
-                        if got.behind || !holds(&queued.seq, got.position) {
+                    for (key, got) in &mut self.open {
+                        let position = self.readers.open[key].1.live;
+                        if got.behind || !holds(&queued.seq, position) {
                             continue;
                         }
                         if got.spent >= got.limit {
@@ -2450,7 +2538,8 @@ pub(super) mod tests {
 
         fn live_input() -> impl Strategy<Value = Live> {
             prop_oneof![
-                (0..8_u64).prop_map(Live::Open),
+                (0..8_u64, proptest::option::of(0..2_usize))
+                    .prop_map(|(back, name)| Live::Open(back, name)),
                 any::<usize>().prop_map(Live::Close),
                 (any::<usize>(), 0..4_u64).prop_map(|(i, ahead)| Live::Ack(i, ahead)),
                 (any::<usize>(), 0..6 * CHARGE).prop_map(|(i, b)| Live::Grant(i, b)),
@@ -2460,11 +2549,39 @@ pub(super) mod tests {
             ]
         }
 
+        /// Opens a session at `start` in both, unnamed or as the named reader `name`
+        /// that resumes, and checks where it starts.
+        fn open_live(
+            readers: &mut Readers,
+            model: &mut Flows,
+            start: u64,
+            name: Option<usize>,
+            limit: u64,
+        ) {
+            let (reader, from) = match name {
+                Some(name) => (named(NAMES[name], 10), resume(live(start))),
+                None => (Reader::Unnamed, Start::At(live(start))),
+            };
+            let opened = readers.open(reader, from, limit);
+            let expected = model.readers.open(name, 10, from);
+            assert_eq!((opened.key, opened.position, opened.replaced), expected);
+            if let Some(Key::Complete(replaced)) = opened.replaced {
+                model.open.remove(&replaced);
+            }
+            let got = Got {
+                behind: model.behind(opened.position.live),
+                limit,
+                ..Got::default()
+            };
+            model.open.insert(opened.key, got);
+        }
+
         /// Checks the live path against a model of the rules: a session gets each
         /// released frame with a sample at or past its position, in seq order, while it
         /// has credit, and none after the first it has no credit for. A session that
         /// starts at or below a sample no longer in memory gets none, and nothing is
-        /// kept with no session open. A release wakes each session that had no frame
+        /// kept with no session open. A named reader that resumes starts where its
+        /// last session stopped. A release wakes each session that had no frame
         /// waiting and now has one or missed one.
         ///
         /// The `n`th open takes `limits[n]`, or 0 past the end of `limits`.
@@ -2477,32 +2594,20 @@ pub(super) mod tests {
             let mut made = 0;
             for step in steps {
                 match step {
-                    Live::Open(back) => {
+                    Live::Open(back, name) => {
                         let start = (model.gone() + 4).saturating_sub(back);
                         let limit = limits.next().unwrap_or(0);
-                        let key = readers.open(
-                            Reader::Unnamed,
-                            Start::At(live(start)),
-                            limit,
-                        );
-                        let got = Got {
-                            position: start,
-                            behind: model.behind(start),
-                            limit,
-                            ..Got::default()
-                        };
-                        model.open.insert(key.key, got);
+                        open_live(&mut readers, &mut model, start, name, limit);
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        readers.close(key.into());
-                        model.close(key);
+                        close(&mut readers, &model.readers, key, 0);
+                        model.close(key, 0);
                     }
                     Live::Ack(i, ahead) => {
                         let Some(key) = model.pick(i) else { continue };
-                        let got = model.got(key);
-                        got.position += ahead;
-                        readers.ack(key, live(got.position)).expect("forward");
+                        let to = live(model.position(key) + ahead);
+                        assert_eq!(readers.ack(key, to), model.readers.ack(key, to));
                     }
                     Live::Grant(i, limit) => {
                         let Some(key) = model.pick(i) else { continue };
@@ -2530,11 +2635,11 @@ pub(super) mod tests {
                         assert_eq!(taken, model.take(key));
                     }
                 }
+                dropped_closed(&mut readers, &model.readers);
                 assert_eq!(readers.pending(), model.pending());
                 for (&key, got) in &model.open {
                     assert_eq!(readers.behind(key), got.behind, "session {key:?}");
                 }
-                dropped_closed(&mut readers, |key| model.open.contains_key(key));
             }
         }
 
