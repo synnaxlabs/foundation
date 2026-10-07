@@ -336,11 +336,10 @@ fn a_remove_frees_a_durable_file_only_after_sync_dir() {
 }
 
 /// What a read open of a path gives a millisecond after a create at it, which starts
-/// once a remove of the file there is polled once and its future drops.
+/// once a remove of the path, with no file there, is polled once and its future drops.
 fn create_after_dropped_remove(value: u64) -> Option<Error> {
     run(value, MIB, |node, _| async move {
         let (files, path) = (node.files(), Path::new("a"));
-        drop(create(&node, "a", 1_024).await);
         let mut remove = Box::pin(files.remove(path));
         pend(remove.as_mut()).await;
         drop(remove);
@@ -352,7 +351,7 @@ fn create_after_dropped_remove(value: u64) -> Option<Error> {
 }
 
 #[test]
-fn a_dropped_remove_that_ends_after_a_create_removes_the_new_file() {
+fn a_dropped_remove_can_remove_a_file_that_a_later_create_makes() {
     let removed = Some(Error::NotFound { path: "a".into() });
     let both = [removed, None];
     let opens: Vec<_> = (0..32).map(create_after_dropped_remove).collect();
