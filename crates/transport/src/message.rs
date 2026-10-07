@@ -732,6 +732,10 @@ mod tests {
                 assert!(live.load(Ordering::Relaxed) <= 64, "at byte {at}");
                 size = size % 3 + 1;
                 let end = at + size.min(max);
+                if end == stream.len() {
+                    // The check in `take` sees a 65th chunk only after a full list.
+                    assert_eq!(live.load(Ordering::Relaxed), 64, "a full list");
+                }
                 live.fetch_add(1, Ordering::Relaxed);
                 let bytes = stream[at..end].to_vec();
                 at = end;
