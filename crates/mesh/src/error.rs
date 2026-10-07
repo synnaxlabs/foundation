@@ -1,7 +1,7 @@
 use std::fmt;
 
 use raft::Position;
-use types::node;
+use types::node::{self, PublicKey};
 
 use crate::region::Malformed;
 use crate::{grant, log};
@@ -24,10 +24,18 @@ pub(crate) enum Error {
         /// The sender.
         from: node::Key,
     },
+    /// A forwarded change from a peer whose key no voter of this node's configuration
+    /// holds.
+    PeerNotVoter {
+        /// The key that the peer proved.
+        peer: PublicKey,
+    },
     /// A message carries a grant or a change that does not hold.
     Grant(grant::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// Two member records name one node.
+    Duplicate(node::Key),
     /// This node's private key is not the key of its member.
     WrongKey,
     /// The group stopped.
@@ -47,10 +55,16 @@ impl fmt::Display for Error {
             Self::NotVoter { from } => {
                 write!(f, "node {from} sent a request, but it is not a voter")
             }
+            Self::PeerNotVoter { peer } => write!(
+                f,
+                "the peer with the public key {peer} forwarded a change, but no voter \
+                 holds that key"
+            ),
             Self::Grant(error) => error.fmt(f),
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::Duplicate(key) => write!(f, "node {key} has two member records"),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }

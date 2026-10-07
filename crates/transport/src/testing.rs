@@ -22,6 +22,8 @@ use crate::{Address, Config, Port, Session, Transport, port, quic};
 
 /// The most streams of each kind a peer may open, in [`Shard::config`].
 pub(crate) const STREAMS_MAX: u32 = 16;
+/// The largest message of each side, in [`Shard::config`].
+pub(crate) const MESSAGE_BYTES_MAX: usize = 1 << 16;
 
 /// The UDP port of [`address`].
 pub(crate) const PORT: u16 = 4433;
@@ -80,7 +82,7 @@ impl Shard {
     pub(crate) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
         Config {
             private_key,
-            message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+            message_bytes_max: NonZeroUsize::new(MESSAGE_BYTES_MAX).expect("not zero"),
             window_bytes: 1 << 20,
             streams_max: NonZeroU32::new(STREAMS_MAX).expect("not zero"),
             idle,

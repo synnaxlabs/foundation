@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::Pool;
 use raft::{
     Answer, Body, Change, Data, Entry, Grant, Message, Position, Proof, Ready,
@@ -13,6 +12,7 @@ use raft::{
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
 use crate::card::{self, Card};
+use crate::ed25519;
 use crate::grant::Signer;
 use crate::member::Member;
 
@@ -32,8 +32,7 @@ pub(crate) fn signer(id: u8) -> Signer {
 }
 
 pub(crate) fn public(id: u8) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private(id).0).unwrap();
-    PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
+    ed25519::public(&ed25519::pair(&private(id)))
 }
 
 /// The record of node `id`, with a card that the node signed.
@@ -42,23 +41,23 @@ pub(crate) fn member(id: u8) -> Member {
         name: format!("plant.node{id}").parse().unwrap(),
         public_key: public(id),
         seal_key: SealKey::new([9; 32]).unwrap(),
-        addresses: Vec::new(),
+        addresses: card::addresses::Addresses::new(Vec::new()).unwrap(),
         version: 1,
     };
     Member {
         card: card::Signed::sign(key(id), card, &private(id)),
         admission: [0; 64],
-        expiry: None,
+        ephemeral: None,
         status: BTreeMap::new(),
     }
 }
 
-pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, Member> {
-    ids.iter().map(|&id| (key(id), member(id))).collect()
+pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
+    ids.iter().map(|&id| member(id)).collect()
 }
 
 /// A pool of 4 MiB.
-pub(crate) fn pool() -> Rc<Pool> {
+pub(crate) fn create_pool() -> Rc<Pool> {
     let config = block::Config { budget: 4 << 20 };
     let memory = block::Heap::new(config.reservation());
     Rc::new(Pool::new(config, memory))

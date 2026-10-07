@@ -55,5 +55,6 @@ mod message;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod region;
+pub mod ticket;
 
 pub use member::Member;
