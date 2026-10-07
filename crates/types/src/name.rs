@@ -661,10 +661,17 @@ mod tests {
             s.parse().unwrap()
         }
 
+        fn segments(
+            count: std::ops::Range<usize>,
+        ) -> impl Strategy<Value = Vec<&'static str>> {
+            prop::collection::vec(prop::sample::select(vec!["a", "b", "@x"]), count)
+        }
+
         #[test]
         fn root_contains_each_name() {
             assert!(Prefix::ROOT.contains(&name("a")));
             assert!(Prefix::ROOT.contains(&name("a.b")));
+            assert!(Prefix::ROOT.contains(&name("@changes")));
         }
 
         #[test]
@@ -702,11 +709,13 @@ mod tests {
         proptest! {
             #[test]
             fn contains_a_name_whose_segments_start_with_its_own(
-                p in names(),
-                n in names(),
+                p in segments(0..7),
+                n in segments(1..16),
             ) {
-                let got = prefix(&p.join(".")).contains(&name(&n.join(".")));
-                prop_assert_eq!(got, n.starts_with(&p));
+                let text = p.join(".");
+                let got = prefix(&text);
+                prop_assert_eq!(got.to_string(), text);
+                prop_assert_eq!(got.contains(&name(&n.join("."))), n.starts_with(&p));
             }
         }
     }
