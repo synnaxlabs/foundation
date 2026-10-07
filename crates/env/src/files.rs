@@ -54,7 +54,8 @@ impl Files {
 
     /// Opens the file at `path`. A file that [`Mode::Create`] makes is not durable
     /// until [`Files::sync_dir`] on its directory ends. After that, a crash leaves it
-    /// whole, with `len` zero bytes. A failed create leaves no file at `path`.
+    /// whole, with `len` zero bytes. A failed create leaves no file at `path`. A create
+    /// that fails with [`Error::Busy`] leaves the file to the handle that holds it.
     ///
     /// # Errors
     ///
@@ -627,10 +628,11 @@ pub trait Driver {
     /// zeroed bytes. It treats an empty file that is there as missing and allocates
     /// it, because a crash between the create and the allocation leaves one. It opens
     /// any other file that is there as it is. A failed create leaves no file at
-    /// `path`. It makes the allocation durable before it ends (`os`: `fallocate`,
-    /// then `fsync` the file), so a `sync_dir` alone makes the file whole. A write
-    /// open of a file that a write handle holds gives [`Error::Busy`] before any other
-    /// check or change of the file.
+    /// `path`. A create that fails with [`Error::Busy`] leaves the file to the handle
+    /// that holds it. It makes the allocation durable before it ends (`os`:
+    /// `fallocate`, then `fsync` the file), so a `sync_dir` alone makes the file
+    /// whole. A write open of a file that a write handle holds gives [`Error::Busy`]
+    /// before any other check or change of the file.
     fn open<'a>(
         &'a self,
         path: &'a Path,
