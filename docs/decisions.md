@@ -533,15 +533,17 @@ How to read this record:
   makes the ring again with `Config::layout`, then syncs the directories and writes the
   first checkpoint, so a ring with no checkpoint takes the layout of the open and a ring
   with one keeps its own (#1254). The open holds its write handle of the old file
-  through the remove, so of two opens at once one gets `Busy`. It syncs the directory
-  after the remove and before the create, because a disk gives the room of a removed
-  file back only then: the remake needs room for the larger of the two files, not for
-  both. `Length` stays for a ring with a checkpoint whose length does not fit its
-  header, and for a file that is not empty and ends inside its header blocks. A crash at
-  any point of the remake leaves a ring that the next open takes, or no ring. Lost: fit
-  the layout to the length of the file (a ring whose size no config gave), and keep the
-  file when its length fits (two paths for one case). It does not wait for
-  `File::resize` (#1238). Decided by `laptop.architect` (2026-10-07T07:47:16Z):
+  through the remove, so of two opens at once one gets `Busy`; an `os` open can still
+  take a removed file, which `os` is to close (#1297). It syncs the directory before
+  each create of a ring, because a disk gives the room of a removed file back only then,
+  and a kill after the remove leaves such a file: the remake needs room for the larger
+  of the two files, not for both. `Length` stays for a ring with a checkpoint whose
+  length does not fit its header, and for a file that is not empty and ends inside its
+  header blocks. A crash at any point of the remake leaves a ring that the next open
+  takes, or no ring. Lost: fit the layout to the length of the file (a ring whose size
+  no config gave), and keep the file when its length fits (two paths for one case). It
+  does not wait for `File::resize` (#1238). Decided by `laptop.architect`
+  (2026-10-07T07:47:16Z):
   https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001. The held
   handle, the sync before the create, and the `Length` text: decided by
   `laptop.architect` (2026-10-07T09:08:16Z):

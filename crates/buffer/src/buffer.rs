@@ -608,6 +608,8 @@ async fn open_ring(
         (file, Some(blocks))
     } else {
         files.create_dir(dir).await?;
+        // A removed ring keeps its room until this sync, and the new ring needs it.
+        files.sync_dir(dir).await?;
         let len = layout.file_len();
         let ring = files.open(&dir.join("ring"), Mode::Create { len }).await?;
         (ring, None)
@@ -626,7 +628,7 @@ async fn open_ring(
 
 /// Opens the ring file in `dir` and reads its two header blocks. `None` when no file
 /// with a checkpoint is there. A file that is empty, or whose header blocks are
-/// zero, holds no checkpoint: this removes it, and the removal is durable.
+/// zero, holds no checkpoint: this removes it.
 ///
 /// # Errors
 ///
@@ -657,8 +659,6 @@ async fn open_written(
     // The handle stays through the remove, so no other open takes this file.
     files.remove(&path).await?;
     file.close().await;
-    // The disk gives the room of the file back only now, and the new ring needs it.
-    files.sync_dir(dir).await?;
     Ok(None)
 }
 

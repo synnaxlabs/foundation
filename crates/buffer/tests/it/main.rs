@@ -1619,7 +1619,7 @@ enum Found {
 }
 
 /// Opens the ring on `node` with `layout`. Returns what the file held before the
-/// open, what the open gave, and the length of the file after it.
+/// open, what the open gave, and the length of the file after it, 0 with no file.
 fn open_with(
     sim: &mut sim::Sim,
     node: &sim::node::Node,
@@ -1647,7 +1647,7 @@ fn open_with(
         let buffer = Buffer::open(config, &mut Slots::new()).await;
         let opened = buffer.map(|buffer| buffer.layout());
         let file = files.open(FilePath::new(RING), Mode::Read).await;
-        (found, opened, file.expect("the ring is there").len())
+        (found, opened, file.map_or(0, |file| file.len()))
     });
     found.expect("the open ends")
 }
@@ -1727,25 +1727,36 @@ fn a_ring_with_no_checkpoint_is_made_again_in_the_room_that_it_leaves() {
     }
 }
 
-/// A crash at any point of the first open, on a disk with room for one ring and not
-/// for two, leaves a ring that opens.
+/// A crash at any point of the first open, or of an open that makes a ring with no
+/// checkpoint again, on a disk with room for one ring and not for two, leaves a ring
+/// that opens. A kill after the remove leaves a file with no name that keeps its room.
 #[test]
-fn a_crash_in_the_first_open_leaves_a_ring_that_opens_in_the_room_of_one() {
+fn a_crash_in_an_open_leaves_a_ring_that_opens_in_the_room_of_one() {
     let new = layout(AREA, BODY_MAX);
     let len = AREA_START + AREA;
-    for crash in [sim::Crash::Process, sim::Crash::Power] {
+    for (crash, unwritten) in [
+        (sim::Crash::Process, false),
+        (sim::Crash::Process, true),
+        (sim::Crash::Power, false),
+        (sim::Crash::Power, true),
+    ] {
         each_cut(0..8, 5_000, |seed, cut| {
             let (mut sim, node) = node_with_disk(seed, len + len / 2);
+            if unwritten {
+                create_unwritten(&mut sim, &node, len);
+            }
             let ended = cut_an_open(&mut sim, &node, cut, crash);
-            let (_, opened, _) = open_with(&mut sim, &node, new);
-            assert_eq!(opened, Ok(new), "seed {seed}, {crash:?} at {cut} ns");
+            let opened = open_with(&mut sim, &node, new);
+            let at = format!("seed {seed}, {crash:?} at {cut} ns, {unwritten}");
+            assert_eq!((opened.1, opened.2), (Ok(new), len), "{at}");
             ended
         });
     }
 }
 
 /// A failed remove of a ring with no checkpoint, or a failed sync of its directory
-/// after the remove, fails the open. The next open makes the ring again.
+/// after the remove, fails the open. The next open makes the ring again, also on a
+/// disk with no room for both files.
 #[test]
 fn a_failed_remove_of_a_ring_with_no_checkpoint_fails_the_open() {
     let (other, len) = (layout(2 * AREA, BODY_MAX), AREA_START + AREA);
@@ -1754,7 +1765,7 @@ fn a_failed_remove_of_a_ring_with_no_checkpoint_fails_the_open() {
         (DIR, Operation::SyncDir, Found::Absent),
     ];
     for (path, operation, left) in faults {
-        let (mut sim, node) = one_node(10);
+        let (mut sim, node) = node_with_disk(10, AREA_START + 2 * AREA + len / 2);
         create_unwritten(&mut sim, &node, len);
         node.fail_file(FilePath::new(path), operation);
         let opened = sim.run_on(&node, move |node, tasks| async move {
@@ -1776,13 +1787,15 @@ fn a_failed_remove_of_a_ring_with_no_checkpoint_fails_the_open() {
     }
 }
 
-/// Two opens at once of a ring with no checkpoint: one gets the ring and the other
-/// gets `Busy`. The entry that the first commits is there after a kill and an open.
+/// Two opens at once of a ring with no checkpoint, on a disk with room for one ring:
+/// one gets the ring and the other gets `Busy`. The entry that the first commits is
+/// there after a kill and an open.
 #[test]
 fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
+    let len = AREA_START + AREA;
     for seed in 0..256 {
-        let (mut sim, node) = one_node(seed);
-        create_unwritten(&mut sim, &node, AREA_START + AREA);
+        let (mut sim, node) = node_with_disk(seed, len + len / 2);
+        create_unwritten(&mut sim, &node, len);
         let results = [1, 2].map(|index| {
             let result = Arc::new(Mutex::new(None));
             let (own, shared) = (node.clone(), Arc::clone(&result));

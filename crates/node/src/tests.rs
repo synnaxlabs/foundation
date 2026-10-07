@@ -861,6 +861,7 @@ mod buffer {
     fn a_crash_during_the_opens_then_another_disk_budget_opens() {
         let mut failed = Vec::new();
         for crash in [sim::Crash::Process, sim::Crash::Power] {
+            let mut last = None;
             for step in 0..60 {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
@@ -875,7 +876,10 @@ mod buffer {
                 if !lens.as_ref().is_ok_and(|lens| lens.iter().all(fits)) {
                     failed.push(format!("{crash:?} at {after:?}: {lens:?}"));
                 }
+                last = Some(lens);
             }
+            // The cuts go past the opens: at the last one each ring has a checkpoint.
+            assert_eq!(last, Some(Ok([DISK.bytes() / 2; 2])), "{crash:?}");
         }
         assert_eq!(failed, Vec::<String>::new());
     }
