@@ -3748,7 +3748,9 @@ policy (X25): when the winning placement names no home, a less specific one does
 give it (architect, #1150,
 https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
 The order is `spec::placement::place`. Decided by architect-2 (#1150,
-https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6039572310).
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6039572310). It
+names each placement by its tree key (architect-2,
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6039872584).
 Basis: BQ10, B7, C5 SHAPE.
 
 **X23. The `index` edge stated twice.**

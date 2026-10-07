@@ -11,7 +11,8 @@ use crate::resolve::{Tie, resolve};
 /// wins for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placed<'a> {
-    /// The placement that wins for the index, or `None` when no placement selects it.
+    /// The tree key of the placement that wins for the index, or `None` when no
+    /// placement selects it.
     pub placement: Option<&'a Name>,
     /// The node that orders, buffers, and gates the index.
     pub home: &'a Name,
@@ -21,13 +22,13 @@ pub struct Placed<'a> {
     pub copies: &'a [Name],
 }
 
-/// Places the index `index`. Of `placements`, keyed by name, the one that selects the
-/// index most specifically wins whole: a less specific one never fills a node it
-/// leaves out. The home is the winner's home, else `writer`, the node of the connector
-/// that writes the index.
+/// Places the index `index`. Of `placements`, the one that selects the index most
+/// specifically wins whole: a less specific one never fills a node it leaves out. The
+/// home is the winner's home, else `writer`, the node of the connector that writes the
+/// index.
 ///
-/// `placements` holds each placement that reaches the index, once: those of its region
-/// and of each region above it. Node names compare as written, so `Edge` and `edge` are
+/// `placements` gives each placement with its tree key. It holds each placement that
+/// reaches the index, once: those of its region and of each region above it. Node names compare as written, so `Edge` and `edge` are
 /// two nodes. The caller checks that a node exists, is not reserved, and is in the
 /// home's region.
 ///
@@ -43,7 +44,7 @@ pub fn place<'a>(
     writer: Option<&'a Name>,
 ) -> Result<Placed<'a>, Unplaced> {
     let winner = resolve(index, placements, Policy::select)
-        .map_err(|Tie { first, second }| Unplaced::Tie(first, second))?;
+        .map_err(|Tie { first, second }| Unplaced::Tie { first, second })?;
     let placement = winner.map(|(key, _)| key);
     let policy = winner.map(|(_, policy)| policy);
     let home = match (policy.and_then(Policy::home), writer) {
@@ -79,18 +80,24 @@ pub fn place<'a>(
 pub enum Unplaced {
     /// The two placements, the first two in name order of those tied, select the index
     /// with the same specificity.
-    Tie(Name, Name),
+    Tie {
+        /// The first of the tied placements, in name order.
+        first: Name,
+        /// The second of the tied placements, in name order.
+        second: Name,
+    },
     /// The placement that wins for the index names no home, or no placement selects
     /// it, and no connector writes it.
     NoHome {
-        /// The placement that wins, or `None` when no placement selects the index.
+        /// The tree key of the placement that wins, or `None` when no placement
+        /// selects the index.
         placement: Option<Name>,
     },
     /// The node of the writer is the home and also has a role in the placement.
     Overlap {
         /// The node of the writer.
         node: Name,
-        /// The placement that wins for the index.
+        /// The tree key of the placement that wins for the index.
         placement: Name,
     },
 }
@@ -98,17 +105,16 @@ pub enum Unplaced {
 impl fmt::Display for Unplaced {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tie(first, second) => write!(
+            Self::Tie { first, second } => write!(
                 f,
-                "placements {first} and {second} select the index with the same \
-                 specificity"
+                "{first} and {second} select the index with the same specificity"
             ),
             Self::NoHome {
                 placement: Some(placement),
             } => write!(
                 f,
-                "placement {placement} wins for the index and names no home, and no \
-                 connector writes the index"
+                "{placement} wins for the index and names no home, and no connector \
+                 writes the index"
             ),
             Self::NoHome { placement: None } => write!(
                 f,
@@ -116,8 +122,7 @@ impl fmt::Display for Unplaced {
             ),
             Self::Overlap { node, placement } => write!(
                 f,
-                "node {node} writes the index and has another role in placement \
-                 {placement}"
+                "node {node} writes the index and has another role in {placement}"
             ),
         }
     }
@@ -138,6 +143,11 @@ mod tests {
         text.parse().unwrap()
     }
 
+    /// The tree key of the placement labeled `label`.
+    fn key(label: &str) -> Name {
+        name(&format!("{label}.@placement"))
+    }
+
     fn policy(patterns: &[&str], home: Option<&str>, standby: Option<&str>) -> Policy {
         policy_with_copies(patterns, home, standby, &[])
     }
@@ -156,7 +166,7 @@ mod tests {
         Policy::new(Selector::new(patterns.iter().copied()).unwrap(), nodes).unwrap()
     }
 
-    /// Places `index` with `placements`, keyed by name, and `writer`.
+    /// Places `index` with `placements`, each with its tree key, and `writer`.
     fn check<'a>(
         index: &str,
         placements: &'a [(Name, Policy)],
@@ -167,9 +177,9 @@ mod tests {
 
     #[test]
     fn homes_an_index_on_the_home_of_its_placement() {
-        let placements = [(name("edge"), policy(&["edge.*"], Some("edge"), None))];
+        let placements = [(key("edge"), policy(&["edge.*"], Some("edge"), None))];
         let placed = check("edge.time", &placements, None).unwrap();
-        assert_eq!(placed.placement, Some(&name("edge")));
+        assert_eq!(placed.placement, Some(&key("edge")));
         assert_eq!(placed.home, &name("edge"));
         assert_eq!(placed.standby, None);
         assert!(placed.copies.is_empty());
@@ -177,7 +187,7 @@ mod tests {
 
     #[test]
     fn prefers_the_home_of_the_placement_to_the_writer() {
-        let placements = [(name("p"), policy(&["a.*"], Some("n_1"), Some("n_2")))];
+        let placements = [(key("p"), policy(&["a.*"], Some("n_1"), Some("n_2")))];
         let writer = name("n_2");
         let placed = check("a.time", &placements, Some(&writer)).unwrap();
         assert_eq!(placed.home, &name("n_1"));
@@ -186,7 +196,7 @@ mod tests {
 
     #[test]
     fn homes_an_index_with_no_placement_on_its_writer() {
-        let placements = [(name("p"), policy(&["b.*"], Some("n_1"), None))];
+        let placements = [(key("p"), policy(&["b.*"], Some("n_1"), None))];
         let writer = name("n_2");
         let placed = check("a.time", &placements, Some(&writer)).unwrap();
         assert_eq!(
@@ -203,15 +213,15 @@ mod tests {
     #[test]
     fn takes_the_winner_whole() {
         let placements = [
-            (name("wide"), policy(&["a.**"], Some("n_1"), None)),
+            (key("wide"), policy(&["a.**"], Some("n_1"), None)),
             (
-                name("narrow"),
+                key("narrow"),
                 policy_with_copies(&["a.*"], None, Some("n_2"), &["n_3"]),
             ),
         ];
         let writer = name("n_4");
         let placed = check("a.time", &placements, Some(&writer)).unwrap();
-        assert_eq!(placed.placement, Some(&name("narrow")));
+        assert_eq!(placed.placement, Some(&key("narrow")));
         assert_eq!(placed.home, &writer, "the wide home does not apply");
         assert_eq!(placed.standby, Some(&name("n_2")));
         assert_eq!(placed.copies, [name("n_3")]);
@@ -220,20 +230,20 @@ mod tests {
     #[test]
     fn skips_a_placement_that_excludes_the_index() {
         let placements = [
-            (name("wide"), policy(&["a.**"], Some("n_1"), None)),
+            (key("wide"), policy(&["a.**"], Some("n_1"), None)),
             (
-                name("narrow"),
+                key("narrow"),
                 policy(&["a.*", "!a.time"], Some("n_2"), None),
             ),
         ];
         let placed = check("a.time", &placements, None).unwrap();
-        assert_eq!(placed.placement, Some(&name("wide")));
+        assert_eq!(placed.placement, Some(&key("wide")));
         assert_eq!(placed.home, &name("n_1"));
     }
 
     #[test]
     fn refuses_an_index_that_no_placement_selects_and_no_connector_writes() {
-        let placements = [(name("p"), policy(&["b.*"], Some("n_1"), None))];
+        let placements = [(key("p"), policy(&["b.*"], Some("n_1"), None))];
         let none = Unplaced::NoHome { placement: None };
         assert_eq!(check("a.time", &placements, None), Err(none.clone()));
         assert_eq!(
@@ -245,51 +255,58 @@ mod tests {
     #[test]
     fn refuses_a_winner_with_no_home_that_hides_a_wider_home() {
         let placements = [
-            (name("wide"), policy(&["a.**"], Some("n_1"), None)),
-            (name("narrow"), policy(&["a.*"], None, Some("n_2"))),
+            (key("wide"), policy(&["a.**"], Some("n_1"), None)),
+            (key("narrow"), policy(&["a.*"], None, Some("n_2"))),
         ];
         let hidden = Unplaced::NoHome {
-            placement: Some(name("narrow")),
+            placement: Some(key("narrow")),
         };
         assert_eq!(check("a.time", &placements, None), Err(hidden.clone()));
         assert_eq!(
             hidden.to_string(),
-            "placement narrow wins for the index and names no home, and no connector \
-             writes the index"
+            "narrow.@placement wins for the index and names no home, and no \
+             connector writes the index"
         );
     }
 
     #[test]
     fn refuses_two_placements_with_the_same_specificity() {
         let placements = [
-            (name("p_3"), policy(&["*.time"], Some("n_1"), None)),
-            (name("p_2"), policy(&["a.*"], Some("n_2"), None)),
-            (name("p_1"), policy(&["a.*"], Some("n_3"), None)),
-            (name("p_0"), policy(&["**"], Some("n_4"), None)),
+            (key("p_3"), policy(&["*.time"], Some("n_1"), None)),
+            (key("p_2"), policy(&["a.*"], Some("n_2"), None)),
+            (key("p_1"), policy(&["a.*"], Some("n_3"), None)),
+            (key("p_0"), policy(&["**"], Some("n_4"), None)),
         ];
-        let tie = Unplaced::Tie(name("p_1"), name("p_2"));
+        let tie = Unplaced::Tie {
+            first: key("p_1"),
+            second: key("p_2"),
+        };
         assert_eq!(check("a.time", &placements, None), Err(tie.clone()));
         assert_eq!(
             tie.to_string(),
-            "placements p_1 and p_2 select the index with the same specificity"
+            "p_1.@placement and p_2.@placement select the index with the same \
+             specificity"
         );
     }
 
     #[test]
     fn ties_a_placement_given_twice_with_itself() {
         let placement = policy(&["a.*"], Some("n_1"), None);
-        let twice = [(name("p"), placement.clone()), (name("p"), placement)];
+        let twice = [(key("p"), placement.clone()), (key("p"), placement)];
         assert_eq!(
             check("a.time", &twice, None),
-            Err(Unplaced::Tie(name("p"), name("p")))
+            Err(Unplaced::Tie {
+                first: key("p"),
+                second: key("p"),
+            })
         );
     }
 
     #[test]
     fn refuses_a_writer_with_another_role() {
-        let standby = [(name("p"), policy(&["a.*"], None, Some("n_1")))];
+        let standby = [(key("p"), policy(&["a.*"], None, Some("n_1")))];
         let copy = [(
-            name("p"),
+            key("p"),
             policy_with_copies(&["a.*"], None, None, &["n_0", "n_1"]),
         )];
         let writer = name("n_1");
@@ -298,17 +315,17 @@ mod tests {
                 check("a.time", placements, Some(&writer)),
                 Err(Unplaced::Overlap {
                     node: name("n_1"),
-                    placement: name("p"),
+                    placement: key("p"),
                 })
             );
         }
         let overlap = Unplaced::Overlap {
             node: name("n_1"),
-            placement: name("p"),
+            placement: key("p"),
         };
         assert_eq!(
             overlap.to_string(),
-            "node n_1 writes the index and has another role in placement p"
+            "node n_1 writes the index and has another role in p.@placement"
         );
     }
 
@@ -329,11 +346,11 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, pattern)| {
-                    let key = format!("p_{i}");
+                    let label = format!("p_{i}");
                     let home = homes[i].then_some("home");
                     let policy =
-                        policy_with_copies(&[pattern.as_str()], home, None, &[&key]);
-                    (name(&key), policy)
+                        policy_with_copies(&[pattern.as_str()], home, None, &[&label]);
+                    (key(&label), policy)
                 })
                 .collect::<Vec<_>>();
             let writer = name("writer");
@@ -360,7 +377,7 @@ mod tests {
                     prop_assert_eq!(placed.copies, winner.copies());
                     prop_assert_eq!(placed.home, winner.home().unwrap_or(&writer));
                 }
-                ([(_, first, _), (_, second, _), ..], Err(Unplaced::Tie(a, b))) => {
+                ([(_, first, _), (_, second, _), ..], Err(Unplaced::Tie { first: a, second: b })) => {
                     prop_assert_eq!(&a, *first);
                     prop_assert_eq!(&b, *second);
                 }
