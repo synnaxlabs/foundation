@@ -3467,6 +3467,80 @@ mod tests {
         });
     }
 
+    /// Runs `pair` until the resent stop of stream `id` reaches `side`, after the
+    /// stream is freed there. Asserts that no side closed and that `side` sent no
+    /// reset after the stream was freed.
+    fn assert_ignored_late_stop(pair: &mut Pair, server: bool, id: StreamId) {
+        fn side(pair: &mut Pair, server: bool) -> &mut Side {
+            if server {
+                &mut pair.server
+            } else {
+                &mut pair.client
+            }
+        }
+        let mut freed = None;
+        for _ in 0..2000 {
+            pair.run(Duration::from_micros(100));
+            let connection = side(pair, server).connection();
+            let stats = connection.stats();
+            if freed.is_none() && connection.send_stream(id).stopped().is_err() {
+                freed = Some(stats.frame_tx.reset_stream);
+            }
+            if stats.frame_rx.stop_sending > 0 {
+                break;
+            }
+        }
+        let resets = freed.expect("the stream is freed before the stop arrives");
+        pair.run(RUN);
+        let stats = side(pair, server).connection().stats();
+        assert!(stats.frame_rx.stop_sending > 0, "the stop arrived");
+        assert_eq!(stats.frame_tx.reset_stream, resets);
+        let closed = |event: &&Event| matches!(event, Event::Closed { .. });
+        assert!(!events(&pair.server).iter().any(closed));
+        assert!(!events(&pair.client).iter().any(closed));
+    }
+
+    #[test]
+    fn ignore_a_stop_over_32_bits_after_the_drop_reset_is_acknowledged() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let bytes = [byte(Class::Complete)];
+            let id = raw(pair.client.connection(), Dir::Bi, &bytes, false);
+            pair.run(RUN);
+            let finished = pair.client.connection().send_stream(id).finish();
+            finished.expect("finished");
+            pair.run(Duration::ZERO);
+            // The stop goes before the server's reset arrives, and the link loses it.
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.client.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            pair.client.drops = 1;
+            pair.run(Duration::ZERO);
+            assert_ignored_late_stop(&mut pair, true, id);
+        });
+    }
+
+    #[test]
+    fn ignore_a_stop_over_32_bits_after_a_caller_reset_is_acknowledged() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let id = sender.key().id;
+            let now = pair.now();
+            pair.client.endpoint.reset(now, &mut sender, Code(9));
+            // The stop goes before the client's reset arrives, and the link loses it.
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.server.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            pair.server.drops = 1;
+            pair.run(Duration::ZERO);
+            assert_ignored_late_stop(&mut pair, false, id);
+        });
+    }
+
     #[test]
     fn a_stop_after_only_the_class_byte_resets_the_reply() {
         testing::run(1, |shard| {
