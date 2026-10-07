@@ -245,7 +245,7 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
         return Err(fail());
     }
     let authority = uri.authority().ok_or_else(fail)?;
-    if authority.as_str().contains('@') {
+    if authority.as_str().contains('@') || authority.host().is_empty() {
         return Err(fail());
     }
     Ok(Origin {

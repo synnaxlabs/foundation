@@ -1694,8 +1694,10 @@ How to read this record:
   request that fails on a reused connection before its response goes once more on a
   new connection, when the connection did not write it, or when its method is
   idempotent and no byte of a response came (RFC 9112, as in Go). The pool key is the
-  origin: scheme, host, and port. The key keeps the host name, because a TLS
-  connection is verified for one name and must never carry a request for another.
+  origin: the host name in lower case, and the port. The client takes only `http`
+  today; with TLS, the key also holds the scheme. The key keeps the host name, because
+  a TLS connection is verified for one name and must never carry a request for
+  another.
   Decided by the architect on #1111
   (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223). A new
   connection looks up the host through `env` and tries each address in order. A

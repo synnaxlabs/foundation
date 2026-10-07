@@ -487,6 +487,7 @@ fn refuses_a_uri_it_cannot_reach() {
         "https://10.0.0.2/",
         "/write",
         "http://admin:secret@10.0.0.2:8086/",
+        "http://:8086/",
     ] {
         let error = network.send(get(uri)).expect_err("not reachable");
         assert!(
