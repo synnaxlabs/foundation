@@ -149,9 +149,9 @@ impl FromStr for Type {
 
     /// Reads the text that `Display` writes, and only that text: a scalar (`bool`,
     /// `i8` to `i64`, `u8` to `u64`, `f32`, `f64`, `timestamp`, `duration`, or `uuid`),
-    /// an array `<scalar>[<len>]`, a matrix `<scalar>[<rows>][<columns>]`, a list `list<<scalar>, <max>>`, `string`, or
-    /// `bytes`. Case is exact, a count has no leading zero, and the one space is after
-    /// the comma of a list.
+    /// an array `<scalar>[<len>]`, a matrix `<scalar>[<rows>][<columns>]`, a list
+    /// `list<<scalar>, <max>>`, `string`, or `bytes`. Case is exact, a count has no
+    /// leading zero, and the one space is after the comma of a list.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
             "string" => return Ok(Self::String),

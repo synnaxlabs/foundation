@@ -93,16 +93,11 @@ fn body(
     let entries = set.entries();
     let group = frame.ends().next().map(|(entry, _)| entries[entry].group);
     let count = frame.ends().count();
-    let matrices = frame
-        .ends()
-        .filter(|&(entry, _)| matches!(entries[entry].data_type, Type::Matrix(_)))
-        .count();
-    let mut head = pool.alloc(COUNT + DESCRIPTOR * count + COLUMNS * matrices)?;
-    let (start, rest) = head.split_at_mut(COUNT);
+    let mut head = pool.alloc(COUNT + DESCRIPTOR * count)?;
+    let (start, descriptors) = head.split_at_mut(COUNT);
     start.copy_from_slice(&to_u32(count).to_le_bytes());
-    let (descriptors, table) = rest.split_at_mut(DESCRIPTOR * count);
     let (descriptors, _) = descriptors.as_chunks_mut::<DESCRIPTOR>();
-    let mut table = table.as_chunks_mut::<COLUMNS>().0.iter_mut();
+    let mut matrices = 0;
     for (descriptor, (entry, end)) in descriptors.iter_mut().zip(frame.ends()) {
         let entry = &entries[entry];
         assert_eq!(
@@ -117,14 +112,26 @@ fn body(
         descriptor[at::ELEMENT] = element;
         descriptor[at::N..at::END].copy_from_slice(&n.to_le_bytes());
         descriptor[at::END..].copy_from_slice(&to_u32(end).to_le_bytes());
-        if let Type::Matrix(matrix) = entry.data_type {
-            let Some(columns) = table.next() else {
-                unreachable!("invariant: the table has room for each matrix");
-            };
-            *columns = matrix.columns().to_le_bytes();
-        }
+        matrices += usize::from(kind == MATRIX);
     }
-    Ok([head.freeze(), frame.body()])
+    if matrices == 0 {
+        return Ok([head.freeze(), frame.body()]);
+    }
+    // Rare, so only a body with a matrix pays a second block and a second pass.
+    let mut whole = pool.alloc(head.len() + COLUMNS * matrices)?;
+    let (descriptors, table) = whole.split_at_mut(head.len());
+    descriptors.copy_from_slice(&head);
+    let columns =
+        frame
+            .ends()
+            .filter_map(|(entry, _)| match entries[entry].data_type {
+                Type::Matrix(matrix) => Some(matrix.columns()),
+                _ => None,
+            });
+    for (to, columns) in table.as_chunks_mut::<COLUMNS>().0.iter_mut().zip(columns) {
+        *to = columns.to_le_bytes();
+    }
+    Ok([whole.freeze(), frame.body()])
 }
 
 /// One series of a stored body.
@@ -145,8 +152,7 @@ pub(crate) struct Series<'a> {
 ///
 /// If `body` is shorter than its header. The iterator panics on an unknown kind or
 /// scalar, on a matrix that [`Matrix::new`] refuses, and on ends that do not fit the
-/// series bytes. Bytes from another node must
-/// be checked before they reach `read`.
+/// series bytes. Bytes from another node must be checked before they reach `read`.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "catch-up from disk (#274) is the first user")
@@ -695,8 +701,8 @@ mod tests {
 
             #[test]
             #[should_panic(
-                expected = "the stored body of 58 bytes is shorter than its header of 60 \
-                            bytes"
+                expected = "the stored body of 58 bytes is shorter than its header of \
+                            60 bytes"
             )]
             fn panics_on_a_body_shorter_than_its_columns() {
                 read(&stored_matrix()[..58]).for_each(drop);
@@ -704,8 +710,8 @@ mod tests {
 
             #[test]
             #[should_panic(
-                expected = "the stored body has a matrix of 65536 by 65536: expected at \
-                            most 4294967295 elements in a matrix"
+                expected = "the stored body has a matrix of 65536 by 65536: expected \
+                            at most 4294967295 elements in a matrix"
             )]
             fn panics_on_a_matrix_that_sample_refuses() {
                 let mut body = stored_matrix();
@@ -828,7 +834,9 @@ mod tests {
 
                 let matrices = series
                     .iter()
-                    .filter(|&&(e, _)| matches!(set.entries()[e].data_type, Type::Matrix(_)))
+                    .filter(|&&(e, _)| {
+                        matches!(set.entries()[e].data_type, Type::Matrix(_))
+                    })
                     .count();
                 prop_assert_eq!(
                     parts[0].len(),
