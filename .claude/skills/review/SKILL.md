@@ -37,8 +37,8 @@ The breaker runs in its own worktree. Remove it when the breaker returns
    what goes wrong, and the fix.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
    the answer. A deferral in a risk crate (`raft`, `buffer`, `delivery`, `block`,
-   `ring`, `codec`, `wire`, `home`, `replica`, `transport`) needs the explicit OK of the
-   engineer of the machine that owns the crate: link their comment.
+   `ring`, `codec`, `wire`, `home`, `replica`, `transport`) needs the explicit OK of
+   `laptop.architect`: link its comment.
 
 ## Second round
 

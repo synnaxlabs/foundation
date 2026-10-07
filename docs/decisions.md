@@ -560,10 +560,11 @@ How to read this record:
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
   the dedicated machine needs a written judgment before merge. The judgment states how
   often the path runs (per sample, frame, session, or start), its absolute cost against
-  the P1 budget, the noise of the machine, and what the change buys. The code owner
-  accepts or rejects it on those facts. The person decided on 2026-10-06 (#1047): "we
-  need to make sure that we semantically understand benchmarks. A regression of 11% can
-  be ok in the right contexts". Supersedes: a regression over 5% blocks a merge.
+  the P1 budget, the noise of the machine, and what the change buys. The architect
+  accepts or rejects it on those facts (the person, 2026-10-07: "YES"). The person
+  decided on 2026-10-06 (#1047): "we need to make sure that we semantically understand
+  benchmarks. A regression of 11% can be ok in the right contexts". Supersedes: a
+  regression over 5% blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
@@ -2008,13 +2009,20 @@ How to read this record:
 - **REVIEW TIERS (2026-10-06)** `reviewer` on every PR; `architecture` and `breaker` on
   every code PR; `performance` on hot paths, with measured numbers. A second round runs
   `reviewer` and `breaker` again on the fix commits only, with the earlier findings. A
-  deferral in a risk crate needs the engineer's explicit OK. 4 of the 5 worst escaped
-  defects came in through a fix or a deferral that nothing checked again. Decided by the
-  advisor under the quality delegation. Supersedes: BREAKER REVIEW.
+  deferral in a risk crate needs the architect's explicit OK (the person, 2026-10-07:
+  "YES"). 4 of the 5 worst escaped defects came in through a fix or a deferral that
+  nothing checked again. Decided by the advisor under the quality delegation.
+  Supersedes: BREAKER REVIEW.
 - **FACTORY MODELS (2026-10-06)** Opus 5.5 for every session and reviewer. Fable only on
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
+  own PR through the queue when the gate, the review rounds, and CI pass; agents may run
+  `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
+  `.claude/`. The person: "Great, make the fucking changes and do your fucking job
+  shipping software". Fuzz inputs in `oracles/fuzz/` need no approval either: they only
+  add tests. The person: "Yes". Supersedes: the approvals in ENGINEERS and MERGE QUEUE.
 
 ### 1.14 Testing
 
