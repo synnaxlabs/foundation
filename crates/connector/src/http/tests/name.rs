@@ -366,3 +366,15 @@ fn connects_to_the_next_address_after_a_refusal_in_the_last_2_s() {
     all_ok(&network.run(vec![Step::Send(get(&format!("http://influx:{PORT}/")))]));
     assert_eq!(log.lock().expect("no panic").requests, [0]);
 }
+
+#[test]
+fn gives_the_request_time_out_when_the_only_address_is_silent() {
+    let mut network = Network::new(89);
+    let silent = network.silent();
+    network.name("influx", vec![silent], Span::ZERO);
+    let error = network
+        .send(get(&format!("http://influx:{PORT}/")))
+        .expect_err("a silent address");
+    assert!(matches!(error, Error::TimedOut), "{error:?}");
+    assert_eq!(network.elapsed, Some(TIMEOUT));
+}
