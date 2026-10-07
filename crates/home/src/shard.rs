@@ -156,8 +156,9 @@ pub struct Config {
     /// The shard's number on its node. Each writer key the shard gives carries it,
     /// so it must differ for each shard of the node.
     pub shard: u32,
-    /// The shard's buffer. Index frames, stored headers, and handoff bodies come
-    /// from its pool.
+    /// The shard's buffer, with no entry that waits for a commit: the shard is its
+    /// only writer. Index frames, stored headers, and handoff bodies come from its
+    /// pool.
     pub buffer: Buffer,
     /// The node's clocks. Control leases expire on its monotonic clock. Stamp
     /// checks, handoffs, and stored entries read its mesh time.
