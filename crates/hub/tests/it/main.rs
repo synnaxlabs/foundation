@@ -479,6 +479,10 @@ fn gives_each_reader_the_error_of_a_failed_sync_on_each_later_call() {
             assert_eq!(complete.next().await.err(), Some(failed.clone()));
             assert_eq!(latest.next().await.err(), Some(failed.clone()));
         }
+        assert_eq!(
+            failed.to_string(),
+            "the buffer of the shard failed: sync of shard-0/ring failed with OS error 5"
+        );
     });
 }
 
