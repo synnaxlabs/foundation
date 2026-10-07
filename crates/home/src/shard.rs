@@ -1636,7 +1636,8 @@ mod tests {
         run(26, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let lease =
+                control::lease::Lease::new(Span::from_nanos(10)).expect("a lease");
             let a = Writer {
                 lease: Some(lease),
                 ..writer("subject-a", 2, &set)
@@ -2657,7 +2658,8 @@ mod tests {
         run(64, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let lease =
+                control::lease::Lease::new(Span::from_nanos(10)).expect("a lease");
             let a = Writer {
                 lease: Some(lease),
                 ..writer("a", 1, &set)
@@ -2674,7 +2676,8 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 2, &set)).expect("synced");
-            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let lease =
+                control::lease::Lease::new(Span::from_nanos(10)).expect("a lease");
             let b = Writer {
                 lease: Some(lease),
                 ..writer("b", 1, &set)
