@@ -223,12 +223,12 @@ fn error(
 ) -> Result<(), Error> {
     let mut first = failed;
     let mut panicked = None;
-    for (joined, error) in shards {
+    for (joined, failure) in shards {
         if let Err(e) = joined {
             panicked.get_or_insert(Error::Panicked(e));
         }
-        if let Some(error) = error {
-            first.get_or_insert(error);
+        if let Some(failure) = failure {
+            first.get_or_insert(failure);
         }
     }
     first.or(panicked).map_or(Ok(()), Err)
