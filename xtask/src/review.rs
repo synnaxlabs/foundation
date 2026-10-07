@@ -37,9 +37,7 @@ struct Comment {
 struct Round {
     number: u32,
     reviewers: BTreeSet<String>,
-    /// The round has the line `Breaker: skipped`: its range changes no `.rs` line but
-    /// comments.
-    breakerless: bool,
+    from: String,
     end: String,
     findings: u32,
 }
@@ -56,7 +54,12 @@ pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
     let found = fetch(pr).and_then(|record| {
         let base = format!("origin/{}", record.base);
         let history = history::History::new(root, &base);
-        problems(&record, head, &|end| history.reaches(end, head))
+        problems(
+            &record,
+            head,
+            &|end| history.reaches(end, head),
+            &|from, end| history.comments_only(from, end),
+        )
     });
     match found {
         Ok(problems) if problems.is_empty() => ExitCode::SUCCESS,
@@ -76,11 +79,13 @@ pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
 /// The problems with the review in `record` at `head`: each round must name the
 /// reviewers it requires, and the last round must find nothing and end at `head`.
 /// `reaches` reports whether a commit (a SHA or its prefix) reaches `head` through
-/// clean merges of the base.
+/// clean merges of the base, and `comments_only` whether a range changes only comment
+/// lines of `.rs` files.
 fn problems(
     record: &Record,
     head: &str,
     reaches: &dyn Fn(&str) -> Result<bool, String>,
+    comments_only: &dyn Fn(&str, &str) -> Result<bool, String>,
 ) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     let rounds: Vec<_> = record
@@ -103,7 +108,7 @@ fn problems(
                 continue;
             }
         };
-        let missing: Vec<&str> = required(round, &record.files)
+        let missing: Vec<&str> = required(round, &record.files, comments_only)?
             .into_iter()
             .filter(|name| !round.reviewers.contains(*name))
             .collect();
@@ -143,21 +148,27 @@ fn problems(
 /// The reviewers that `round` must name for a PR that changes `files`, by REVIEW
 /// TIERS in `docs/decisions.md`: on round 1, `reviewer`, plus `architecture` and
 /// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR
-/// unless the round skipped it. `performance` depends on what the code does, so no
-/// round requires it here.
-fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
+/// unless the range changes only comment lines. `performance` depends on what the
+/// code does, so no round requires it here.
+fn required(
+    round: &Round,
+    files: &[String],
+    comments_only: &dyn Fn(&str, &str) -> Result<bool, String>,
+) -> Result<Vec<&'static str>, String> {
     let code = files.iter().map(Path::new).any(|f| {
         f.extension().is_some_and(|e| e == "rs")
             || f.file_name()
                 .is_some_and(|n| n == "Cargo.toml" || n == "Cargo.lock")
     });
-    if code && round.number <= 1 {
-        vec!["reviewer", "architecture", "breaker"]
-    } else if code && !round.breakerless {
-        vec!["reviewer", "breaker"]
-    } else {
+    Ok(if !code {
         vec!["reviewer"]
-    }
+    } else if round.number <= 1 {
+        vec!["reviewer", "architecture", "breaker"]
+    } else if comments_only(&round.from, &round.end)? {
+        vec!["reviewer"]
+    } else {
+        vec!["reviewer", "breaker"]
+    })
 }
 
 /// A problem when no director verdict by the bot has the line
@@ -195,9 +206,7 @@ fn round(body: &str) -> Option<Result<Round, String>> {
         )));
     };
     let (mut reviewers, mut range, mut findings) = (None, None, None);
-    let mut breakerless = false;
     for line in lines {
-        breakerless |= line.starts_with("Breaker: skipped");
         if let Some(value) = line.strip_prefix("Reviewers: ") {
             reviewers.get_or_insert(value);
         } else if let Some(value) = line.strip_prefix("Range: ") {
@@ -214,7 +223,7 @@ fn round(body: &str) -> Option<Result<Round, String>> {
     };
     let fields = || {
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
-        let (_, end) = range.split_once("..").ok_or_else(|| {
+        let (from, end) = range.split_once("..").ok_or_else(|| {
             format!(
                 "review round {number} has the range `{range}`, not `<from>..<head>`"
             )
@@ -222,7 +231,10 @@ fn round(body: &str) -> Option<Result<Round, String>> {
         let findings = match findings.ok_or_else(|| missing("Findings"))? {
             "none" => 0,
             count => count.parse().map_err(|e| {
-                format!("review round {number} has `Findings: {count}`, not a count or `none`: {e}")
+                format!(
+                    "review round {number} has `Findings: {count}`, not a count or \
+                     `none`: {e}"
+                )
             })?,
         };
         Ok(Round {
@@ -232,7 +244,7 @@ fn round(body: &str) -> Option<Result<Round, String>> {
                 .split(',')
                 .map(|r| r.trim().trim_matches('`').to_string())
                 .collect(),
-            breakerless,
+            from: from.to_string(),
             end: end.to_string(),
             findings,
         })

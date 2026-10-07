@@ -63,6 +63,10 @@ impl Repo {
     fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
         History::new(&self.dir, "origin/main").reaches(end, head)
     }
+
+    fn comments_only(&self, from: &str, end: &str) -> Result<bool, String> {
+        History::new(&self.dir, "origin/main").comments_only(from, end)
+    }
 }
 
 impl Drop for Repo {
@@ -152,4 +156,29 @@ fn names_the_git_failure_for_an_unknown_head() {
                 .to_string()
         )
     );
+}
+
+#[test]
+fn a_range_of_comment_lines_is_comments_only() {
+    let (repo, from) = Repo::with_pr("comments");
+    let code = repo.commit("a.rs", "/// A.\nfn a() {}\n");
+    assert_eq!(repo.comments_only(&from, &code), Ok(false));
+    let docs = repo.commit("a.rs", "/// A, wrapped.\n  // B.\nfn a() {}\n");
+    assert_eq!(repo.comments_only(&code, &docs), Ok(true));
+    let text = repo.commit("b.txt", "fn b() {}\n");
+    assert_eq!(repo.comments_only(&code[..7], &text[..7]), Ok(true));
+    let removed = repo.commit("a.rs", "fn a() {}\n");
+    assert_eq!(repo.comments_only(&text, &removed), Ok(true));
+    let blank = repo.commit("a.rs", "fn a() {}\n\n");
+    assert_eq!(repo.comments_only(&removed, &blank), Ok(false));
+    let renamed = repo.commit("a.rs", "fn b() {}\n\n");
+    assert_eq!(repo.comments_only(&blank, &renamed), Ok(false));
+}
+
+#[test]
+fn a_range_that_names_no_commit_is_not_comments_only() {
+    let (repo, end) = Repo::with_pr("unnamed");
+    assert_eq!(repo.comments_only("deadbeef", &end), Ok(false));
+    assert_eq!(repo.comments_only(&end, "HEAD"), Ok(false));
+    assert_eq!(repo.comments_only(&end, &end), Ok(true));
 }

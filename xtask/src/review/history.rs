@@ -25,10 +25,7 @@ impl<'a> History<'a> {
     ///
     /// A failed `git` command.
     pub(crate) fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
-        if end.len() < 7 || !end.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Ok(false);
-        }
-        let Some(end) = self.commit(end)? else {
+        let Some(end) = self.named(end)? else {
             return Ok(false);
         };
         let mut commit =
@@ -44,6 +41,51 @@ impl<'a> History<'a> {
             commit = first.to_string();
         }
         Ok(true)
+    }
+
+    /// Reports whether each `.rs` line that `from..end` changes, trimmed, starts with
+    /// `//`. `from` and `end` are SHAs or prefixes of at least 7 digits; text that
+    /// names no single commit gives `false`.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    pub(crate) fn comments_only(&self, from: &str, end: &str) -> Result<bool, String> {
+        let (Some(from), Some(end)) = (self.named(from)?, self.named(end)?) else {
+            return Ok(false);
+        };
+        let diff = self.git(&[
+            "diff",
+            "--no-ext-diff",
+            "--unified=0",
+            &from,
+            &end,
+            "--",
+            "*.rs",
+        ])?;
+        let mut hunk = false;
+        for line in diff.lines() {
+            if line.starts_with("diff ") {
+                hunk = false;
+            } else if line.starts_with("@@") {
+                hunk = true;
+            } else if hunk
+                && let Some(changed) = line.strip_prefix(['+', '-'])
+                && !changed.trim().starts_with("//")
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The full SHA of the commit that `text` names when it is a SHA or a prefix of at
+    /// least 7 digits, or `None`.
+    fn named(&self, text: &str) -> Result<Option<String>, String> {
+        if text.len() < 7 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        self.commit(text)
     }
 
     /// The full SHA of the commit that `name` names, or `None` when it names no

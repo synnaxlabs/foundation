@@ -44,9 +44,18 @@ fn record(comments: Vec<Comment>) -> Record {
     }
 }
 
+/// The start of the range of `ROUND`, which changes only comment lines.
+const COMMENTS: &str = "38cba24f";
+
 fn check(record: &Record) -> Vec<String> {
     // A commit reaches the head only when it is a prefix of it.
-    problems(record, HEAD, &|end| Ok(HEAD.starts_with(end))).unwrap()
+    problems(
+        record,
+        HEAD,
+        &|end| Ok(HEAD.starts_with(end)),
+        &|from, _| Ok(from == COMMENTS),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -90,7 +99,7 @@ fn ignores_a_round_by_another_account() {
 
 #[test]
 fn fails_a_range_that_ends_before_the_head() {
-    let round = ROUND.replace("38cba24f..c77c67d7", "940140aa..82ba5b72");
+    let round = ROUND.replace("..c77c67d7", "..82ba5b72");
     assert_eq!(
         check(&record(vec![bot(&round)])),
         vec![format!(
@@ -113,14 +122,11 @@ fn fails_a_round_with_findings() {
     );
 }
 
-/// `ROUND` as a later round of a code PR that does not skip `breaker`.
+/// `ROUND` as a later round of a code PR whose range changes code.
 fn later(reviewers: &str) -> String {
     ROUND
         .replace("Reviewers: reviewer", &format!("Reviewers: {reviewers}"))
-        .replace(
-            "Breaker: skipped, the range changes no `.rs` line but comments\n",
-            "",
-        )
+        .replace(COMMENTS, "940140aa")
 }
 
 #[test]
@@ -132,6 +138,15 @@ fn fails_a_code_pr_whose_round_names_no_breaker() {
     assert_eq!(
         check(&record(vec![bot(&later("reviewer, breaker"))])),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_breaker_skip_needs_a_range_of_comments_only() {
+    let code = ROUND.replace(COMMENTS, "940140aa");
+    assert_eq!(
+        check(&record(vec![bot(&code)])),
+        vec!["review round 3 names no breaker, which this round requires.".to_string()]
     );
 }
 
@@ -197,8 +212,7 @@ fn each_earlier_round_names_the_reviewers_it_requires() {
 
 #[test]
 fn reads_the_fields_only_from_the_block_after_the_heading() {
-    let round = later("reviewer")
-        + "\nBreaker: skipped is not allowed here.\nReviewers: reviewer, breaker";
+    let round = later("reviewer") + "\nReviewers: reviewer, breaker";
     assert_eq!(
         check(&record(vec![bot(&round)])),
         vec!["review round 3 names no breaker, which this round requires.".to_string()]
@@ -310,8 +324,13 @@ fn a_red_team_pr_with_no_oracle_label_needs_no_approval() {
 fn returns_a_failure_to_read_history() {
     let failed = |_: &str| Err("git rev-parse: bad".to_string());
     assert_eq!(
-        problems(&record(vec![bot(ROUND)]), HEAD, &failed),
+        problems(&record(vec![bot(ROUND)]), HEAD, &failed, &|_, _| Ok(true)),
         Err("git rev-parse: bad".to_string())
+    );
+    let failed = |_: &str, _: &str| Err("git diff: bad".to_string());
+    assert_eq!(
+        problems(&record(vec![bot(ROUND)]), HEAD, &|_| Ok(true), &failed),
+        Err("git diff: bad".to_string())
     );
 }
 
