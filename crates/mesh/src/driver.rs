@@ -15,7 +15,7 @@ use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use types::channel;
-use types::name::Name;
+use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -41,8 +41,8 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// The prefix of the region's names.
-    pub(crate) region: Name,
+    /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
+    pub(crate) region: Prefix,
     /// Each member of the region, this node included, one record for each node. A
     /// member's peer proves the public key of its card, and that key signs the member's
     /// grants.
@@ -2215,6 +2215,49 @@ mod tests {
             assert_eq!(mesh.member(key(3)), None);
             let admitted = mesh.member(key(4)).map(|member| member.card);
             assert_eq!(admitted, Some(common::member(4).card));
+        });
+    }
+
+    // The root region holds each name: a ticket and a join under any prefix.
+    #[test]
+    fn the_root_region_takes_a_join_of_a_node_with_any_name() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                region: Prefix::ROOT,
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let Change::Ticket {
+                public_key,
+                mut options,
+            } = ticket()
+            else {
+                unreachable!()
+            };
+            options.prefix = "edge".parse().unwrap();
+            lead(
+                &mesh,
+                &node.clock(),
+                Change::Ticket {
+                    public_key,
+                    options,
+                },
+            )
+            .await;
+            let card = common::signed(4, "edge.node4");
+            let Change::Join(mut join) = join(4) else {
+                unreachable!()
+            };
+            join.card.card = card.card().clone();
+            join.card.signature = *card.signature();
+            join.admission = common::ticket(7).admission(&card);
+            mesh.propose(Change::Join(join)).await.unwrap();
+            mesh.propose(home(1)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(card));
         });
     }
 

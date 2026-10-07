@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use types::channel;
-use types::name::Name;
+use types::name::{Name, Prefix};
 use types::node::{self, PublicKey};
 use types::time::Stamp;
 
@@ -22,7 +22,7 @@ use crate::ticket::{self, Options, Record};
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct State {
-    region: Name,
+    region: Prefix,
     members: BTreeMap<node::Key, Member>,
     tickets: BTreeMap<[u8; 32], Record>,
     homes: BTreeMap<channel::Key, node::Key>,
@@ -41,7 +41,7 @@ impl State {
     ///
     /// [`Unfit`] when the region cannot hold a member, such as when two of `members`
     /// have one key.
-    pub(crate) fn new(region: Name, members: Vec<Member>) -> Result<Self, Unfit> {
+    pub(crate) fn new(region: Prefix, members: Vec<Member>) -> Result<Self, Unfit> {
         let mut state = Self {
             region,
             members: BTreeMap::new(),
@@ -131,7 +131,7 @@ impl State {
         public_key: PublicKey,
         options: Options,
     ) -> Result<(), Refused> {
-        if !options.prefix.starts_with(&self.region) {
+        if !self.region.contains(&options.prefix) {
             return Err(Refused::Outside {
                 prefix: options.prefix,
                 region: self.region.clone(),
@@ -153,7 +153,7 @@ impl State {
         if name.reserved() {
             return Err(Unfit::Reserved { name: name.clone() });
         }
-        if !name.starts_with(&self.region) {
+        if !self.region.contains(name) {
             return Err(Unfit::Outside {
                 name: name.clone(),
                 region: self.region.clone(),
@@ -404,7 +404,7 @@ pub(crate) enum Refused {
         /// The ticket's prefix.
         prefix: Name,
         /// The region's prefix.
-        region: Name,
+        region: Prefix,
     },
     /// The bytes of a committed entry of a known kind are not the body of that kind,
     /// as [`Malformed::Body`].
@@ -462,7 +462,7 @@ pub(crate) enum Unfit {
         /// The member's name.
         name: Name,
         /// The region's prefix.
-        region: Name,
+        region: Prefix,
     },
     /// The name of a status channel of the member, `<name>.<status>`, is longer than
     /// [`Name::MAX_BYTES`].
@@ -578,7 +578,8 @@ mod tests {
 
     // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
     fn state() -> State {
-        let mut state = State::new(name("plant"), create_members(&[1, 2])).unwrap();
+        let mut state =
+            State::new(name("plant").into(), create_members(&[1, 2])).unwrap();
         let recorded = state.apply(record(7, options("plant.edge", false)));
         assert_eq!(recorded, Ok(None));
         state
@@ -611,7 +612,8 @@ mod tests {
 
     #[test]
     fn new_refuses_two_members_with_one_key() {
-        let error = State::new(name("plant"), create_members(&[1, 2, 1])).unwrap_err();
+        let error =
+            State::new(name("plant").into(), create_members(&[1, 2, 1])).unwrap_err();
         assert_eq!(error, Unfit::Duplicate { key: node(1) });
         assert_eq!(
             error.to_string(),
@@ -624,7 +626,7 @@ mod tests {
         let mut reserved = create_members(&[1, 2]);
         reserved[1].card = signed(2, "plant.@changes");
         assert_eq!(
-            State::new(name("plant"), reserved),
+            State::new(name("plant").into(), reserved),
             Err(Unfit::Reserved {
                 name: name("plant.@changes")
             })
@@ -632,20 +634,40 @@ mod tests {
         let mut outside = create_members(&[1, 2]);
         outside[1].card = signed(2, "factory.node2");
         assert_eq!(
-            State::new(name("plant"), outside),
+            State::new(name("plant").into(), outside),
             Err(Unfit::Outside {
                 name: name("factory.node2"),
-                region: name("plant")
+                region: name("plant").into()
             })
         );
         let mut long = create_members(&[1, 2]);
         long[1].status = status([(long_status(256 - 12), index(1))]);
         assert_eq!(
-            State::new(name("plant"), long).unwrap_err(),
+            State::new(name("plant").into(), long).unwrap_err(),
             Unfit::Long {
                 name: name("plant.node2"),
                 status: long_status(256 - 12),
             }
+        );
+    }
+
+    #[test]
+    fn the_root_region_holds_a_member_and_a_ticket_under_any_prefix() {
+        let mut members = create_members(&[1, 2]);
+        members[1].card = signed(2, "factory.node2");
+        let mut state = State::new(Prefix::ROOT, members).unwrap();
+        assert_eq!(state.apply(record(8, options("edge", false))), Ok(None));
+        let join = join(8, 3, "edge.a");
+        assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(None));
+        let names = [1, 2, 3]
+            .map(|id| state.member(node(id)).map(|m| m.card.card().name.clone()));
+        assert_eq!(
+            names,
+            [
+                Some(name("plant.node1")),
+                Some(name("factory.node2")),
+                Some(name("edge.a"))
+            ]
         );
     }
 
@@ -679,7 +701,7 @@ mod tests {
             state.apply(record(8, options("plants.edge", false))),
             Err(Refused::Outside {
                 prefix: name("plants.edge"),
-                region: name("plant")
+                region: name("plant").into()
             })
         );
         assert_eq!(state, before);
@@ -822,7 +844,7 @@ mod tests {
             apply_join(&mut state, join(7, 3, "plants.edge")),
             Err(Unfit::Outside {
                 name: name("plants.edge"),
-                region: name("plant")
+                region: name("plant").into()
             }
             .into())
         );
@@ -998,7 +1020,7 @@ mod tests {
         let mut taken = create_members(&[1, 2]);
         taken[1].card = signed(2, "plant.NODE1");
         assert_eq!(
-            State::new(name("plant"), taken),
+            State::new(name("plant").into(), taken),
             Err(Unfit::Taken {
                 name: name("plant.NODE1"),
                 key: node(1)
@@ -1008,7 +1030,7 @@ mod tests {
         reused[0].status = status([(name("disk"), index(20))]);
         reused[1].status = status([(name("disk"), index(20))]);
         assert_eq!(
-            State::new(name("plant"), reused),
+            State::new(name("plant").into(), reused),
             Err(Unfit::Reused { key: index(20) })
         );
     }
@@ -1037,7 +1059,7 @@ mod tests {
                 outside,
                 Unfit::Outside {
                     name: name("plants.edge.a"),
-                    region: name("plant"),
+                    region: name("plant").into(),
                 }
                 .into(),
             ),
@@ -1096,7 +1118,7 @@ mod tests {
             (
                 Refused::Outside {
                     prefix: name("plants.edge"),
-                    region: name("plant"),
+                    region: name("plant").into(),
                 },
                 "the prefix plants.edge is not under the region plant".to_owned(),
             ),
@@ -1150,7 +1172,7 @@ mod tests {
             (
                 Unfit::Outside {
                     name: name("plants.edge"),
-                    region: name("plant"),
+                    region: name("plant").into(),
                 },
                 "the name plants.edge is not under the region plant".to_owned(),
             ),
@@ -1370,7 +1392,7 @@ mod tests {
         fn a_refused_change_changes_nothing(
             steps in prop::collection::vec(steps(), 0..16),
         ) {
-            let mut state = State::new(name("plant"), create_members(&[1, 2])).unwrap();
+            let mut state = State::new(name("plant").into(), create_members(&[1, 2])).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());
