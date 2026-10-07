@@ -1,6 +1,7 @@
 //! The two halves of a stream: an ordered, reliable sequence of whole messages.
 
 use std::future::poll_fn;
+use std::ops::Range;
 use std::rc::Rc;
 use std::task::Poll;
 
@@ -11,9 +12,25 @@ use crate::code::Code;
 use crate::error::Error;
 use crate::quic;
 
-/// What a [`Sender`] gives after a [`Sender::send`] future dropped and reset its
-/// stream.
+/// What a [`Sender`] gives after a dropped send future reset its stream.
 const CANCELLED: Error = Error::Reset { code: Code(0) };
+
+/// Bytes of a block to send, then zeros.
+///
+/// ```
+/// use transport::stream::Part;
+///
+/// // A series of 5 bytes at offset 64, padded to 8.
+/// let series = Part { range: 64..69, zeros: 3 };
+/// assert_eq!(series.range.len() + usize::from(series.zeros), 8);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    /// The bytes of the block to send.
+    pub range: Range<usize>,
+    /// The zero bytes to send after them, at most 7.
+    pub zeros: u8,
+}
 
 /// The sending half of a stream. Dropping it without [`finish`](Self::finish) resets
 /// the stream with `Code(0)`, so the peer never reads a cut-off stream as complete.
@@ -34,7 +51,7 @@ const CANCELLED: Error = Error::Reset { code: Code(0) };
 pub struct Sender {
     session: Rc<quic::Session>,
     class: Class,
-    /// `None` once a `send` future dropped and reset the stream.
+    /// `None` once a dropped send future reset the stream.
     stream: Option<quic::stream::Sender>,
 }
 
@@ -73,7 +90,7 @@ impl Sender {
     /// [`Error::TooLarge`] when `message` is over the peer's
     /// [`Config::message_bytes_max`](crate::Config::message_bytes_max),
     /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
-    /// `Code(0)` after a `send` future dropped, or the error that ended the session.
+    /// `Code(0)` after a dropped send future, or the error that ended the session.
     ///
     /// # Panics
     ///
@@ -139,6 +156,75 @@ impl Sender {
         todo!("#68")
     }
 
+    /// Sends one message: for each of `parts`, in order, the bytes of its range of
+    /// `block`, then its zeros. The stream holds `block` until the carrier takes the
+    /// message, and copies no byte of it before then. It never sends a byte of
+    /// `block` outside the ranges. Waits, returns, and resets on drop as
+    /// [`send`](Self::send).
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send). [`Error::TooLarge`] when the sum of the range lengths
+    /// and the zeros is over the peer's message limit.
+    ///
+    /// # Panics
+    ///
+    /// When called after [`finish`](Self::finish), or when a range starts after its
+    /// end, ends past the block, or has more than 7 zeros.
+    ///
+    /// ```
+    /// use transport::Error;
+    /// use transport::stream::{Part, Sender};
+    ///
+    /// async fn series(sender: &mut Sender, frame: block::Block) -> Result<(), Error> {
+    ///     let parts = [
+    ///         Part { range: 0..8, zeros: 0 },
+    ///         Part { range: 64..69, zeros: 3 },
+    ///     ];
+    ///     sender.send_parts(frame, &parts).await
+    /// }
+    /// ```
+    pub async fn send_parts(
+        &mut self,
+        block: Block,
+        parts: &[Part],
+    ) -> Result<(), Error> {
+        self.stream.as_mut().ok_or(CANCELLED)?;
+        drop((block, parts));
+        todo!("#68")
+    }
+
+    /// [`send_parts`](Self::send_parts) when the stream can take the message now, as
+    /// [`try_send`](Self::try_send): gives `block` back, with nothing sent, when it
+    /// cannot.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_parts`](Self::send_parts).
+    ///
+    /// # Panics
+    ///
+    /// As [`send_parts`](Self::send_parts).
+    ///
+    /// ```
+    /// use block::Block;
+    /// use transport::Error;
+    /// use transport::stream::{Part, Sender};
+    ///
+    /// fn live(sender: &mut Sender, frame: Block) -> Result<Option<Block>, Error> {
+    ///     sender.try_send_parts(frame, &[Part { range: 0..8, zeros: 0 }])
+    /// }
+    /// ```
+    pub fn try_send_parts(
+        &mut self,
+        block: Block,
+        parts: &[Part],
+    ) -> Result<Option<Block>, Error> {
+        self.stream.as_mut().ok_or(CANCELLED)?;
+        drop((block, parts));
+        todo!("#68")
+    }
+
     /// Ends the stream after the messages already sent. The peer's
     /// [`Receiver::recv`] returns `None` after the last one. The sender stays, so
     /// [`reset`](Self::reset) can still cancel what the peer does not have yet.
@@ -146,7 +232,7 @@ impl Sender {
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
-    /// `Code(0)` after a `send` future dropped, or the error that ended the session.
+    /// `Code(0)` after a dropped send future, or the error that ended the session.
     ///
     /// ```
     /// use transport::{Error, stream::Sender};
@@ -275,6 +361,36 @@ impl Receiver {
             poll_fn(|cx| receiving.session.poll_read(cx, receiving.stream)).await;
         receiving.done = true;
         received
+    }
+
+    /// Waits for the next whole message and writes it to the start of `buffer`.
+    /// Gives its length, or `None` once the sender finished and every message has
+    /// arrived. It uses the same receive budget as [`recv`](Self::recv). If the
+    /// future drops before it gives the length, the message stays queued and `buffer`
+    /// may hold part of it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] with the message length and `buffer.len()` when the
+    /// message is longer than `buffer`; the message stays queued. [`Error::Reset`]
+    /// when the sender cancelled the stream, or the error that ended the session.
+    ///
+    /// ```
+    /// use transport::{Error, stream::Receiver};
+    ///
+    /// async fn drain(receiver: &mut Receiver, draft: &mut [u8]) -> Result<(), Error> {
+    ///     while let Some(len) = receiver.recv_into(draft).await? {
+    ///         let _body = &draft[..len];
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn recv_into(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> Result<Option<usize>, Error> {
+        let _ = buffer;
+        todo!("#68")
     }
 
     /// Asks the sender to stop: messages not yet received drop, and the sender sees

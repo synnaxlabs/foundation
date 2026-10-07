@@ -56,8 +56,8 @@ pub enum Error {
         /// The code the peer stopped with.
         code: Code,
     },
-    /// A message is larger than the peer accepts on a stream, or than a datagram
-    /// carries.
+    /// A message is larger than the peer accepts on a stream, than a datagram
+    /// carries, or than the buffer of a receive.
     TooLarge {
         /// The message's size.
         bytes: usize,
