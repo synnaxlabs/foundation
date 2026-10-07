@@ -425,8 +425,9 @@ async fn open(session: &Session, load: Load) -> Vec<Sender> {
 ///
 /// # Panics
 ///
-/// When a send fails, when the rounds do not show `premise`, or when the classes the
-/// server got in `accepted` are not those of `senders`.
+/// When a send fails, when the rounds do not show `premise` (for `Competes`, also
+/// when the timed `Complete` sends are not 2 to 4 times the timed `Latest` sends),
+/// or when the classes the server got in `accepted` are not those of `senders`.
 async fn compete(
     pool: &Pool,
     senders: &mut [Sender],
