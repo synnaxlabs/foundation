@@ -262,6 +262,29 @@ How to read this record:
   home opens unnamed readers before the first estimate. A named complete session has a
   `complete::Key`, and the wrong close of an open session panics; the architect decided
   (#1024). Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+- **STORE TRIM (2026-10-06)** Under disk pressure, `buffer` frees its oldest records
+  itself, in the commit task, whatever the floors: a ring frees space only at its
+  tail, so a floor never changes which record goes (B1). The commit writes the new
+  tail in the same sync as its data, and reuses the space only after that sync. A
+  trim never frees a record that a read in progress holds (#510). `buffer` keeps its
+  own headroom (at least two records of `body_max`, or twice the last commit), so a
+  full ring does not refuse a live write under steady pressure. `append` gives
+  `Rejected::Full` only when the records queued since the last commit do not fit
+  after the trim: the full disk queue of B5, which is the commit queue. A read
+  reports the trimmed seqs of a path as `Read::gap`, also when the path holds no
+  entry, and the gap's length is the count of samples lost (B2). An open of a full
+  ring frees the oldest record for its restart record, until segments exist (S4).
+  `set_floor` and `usage` wait for their first effect, the B1 warning (#1080). Lost:
+  a `trim` call from the home (it needs the commit rate, a late trim gives a second
+  gap, and the edge cases of the ring move up into `home`). Decided by the architect
+  (#160).
+- **SHARD DISK (2026-10-06)** Until segments exist, `node` gives each shard's ring
+  `disk / n` of the node's disk budget, and shard 0 also gets the remainder, as SHARD
+  POOLS does. The ring is the whole store, and a new area takes effect at the next
+  wrap (#451). Oldest first (B1) then holds per shard, not per node: a patch. The
+  long-term path is small rings for commits, then segments that draw from one
+  node-wide allowance (#1081). The 5.5 lab sizes the budget for the shard that holds
+  the index. Decided by the architect (#342).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
