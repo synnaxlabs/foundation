@@ -406,6 +406,29 @@ mod tests {
         }
 
         #[test]
+        fn decode_refuses_only_a_window_bytes_below_the_message_bytes_max(
+            message in value().prop_map(|value| value.max(MESSAGE_BYTES_MIN as u64)),
+            offset in -3_i64..=3,
+        ) {
+            let window = message
+                .saturating_add_signed(offset)
+                .min(VarInt::MAX.into_inner());
+            let expected = if window < message {
+                fault(&format!(
+                    "a hello with window_bytes {window} below message_bytes_max \
+                     {message}"
+                ))
+            } else {
+                Ok(Hello {
+                    window_bytes: usize::try_from(window).expect("64 bits"),
+                    message_bytes_max: usize::try_from(message).expect("64 bits"),
+                })
+            };
+            let bytes = encode(&[(0, window), (1, message)]);
+            prop_assert_eq!(Hello::decode(&bytes), expected);
+        }
+
+        #[test]
         fn decode_ignores_unknown_ids(
             ids in prop::collection::btree_set(2..=VarInt::MAX.into_inner(), 0..=10),
             value in 0..=VarInt::MAX.into_inner(),
@@ -562,6 +585,13 @@ mod tests {
                 Ok(Hello {
                     window_bytes: 16_000,
                     message_bytes_max: 3_000,
+                }),
+            ),
+            (
+                [(0, (1 << 30) - 1), (1, 1 << 14), (2, 7)],
+                Ok(Hello {
+                    window_bytes: (1 << 30) - 1,
+                    message_bytes_max: 1 << 14,
                 }),
             ),
             (
