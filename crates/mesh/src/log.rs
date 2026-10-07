@@ -1824,8 +1824,8 @@ mod tests {
         removes_a_spare(0);
     }
 
-    /// Writes record 1 to `log-0` and makes `log-1` with `len` bytes and no record,
-    /// then cuts the power.
+    /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
+    /// and no record, then cuts the power.
     fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
         sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
@@ -1875,12 +1875,8 @@ mod tests {
                     (refused, lens(&node).await)
                 })
                 .unwrap();
-            let expected = files::Error::Io {
-                path: file("log-1"),
-                operation: Operation::Remove,
-                code: 5,
-            };
-            assert_eq!(refused, Err(Error::Files(expected)), "{len} bytes");
+            let expected = io("log-1", Operation::Remove);
+            assert_eq!(refused, Err(expected), "{len} bytes");
             assert_eq!(lens, spare(len));
             sim.crash(&node, Crash::Power);
             let expected = Stored {
@@ -1942,23 +1938,21 @@ mod tests {
     fn a_failed_remove_of_a_first_file_with_no_bytes_poisons_the_log() {
         let (mut sim, node) = sim(0);
         create_first_file_with_no_bytes(&mut sim, &node);
-        let errors = sim
+        let (errors, lens) = sim
             .run_on(&node, |node, _| async move {
                 let (mut log, _) = open(&node).await.unwrap();
                 node.fail_file(&file("log-0"), Operation::Remove);
-                let error = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
-                (error, log.write(None, &[bytes(1, 10)]).await.unwrap_err())
+                let first = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+                let second = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+                drop(log);
+                ((first, second), lens(&node).await)
             })
             .unwrap();
-        let io = Error::Files(files::Error::Io {
-            path: file("log-0"),
-            operation: Operation::Remove,
-            code: 5,
-        });
         let poisoned = Error::Poisoned {
             path: file("log-0"),
         };
-        assert_eq!(errors, (io, poisoned));
+        assert_eq!(errors, (io("log-0", Operation::Remove), poisoned));
+        assert_eq!(lens, [(PathBuf::from("log-0"), 0)]);
         sim.crash(&node, Crash::Power);
         assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
     }
