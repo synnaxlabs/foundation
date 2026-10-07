@@ -720,10 +720,32 @@ fn key(n: u128) -> Key {
     Key::from_u128(n)
 }
 
+/// Each scalar with its code.
+const SCALARS: [(Scalar, u8); 14] = [
+    (Scalar::Bool, 0),
+    (Scalar::I8, 1),
+    (Scalar::I16, 2),
+    (Scalar::I32, 3),
+    (Scalar::I64, 4),
+    (Scalar::U8, 5),
+    (Scalar::U16, 6),
+    (Scalar::U32, 7),
+    (Scalar::U64, 8),
+    (Scalar::F32, 9),
+    (Scalar::F64, 10),
+    (Scalar::Stamp, 11),
+    (Scalar::Span, 12),
+    (Scalar::Uuid, 13),
+];
+
 #[test]
-fn codes_each_scalar_by_its_place() {
-    for (at, scalar) in SCALARS.into_iter().enumerate() {
-        assert_eq!(usize::from(code(scalar)), at);
+fn codes_each_scalar_by_its_documented_byte() {
+    for (each, byte) in SCALARS {
+        assert_eq!(code(each), byte);
+        assert_eq!(scalar(byte), Some(each));
+    }
+    for byte in 14..=u8::MAX {
+        assert_eq!(scalar(byte), None);
     }
 }
 
@@ -747,6 +769,7 @@ fn data_bytes(rest: &[u8]) -> Vec<u8> {
 /// Where the data type of [`data_bytes`] starts.
 const DATA_TYPE_AT: usize = 2 + 16 + 1 + 16 + 1;
 
+/// A data channel with key 7 on index 9, with quality 10.
 fn data(data_type: DataType, unit: Option<&str>) -> Definition {
     let unit = unit.map(|u| Unit::new(u).unwrap());
     Definition::Channel(Channel {
@@ -754,6 +777,13 @@ fn data(data_type: DataType, unit: Option<&str>) -> Definition {
         kind: channel::Kind::Data(
             Data::new(key(9), Some(key(10)), data_type, unit).unwrap(),
         ),
+    })
+}
+
+fn f64s(len: u32) -> DataType {
+    DataType::Sample(sample::Type::Array {
+        element: Scalar::F64,
+        len,
     })
 }
 
@@ -775,16 +805,9 @@ fn writes_the_documented_channel_layout() {
     tail.extend_from_slice(&[1, 10, 3, 0, 0, 0, 1]);
     tail.extend_from_slice(&3_u64.to_le_bytes());
     tail.extend_from_slice(b"kPa");
-    let array = sample::Type::Array {
-        element: Scalar::F64,
-        len: 3,
-    };
     for (definition, expected) in [
         (index, channel_bytes(0, &rest)),
-        (
-            data(DataType::Sample(array), Some("kPa")),
-            channel_bytes(1, &tail),
-        ),
+        (data(f64s(3), Some("kPa")), channel_bytes(1, &tail)),
     ] {
         assert_eq!(definition.encode(), expected);
         assert_eq!(Definition::decode(&expected), Ok(definition));
@@ -819,86 +842,167 @@ fn writes_each_data_type_by_its_documented_bytes() {
 
 #[test]
 fn refuses_an_unknown_channel_kind() {
+    let error = Error::ChannelKind { at: 18, found: 2 };
     assert_eq!(
-        Definition::decode(&channel_bytes(2, &[])),
-        Err(Error::ChannelKind { at: 18, found: 2 })
+        error.to_string(),
+        "the channel kind 2 at byte 18 is not 0 or 1"
     );
+    assert_eq!(Definition::decode(&channel_bytes(2, &[])), Err(error));
 }
 
 #[test]
-fn refuses_a_key_flag_that_is_not_0_or_1() {
-    assert_eq!(
-        Definition::decode(&channel_bytes(0, &[2, 0])),
-        Err(Error::Flag { at: 19, found: 2 })
-    );
+fn refuses_a_presence_flag_of_a_channel_that_is_not_0_or_1() {
+    let mut control = vec![1];
+    control.extend_from_slice(&8_u128.to_le_bytes());
+    control.push(2);
+    let mut quality = 9_u128.to_le_bytes().to_vec();
+    quality.push(2);
+    let mut unit = 9_u128.to_le_bytes().to_vec();
+    unit.extend_from_slice(&[0, 0, 3, 2]);
+    for (bytes, at) in [
+        (channel_bytes(0, &[2, 0]), 19),
+        (channel_bytes(0, &control), 36),
+        (channel_bytes(1, &quality), 35),
+        (channel_bytes(1, &unit), DATA_TYPE_AT + 2),
+    ] {
+        assert_eq!(
+            Definition::decode(&bytes),
+            Err(Error::Flag { at, found: 2 })
+        );
+    }
 }
 
 #[test]
 fn refuses_an_unknown_data_type_or_scalar() {
     let at = DATA_TYPE_AT;
-    for (rest, error) in [
-        (&[6][..], Error::DataType { at, found: 6 }),
+    let scalar_at = at + 1;
+    for (rest, error, message) in [
+        (
+            &[6][..],
+            Error::DataType { at, found: 6 },
+            format!("the data type 6 at byte {at} is not a known type"),
+        ),
         (
             &[0, 14],
             Error::Scalar {
-                at: at + 1,
+                at: scalar_at,
                 found: 14,
             },
+            format!("the scalar 14 at byte {scalar_at} is not a known scalar"),
         ),
         (
             &[1, 255],
             Error::Scalar {
-                at: at + 1,
+                at: scalar_at,
                 found: 255,
             },
+            format!("the scalar 255 at byte {scalar_at} is not a known scalar"),
+        ),
+        (
+            &[2, 14],
+            Error::Scalar {
+                at: scalar_at,
+                found: 14,
+            },
+            format!("the scalar 14 at byte {scalar_at} is not a known scalar"),
         ),
     ] {
+        assert_eq!(error.to_string(), message);
         assert_eq!(Definition::decode(&data_bytes(rest)), Err(error));
     }
 }
 
 #[test]
 fn refuses_a_unit_that_does_not_read() {
-    let mut rest = vec![0, 10, 1];
-    rest.extend_from_slice(&0_u64.to_le_bytes());
+    let at = DATA_TYPE_AT + 3;
+    for (text, error) in [
+        (&b""[..], unit::Error::Empty),
+        (&[b'a'; 33], unit::Error::Long { len: 33 }),
+        (b"k Pa", unit::Error::Character { at: 1, found: ' ' }),
+    ] {
+        let mut rest = vec![0, 10, 1];
+        rest.extend_from_slice(&u64::try_from(text.len()).unwrap().to_le_bytes());
+        rest.extend_from_slice(text);
+        let error = Error::Unit { at, error };
+        assert_eq!(Definition::decode(&data_bytes(&rest)), Err(error));
+    }
+    let error = Error::Unit {
+        at,
+        error: unit::Error::Empty,
+    };
     assert_eq!(
-        Definition::decode(&data_bytes(&rest)),
-        Err(Error::Unit {
-            at: DATA_TYPE_AT + 3,
-            error: unit::Error::Empty,
-        })
+        error.to_string(),
+        format!("the unit at byte {at} does not read: a unit is empty")
     );
 }
 
 #[test]
-fn refuses_a_unit_on_a_type_that_holds_no_number() {
-    let mut rest = vec![3, 1];
-    rest.extend_from_slice(&1_u64.to_le_bytes());
-    rest.push(b'V');
+fn refuses_a_data_channel_that_cannot_exist() {
+    let mut string = vec![3, 1];
+    string.extend_from_slice(&1_u64.to_le_bytes());
+    string.push(b'V');
+    let at = DATA_TYPE_AT;
+    for (rest, error) in [
+        (
+            string,
+            channel::Error::Unit {
+                data_type: DataType::Sample(sample::Type::String),
+            },
+        ),
+        (
+            vec![1, 10, 0, 0, 0, 0, 0],
+            channel::Error::Empty { data_type: f64s(0) },
+        ),
+        (
+            vec![2, 10, 0, 0, 0, 0, 0],
+            channel::Error::Empty {
+                data_type: DataType::Sample(sample::Type::List {
+                    element: Scalar::F64,
+                    max: 0,
+                }),
+            },
+        ),
+    ] {
+        let error = Error::Channel { at, error };
+        assert_eq!(Definition::decode(&data_bytes(&rest)), Err(error));
+    }
     let error = Error::Channel {
-        at: DATA_TYPE_AT,
-        error: channel::Error::Unit {
-            data_type: DataType::Sample(sample::Type::String),
-        },
+        at,
+        error: channel::Error::Empty { data_type: f64s(0) },
     };
     assert_eq!(
         error.to_string(),
-        format!(
-            "the data channel at byte {DATA_TYPE_AT}: a unit is on a data type that \
-             holds no number"
-        )
+        format!("the data channel at byte {at}: an array or a list holds no element")
     );
-    assert_eq!(Definition::decode(&data_bytes(&rest)), Err(error));
 }
 
 #[test]
 fn refuses_a_channel_that_ends_early() {
-    let bytes = data(DataType::Quality, None).encode();
-    for end in [2, 17, 18, 19, DATA_TYPE_AT, bytes.len() - 1] {
-        let error = Definition::decode(&bytes[..end]).unwrap_err();
-        assert!(
-            matches!(error, Error::Truncated { .. }),
-            "{end} gives {error:?}"
+    let bytes = data(f64s(3), Some("kPa")).encode();
+    assert_eq!(bytes.len(), 70);
+    for (end, at) in [
+        (2, 2),
+        (17, 2),
+        (18, 18),
+        (19, 19),
+        (34, 19),
+        (35, 35),
+        (36, 36),
+        (51, 36),
+        (52, 52),
+        (53, 53),
+        (54, 54),
+        (57, 54),
+        (58, 58),
+        (59, 59),
+        (66, 59),
+        (67, 59),
+        (69, 59),
+    ] {
+        assert_eq!(
+            Definition::decode(&bytes[..end]),
+            Err(Error::Truncated { at }),
+            "{end}"
         );
     }
 }
@@ -1001,7 +1105,7 @@ fn time_strategy() -> impl Strategy<Value = Definition> {
 }
 
 fn data_type_strategy() -> impl Strategy<Value = DataType> {
-    let scalar = prop::sample::select(SCALARS.to_vec());
+    let scalar = prop::sample::select(SCALARS.map(|(each, _)| each).to_vec());
     prop_oneof![
         scalar
             .clone()

@@ -227,24 +227,6 @@ const fn mode_byte(mode: Mode) -> u8 {
     }
 }
 
-/// Every scalar, in the order of their codes.
-const SCALARS: [Scalar; 14] = [
-    Scalar::Bool,
-    Scalar::I8,
-    Scalar::I16,
-    Scalar::I32,
-    Scalar::I64,
-    Scalar::U8,
-    Scalar::U16,
-    Scalar::U32,
-    Scalar::U64,
-    Scalar::F32,
-    Scalar::F64,
-    Scalar::Stamp,
-    Scalar::Span,
-    Scalar::Uuid,
-];
-
 const SCALAR: u8 = 0;
 const ARRAY: u8 = 1;
 const LIST: u8 = 2;
@@ -252,7 +234,7 @@ const STRING: u8 = 3;
 const BYTES: u8 = 4;
 const QUALITY: u8 = 5;
 
-/// The code of a scalar: its place in [`SCALARS`].
+/// The code of a scalar. [`scalar`] is its inverse.
 const fn code(scalar: Scalar) -> u8 {
     match scalar {
         Scalar::Bool => 0,
@@ -272,8 +254,29 @@ const fn code(scalar: Scalar) -> u8 {
     }
 }
 
-fn data_type(out: &mut Vec<u8>, data_type: DataType) {
-    match data_type {
+/// The scalar with the code `code`, if any. [`code`] is its inverse.
+const fn scalar(code: u8) -> Option<Scalar> {
+    Some(match code {
+        0 => Scalar::Bool,
+        1 => Scalar::I8,
+        2 => Scalar::I16,
+        3 => Scalar::I32,
+        4 => Scalar::I64,
+        5 => Scalar::U8,
+        6 => Scalar::U16,
+        7 => Scalar::U32,
+        8 => Scalar::U64,
+        9 => Scalar::F32,
+        10 => Scalar::F64,
+        11 => Scalar::Stamp,
+        12 => Scalar::Span,
+        13 => Scalar::Uuid,
+        _ => return None,
+    })
+}
+
+fn data_type(out: &mut Vec<u8>, data_type: &DataType) {
+    match *data_type {
         DataType::Sample(sample::Type::Scalar(element)) => {
             out.extend_from_slice(&[SCALAR, code(element)]);
         }
@@ -611,10 +614,7 @@ impl<'a> Reader<'a> {
     fn scalar(&mut self) -> Result<Scalar, Error> {
         let at = self.at();
         let found = self.byte()?;
-        SCALARS
-            .get(usize::from(found))
-            .copied()
-            .ok_or(Error::Scalar { at, found })
+        scalar(found).ok_or(Error::Scalar { at, found })
     }
 
     fn access(&mut self) -> Result<Policy, Error> {
