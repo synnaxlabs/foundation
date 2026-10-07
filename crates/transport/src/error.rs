@@ -73,15 +73,6 @@ pub enum Error {
         /// What broke, for people to read.
         reason: String,
     },
-    /// The shard's pool has no room for a received message now. The message stays
-    /// queued; call again when a block frees.
-    Pool {
-        /// The message's size.
-        bytes: usize,
-        /// The bytes of the pool's budget that are free. A block for `bytes` needs
-        /// more.
-        available: usize,
-    },
     /// The socket under the session broke. Every session on it ends with this. Each
     /// later dial gets it, and so does each accept once it gave the sessions that
     /// connected before the break.
@@ -129,10 +120,6 @@ impl fmt::Display for Error {
                 )
             }
             Self::Broken { reason } => write!(f, "the connection broke: {reason}"),
-            Self::Pool { bytes, available } => write!(
-                f,
-                "no room for a received message of {bytes} bytes ({available} free)"
-            ),
             Self::Network { error } => write!(f, "the socket broke: {error}"),
             Self::Config { field, rule } => write!(f, "config {field} {rule}"),
         }
@@ -242,18 +229,6 @@ mod tests {
                 reason: "stateless reset".to_owned(),
             };
             check(&error, "the connection broke: stateless reset");
-        }
-
-        #[test]
-        fn gives_the_size_and_the_room_of_the_pool() {
-            let error = Error::Pool {
-                bytes: 10,
-                available: 4,
-            };
-            check(
-                &error,
-                "no room for a received message of 10 bytes (4 free)",
-            );
         }
 
         #[test]
