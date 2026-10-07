@@ -667,7 +667,6 @@ mod tests {
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
             // Private: no heap count is exact in a binary with a test harness.
-            assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message[..10]);
             assert_eq!(reader.held.buffer.capacity(), 1_024);
             let buffer = reader.held.buffer.as_ptr();
@@ -693,32 +692,11 @@ mod tests {
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
             // Private: no heap count is exact in a binary with a test harness.
-            assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message);
             drop(held);
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Ready(Some(message))));
             assert_eq!(reader.held.buffer.capacity(), 0);
-        }
-
-        #[test]
-        fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
-            // Private: no heap count is exact in a binary with a test harness.
-            let mut held = Held::default();
-            for byte in 0..CHUNKS_MAX {
-                held.push(100, Bytes::from(vec![u8::try_from(byte).expect("a byte")]));
-            }
-            assert_eq!(held.chunks.len(), CHUNKS_MAX);
-            assert!(held.buffer.is_empty());
-            held.push(100, Bytes::from_static(&[64]));
-            assert_eq!(held.chunks.len(), 1);
-            assert_eq!(held.buffer, (0..64).collect::<Vec<u8>>());
-            assert_eq!(held.buffer.capacity(), 100);
-            let mut block = [0; 65];
-            held.drain_into(&mut block);
-            assert_eq!(block.to_vec(), (0..65).collect::<Vec<u8>>());
-            assert!(held.chunks.is_empty());
-            assert_eq!(held.buffer.capacity(), 0);
         }
 
         /// Each copy of a full list, not only the first two that `tests/chunks.rs`

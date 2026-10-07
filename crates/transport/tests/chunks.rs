@@ -1,8 +1,9 @@
 //! A read holds at most 64 of the chunks that a message comes in. Each time the list
 //! is full, the read copies it into one heap buffer, so a message in many tiny
-//! frames cannot grow the list. A packet holds at most 1472 bytes, and with no loss
-//! noq-proto keeps each packet's bytes in place, so the only heap block that holds
-//! all of a longer pattern is that buffer. The count covers each thread, so this
+//! frames cannot grow the list. A packet holds at most 1472 bytes, and noq-proto
+//! keeps each packet's bytes in place until their spare bytes pass 32 KiB, which
+//! these messages do not reach. So the only heap block that holds all of a longer
+//! pattern is that buffer. The count covers each thread, so this
 //! binary has no test harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -35,9 +36,9 @@ const PATTERN: usize = 4096;
 const FULL: usize = 83_600;
 /// A message that comes in 65 chunks in this sim, one past a full list.
 const PAST: usize = 84_900;
-/// Where the pattern starts in a long message. A packet carries between 1000 and
-/// 1472 bytes of a message, so the pattern lies past its first 64 packets and inside
-/// its first 128: only a second copy of a full list holds it.
+/// Where the pattern starts in a long message. Each packet but the last carries
+/// between 1000 and 1472 bytes of a message, so the pattern lies past its first 64
+/// packets and inside its first 128: only a second copy of a full list holds it.
 const SECOND: usize = 110_000;
 /// When the server reads after it accepts the stream, once the whole message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
