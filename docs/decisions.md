@@ -1635,7 +1635,13 @@ How to read this record:
   `Ready::sign` gives each `None` the signature that the caller's closure makes for
   its claim, in the hard proof, in each message, and in each change this node wrote
   (in `entries`, in `committed`, and in each append), before the write and the
-  sends. The caller checks each pair that `Message::claims` gives before `step` and
+  sends. `raft` keeps its own claims unsigned, so `Ready::sign` signs each copy that a
+  `Ready` holds, and a resend again. Ed25519 gives each copy the same bytes. Lost:
+  `raft` keeps the signed copy. It puts the signer in `raft` and changes the
+  conformance oracle, for signatures that come only with elections, configuration
+  changes, and resends (architect, #1187, 2026-10-07T15:25:42Z,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6041049761). The
+  caller checks each pair that `Message::claims` gives before `step` and
   refuses a `None`: `step` keeps each signature as it came, so an unchecked `None`
   of another voter reaches `Ready::sign`. `Message::claims` also gives each claim
   of a change an append carries: its votes in the entry's term, then the change
