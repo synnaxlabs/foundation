@@ -26,7 +26,9 @@ impl<'a> History<'a> {
     /// Reports whether `end` (a SHA or a prefix of at least 7 digits) is `head`, or
     /// reaches it through first-parent merges of a commit on the base that resolve no
     /// conflict: each merge's tree is the tree that `git merge-tree` makes of its
-    /// parents. Text that names no single commit does not reach `head`.
+    /// parents. A merge whose base side moves text of its first parent into a code file
+    /// does not count, as in `code_change`. Text that names no single commit does not
+    /// reach `head`.
     ///
     /// # Errors
     ///
@@ -56,17 +58,20 @@ impl<'a> History<'a> {
     /// empty or starts with `//`; each line of a `Cargo.toml` or `Cargo.lock` is
     /// code. A moved file counts as removed and added.
     ///
-    /// A merge of a commit on the base on the first-parent chain of `end` counts only
-    /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
-    /// `git merge-tree` finds a conflict in between its parents gives "resolves a
-    /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
-    /// tree that `git merge-tree` makes of `from` and the newest base commit that
-    /// `end` holds, not from `from`: the base's code does not count, and text of the
-    /// range that the base moves into a code file does. A code file that this tree
-    /// has a conflict in gives "has a conflict in `<file>` between its start and the
-    /// base", so a conflict that leaves no markers fails closed too. An `end` that
-    /// holds more than one newest base commit gives "holds the base at more than one
-    /// newest commit: `<commit>`, `<commit>`".
+    /// A merge of a commit on the base on the first-parent chain of `end` counts by
+    /// its resolution and by its renames. A `.rs`, `Cargo.toml`, or `Cargo.lock` file
+    /// that `git merge-tree` finds a conflict in between its parents gives "resolves
+    /// a conflict in `<file>` in `<merge>`". A path that is not code, that the first
+    /// parent changes since a merge base of the parents, and that the second parent
+    /// renames to a code path by the rename detection of the merge gives "the base
+    /// moves `<old>`, which the PR changes, into the code file `<new>`". Else the
+    /// change is read to `end` from the tree that `git merge-tree` makes of `from`
+    /// and the newest base commit that `end` holds, not from `from`: the base's code
+    /// does not count, and text of the range that the base moves into a code file
+    /// does. A code file that this tree has a conflict in gives "has a conflict in
+    /// `<file>` between its start and the base", so a conflict that leaves no markers
+    /// fails closed too. An `end` that holds more than one newest base commit gives
+    /// "holds the base at more than one newest commit: `<commit>`, `<commit>`".
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
     /// a removed one.
@@ -109,6 +114,9 @@ impl<'a> History<'a> {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
+            }
+            if let Some(moved) = self.moved_into_code(first, second)? {
+                return Ok(Some(moved));
             }
         }
         let bases = self.git(&["merge-base", "--all", &end_sha, &base])?;
@@ -280,11 +288,57 @@ impl<'a> History<'a> {
     }
 
     /// Reports whether `merge` has the tree that a merge of `first` and `second`
-    /// makes with no conflict.
+    /// makes with no conflict, and the merge moves no text of `first` into a code
+    /// file (`moved_into_code`).
     fn clean(&self, merge: &str, first: &str, second: &str) -> Result<bool, String> {
         let merged = self.merged(first, second)?;
         let tree = self.git(&["rev-parse", &format!("{merge}^{{tree}}")])?;
-        Ok(merged.clean && merged.tree == tree)
+        Ok(merged.clean
+            && merged.tree == tree
+            && self.moved_into_code(first, second)?.is_none())
+    }
+
+    /// The phrase "the base moves `<old>`, which the PR changes, into the code file
+    /// `<new>`" for the first path `<old>` that is not code, that `first` changes
+    /// since a merge base of `first` and `second`, and that `second` renames to the
+    /// code path `<new>` since that merge base. Renames are found by the rename
+    /// detection that `git merge-tree` uses, with no limit on the number of files.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn moved_into_code(
+        &self,
+        first: &str,
+        second: &str,
+    ) -> Result<Option<String>, String> {
+        for base in self.git(&["merge-base", "--all", first, second])?.lines() {
+            // `R<score>NUL<old>NUL<new>NUL` for each rename.
+            let renames = self.output(&[
+                "diff",
+                "-z",
+                "--name-status",
+                "--find-renames",
+                "--diff-filter=R",
+                "-l0",
+                base,
+                second,
+            ])?;
+            let renames: Vec<_> = renames.split(|&b| b == 0).collect();
+            let changed = self.output(&["diff", "-z", "--name-only", base, first])?;
+            let changed: Vec<_> = changed.split(|&b| b == 0).collect();
+            for [_, old_bytes, new_bytes] in renames.as_chunks::<3>().0 {
+                let old = String::from_utf8_lossy(old_bytes);
+                let new = String::from_utf8_lossy(new_bytes);
+                if !code_path(&old) && code_path(&new) && changed.contains(old_bytes) {
+                    return Ok(Some(format!(
+                        "the base moves `{old}`, which the PR changes, into the code \
+                         file `{new}`"
+                    )));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// What `git merge-tree` makes of `first` and `second`.
