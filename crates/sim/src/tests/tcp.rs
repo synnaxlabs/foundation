@@ -1611,15 +1611,17 @@ fn a_connect_in_its_handshake_at_the_fault_is_reset_and_never_accepted() {
     });
     let remote = at(&b, 4433);
     let client = start(&a, "client", move |node| async move {
-        let mut tcp = connect(&node, remote, options()).await?;
-        read(&mut tcp, 1).await
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        (read(&mut tcp, 1).await, node.clock().now())
     });
-    sim.run_for(Span::from_nanos(delay().nanos() * 3 / 2))
-        .unwrap();
+    let delays = |halves: i64| Span::from_nanos(delay().nanos() * halves / 2);
+    sim.run_for(delays(3)).unwrap();
     b.fail_listener(remote);
     sim.run().unwrap();
     assert_eq!(take(&accepted), Err(EIO));
-    assert_eq!(take(&client), Err(Net::Reset { remote }));
+    // The RST of the fault, not the answer to the client's ACK.
+    let reset = after(delays(5));
+    assert_eq!(take(&client), (Err(Net::Reset { remote }), reset));
 }
 
 #[test]
