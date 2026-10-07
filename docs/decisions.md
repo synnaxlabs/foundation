@@ -2208,24 +2208,26 @@ How to read this record:
   `Watch::next`, and `Mesh::member` (#562). `next` gives `Stopped`, which holds the
   cause types `log::Error` and `change::Unknown`, each public in its own module, so a
   caller can match the exact cause. `next` gives `Stopped` and not `Error`, because a
-  stop is the only error that it has: the type says what the call gives. `hub` holds
-  `Error::Mesh(mesh::Stopped)` for a read of a home. The cause types at the root
-  (`mesh::LogError`) lost, because each name repeats its module. A `Stopped` that holds
-  a text for each cause lost, because a caller cannot match a text. The surface holds
-  types of other crates: `raft::Position`, `block::Error`, `env::files::Error`, and
-  `types::node::PublicKey`, which the card of a `Member` holds. A caller whose line of
-  the crate map does not hold the crate of such a type reads it only through `Display`
-  and `Debug`. A caller that must match one gets the crate in its line through an
-  `interface` issue first. `mesh` does not re-export such a type: a re-export makes each
-  change to `raft` a change to the surface of `mesh`. The `Debug` text of a `Mesh` is
-  `Mesh { .. }`, and of a `Watch` is its index only. `Config`, `Mesh::open`, and
-  `Mesh::serve` become public after the senders (#1410), so until then no crate outside
-  `mesh` opens a `Mesh`. `Error`, `claim::Error`, and `region::Unfit` become public with
-  them, because `open` and `serve` give them. `claim::Error` is the `grant::Error` of
-  the rulings: #1460 gave the module its new name. `Error` then adds `raft::Error` and
-  `transport::Error` to the types of other crates. The calls that change the region and
-  the change records stay private. The surface is approved by the architect,
-  2026-10-07T16:24:54Z:
+  stop is the only error that it has: the type says what the call gives. For a read of a
+  home, `hub` gets the variant `Error::Mesh(mesh::Stopped)` in #340, which supersedes
+  the `Error::Mesh(mesh::Error)` of its plan
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6002776268). The
+  cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
+  A `Stopped` that holds a text for each cause lost, because a caller cannot match a
+  text. The surface holds types of other crates, among them `raft::Position`,
+  `block::Error`, `env::files::Error`, and `types::node::PublicKey`, which the card of a
+  `Member` holds. A caller whose line of the crate map does not hold the crate of such a
+  type reads it only through `Display` and `Debug`. A caller that must match one gets
+  the crate in its line through an `interface` issue first. `mesh` does not re-export
+  such a type: a re-export makes each change to `raft` a change to the surface of
+  `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index
+  only. `Config`, `Mesh::open`, and `Mesh::serve` become public after the senders
+  (#1410), so until then no crate outside `mesh` opens a `Mesh`. `Error`,
+  `claim::Error`, and `region::Unfit` become public with them, because `open` and
+  `serve` give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the
+  module its new name. `Error` then adds `raft::Error` and `transport::Error` to the
+  types of other crates. The calls that change the region and the change records stay
+  private. The surface is approved by the architect, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order

@@ -79,7 +79,7 @@ pub(crate) struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory fails with the error of the log.
+/// open of the same directory fails with a [`log::Error`].
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
