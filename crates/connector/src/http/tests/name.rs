@@ -298,6 +298,15 @@ fn sends_to_an_ipv6_literal_with_no_lookup() {
 }
 
 #[test]
+fn sends_to_port_80_of_an_ipv6_literal_with_no_port() {
+    let mut network = Network::new(84);
+    let server = network.server.addresses()[1];
+    let log = network.serve_on(SocketAddr::new(server, 80), ok);
+    all_ok(&network.run(vec![Step::Send(get(&format!("http://[{server}]/")))]));
+    assert_eq!(log.lock().expect("no panic").requests, [0]);
+}
+
+#[test]
 fn makes_no_connect_once_the_timeout_ends() {
     let mut network = Network::new(85);
     let mut addresses: Vec<IpAddr> = (0..5).map(|_| network.silent()).collect();
