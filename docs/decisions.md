@@ -186,8 +186,12 @@ How to read this record:
   (2026-10-07T17:30:55Z):
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011, and for
   the spec by `laptop.architect-2` (2026-10-07T17:27:36Z):
-  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043187013. They
-  supersede 6042293625 and 6042559685 (a `Matrix` with private fields and `u32` sides).
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043187013.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625 and
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042559685 (a
+  `Matrix` with private fields and `u32` sides), and the `Lengths` text of
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040630702.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -765,8 +769,9 @@ How to read this record:
   Amended: kind 5, with both `u16` sides in `n`, so the descriptor stays 26 bytes and
   a body with no matrix is as before. Decided by `laptop.architect`
   (2026-10-07T17:30:55Z):
-  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011. It
-  supersedes the `columns` table of 6042293625.
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
+  Supersedes the `columns` table of
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that

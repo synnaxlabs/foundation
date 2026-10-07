@@ -92,16 +92,6 @@ pub enum Type {
         /// Elements per sample.
         len: u32,
     },
-    /// A fixed array of arrays per sample, row-major. A sample has the bytes of an
-    /// array of `rows * columns` elements; the shape is only in the type.
-    Matrix {
-        /// The element type.
-        element: Scalar,
-        /// Arrays per sample.
-        rows: u16,
-        /// Elements per array.
-        columns: u16,
-    },
     /// A list of at most `max` elements per sample.
     List {
         /// The element type.
@@ -113,6 +103,16 @@ pub enum Type {
     String,
     /// Unlabeled bytes per sample.
     Bytes,
+    /// A fixed array of arrays per sample, row-major. A sample has the bytes of an
+    /// array of `rows * columns` elements; the shape is only in the type.
+    Matrix {
+        /// The element type.
+        element: Scalar,
+        /// Arrays per sample.
+        rows: u16,
+        /// Elements per array.
+        columns: u16,
+    },
 }
 
 impl Type {
@@ -202,8 +202,8 @@ impl FromStr for Type {
     }
 }
 
-/// The scalar that `text` names as the element of an array or a list. A scalar with
-/// space around it is a fault of syntax, not of the element.
+/// The scalar that `text` names as the element of an array, a matrix, or a list. A
+/// scalar with space around it is a fault of syntax, not of the element.
 fn element(text: &str) -> Result<Scalar, Error> {
     match Scalar::named(text) {
         Some(scalar) => Ok(scalar),
@@ -240,8 +240,8 @@ pub enum Error {
     /// `list<u8,16>`, and a scalar element with space around it, as in `f32 [3]`, give
     /// this error.
     Syntax,
-    /// The element of an array or a list is not a scalar, as in `string[3]` or
-    /// `list<f32[2], 4>`.
+    /// The element of an array, a matrix, or a list is not a scalar, as in `string[3]`
+    /// or `list<f32[2], 4>`.
     Element,
     /// A length or a maximum is not ASCII digits with no leading zero that fit in a
     /// `u32`, as in `f32[]`, `f32[03]`, or `f32[-1]`.
@@ -452,7 +452,6 @@ mod tests {
         }
     }
 
-    /// The #1152 test of `f32[2][3]`: it reads as an array of arrays.
     #[test]
     fn reads_two_lengths() {
         let read = "f32[2][3]".parse::<Type>();
