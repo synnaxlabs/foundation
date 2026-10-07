@@ -257,11 +257,11 @@ pub(crate) fn take_change(bytes: &mut &[u8]) -> Option<Change> {
         incoming: take_keys(bytes)?,
         outgoing: take_keys(bytes)?,
     };
-    let votes = take_proof(bytes)?;
+    let proof = take_proof(bytes)?;
     let signature = Some(take_signature(bytes)?);
     Some(Change {
         voters,
-        votes,
+        votes: proof,
         signature,
     })
 }

@@ -459,10 +459,11 @@ mod tests {
         [&[RAFT][..], &key(1), &key(2), &le(3), &[0], &le(0)].concat()
     }
 
+    /// The length of [`head`].
+    const HEAD: usize = 1 + 16 + 16 + 8 + 1 + 8;
+
     /// Where the proof's presence byte is in [`head`].
-    fn proof_at() -> usize {
-        head().len() - 9
-    }
+    const PROOF_AT: usize = HEAD - 9;
 
     /// The change of leader 1 to the incoming voters 1 and 2 from the outgoing
     /// voter 2, with the vote of voter 1 and `signature`.
@@ -542,6 +543,7 @@ mod tests {
 
     #[test]
     fn a_proof_has_a_fixed_byte_form() {
+        assert_eq!(head().len(), HEAD);
         let message = Message::Raft(raft::Message {
             from: node(1),
             to: node(2),
@@ -557,7 +559,7 @@ mod tests {
         });
         let voters = [&le(2)[..], &key(1), &[5; 64], &key(4), &[6; 64]].concat();
         let proof = [&[1, 1][..], &key(1), &voters].concat();
-        let head = &head()[..proof_at()];
+        let head = &head()[..PROOF_AT];
         let expected = [head, &proof, &le(0), &[5], &le(6)].concat();
         assert_eq!(message.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(message));
@@ -648,15 +650,14 @@ mod tests {
         *body.last_mut().unwrap() = 10;
         let mut tail = heartbeat.clone();
         tail.push(0);
-        let proof_at = proof_at();
         let mut presence = heartbeat.clone();
-        presence[proof_at] = 2;
+        presence[PROOF_AT] = 2;
         let grant =
-            [&head()[..proof_at], &[1, 2], &key(1), &le(0), &le(0), &[6]].concat();
+            [&head()[..PROOF_AT], &[1, 2], &key(1), &le(0), &le(0), &[6]].concat();
         let proven = |voters: [u8; 2]| {
             let voters = voters.map(|voter| [key(voter), vec![voter; 64]].concat());
             let proof = [&[1, 1][..], &key(1), &le(2), &voters.concat()].concat();
-            [&head()[..proof_at], &proof, &le(0), &[6]].concat()
+            [&head()[..PROOF_AT], &proof, &le(0), &[6]].concat()
         };
         let link = Link {
             at: at(2, 4),
