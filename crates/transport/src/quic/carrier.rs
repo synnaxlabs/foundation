@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, SocketAddr};
@@ -11,14 +12,18 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
+use block::Block;
 use env::clock::{Clock, Sleep};
 use env::net::Ecn;
 use env::net::udp::{self, Meta, Transmit};
+use noq_proto::StreamId;
+use types::hash::Map;
 use types::node::PublicKey;
 use types::time::Monotonic;
 
+use super::stream::{Incoming, Receiver, Sender};
 use super::{Endpoint, Event, connection};
-use crate::{Code, Config, Error, PAYLOAD_IPV4, Peer, port};
+use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
 /// shard's other tasks.
@@ -213,7 +218,7 @@ impl State {
                     slot.peer = Some(peer);
                     slot.connected = self.connects;
                     self.connects += 1;
-                    slot.wake();
+                    slot.wake_status();
                     return;
                 }
                 let Some(accepted) = &mut self.accepted else {
@@ -229,12 +234,30 @@ impl State {
                 self.accepting.drain(..).for_each(Waker::wake);
             }
             Event::Closed { key, error } => self.end(key, error),
-            // No session takes streams or datagrams yet.
-            Event::Incoming { .. }
-            | Event::Available { .. }
-            | Event::Readable { .. }
-            | Event::Writable { .. }
-            | Event::Datagram { .. } => {}
+            Event::Incoming { key } => {
+                if let Some(slot) = self.sessions.get_mut(&key) {
+                    slot.incoming.drain(..).for_each(Waker::wake);
+                }
+            }
+            Event::Available { key } => {
+                if let Some(slot) = self.sessions.get_mut(&key) {
+                    slot.available.drain(..).for_each(Waker::wake);
+                }
+            }
+            Event::Readable { stream } => {
+                let slot = self.sessions.get_mut(&stream.connection);
+                if let Some(waker) = slot.and_then(|s| s.reading.remove(&stream.id)) {
+                    waker.wake();
+                }
+            }
+            Event::Writable { stream } => {
+                let slot = self.sessions.get_mut(&stream.connection);
+                if let Some(waker) = slot.and_then(|s| s.writing.remove(&stream.id)) {
+                    waker.wake();
+                }
+            }
+            // No session takes datagrams yet.
+            Event::Datagram { .. } => {}
         }
     }
 
@@ -249,11 +272,9 @@ impl State {
     /// Ends each session with [`Error::Network`], and refuses each later dial, and
     /// each accept once none that connected waits.
     fn fail(&mut self, error: env::net::Error) {
-        for slot in self.sessions.values_mut() {
-            slot.end.get_or_insert_with(|| Error::Network {
-                error: error.clone(),
-            });
-            slot.wake();
+        self.endpoint.fail(&error);
+        while let Some(event) = self.endpoint.poll() {
+            self.dispatch(event);
         }
         self.accepting.drain(..).for_each(Waker::wake);
         self.failed = Some(error);
@@ -269,13 +290,30 @@ struct Slot {
     connected: u64,
     /// Why the connection ended.
     end: Option<Error>,
-    /// The wakers of the calls that wait on the session.
-    wakers: Vec<Waker>,
+    /// The wakers of the calls that wait for the handshake or the end.
+    status: Vec<Waker>,
+    /// The wakers of the opens that wait for the peer to allow a stream.
+    available: Vec<Waker>,
+    /// The wakers of the accepts that wait for a stream.
+    incoming: Vec<Waker>,
+    /// The waker of the read that waits on each stream.
+    reading: Map<StreamId, Waker>,
+    /// The waker of the write that waits on each stream.
+    writing: Map<StreamId, Waker>,
 }
 
 impl Slot {
+    fn wake_status(&mut self) {
+        self.status.drain(..).for_each(Waker::wake);
+    }
+
+    /// Wakes each call that waits on the session, for its end.
     fn wake(&mut self) {
-        self.wakers.drain(..).for_each(Waker::wake);
+        self.wake_status();
+        self.available.drain(..).for_each(Waker::wake);
+        self.incoming.drain(..).for_each(Waker::wake);
+        self.reading.drain().for_each(|(_, waker)| waker.wake());
+        self.writing.drain().for_each(|(_, waker)| waker.wake());
     }
 }
 
@@ -310,10 +348,210 @@ impl Session {
             if let Some(error) = &slot.end {
                 return Poll::Ready(error.clone());
             }
-            register(&mut slot.wakers, cx.waker());
+            register(&mut slot.status, cx.waker());
             Poll::Pending
         })
         .await
+    }
+
+    /// Ready with a stream of `class` that goes both ways, once the peer allows one,
+    /// or with why the session ended.
+    pub(crate) fn poll_open(
+        &self,
+        cx: &mut Context<'_>,
+        class: Class,
+    ) -> Poll<Result<(Sender, Receiver), Error>> {
+        self.poll_queue(
+            cx,
+            |slot| &mut slot.available,
+            |endpoint, clock, key| endpoint.open(clock.now(), key, class),
+        )
+    }
+
+    /// As [`Session::poll_open`], for a stream that only this side sends on.
+    pub(crate) fn poll_open_sender(
+        &self,
+        cx: &mut Context<'_>,
+        class: Class,
+    ) -> Poll<Result<Sender, Error>> {
+        self.poll_queue(
+            cx,
+            |slot| &mut slot.available,
+            |endpoint, clock, key| endpoint.open_sender(clock.now(), key, class),
+        )
+    }
+
+    /// Ready with the next stream the peer opened, highest class first, or with why
+    /// the session ended.
+    pub(crate) fn poll_accept(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Incoming, Error>> {
+        self.poll_queue(
+            cx,
+            |slot| &mut slot.incoming,
+            |endpoint, _, key| endpoint.accept(key),
+        )
+    }
+
+    /// Writes `message` when it is `Some`, and takes it, else writes the rest that
+    /// `sender` holds. Ready once the stream took all of it, or with the error.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::write`], or why the session ended.
+    ///
+    /// # Panics
+    ///
+    /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::write`] does
+    /// while the session is live.
+    pub(crate) fn poll_write(
+        &self,
+        cx: &mut Context<'_>,
+        sender: &mut Sender,
+        message: &mut Option<Block>,
+    ) -> Poll<Result<(), Error>> {
+        self.with(|endpoint, clock, slot| {
+            sender.check_unfinished();
+            let written = match message.take() {
+                Some(message) => endpoint.write(clock.now(), sender, message),
+                None => endpoint.flush(clock.now(), sender),
+            };
+            match written {
+                Ok(Poll::Pending) => {
+                    if let Some(error) = &slot.end {
+                        return Poll::Ready(Err(error.clone()));
+                    }
+                    register_one(&mut slot.writing, sender.key().id, cx.waker());
+                    Poll::Pending
+                }
+                Ok(Poll::Ready(())) => Poll::Ready(Ok(())),
+                Err(error) => Poll::Ready(Err(error)),
+            }
+        })
+    }
+
+    /// Ends `sender`'s stream after the messages written to it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::finish`], or why the session ended.
+    ///
+    /// # Panics
+    ///
+    /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::finish`] does
+    /// while the session is live.
+    pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
+        self.with(|endpoint, clock, slot| {
+            sender.check_unfinished();
+            if let Some(error) = &slot.end {
+                return Err(error.clone());
+            }
+            endpoint.finish(clock.now(), sender)
+        })
+    }
+
+    /// Resets `sender`'s stream with `code`, as [`Endpoint::reset`] does.
+    pub(crate) fn reset(&self, sender: Sender, code: Code) {
+        self.with(|endpoint, clock, slot| {
+            slot.writing.remove(&sender.key().id);
+            endpoint.reset(clock.now(), sender, code);
+        });
+    }
+
+    /// Ready with the next whole message of `receiver`'s stream, `None` after the
+    /// last, or with the error.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::read`], or why the session ended.
+    pub(crate) fn poll_read(
+        &self,
+        cx: &mut Context<'_>,
+        receiver: &mut Receiver,
+    ) -> Poll<Result<Option<Block>, Error>> {
+        self.with(
+            |endpoint, clock, slot| match endpoint.read(clock.now(), receiver) {
+                Ok(Poll::Pending) => {
+                    if let Some(error) = &slot.end {
+                        return Poll::Ready(Err(error.clone()));
+                    }
+                    register_one(&mut slot.reading, receiver.key().id, cx.waker());
+                    Poll::Pending
+                }
+                Ok(Poll::Ready(message)) => Poll::Ready(Ok(message)),
+                Err(error) => Poll::Ready(Err(error)),
+            },
+        )
+    }
+
+    /// Ends a read of `receiver` that waits, as [`Endpoint::end_wait`] does.
+    pub(crate) fn end_wait(&self, receiver: &mut Receiver) {
+        self.with(|endpoint, _, slot| {
+            slot.reading.remove(&receiver.key().id);
+            endpoint.end_wait(receiver);
+        });
+    }
+
+    /// Stops `receiver`'s stream with `code`, as [`Endpoint::stop`] does.
+    pub(crate) fn stop(&self, receiver: Receiver, code: Code) {
+        self.with(|endpoint, clock, slot| {
+            slot.reading.remove(&receiver.key().id);
+            endpoint.stop(clock.now(), receiver, code);
+        });
+    }
+
+    /// Ready with what `take` gives, or with why the session ended. Else registers
+    /// the waker in the list that `wakers` picks.
+    fn poll_queue<T>(
+        &self,
+        cx: &mut Context<'_>,
+        wakers: fn(&mut Slot) -> &mut Vec<Waker>,
+        take: impl FnOnce(&mut Endpoint, &Clock, connection::Key) -> Option<T>,
+    ) -> Poll<Result<T, Error>> {
+        self.with(|endpoint, clock, slot| {
+            if let Some(error) = &slot.end {
+                return Poll::Ready(Err(error.clone()));
+            }
+            if let Some(taken) = take(endpoint, clock, self.key) {
+                return Poll::Ready(Ok(taken));
+            }
+            register(wakers(slot), cx.waker());
+            Poll::Pending
+        })
+    }
+
+    /// Opens a one-way stream that skips the stream layer, and writes `bytes` on it.
+    #[cfg(test)]
+    pub(crate) fn raw(&self, bytes: &[u8]) {
+        let key = self.key;
+        self.with(|endpoint, _, _| {
+            let connection = super::pair::connection(endpoint, key);
+            let id = connection.streams().open(noq_proto::Dir::Uni);
+            let mut send = connection.send_stream(id.expect("a stream"));
+            assert_eq!(send.write(bytes), Ok(bytes.len()));
+        });
+    }
+
+    /// Runs `call` on the endpoint, the clock, and the session's slot, then wakes the
+    /// task to send what the call queued.
+    fn with<T>(&self, call: impl FnOnce(&mut Endpoint, &Clock, &mut Slot) -> T) -> T {
+        let mut state = self.state.borrow_mut();
+        let State {
+            endpoint,
+            clock,
+            task,
+            sessions,
+            ..
+        } = &mut *state;
+        let slot = sessions
+            .get_mut(&self.key)
+            .expect("invariant: a session keeps its slot until it drops");
+        let called = call(endpoint, clock, slot);
+        if let Some(task) = task {
+            task.wake_by_ref();
+        }
+        called
     }
 
     /// Ready when the handshake finished, with how many dials on the carrier
@@ -330,8 +568,16 @@ impl Session {
         if let Some(error) = &slot.end {
             return Poll::Ready(Err(error.clone()));
         }
-        register(&mut slot.wakers, cx.waker());
+        register(&mut slot.status, cx.waker());
         Poll::Pending
+    }
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
     }
 }
 
@@ -530,6 +776,14 @@ fn register(wakers: &mut Vec<Waker>, waker: &Waker) {
     }
 }
 
+/// Makes `waker` the one waker of `stream` in `wakers`.
+fn register_one(wakers: &mut Map<StreamId, Waker>, stream: StreamId, waker: &Waker) {
+    let held = wakers.entry(stream).or_insert_with(|| waker.clone());
+    if !held.will_wake(waker) {
+        held.clone_from(waker);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;
@@ -547,7 +801,7 @@ mod tests {
 
     use super::{BATCHES, Carrier, Socket, register};
     use crate::quic::Endpoint;
-    use crate::testing::{self, IDLE, PORT, address, nodes, shard, spans};
+    use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::tls::public;
     use crate::{Code, Error, Peer};
 
@@ -1062,6 +1316,44 @@ mod tests {
             let dialed = carrier.connect(public(&SERVER), at).await;
             assert_eq!(dialed.err(), Some(network.clone()));
             assert_eq!(carrier.accept().await.err(), Some(network));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_broken_socket_ends_a_waiting_accept() {
+        let (mut sim, client, _) = nodes(0);
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let mut accepting = pin!(carrier.accept());
+            assert!(poll_once(accepting.as_mut()).await.is_none());
+            node.fail_udp(address(&node));
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(accepting.await.err(), Some(network));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_broken_socket_keeps_the_end_of_a_session_that_ended_before() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            let closed = Error::Closed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            node.fail_udp(address(&node));
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert!(carrier.0.borrow().task.is_none());
+            assert_eq!(session.closed().await, closed);
         });
         assert_eq!(sim.run(), Ok(()));
     }

@@ -35,17 +35,13 @@ mod code;
 pub mod datagram;
 mod dial;
 mod error;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the QUIC carrier is the first user")
-)]
 mod message;
 pub mod port;
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the streams and datagrams of `Session` are the next users (#68)"
+        reason = "the datagrams of `Session` are the next users (#68)"
     )
 )]
 mod quic;
