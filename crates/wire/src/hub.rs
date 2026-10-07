@@ -598,6 +598,15 @@ mod tests {
         }
 
         #[test]
+        fn decodes_an_open_of_one_channel() {
+            let open = Open {
+                mode: Mode::Latest,
+                channels: 1,
+            };
+            assert_eq!(Open::decode(&[1, 1, 0, 0, 0]), Ok(open));
+        }
+
+        #[test]
         #[should_panic(expected = "an open names at least one channel")]
         fn panics_on_an_open_of_no_channel() {
             let open = Open {
@@ -688,6 +697,13 @@ mod tests {
         #[test]
         fn refuses_a_head_of_no_series() {
             assert_eq!(Reply::decode(&zeros(2, 18)), Err(Error::Series));
+        }
+
+        #[test]
+        fn decodes_a_head_of_one_series() {
+            let mut bytes = zeros(2, 18);
+            bytes[14] = 1;
+            assert_eq!(Reply::decode(&bytes), Ok(live()));
         }
 
         #[test]
