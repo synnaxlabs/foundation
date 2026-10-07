@@ -254,8 +254,8 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
     }
     let found = stat.st_size.cast_unsigned();
     match mode {
-        // Not atomic: a crash before the allocation leaves an empty file, which this
-        // allocates.
+        // Not atomic: a crash before `allocate` sets the length leaves an empty file,
+        // which this allocates.
         Mode::Create { len } if found == 0 && len != 0 => {
             allocate(&fd, len)
                 .and_then(|()| sync_all(&fd))
@@ -347,11 +347,16 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
     return fs::fcntl_fullfsync(fd);
 }
 
-/// Allocates the first `len` bytes of the empty file `fd` on disk and sets its length
-/// to `len`.
+/// Allocates the first `len` bytes of the empty file `fd` on disk, all or none, and
+/// sets its length to `len`.
 fn allocate(fd: &OwnedFd, len: u64) -> io::Result<()> {
+    // The length stays 0 until each block is there, also after a crash. On ext4, a
+    // failed call keeps the blocks it took.
     #[cfg(target_os = "linux")]
-    return fs::fallocate(fd, fs::FallocateFlags::empty(), 0, len);
+    return match fs::fallocate(fd, fs::FallocateFlags::KEEP_SIZE, 0, len) {
+        Ok(()) => fs::ftruncate(fd, len),
+        Err(errno) => fs::ftruncate(fd, 0).and(Err(errno)),
+    };
     #[cfg(target_os = "macos")]
     return crate::allocate::all(fd, len);
 }
