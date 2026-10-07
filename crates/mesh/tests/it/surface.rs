@@ -147,12 +147,17 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
-// A known gap until #1587: `open` must refuse this transport.
 #[test]
-fn open_takes_a_transport_that_proves_another_key() {
+#[should_panic(
+    expected = "invariant: the transport of a mesh proves the public half of its \
+                private key: it proves \
+                ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1, not \
+                8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+)]
+fn open_panics_on_a_transport_that_proves_another_key() {
     solo(|node, tasks| async move {
         let config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
-        drop(Mesh::open(config).await.unwrap());
+        drop(Mesh::open(config).await);
     });
 }
 
