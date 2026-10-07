@@ -14,7 +14,7 @@ enum Next {
     Opened,
     Head,
     Ends { remain: u32 },
-    Body { at: usize, remain: usize },
+    Body { end: usize, remain: usize },
 }
 
 /// A message from the home, decoded.
@@ -77,16 +77,16 @@ impl Reader {
                 let remain = rest_of_run(remain, ends.len())?;
                 let next = match (remain, ends.last_end()) {
                     (0, Some(0)) => Next::Head,
-                    (0, Some(end)) => Next::Body {
-                        at: 0,
-                        remain: body_len(end),
-                    },
+                    (0, Some(end)) => {
+                        let end = body_len(end);
+                        Next::Body { end, remain: end }
+                    }
                     _ => Next::Ends { remain },
                 };
                 let last = remain == 0;
                 (FromHome::Ends { ends, last }, next)
             }
-            Next::Body { at, remain } => {
+            Next::Body { end, remain } => {
                 let len = message.len();
                 if len == 0 {
                     return Err(Error::Empty);
@@ -96,10 +96,7 @@ impl Reader {
                 let next = if remain == 0 {
                     Next::Head
                 } else {
-                    Next::Body {
-                        at: after(at, len),
-                        remain,
-                    }
+                    Next::Body { end, remain }
                 };
                 let last = remain == 0;
                 (
@@ -120,7 +117,7 @@ impl Reader {
     #[must_use]
     pub fn body(&self) -> Option<usize> {
         match self.next {
-            Next::Body { at, .. } => Some(at),
+            Next::Body { end, remain } => Some(start(end, remain)),
             Next::Opened | Next::Head | Next::Ends { .. } => None,
         }
     }
@@ -148,9 +145,9 @@ fn body_len(end: u32) -> usize {
     usize::try_from(end).expect("invariant: a usize holds a u32")
 }
 
-fn after(at: usize, len: usize) -> usize {
-    at.checked_add(len)
-        .expect("invariant: a body message ends at or before the last end")
+fn start(end: usize, remain: usize) -> usize {
+    end.checked_sub(remain)
+        .expect("invariant: the rest of the body is no longer than the body")
 }
 
 #[cfg(test)]

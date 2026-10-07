@@ -94,6 +94,28 @@ fn decode_a_frame(bencher: Bencher<'_, '_>, series: u32) {
     });
 }
 
+/// Decodes a body of `messages` messages of 1 024 bytes, with where each starts.
+#[divan::bench(args = [1, 8, 64])]
+fn decode_a_body(bencher: Bencher<'_, '_>, messages: u32) {
+    let mut out = [0; 18];
+    head(1).encode(&mut out);
+    let mut run = [0; ends::LEN];
+    ends::encode([(0, messages * 1_024)].into_iter(), &mut run);
+    let body = vec![7; usize::try_from(messages * 1_024).expect("a u32 fits a usize")];
+    let mut reader = opened(1);
+    bencher.bench_local(|| {
+        reader.decode(&out).expect("the head decodes");
+        reader.decode(&run).expect("the ends decode");
+        body.chunks(1_024).fold(0, |sum: usize, message| {
+            let at = reader.body().expect("the body comes next");
+            match reader.decode(divan::black_box(message)) {
+                Ok(FromHome::Body { bytes, .. }) => sum.wrapping_add(at + bytes.len()),
+                other => panic!("the body did not decode: {other:?}"),
+            }
+        })
+    });
+}
+
 #[divan::bench]
 fn encode_and_decode_a_head(bencher: Bencher<'_, '_>) {
     let mut out = [0; 18];
