@@ -611,8 +611,8 @@ fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
 }
 
 /// Once the hub and each session drop while the commit task waits for a commit, the
-/// hub holds no commit: once a commit of the home resolves and drops, the ring is
-/// closed.
+/// hub holds no commit: a commit of the home that resolves holds the ring open until
+/// it drops.
 #[test]
 fn drops_the_commit_it_waits_for_with_the_hub() {
     for seed in 0..64 {
@@ -624,19 +624,26 @@ fn drops_the_commit_it_waits_for_with_the_hub() {
             test.clock.sleep(Span::from_nanos(1)).await;
             let Test {
                 node,
-                commit,
+                mut commit,
                 hub,
                 paused,
                 ..
             } = test;
             paused.pause();
             drop((hub, reader, writer));
-            assert_eq!(commit.await, Ok(()));
-            let ring = node
-                .files()
-                .open(FilePath::new(RING), env::files::Mode::Write)
-                .await;
-            assert!(ring.is_ok(), "seed {seed}: {ring:?}");
+            assert_eq!((&mut commit).await, Ok(()));
+            let open = || async {
+                node.files()
+                    .open(FilePath::new(RING), env::files::Mode::Write)
+                    .await
+                    .map(drop)
+            };
+            let busy = env::files::Error::Busy {
+                path: PathBuf::from(RING),
+            };
+            assert_eq!(open().await, Err(busy), "seed {seed}");
+            drop(commit);
+            assert_eq!(open().await, Ok(()), "seed {seed}");
             paused.resume();
         });
     }
