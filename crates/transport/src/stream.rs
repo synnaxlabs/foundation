@@ -12,8 +12,7 @@ use crate::code::Code;
 use crate::error::Error;
 use crate::quic;
 
-/// What a [`Sender`] gives after a [`Sender::send`] future dropped and reset its
-/// stream.
+/// What a [`Sender`] gives after a dropped send future reset its stream.
 const CANCELLED: Error = Error::Reset { code: Code(0) };
 
 /// Bytes of a block to send, then zeros.
@@ -52,7 +51,7 @@ pub struct Part {
 pub struct Sender {
     session: Rc<quic::Session>,
     class: Class,
-    /// `None` once a `send` future dropped and reset the stream.
+    /// `None` once a dropped send future reset the stream.
     stream: Option<quic::stream::Sender>,
 }
 
@@ -91,7 +90,7 @@ impl Sender {
     /// [`Error::TooLarge`] when `message` is over the peer's
     /// [`Config::message_bytes_max`](crate::Config::message_bytes_max),
     /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
-    /// `Code(0)` after a `send` future dropped, or the error that ended the session.
+    /// `Code(0)` after a dropped send future, or the error that ended the session.
     ///
     /// # Panics
     ///
@@ -233,7 +232,7 @@ impl Sender {
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped reading, [`Error::Reset`] with
-    /// `Code(0)` after a `send` future dropped, or the error that ended the session.
+    /// `Code(0)` after a dropped send future, or the error that ended the session.
     ///
     /// ```
     /// use transport::{Error, stream::Sender};
@@ -375,7 +374,7 @@ impl Receiver {
     /// ```
     /// use transport::{Error, stream::Receiver};
     ///
-    /// async fn next(receiver: &mut Receiver, draft: &mut [u8]) -> Result<(), Error> {
+    /// async fn drain(receiver: &mut Receiver, draft: &mut [u8]) -> Result<(), Error> {
     ///     while let Some(len) = receiver.recv_into(draft).await? {
     ///         let _body = &draft[..len];
     ///     }
