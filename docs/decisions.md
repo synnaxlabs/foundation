@@ -146,7 +146,14 @@ How to read this record:
 - **S5** `Channel { key, name, kind: Kind }`, with
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
-  or virtual flag.
+  or virtual flag. Amended: no `name` field, because the name is the tree key, and
+  `Kind::Data(Data)` has private fields. An array or list of size 0 is valid: no
+  caller divides by its width, and a refusal, when one is needed, goes in
+  `sample::Type`, which every format reads. The spec numbers its scalar codes in its
+  own table, apart from STORED BODY, so a change to one format does not change the
+  other. Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
+  https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -2003,6 +2010,32 @@ How to read this record:
   would move the policy to other voters silently, and X26 could never fail), and the
   region from the directory (K2 makes the layout a default only; r3 rejected a
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
+  The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
+  `@node_settings`, `@compression` (compression section), `@placement` (S12), and
+  `@time`. No time keyword was on record (C6 shows `[[time]]`, and X36 replaced its
+  content), so the architect decided `time`. A connector has no segment: it is at its
+  own name, and its channels are its children (#758, 2.2, C8). A channel has no segment
+  either: it is at its own name (#756,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
+  check still applies to both names. A region record is at `<prefix>.@region` in the
+  parent's tree (#758). This is not an exception to X2: the region that holds the record
+  is the longest region prefix that contains `<prefix>`, other than `<prefix>` itself.
+  The root region has no record and no key: no parent records it (X3), and its voters
+  live only in its Raft config. The one place that maps a key to its region applies
+  this, so no caller tests for `@region`. Decided by the architect, #1001
+  (https://github.com/synnaxlabs/foundation/issues/1001#issuecomment-6031305302; #758
+  for the connector and the region). The kind is `spec::definition::Kind`, and the
+  module `spec::key` holds the whole key rule: the segments, the `@` rule, the bound,
+  `Kind::key`, and `key::Error`. Lost: a module `spec::kind`, because in `spec` "kind"
+  also names a connector's driver. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031286198 and
+  https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031290037).
+  `Kind::key` takes the label as text and checks it in this order: the bound
+  (`key::Error::Long`, the one length error for every kind, with `Name::MAX_BYTES` for a
+  connector), then the name (`key::Error::Name`), then the `@` rule. So the user gets
+  the true bound in one round. Lost: a `&Name` label, whose parse gives its own length
+  error with the wrong bound. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031559597).
 
 ### 1.12 Access, identity, and secrets
 
@@ -2610,9 +2643,9 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
-| Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
+| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |

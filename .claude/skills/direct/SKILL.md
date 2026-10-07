@@ -35,7 +35,8 @@ For each code PR, launch a fresh subagent with the PR number. It checks, with fi
   declare, and each allocation, copy, lock, or wakeup on it that the rules forbid.
 - **Defects** it can show.
 
-Post the verdict as one comment on the PR. Then act on each problem:
+It also gives the rating and summary that `/review` "Rating" defines. Post the verdict
+as one comment on the PR that starts with them, as given. Then act on each problem:
 
 - A defect: an issue with its `crate:` label.
 - A contract question: send it to `laptop.architect`.
@@ -65,15 +66,21 @@ person.
 ## Red-team PRs
 
 Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
-that each new test fails on the code it targets. Post one comment: approved at `<sha>`,
-or the findings. A later push needs a new approval.
+that each new test fails on the code it targets. Post one comment that starts with the
+rating and summary of the last round, as given, then approved at `<sha>` or the
+findings. A later push needs a new approval.
 
 ## The bar
 
+- The objective is high-quality software, shipped fast. A new rule closes a gap that no
+  rule or check already covers, and names the defect it would have stopped. Never add a
+  second gate on the same thing, and send the architect only boundaries, public
+  surfaces, contracts, and risk-crate deferrals.
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
-  in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. When an
-  audit shows a gap, change the rule in one small PR, and send the link to
-  `laptop.monitor`, who gets the person's approval.
+  in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. Collect
+  the rule changes from your audits in one rule PR, and keep only one open at a time.
+  Send its link to `laptop.monitor` when it holds a set of rules, at most once every two
+  hours (12 a day), so that the person approves them together.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
   merged PR, performance findings after merge, acceptance scenarios passing, and review
   rounds per PR.
