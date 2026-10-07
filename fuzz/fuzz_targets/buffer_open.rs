@@ -2,9 +2,9 @@
 //! `committed` reported durable is what a reopen gives.
 //!
 //! `Buffer::read` gives each path of a ring that opens as its doc says: every entry
-//! up to the tail, a gap only for seqs that no entry holds, and the same entries in
-//! one read, in reads of one entry, from inside an entry or a gap, and after a
-//! reopen.
+//! up to the tail, a gap only for seqs that no entry holds, each entry that its
+//! budget takes, and the same entries in one read, in reads of a small budget, from
+//! inside an entry or a gap, and after a reopen.
 //!
 //! Input: batches that the production path writes, then edits on the file bytes.
 //! Two edits seal a CRC: a header block (at offset 42, over its first 512-byte
@@ -275,7 +275,7 @@ async fn build(
 ) -> (Vec<Tail>, Vec<Vec<Given>>) {
     let (buffer, slots) = open(node, tasks, pool).await.expect("a new ring opens");
     let mut next = vec![[0u64; 2]; INDEXES];
-    let mut tags = BUILD_TAG..;
+    let mut tags = BUILD_TAG..CHECK_TAG;
     let mut written: Vec<[Vec<Given>; 2]> =
         iter::repeat_with(Default::default).take(INDEXES).collect();
     for batch in &input.batches {
@@ -543,11 +543,17 @@ async fn check(
             });
         }
     }
+    let before = tails(&buffer, &slots);
     match buffer.append(entries) {
         Ok(()) => {}
         Err(Rejected::Full { .. }) => return,
         Err(other) => panic!("append failed: {other}"),
     }
+    assert_eq!(
+        tails(&buffer, &slots),
+        before,
+        "an entry was durable before its commit"
+    );
     buffer.committed().await.expect("the entries commit");
     let durable = tails(&buffer, &slots);
     let stored = read_paths(&buffer, &slots).await;
