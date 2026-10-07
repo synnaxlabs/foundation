@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc fb69e4c2141843f98e75465202e82957e9aabb4ad6a7045e6813d908af6384c0 # shrinks to lead = Some('\t'), measurement = "]", keys = {"0": (false, "]", Float(Float(0.0)))}, time = 0
+cc 1557e94b0654fc18b9d0d38d546cf7b73a573b60f6d52254c793862515a9f9f0 # shrinks to measurement = "A", keys = {"\tA": (false, "¡", Float(Float(0.0)))}, time = 0

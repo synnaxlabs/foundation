@@ -64,6 +64,7 @@ fn parse(line: &str) -> Parsed {
         let (key, value) = pair(tag);
         (key, unescape(value))
     });
+    let fields = fields.trim_start_matches([' ', '\t', '\0']);
     let fields = split(fields, ',').into_iter().map(|field| {
         let (key, text) = pair(field);
         (key, value(text))
@@ -210,6 +211,12 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
             },
             "the name \"f\\r\" holds '\\r', which line protocol cannot carry",
         ),
+    ]);
+}
+
+#[test]
+fn refuses_a_name_influxdb_skips_at_the_start() {
+    refuses(&[
         (
             Measurement::new("\t#m", &[], &["f"]),
             Error::Character {
@@ -233,6 +240,22 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 character: '\t',
             },
             "the name \"\\tm\" holds '\\t', which line protocol cannot carry",
+        ),
+        (
+            Measurement::new("m", &[], &["f", "\tf"]),
+            Error::Character {
+                name: "\tf".into(),
+                character: '\t',
+            },
+            "the name \"\\tf\" holds '\\t', which line protocol cannot carry",
+        ),
+        (
+            Measurement::new("m", &[], &["\0f"]),
+            Error::Character {
+                name: "\0f".into(),
+                character: '\0',
+            },
+            "the name \"\\0f\" holds '\\0', which line protocol cannot carry",
         ),
     ]);
 }
@@ -302,8 +325,26 @@ fn allows_what_is_reserved_only_elsewhere() {
     assert_eq!(text(&out), "time,k=_v,t=# #f=0i 0\n");
 }
 
+/// A name that InfluxDB keeps, with a tab or NUL, then maybe `#`, in front of some.
 fn name() -> impl Strategy<Value = String> {
-    "[^_#\\\\\n\r][^\\\\\n\r]{0,8}".prop_filter("not time", |name| name != "time")
+    let lead = prop_oneof![
+        8 => Just(""),
+        1 => proptest::sample::select(vec!["\t", "\0", "\t#", "\0#"]),
+    ];
+    let name =
+        "[^_#\\\\\n\r][^\\\\\n\r]{0,8}".prop_filter("not time", |name| name != "time");
+    (lead, name).prop_map(|(lead, name)| format!("{lead}{name}"))
+}
+
+/// The error for the first name that starts with a tab or NUL.
+fn skipped<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<Error> {
+    names.into_iter().find_map(|name| {
+        let character = name.chars().next().filter(|c| matches!(c, '\t' | '\0'))?;
+        Some(Error::Character {
+            name: name.into(),
+            character,
+        })
+    })
 }
 
 fn field_value() -> impl Strategy<Value = Value> {
@@ -320,7 +361,6 @@ fn field_value() -> impl Strategy<Value = Value> {
 proptest! {
     #[test]
     fn each_line_parses_back(
-        lead in proptest::option::of(proptest::sample::select(vec!['\t', '\0'])),
         measurement in name(),
         keys in proptest::collection::btree_map(
             name(),
@@ -343,10 +383,10 @@ proptest! {
         prop_assume!(!fields.is_empty());
         let borrowed: Vec<(&str, &str)> =
             tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let measurement: String = lead.into_iter().chain(measurement.chars()).collect();
         let line = Measurement::new(&measurement, &borrowed, &keys_of_fields);
-        if let Some(character) = measurement.chars().next().filter(|c| matches!(c, '\t' | '\0')) {
-            prop_assert_eq!(line, Err(Error::Character { name: measurement, character }));
+        let names = std::iter::once(measurement.as_str()).chain(keys_of_fields.iter().copied());
+        if let Some(error) = skipped(names) {
+            prop_assert_eq!(line, Err(error));
             return Ok(());
         }
         let line = line.unwrap();

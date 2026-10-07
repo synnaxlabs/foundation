@@ -21,7 +21,7 @@ impl Measurement {
     ///
     /// - [`Error::Empty`] for an empty name, key, or tag value.
     /// - [`Error::Character`] for one with a backslash, a newline, or a carriage
-    ///   return, or a name that starts with a tab or NUL.
+    ///   return, or a name or field key that starts with a tab or NUL.
     /// - [`Error::Reserved`] for a name or key that starts with `_`, or a key
     ///   `time`.
     /// - [`Error::Comment`] for a name that starts with `#`.
@@ -34,13 +34,7 @@ impl Measurement {
         fields: &[&str],
     ) -> Result<Self, Error> {
         unreserved(name)?;
-        // InfluxDB skips a tab or NUL at the start of a line, and no escape keeps it.
-        if let Some(character @ ('\t' | '\0')) = name.chars().next() {
-            return Err(Error::Character {
-                name: name.into(),
-                character,
-            });
-        }
+        unskipped(name)?;
         if name.starts_with('#') {
             return Err(Error::Comment(name.into()));
         }
@@ -66,6 +60,7 @@ impl Measurement {
         }
         let fields = fields.iter().map(|&key| {
             unreserved_key(key)?;
+            unskipped(key)?;
             let mut bytes = Vec::new();
             escape(key, b",= ", Part::FieldKey, &mut bytes)?;
             Ok(bytes)
@@ -218,6 +213,18 @@ fn unreserved_key(key: &str) -> Result<(), Error> {
         return Err(Error::Reserved(key.into()));
     }
     unreserved(key)
+}
+
+/// Refuses a name that starts with a tab or NUL. InfluxDB skips these before the
+/// measurement and before the first field, and no escape keeps them.
+fn unskipped(name: &str) -> Result<(), Error> {
+    if let Some(character @ ('\t' | '\0')) = name.chars().next() {
+        return Err(Error::Character {
+            name: name.into(),
+            character,
+        });
+    }
+    Ok(())
 }
 
 /// Refuses a name or key that starts with `_`.
