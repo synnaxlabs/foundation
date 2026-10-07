@@ -1476,10 +1476,15 @@ mod tests {
 
     #[test]
     fn open_refuses_two_records_of_one_node() {
+        let admitted = Member {
+            admission: [1; 64],
+            ..common::member(2)
+        };
         let cases = [
             ("an equal record", record(2, 2, 1)),
             ("another version", record(2, 2, 2)),
             ("another signer", record(2, 3, 1)),
+            ("another admission", admitted),
         ];
         for (case, second) in cases {
             for at in [0, 3] {
