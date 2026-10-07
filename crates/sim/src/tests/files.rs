@@ -826,6 +826,7 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
             ("a/", Mode::Create { len: 1 }),
             ("b/", Mode::Create { len: 1 }),
             ("b/", Mode::Read),
+            ("b/.", Mode::Read),
             ("d/", Mode::Read),
         ] {
             results.push(files.open(Path::new(path), mode).await.map(drop));
@@ -842,6 +843,7 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
         Err(io("a/", Operation::Open, 21)),
         Err(io("b/", Operation::Open, 21)),
         Err(Error::NotFound { path: "b/".into() }),
+        Err(Error::NotFound { path: "b/.".into() }),
         Err(io("d/", Operation::Open, 21)),
         Err(io("a/", Operation::Remove, 20)),
         Ok(()),

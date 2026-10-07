@@ -443,24 +443,42 @@ fn a_memory_path_spelled_with_a_dot_names_the_same_file_in_each_call() {
 }
 
 #[test]
-fn a_memory_path_ending_in_a_dot_segment_names_no_file() {
+fn a_memory_path_with_a_trailing_slash_names_only_a_directory() {
     let files = Memory::default().files();
     drop(ready(files.open(FilePath::new("a"), Mode::Create { len: 1 })).unwrap());
-    let io = |path: &str, operation| FileError::Io {
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("a/", Mode::Write),
+        ("a/.", Mode::Read),
+        ("a//", Mode::Read),
+        ("a/", Mode::Create { len: 1 }),
+        ("b/", Mode::Create { len: 1 }),
+        ("b/", Mode::Read),
+        ("b/.", Mode::Read),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    for path in ["a/", "b/", "a"] {
+        results.push(ready(files.remove(FilePath::new(path))));
+    }
+    let io = |path: &str, operation, code| FileError::Io {
         path: path.into(),
         operation,
-        code: 20,
+        code,
     };
-    for path in ["a/.", "a/"] {
-        let opened = ready(files.open(FilePath::new(path), Mode::Read)).map(drop);
-        assert_eq!(opened, Err(io(path, Operation::Open)));
-        let removed = ready(files.remove(FilePath::new(path)));
-        assert_eq!(removed, Err(io(path, Operation::Remove)));
-    }
-    assert_eq!(
-        ready(files.list(FilePath::new(""))).unwrap(),
-        [PathBuf::from("a")]
-    );
+    let expected = [
+        Err(io("a/", Operation::Open, 20)),
+        Err(io("a/.", Operation::Open, 20)),
+        Err(io("a//", Operation::Open, 20)),
+        Err(io("a/", Operation::Open, 21)),
+        Err(io("b/", Operation::Open, 21)),
+        Err(FileError::NotFound { path: "b/".into() }),
+        Err(FileError::NotFound { path: "b/.".into() }),
+        Err(io("a/", Operation::Remove, 20)),
+        Ok(()),
+        Ok(()),
+    ];
+    assert_eq!(results, expected);
 }
 
 #[test]

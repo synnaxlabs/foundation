@@ -93,18 +93,20 @@ fn key(path: &Path) -> PathBuf {
         .collect()
 }
 
-/// The error of a file call on `path` when it ends in `/` or `/.`, which names
-/// only a directory, as on a disk (`ENOTDIR`).
-fn not_a_file(path: &Path, operation: Operation) -> Result<(), Error> {
+/// Whether `path` ends in `/` or `/.`, as `a/` does. Such a path names only a
+/// directory: a disk gives `EISDIR` (21) on a create and `ENOTDIR` (20) on a
+/// file that is there.
+fn slashed(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
-    if bytes.ends_with(b"/") || bytes.ends_with(b"/.") {
-        return Err(Error::Io {
-            path: path.into(),
-            operation,
-            code: 20,
-        });
+    bytes.ends_with(b"/") || bytes.ends_with(b"/.")
+}
+
+fn io(path: &Path, operation: Operation, code: i32) -> Error {
+    Error::Io {
+        path: path.into(),
+        operation,
+        code,
     }
-    Ok(())
 }
 
 fn to_u64(len: usize) -> u64 {
@@ -123,25 +125,28 @@ impl Driver for Memory {
     ) -> Request<'a, Box<dyn Descriptor>> {
         let mut files = lock(&self.files);
         let found = files.get(&key(path)).cloned();
-        let result =
-            not_a_file(path, Operation::Open).and_then(|()| match (found, mode) {
-                (Some(bytes), Mode::Create { len })
-                    if to_u64(lock(&bytes).len()) != len =>
-                {
-                    Err(Error::Length {
-                        path: path.into(),
-                        expected: len,
-                        found: to_u64(lock(&bytes).len()),
-                    })
-                }
-                (Some(bytes), _) => Ok(bytes),
-                (None, Mode::Create { len }) => {
-                    let bytes = Arc::new(Mutex::new(vec![0; to_usize(len)]));
-                    files.insert(key(path), Arc::clone(&bytes));
-                    Ok(bytes)
-                }
-                (None, _) => Err(Error::NotFound { path: path.into() }),
-            });
+        let result = match (found, mode) {
+            (_, Mode::Create { .. }) if slashed(path) => {
+                Err(io(path, Operation::Open, 21))
+            }
+            (Some(_), _) if slashed(path) => Err(io(path, Operation::Open, 20)),
+            (Some(bytes), Mode::Create { len })
+                if to_u64(lock(&bytes).len()) != len =>
+            {
+                Err(Error::Length {
+                    path: path.into(),
+                    expected: len,
+                    found: to_u64(lock(&bytes).len()),
+                })
+            }
+            (Some(bytes), _) => Ok(bytes),
+            (None, Mode::Create { len }) => {
+                let bytes = Arc::new(Mutex::new(vec![0; to_usize(len)]));
+                files.insert(key(path), Arc::clone(&bytes));
+                Ok(bytes)
+            }
+            (None, _) => Err(Error::NotFound { path: path.into() }),
+        };
         let result = result.map(|bytes| {
             self.opens.fetch_add(1, Relaxed);
             let open: Box<dyn Descriptor> = Box::new(Open {
@@ -169,10 +174,13 @@ impl Driver for Memory {
     }
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
-        let result = not_a_file(path, Operation::Remove);
-        if result.is_ok() {
-            lock(&self.files).remove(&key(path));
-        }
+        let mut files = lock(&self.files);
+        let result = if files.contains_key(&key(path)) && slashed(path) {
+            Err(io(path, Operation::Remove, 20))
+        } else {
+            files.remove(&key(path));
+            Ok(())
+        };
         Box::pin(async { result })
     }
 

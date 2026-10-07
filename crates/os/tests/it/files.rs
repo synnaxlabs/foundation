@@ -311,17 +311,37 @@ fn a_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
 }
 
 #[test]
-fn a_path_ending_in_a_dot_segment_names_no_file() {
+fn a_path_with_a_trailing_slash_names_only_a_directory() {
     run(|files, _| async move {
         drop(create(&files, "a", 4 * KIB).await);
-        for path in ["a/.", "a/"] {
-            let opened = files.open(Path::new(path), Mode::Read).await.map(drop);
-            assert_eq!(opened, Err(io(path, Operation::Open, 20)));
-            let removed = files.remove(Path::new(path)).await;
-            assert_eq!(removed, Err(io(path, Operation::Remove, 20)));
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("a/", Mode::Write),
+            ("a/.", Mode::Read),
+            ("a//", Mode::Read),
+            ("a/", Mode::Create { len: 4 * KIB }),
+            ("b/", Mode::Create { len: 4 * KIB }),
+            ("b/", Mode::Read),
+            ("b/.", Mode::Read),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
         }
-        let names = files.list(Path::new("")).await.unwrap();
-        assert_eq!(names, [PathBuf::from("a")]);
+        for path in ["a/", "b/", "a"] {
+            results.push(files.remove(Path::new(path)).await);
+        }
+        let expected = [
+            Err(io("a/", Operation::Open, 20)),
+            Err(io("a/.", Operation::Open, 20)),
+            Err(io("a//", Operation::Open, 20)),
+            Err(io("a/", Operation::Open, 21)),
+            Err(io("b/", Operation::Open, 21)),
+            Err(Error::NotFound { path: "b/".into() }),
+            Err(Error::NotFound { path: "b/.".into() }),
+            Err(io("a/", Operation::Remove, 20)),
+            Ok(()),
+            Ok(()),
+        ];
+        assert_eq!(results, expected);
     });
 }
 
