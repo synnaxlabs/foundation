@@ -336,8 +336,8 @@ impl Disk {
         Ok(())
     }
 
-    /// Makes the entry at `path` durable, and frees the file that the old durable
-    /// entry of its name kept.
+    /// Makes the entry at `path` durable. Only a power cut follows it, which frees a
+    /// file that the old durable entry of the name kept.
     pub(crate) fn commit(&mut self, path: &Path) {
         let segments = segments(path);
         let (name, parent) = segments.split_last().expect("invariant: a file path");
@@ -346,14 +346,8 @@ impl Disk {
         };
         let dir = self.dir_mut(key);
         let inode = dir.entries[*name];
-        let old = dir.durable.insert(name.into(), inode);
+        dir.durable.insert(name.into(), inode);
         self.file(inode).durable = true;
-        if let Some(old) = old.filter(|&old| old != inode)
-            && let Some(Inode::File(file)) = self.inodes.get_mut(&old)
-        {
-            file.durable = false;
-            self.collect(old);
-        }
     }
 
     /// Cuts the power, as [`Disk::crash`] says.

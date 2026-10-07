@@ -1678,7 +1678,7 @@ fn a_ring_with_no_checkpoint_takes_the_layout_of_the_open() {
 /// An open makes a ring with no checkpoint again. A crash at any point of it leaves
 /// a ring that opens: with the layout of its checkpoint when it has one, or else
 /// with the layout of that open. The cuts leave each state that the remake goes
-/// through.
+/// through, and the file with no bytes that a crash in its create leaves.
 #[test]
 fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
     let (old, new) = (layout(2 * AREA, BODY_MAX), layout(AREA, BODY_MAX));
@@ -1701,7 +1701,7 @@ fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
             }
             ended
         });
-        let zero = lens.map(Found::Unwritten);
+        let zero = [0, lens[0], lens[1]].map(Found::Unwritten);
         let all = [Found::Absent, Found::Written].into_iter().chain(zero);
         assert_eq!(left, all.collect(), "{crash:?}");
     }

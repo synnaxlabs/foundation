@@ -478,9 +478,10 @@ fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
 }
 
 /// The length of file `a` after `crash` cuts a create of 1 KiB of it, or `None` when
-/// no file is there, then its length after a create of 1 KiB. When `empty`, a durable
-/// file `a` with no bytes is there before.
-fn create_at_a_crash(seed: u64, crash: Crash, empty: bool) -> (Option<u64>, u64) {
+/// no file is there, then its length after a create of 1 KiB, then the free bytes
+/// after a remove of it. A removed file keeps its room while a durable entry names it.
+/// When `empty`, a durable file `a` with no bytes is there before.
+fn create_at_a_crash(seed: u64, crash: Crash, empty: bool) -> (Option<u64>, u64, u64) {
     let (mut sim, node) = disk(seed);
     crash_after(&mut sim, &node, crash, move |node| async move {
         if empty {
@@ -492,15 +493,18 @@ fn create_at_a_crash(seed: u64, crash: Crash, empty: bool) -> (Option<u64>, u64)
         hang(node.files().open(Path::new("a"), mode)).await;
     });
     sim.run_on(&node, |node, _| async move {
-        let opened = node.files().open(Path::new("a"), Mode::Write).await;
+        let files = node.files();
+        let opened = files.open(Path::new("a"), Mode::Write).await;
         let cut = opened.ok().map(|file| file.len());
-        (cut, create(&node, "a", 1_024).await.len())
+        let len = create(&node, "a", 1_024).await.len();
+        files.remove(Path::new("a")).await.unwrap();
+        (cut, len, files.free().await.unwrap())
     })
     .unwrap()
 }
 
 /// The outcomes of [`create_at_a_crash`] over 32 seeds.
-fn creates_at_a_crash(crash: Crash, empty: bool) -> BTreeSet<(Option<u64>, u64)> {
+fn creates_at_a_crash(crash: Crash, empty: bool) -> BTreeSet<(Option<u64>, u64, u64)> {
     (0..32)
         .map(|seed| create_at_a_crash(seed, crash, empty))
         .collect()
@@ -508,17 +512,19 @@ fn creates_at_a_crash(crash: Crash, empty: bool) -> BTreeSet<(Option<u64>, u64)>
 
 #[test]
 fn a_crash_in_a_create_can_leave_the_file_with_no_bytes() {
-    let process = BTreeSet::from([(Some(0), 1_024), (Some(1_024), 1_024)]);
+    let process = BTreeSet::from([(Some(0), 1_024, MIB), (Some(1_024), 1_024, MIB)]);
     assert_eq!(creates_at_a_crash(Crash::Process, false), process);
-    assert_eq!(creates_at_a_crash(Crash::Process, true), process);
-    let power = BTreeSet::from([(None, 1_024), (Some(0), 1_024)]);
+    let power = BTreeSet::from([(None, 1_024, MIB), (Some(0), 1_024, MIB - 1_024)]);
     assert_eq!(creates_at_a_crash(Crash::Power, false), power);
 }
 
 #[test]
-fn a_power_crash_in_a_create_over_a_synced_file_with_no_bytes_keeps_it() {
-    let kept = BTreeSet::from([(Some(0), 1_024)]);
-    assert_eq!(creates_at_a_crash(Crash::Power, true), kept);
+fn a_crash_in_a_create_over_a_synced_file_with_no_bytes_keeps_it() {
+    let kept = MIB - 1_024;
+    let process = BTreeSet::from([(Some(0), 1_024, kept), (Some(1_024), 1_024, kept)]);
+    assert_eq!(creates_at_a_crash(Crash::Process, true), process);
+    let power = BTreeSet::from([(Some(0), 1_024, kept)]);
+    assert_eq!(creates_at_a_crash(Crash::Power, true), power);
 }
 
 /// The digest of a run in which the power is cut during [`write_in_flight`].
