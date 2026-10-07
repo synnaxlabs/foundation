@@ -2269,6 +2269,44 @@ mod tests {
         }
 
         #[test]
+        fn a_replace_from_below_two_written_joins_drops_both() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(5)])).await;
+                let forged =
+                    |leader, term| heartbeat(leader, term, &[(2, 2), (3, 3), (4, 5)]);
+                let votes = [(2, 2), (3, 3)];
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &votes, replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                mesh.outgoing(key(3)).await.unwrap();
+                assert_eq!(mesh.receive(public(3), forged(3, later())), Ok(()));
+            });
+        }
+
+        #[test]
+        fn a_reopen_keeps_a_written_join_until_a_replace() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4)])).await;
+                drop(mesh);
+                node.clock().sleep(Span::MILLISECOND).await;
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let forged =
+                    |leader, term| heartbeat(leader, term, &[(2, 2), (3, 3), (4, 5)]);
+                let refused = Error::Grant(grant::Error::Forged { voter: key(4) });
+                let received = mesh.receive(public(2), forged(2, common::TERM));
+                assert_eq!(received, Err(refused));
+                let votes = [(2, 2), (3, 3)];
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &votes, replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                mesh.outgoing(key(3)).await.unwrap();
+                assert_eq!(mesh.receive(public(3), forged(3, later())), Ok(()));
+            });
+        }
+
+        #[test]
         fn a_join_after_the_synced_entry_gives_its_key_before_the_write() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
