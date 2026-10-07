@@ -37,10 +37,11 @@ The breaker runs in its own worktree. Remove it when the breaker returns
    its range (`<from>..<head sha>`), and the confirmed findings, most severe first: file
    and line, what goes wrong, and the fix.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
-   the answer. A deferral in a risk crate (`raft`, `buffer`, `delivery`, `block`,
-   `ring`, `codec`, `wire`, `home`, `replica`, `transport`) needs the explicit OK of
-   `laptop.architect`: link its comment. An answer that decides what a public doc or a
-   ruling means needs the architect's approval too.
+   the answer, also when the code is already on `main`. A deferral in a risk crate
+   (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
+   `transport`) needs the explicit OK of `laptop.architect`: link its comment. An
+   answer that decides what a public doc or a ruling means needs the architect's
+   approval too.
 
 ## Second round
 
@@ -48,10 +49,11 @@ In 4 of the 5 worst escaped defects, the defect came in through a fix or a defer
 nothing checked again. So when round 1 led to fix commits:
 
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
-   with the round 1 comment attached. The `reviewer` also gets each answer that changed
-   no code, and checks it against the code. When a fix commit changes code on a hot
-   path, run `performance` again on it too, and update the Performance section with its
-   numbers.
+   with the round 1 comment attached. Only a range that changes no `.rs` line but
+   comments skips `breaker`, and its round comment says so. The `reviewer` also gets
+   each answer that changed no code, and checks it against the code. When a fix commit
+   changes code on a hot path, run `performance` again on it too, and update the
+   Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing.
 
