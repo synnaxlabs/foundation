@@ -2632,7 +2632,10 @@ How to read this record:
   2026-10-07T16:41:29Z
   https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
   2026-10-07T17:22:21Z
-  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777).
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777,
+  2026-10-07T18:32:43Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6044310015, which
+  amends the 415 sentence of item 5 of 6043097777 and adds the order of the checks).
 - **HTTP SIM SERVER (#1151)** `connector::http::sim::serve(listener, tasks, answer)`,
   behind the `connector` cargo feature `sim`, off by default, is the one HTTP/1.1
   server of the protocol simulators of HTTP connectors. It runs `hyper`'s server on
