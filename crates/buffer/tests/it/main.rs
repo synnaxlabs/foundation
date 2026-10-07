@@ -42,11 +42,12 @@ const POOL: usize = 1 << 21;
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 /// Where a header block keeps its version, its `body_max`, its tail offset, its tail
-/// chain, and its CRC.
+/// chain, its seq, and its CRC.
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
 const TAIL_AT: usize = 22;
 const CHAIN_AT: usize = 30;
+const SEQ_AT: usize = 34;
 const CRC_AT: usize = 42;
 /// The bytes the header CRC covers.
 const COVER: usize = 512;
@@ -165,8 +166,10 @@ impl Shard {
         assert_eq!(at, start, "no record starts at {offset}");
         let chain = match before.map(|before| (before, file[before + 8])) {
             None => {
-                assert!(file.starts_with(b"FNDNRING"), "the ring has no header");
-                let chains = [0, to_usize(BLOCK)].map(|block| u32_at(block + CHAIN_AT));
+                let blocks = [0, to_usize(BLOCK)];
+                let magic = |&block: &usize| file[block..].starts_with(b"FNDNRING");
+                assert!(blocks.iter().any(magic), "the ring has no header");
+                let chains = blocks.map(|block| u32_at(block + CHAIN_AT));
                 assert_eq!(chains[0], chains[1], "the header holds two tail chains");
                 chains[0]
             }
@@ -2241,7 +2244,7 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
 fn seal_refuses_the_first_record_under_two_tail_chains() {
     run(112, Memory::default(), |shard| async move {
         shard.create_two_records().await;
-        shard.memory.put(RING, to_usize(BLOCK), &[0; SECTOR]);
+        shard.memory.put(RING, 0, &[0; SECTOR]);
         shard.seal(0);
     });
 }
@@ -2350,18 +2353,33 @@ fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
     });
 }
 
-/// The two blocks of a new ring tie, so the open takes the first one. It does not
-/// check the tail of the other.
+/// The open takes the newer header block, or the first one on a tie. It does not
+/// check the tail of the other. Each case: the block made newer, the block with the
+/// tail off a block boundary, and whether the open takes that block.
 #[test]
 fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
-    let unaligned = Error::Unaligned { tail: BLOCK + 1 };
-    for (place, result) in [(0, Err(unaligned)), (to_usize(BLOCK), Ok(()))] {
+    let (first, second) = (0, to_usize(BLOCK));
+    let cases = [
+        (None, first, true),
+        (None, second, false),
+        (Some(second), first, false),
+        (Some(second), second, true),
+    ];
+    for (newer, unaligned, taken) in cases {
         run(119, Memory::default(), move |shard| async move {
-            let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+            let ring = layout(AREA, BODY_MAX);
+            let buffer = shard.open(ring, &mut Slots::new()).await;
             drop(buffer.expect("opens"));
-            shard.tamper_block(place, TAIL_AT, &(BLOCK + 1).to_le_bytes());
-            let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-            assert_eq!(opened.map(drop), result, "the block at {place}");
+            if let Some(place) = newer {
+                shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes());
+            }
+            shard.tamper_block(unaligned, TAIL_AT, &(BLOCK + 1).to_le_bytes());
+            if taken {
+                let error = Error::Unaligned { tail: BLOCK + 1 };
+                return shard.open_refused(ring, error).await;
+            }
+            let opened = shard.open(ring, &mut Slots::new()).await;
+            assert_eq!(opened.map(drop), Ok(()), "the block at {unaligned}");
         });
     }
 }
