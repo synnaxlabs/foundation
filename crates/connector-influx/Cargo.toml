@@ -15,5 +15,10 @@ types = { path = "../types" }
 [dev-dependencies]
 proptest.workspace = true
 
+[[test]]
+name = "memory"
+harness = false
+required-features = ["sim"]
+
 [lints]
 workspace = true

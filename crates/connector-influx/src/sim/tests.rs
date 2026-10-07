@@ -1,4 +1,5 @@
 use proptest::prelude::*;
+use std::fmt::Write as _;
 
 use super::*;
 use crate::line::{self, Value};
@@ -22,6 +23,24 @@ fn times(store: &Store, measurement: &str, tags: &[(&str, &str)]) -> Vec<i64> {
         .collect()
 }
 
+/// Each point of `measurement`, with its tags and fields as maps.
+fn read(
+    store: &Store,
+    measurement: &str,
+) -> Vec<(Stamp, Tags, BTreeMap<String, Field>)> {
+    store
+        .points(measurement, &[])
+        .map(|point| {
+            let fields = point
+                .fields
+                .iter()
+                .map(|(key, field)| (key.to_owned(), field))
+                .collect();
+            (point.time, point.tags.clone(), fields)
+        })
+        .collect()
+}
+
 fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
     pairs
         .iter()
@@ -33,18 +52,18 @@ fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
 fn stores_each_type_and_tag() {
     let store = stored("m,b=2,a=1 f=1.5,i=-2i,u=3u,t=t,s=\"x y\" 10\n");
     assert_eq!(
-        store.points("m", &[]).collect::<Vec<_>>(),
-        [Point {
-            time: Stamp::from_nanos(10),
-            tags: &map(&[("a", "1".to_owned()), ("b", "2".to_owned())]),
-            fields: &map(&[
+        read(&store, "m"),
+        [(
+            Stamp::from_nanos(10),
+            map(&[("a", "1".to_owned()), ("b", "2".to_owned())]),
+            map(&[
                 ("f", Field::Float(1.5)),
                 ("i", Field::Integer(-2)),
                 ("u", Field::Unsigned(3)),
                 ("t", Field::Boolean(true)),
                 ("s", Field::String("x y".into())),
             ]),
-        }]
+        )]
     );
 }
 
@@ -54,7 +73,7 @@ fn a_later_write_replaces_only_the_fields_it_sets() {
     let point = store.points("m", &[]).next().unwrap();
     assert_eq!(
         point.fields,
-        &map(&[("v", Field::Float(3.0)), ("w", Field::Integer(2))])
+        map(&[("v", Field::Float(3.0)), ("w", Field::Integer(2))])
     );
 }
 
@@ -137,7 +156,7 @@ fn stores_a_leading_tab_and_a_tab_in_a_string() {
     let store = stored("\tm v=1 10\nm s=\"a\tb\" 20\n");
     assert_eq!(times(&store, "m", &[]), [10, 20]);
     let point = store.points("m", &[]).last().unwrap();
-    assert_eq!(point.fields, &map(&[("s", Field::String("a\tb".into()))]));
+    assert_eq!(point.fields, map(&[("s", Field::String("a\tb".into()))]));
 }
 
 #[test]
@@ -177,7 +196,7 @@ fn stores_a_backslash_or_nul_that_the_writer_refuses() {
     );
     assert_eq!(
         point.fields,
-        &map(&[("v\\w", Field::Float(1.0)), ("x\0y", Field::Float(2.0))])
+        map(&[("v\\w", Field::Float(1.0)), ("x\0y", Field::Float(2.0))])
     );
 }
 
@@ -503,12 +522,120 @@ proptest! {
         let tags: Vec<(&str, String)> =
             tags.iter().map(|&(key, text)| (key, text.to_owned())).collect();
         prop_assert_eq!(
-            store.points(&measurement, &[]).collect::<Vec<_>>(),
-            [Point {
-                time: Stamp::from_nanos(time),
-                tags: &map(&tags),
-                fields: &map(&fields),
-            }]
+            read(&store, &measurement),
+            [(Stamp::from_nanos(time), map(&tags), map(&fields))]
         );
+    }
+}
+
+/// Many points of one measurement, at `start`, `start + step`, and so on, with the
+/// fields that `fields` selects and a tag `t` when `tag` is set.
+#[derive(Clone, Debug)]
+struct Run {
+    start: i64,
+    step: i64,
+    count: i64,
+    tag: Option<&'static str>,
+    fields: u8,
+}
+
+fn run() -> impl Strategy<Value = Run> {
+    (
+        0..20_000_i64,
+        1..4_i64,
+        1..6_000_i64,
+        prop_oneof![Just(None), Just(Some("a")), Just(Some("b"))],
+        1..16_u8,
+    )
+        .prop_map(|(start, step, count, tag, fields)| Run {
+            start,
+            step,
+            count,
+            tag,
+            fields,
+        })
+}
+
+/// The fields of the point at `time` in run `run`, of the kinds that `mask` selects.
+#[expect(clippy::arithmetic_side_effects, reason = "times are below 40_000")]
+fn fields_of(run: usize, time: i64, mask: u8) -> Vec<(&'static str, Field)> {
+    let run = i64::try_from(run).unwrap();
+    [
+        ("b", Field::Boolean((time + run) % 2 == 0)),
+        (
+            "f",
+            Field::Float(f64::from(i32::try_from(time).unwrap()) * 0.5),
+        ),
+        ("i", Field::Integer(time * 10 + run)),
+        ("s", Field::String(format!("r{run}"))),
+    ]
+    .into_iter()
+    .enumerate()
+    .filter(|(bit, _)| mask & (1 << bit) != 0)
+    .map(|(_, field)| field)
+    .collect()
+}
+
+fn text(field: &Field) -> String {
+    match field {
+        Field::Boolean(value) => value.to_string(),
+        Field::Float(value) => format!("{value:?}"),
+        Field::Integer(value) => format!("{value}i"),
+        Field::String(value) => format!("{value:?}"),
+        Field::Unsigned(value) => format!("{value}u"),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn reads_back_what_a_map_of_each_point_holds(
+        runs in proptest::collection::vec(run(), 1..6),
+    ) {
+        type Model = BTreeMap<(Stamp, Tags), BTreeMap<String, Field>>;
+        let mut store = Store::default();
+        let mut model = Model::new();
+        for (at, run) in runs.iter().enumerate() {
+            let mut body = String::new();
+            let tags = run.tag.map(|tag| map(&[("t", tag.to_owned())])).unwrap_or_default();
+            for k in 0..run.count {
+                #[expect(clippy::arithmetic_side_effects, reason = "below 40_000")]
+                let time = run.start + k * run.step;
+                let fields = fields_of(at, time, run.fields);
+                let set: Vec<String> = fields
+                    .iter()
+                    .map(|(key, field)| format!("{key}={}", text(field)))
+                    .collect();
+                let tag = run.tag.map(|tag| format!(",t={tag}")).unwrap_or_default();
+                writeln!(body, "m{tag} {} {time}", set.join(",")).unwrap();
+                model
+                    .entry((Stamp::from_nanos(time), tags.clone()))
+                    .or_default()
+                    .extend(fields.into_iter().map(|(key, field)| (key.to_owned(), field)));
+            }
+            store.write(body.as_bytes()).unwrap();
+        }
+        let expected: Vec<_> = model
+            .iter()
+            .map(|((time, tags), fields)| (*time, tags.clone(), fields.clone()))
+            .collect();
+        prop_assert_eq!(read(&store, "m"), expected.clone());
+        let tagged: Vec<_> = expected
+            .into_iter()
+            .filter(|(_, tags, _)| tags.get("t").is_some_and(|tag| tag == "a"))
+            .collect();
+        let filtered: Vec<_> = store
+            .points("m", &[("t", "a")])
+            .map(|point| {
+                let fields = point
+                    .fields
+                    .iter()
+                    .map(|(key, field)| (key.to_owned(), field))
+                    .collect();
+                (point.time, point.tags.clone(), fields)
+            })
+            .collect();
+        prop_assert_eq!(filtered, tagged);
     }
 }

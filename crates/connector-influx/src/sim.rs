@@ -24,15 +24,48 @@ pub struct Store {
     measurements: BTreeMap<String, Measurement>,
 }
 
-/// The points and field types of one measurement.
+/// The series and field types of one measurement.
 #[derive(Debug, Default)]
 struct Measurement {
-    points: BTreeMap<(Stamp, Tags), Fields>,
+    series: BTreeMap<Tags, Series>,
     kinds: BTreeMap<String, Kind>,
 }
 
 type Tags = BTreeMap<String, String>;
-type Fields = BTreeMap<String, Field>;
+
+/// The most points that a chunk holds.
+const CHUNK: usize = 4096;
+
+/// The points of one tag set, in chunks keyed by the first time of each.
+#[derive(Debug, Default)]
+struct Series {
+    chunks: BTreeMap<Stamp, Chunk>,
+}
+
+/// Points in time order, with one typed column for each field key.
+#[derive(Debug, Default)]
+struct Chunk {
+    times: Vec<Stamp>,
+    columns: BTreeMap<String, Column>,
+}
+
+/// The values of one field key in a chunk. A field type is fixed for each
+/// measurement, so one typed column holds it.
+#[derive(Debug)]
+enum Column {
+    Float(Typed<f64>),
+    Integer(Typed<i64>),
+    Unsigned(Typed<u64>),
+    Boolean(Typed<bool>),
+    String(Typed<String>),
+}
+
+/// `set[i]` says whether point `i` sets the field, and then `values[i]` holds it.
+#[derive(Debug)]
+struct Typed<T> {
+    set: Vec<bool>,
+    values: Vec<T>,
+}
 
 impl Store {
     /// Stores each line of `body`. Like InfluxDB, it stores each valid line, also after
@@ -82,20 +115,28 @@ impl Store {
         measurement: &str,
         tags: &[(&str, &str)],
     ) -> impl Iterator<Item = Point<'a>> {
-        self.measurements
+        let mut series: Vec<_> = self
+            .measurements
             .get(measurement)
             .into_iter()
-            .flat_map(|measurement| &measurement.points)
-            .filter(move |((_, held), _)| {
+            .flat_map(|measurement| &measurement.series)
+            .filter(|(held, _)| {
                 tags.iter().all(|&(key, value)| {
                     held.get(key).is_some_and(|stored| stored == value)
                 })
             })
-            .map(|((time, tags), fields)| Point {
-                time: *time,
-                tags,
-                fields,
-            })
+            .map(|(tags, series)| series.points(tags).peekable())
+            .collect();
+        std::iter::from_fn(move || {
+            // The first of equal times wins, so ties come in tag order.
+            let next = series
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(at, points)| Some((points.peek()?.time, at)))
+                .min()?
+                .1;
+            series.get_mut(next)?.next()
+        })
     }
 
     fn store(&mut self, text: &str, parsed: &ParsedLine<'_>) -> Result<(), Error> {
@@ -138,7 +179,7 @@ impl Store {
             conflict(key.as_str(), Kind::Tag)?;
             tags.insert(key.as_str().into(), value.as_str().into());
         }
-        let mut fields = Fields::new();
+        let mut fields: BTreeMap<String, Field> = BTreeMap::new();
         for (key, value) in &parsed.field_set {
             let key = key.as_str();
             check(key)?;
@@ -162,12 +203,213 @@ impl Store {
             measurement.kinds.insert(key.clone(), field.kind());
         }
         measurement
-            .points
-            .entry((time, tags))
+            .series
+            .entry(tags)
             .or_default()
-            .extend(fields);
+            .write(time, fields);
         Ok(())
     }
+}
+
+impl Series {
+    fn points<'a>(&'a self, tags: &'a Tags) -> impl Iterator<Item = Point<'a>> {
+        self.chunks.values().flat_map(move |chunk| {
+            chunk
+                .times
+                .iter()
+                .enumerate()
+                .map(move |(at, &time)| Point {
+                    time,
+                    tags,
+                    fields: Fields { chunk, at },
+                })
+        })
+    }
+
+    /// Sets `fields` on the point at `time`, and adds the point if it is new.
+    fn write(&mut self, time: Stamp, fields: BTreeMap<String, Field>) {
+        let Some((first, found, len)) = self
+            .chunks
+            .range(..=time)
+            .next_back()
+            .or_else(|| self.chunks.first_key_value())
+            .map(|(&first, chunk)| {
+                (first, chunk.times.binary_search(&time), chunk.times.len())
+            })
+        else {
+            return self.insert(time, 0, time, fields);
+        };
+        match found {
+            Ok(at) => self.chunk(first).set(at, fields),
+            Err(at) if len < CHUNK => self.insert(first, at, time, fields),
+            // A time before or after a full chunk starts a chunk, so appends in time
+            // order leave each chunk full.
+            Err(0 | CHUNK) => self.insert(time, 0, time, fields),
+            Err(_) => {
+                let right = self.chunk(first).split();
+                self.chunks.insert(right.first(), right);
+                self.write(time, fields);
+            }
+        }
+    }
+
+    /// Adds the point at `time` at index `at` of the chunk keyed `first`, or of a new
+    /// chunk when none is keyed `first`.
+    fn insert(
+        &mut self,
+        first: Stamp,
+        at: usize,
+        time: Stamp,
+        fields: BTreeMap<String, Field>,
+    ) {
+        if at == 0 {
+            let mut chunk = self.chunks.remove(&first).unwrap_or_default();
+            chunk.insert(0, time, fields);
+            self.chunks.insert(time, chunk);
+        } else {
+            self.chunk(first).insert(at, time, fields);
+        }
+    }
+
+    fn chunk(&mut self, first: Stamp) -> &mut Chunk {
+        self.chunks
+            .get_mut(&first)
+            .expect("a chunk that was just found")
+    }
+}
+
+impl Chunk {
+    fn first(&self) -> Stamp {
+        *self.times.first().expect("a chunk holds a point")
+    }
+
+    fn set(&mut self, at: usize, fields: BTreeMap<String, Field>) {
+        let len = self.times.len();
+        for (key, field) in fields {
+            self.columns
+                .entry(key)
+                .or_insert_with(|| Column::new(&field, len))
+                .set(at, field);
+        }
+    }
+
+    fn insert(&mut self, at: usize, time: Stamp, fields: BTreeMap<String, Field>) {
+        self.times.insert(at, time);
+        for column in self.columns.values_mut() {
+            column.insert(at);
+        }
+        self.set(at, fields);
+    }
+
+    /// Moves the later half of the points into a new chunk.
+    fn split(&mut self) -> Self {
+        let half = self.times.len() / 2;
+        Self {
+            times: split(&mut self.times, half),
+            columns: self
+                .columns
+                .iter_mut()
+                .map(|(key, column)| (key.clone(), column.split(half)))
+                .collect(),
+        }
+    }
+}
+
+impl Column {
+    /// A column of `len` points, none of which sets it, for the type of `field`.
+    fn new(field: &Field, len: usize) -> Self {
+        match field {
+            Field::Float(_) => Self::Float(Typed::new(len)),
+            Field::Integer(_) => Self::Integer(Typed::new(len)),
+            Field::Unsigned(_) => Self::Unsigned(Typed::new(len)),
+            Field::Boolean(_) => Self::Boolean(Typed::new(len)),
+            Field::String(_) => Self::String(Typed::new(len)),
+        }
+    }
+
+    fn insert(&mut self, at: usize) {
+        match self {
+            Self::Float(typed) => typed.insert(at),
+            Self::Integer(typed) => typed.insert(at),
+            Self::Unsigned(typed) => typed.insert(at),
+            Self::Boolean(typed) => typed.insert(at),
+            Self::String(typed) => typed.insert(at),
+        }
+    }
+
+    fn set(&mut self, at: usize, field: Field) {
+        match (self, field) {
+            (Self::Float(typed), Field::Float(value)) => typed.set(at, value),
+            (Self::Integer(typed), Field::Integer(value)) => typed.set(at, value),
+            (Self::Unsigned(typed), Field::Unsigned(value)) => typed.set(at, value),
+            (Self::Boolean(typed), Field::Boolean(value)) => typed.set(at, value),
+            (Self::String(typed), Field::String(value)) => typed.set(at, value),
+            (column, field) => {
+                unreachable!("the Conflict check refused {field:?} into {column:?}")
+            }
+        }
+    }
+
+    fn get(&self, at: usize) -> Option<Field> {
+        match self {
+            Self::Float(typed) => typed.get(at).copied().map(Field::Float),
+            Self::Integer(typed) => typed.get(at).copied().map(Field::Integer),
+            Self::Unsigned(typed) => typed.get(at).copied().map(Field::Unsigned),
+            Self::Boolean(typed) => typed.get(at).copied().map(Field::Boolean),
+            Self::String(typed) => typed.get(at).cloned().map(Field::String),
+        }
+    }
+
+    fn split(&mut self, half: usize) -> Self {
+        match self {
+            Self::Float(typed) => Self::Float(typed.split(half)),
+            Self::Integer(typed) => Self::Integer(typed.split(half)),
+            Self::Unsigned(typed) => Self::Unsigned(typed.split(half)),
+            Self::Boolean(typed) => Self::Boolean(typed.split(half)),
+            Self::String(typed) => Self::String(typed.split(half)),
+        }
+    }
+}
+
+impl<T: Clone + Default> Typed<T> {
+    fn new(len: usize) -> Self {
+        Self {
+            set: vec![false; len],
+            values: vec![T::default(); len],
+        }
+    }
+
+    fn insert(&mut self, at: usize) {
+        self.set.insert(at, false);
+        self.values.insert(at, T::default());
+    }
+
+    fn set(&mut self, at: usize, value: T) {
+        *self.set.get_mut(at).expect("a point of the chunk") = true;
+        *self.values.get_mut(at).expect("a point of the chunk") = value;
+    }
+
+    fn get(&self, at: usize) -> Option<&T> {
+        self.set
+            .get(at)
+            .is_some_and(|set| *set)
+            .then(|| self.values.get(at))
+            .flatten()
+    }
+
+    fn split(&mut self, half: usize) -> Self {
+        Self {
+            set: split(&mut self.set, half),
+            values: split(&mut self.values, half),
+        }
+    }
+}
+
+/// Moves `values[half..]` into a new `Vec`, and frees the spare capacity of `values`.
+fn split<T>(values: &mut Vec<T>, half: usize) -> Vec<T> {
+    let right = values.split_off(half);
+    values.shrink_to_fit();
+    right
 }
 
 fn time(text: &str, time: Option<i64>) -> Result<Stamp, Error> {
@@ -187,8 +429,53 @@ pub struct Point<'a> {
     pub time: Stamp,
     /// The tags, by key.
     pub tags: &'a BTreeMap<String, String>,
-    /// The fields, by key.
-    pub fields: &'a BTreeMap<String, Field>,
+    /// The fields that the point sets.
+    pub fields: Fields<'a>,
+}
+
+/// The fields that one stored point sets, by key. Two are equal when they set the same
+/// keys to equal values.
+#[derive(Clone, Copy)]
+pub struct Fields<'a> {
+    chunk: &'a Chunk,
+    at: usize,
+}
+
+impl<'a> Fields<'a> {
+    /// The value of `key`, or `None` when the point does not set it.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<Field> {
+        self.chunk.columns.get(key)?.get(self.at)
+    }
+
+    /// Each field that the point sets, in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, Field)> + 'a {
+        let at = self.at;
+        self.chunk
+            .columns
+            .iter()
+            .filter_map(move |(key, column)| Some((key.as_str(), column.get(at)?)))
+    }
+}
+
+impl PartialEq for Fields<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl PartialEq<BTreeMap<String, Field>> for Fields<'_> {
+    fn eq(&self, other: &BTreeMap<String, Field>) -> bool {
+        self.iter().eq(other
+            .iter()
+            .map(|(key, field)| (key.as_str(), field.clone())))
+    }
+}
+
+impl fmt::Debug for Fields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
 }
 
 /// One field value, in InfluxDB's types.
