@@ -119,7 +119,9 @@ impl Reader {
     /// has no more bytes now, or `None` when the stream ended between two messages.
     /// After `Pending`, the next call goes on where this one stopped: it asks
     /// `admit` again only when it refused, and `take` only for a whole message.
-    /// After an error, the reader holds no bytes of a message.
+    /// After an error inside a message's body, the reader holds no bytes of the
+    /// message. After any other error, it holds at most the bytes of a length prefix,
+    /// on no heap.
     ///
     /// # Errors
     ///
