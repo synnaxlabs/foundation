@@ -88,20 +88,18 @@ impl Mesh {
         let Some(session) = session else {
             return Ok(None);
         };
-        let forward = forward(&session, &self.pool, &change);
+        let forward = forward(&session, &self.pool, change);
         Ok(within(&self.clock, ANSWER, forward).await.flatten())
     }
 }
 
 // Sends `change` to the leader on a new stream of `session`, and gives the position
 // in its answer. `None` when the peer did not propose it, or the stream failed.
-async fn forward(session: &Session, pool: &Pool, change: &Change) -> Option<Position> {
+async fn forward(session: &Session, pool: &Pool, change: Change) -> Option<Position> {
     let (mut sender, mut receiver) = session.open(Class::Command).await.ok()?;
     let header = block(pool, &wire::header::encode(Protocol::Mesh)).ok()?;
     sender.send(header).await.ok()?;
-    let proposal = Message::Propose {
-        change: change.clone(),
-    };
+    let proposal = Message::Propose { change };
     sender
         .send(block(pool, &proposal.encode()).ok()?)
         .await

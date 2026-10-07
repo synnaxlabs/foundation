@@ -2235,8 +2235,35 @@ How to read this record:
   or in a send. The task of a voter that a change removed, to which `raft` sends no more
   messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881).
-  Proposed by box1.builder-3, decided by the architect (#471),
-  2026-10-07T04:11:26Z:
+  `set_home` makes a member the home of an index, and returns when this node applied an
+  entry that sets it. A try starts with two checks on this node: the node is a voter
+  (`Error::NoVote`), and the home is a member (`Error::NotMember`). Only the two and a
+  stop of the group end the call with an error. A voter of one half of a joint
+  configuration is a voter here, as in the leader's check of a peer
+  (`Error::PeerNotVoter`). The try proposes on this node. When another node leads, the
+  try sends the proposal on a new two-way stream of the session that the queue of the
+  leader holds, and reads one answer. The call does not dial: two dialers for one peer
+  need a rule for which session stays, and a follower sends to its leader in each tick,
+  so with no session the leader cannot be reached. A try gets no position when no leader
+  is known, when the queue has no session, when the leader refuses the proposal, when
+  the stream fails, when the pool has no block for the proposal or this node's group
+  gives `Error::Pool`, and when no answer comes in one election timeout. The call then
+  waits one tick and starts the next try. So a call that waits for an answer gives a
+  stop of the group at most 11 ticks late. With a position, the call waits with no time
+  limit until this node applied the entry of that term at that index, or until the log
+  has a different entry there, and then it proposes again: a new leader commits an entry
+  of its term, which decides each older position. A time limit lost: a slow group gets
+  the change again at each timeout. A `request` number with a map of open requests lost:
+  the stream is the request (MESH WIRE). `Applied` keeps the term of each applied entry
+  only above the lowest floor of an open try, and the term of the last entry, so it
+  holds one pair while no call waits (MEMORY BOUNDS). A dropped call leaves no waker and
+  no floor, and its stream stops. A node that is not a voter gets `NoVote` and does not
+  wait, because the leader gives it only code 16, which a full pool also gives. A node
+  that a voter promoted gets `NoVote` until it applies that change, and the caller tries
+  again (approved by the architect with two changes, `NoVote` and the bound of
+  `Applied`, 2026-10-07T11:54:56Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407). Proposed
+  by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `next` gives `Stopped`, which holds the
@@ -2261,8 +2288,10 @@ How to read this record:
   `open` and `serve` give them. `claim::Error` is the `grant::Error` of the rulings:
   #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
   to the types of other crates. The `Debug` text of a `Config` does not show the private
-  key. The calls that change the region and the change records stay private. The surface
-  is approved by the architect, 2026-10-07T16:24:54Z:
+  key. `Mesh::set_home` is the first public call that changes the region (#471), and
+  `Error::NoVote` is public with it (MESH DRIVER). The other calls that change the
+  region and the change records stay private. The surface is approved by the architect,
+  2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
