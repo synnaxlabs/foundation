@@ -3270,8 +3270,8 @@ How to read this record:
   when the old path is gone or holds another file (a remove and a create since the
   open), it gives `NotFound { path: old }` and changes nothing. When `to` is there, it
   gives `Exists { path: to }` and changes nothing; the handle stays usable. A read
-  handle, a path in another directory, an empty path, or the directory itself is a
-  defect and panics. It poisons the file only when it is dropped before it ends, as any
+  handle, a path in another directory, or a path that does not end in a name (empty,
+  or with `/` or `.` last, so a directory) is a defect and panics. It poisons the file only when it is dropped before it ends, as any
   other call. `os` checks that the old path still names the file by device and inode,
   with no follow of a link, then renames with `RENAME_NOREPLACE`; the I/O thread runs
   the calls of a node in order, so nothing changes the path between the check and the
@@ -3279,7 +3279,8 @@ How to read this record:
   handle from a new file at its path; a link then an unlink, which leaves two names at a
   crash; a replacing rename or a `replace: bool`, which no caller wants and which hides
   a defect that `Exists` reports; and a bare-name `rename(&mut self, name: &OsStr)`,
-  which spells a directory rule in the type instead of a check (#1449, decided by
+  because each caller holds whole paths (`ring.new` to `ring`) and the path of the
+  handle and its errors need one (#1449, decided by
   `laptop.architect-2`, 2026-10-07:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node

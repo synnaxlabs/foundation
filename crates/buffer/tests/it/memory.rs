@@ -221,14 +221,18 @@ impl Descriptor for Open {
 
     fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
         let mut files = lock(&self.files);
-        let result = if files.contains_key(to) {
-            Err(Error::Exists { path: to.into() })
-        } else if let Some(bytes) = files.remove(from) {
-            files.insert(to.into(), bytes);
-            *lock(&self.path) = to.into();
-            Ok(())
-        } else {
-            Err(Error::NotFound { path: from.into() })
+        let result = match files.get(from) {
+            Some(bytes) if !Arc::ptr_eq(bytes, &self.bytes) => {
+                Err(Error::NotFound { path: from.into() })
+            }
+            None => Err(Error::NotFound { path: from.into() }),
+            Some(_) if files.contains_key(to) => Err(Error::Exists { path: to.into() }),
+            Some(_) => {
+                let bytes = files.remove(from).expect("invariant: `from` was found");
+                files.insert(to.into(), bytes);
+                *lock(&self.path) = to.into();
+                Ok(())
+            }
         };
         Box::pin(async { result })
     }

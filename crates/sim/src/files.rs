@@ -72,19 +72,16 @@ impl Call {
     }
 }
 
-/// The error of `call` on `path`, which failed by `cause`.
-fn error(cause: &Cause, path: PathBuf, call: Call) -> Error {
-    match *cause {
+/// The error of `operation` on `path`, which failed by `cause`.
+fn error(cause: Cause, path: PathBuf, operation: Operation) -> Error {
+    match cause {
         Cause::NotFound => Error::NotFound { path },
         Cause::Full => Error::Full { path },
         Cause::Busy => Error::Busy { path },
-        Cause::Exists => match call {
-            Call::Rename { to, .. } => Error::Exists { path: to },
-            _ => unreachable!("invariant: only a rename finds a path taken"),
-        },
+        Cause::Exists(path) => Error::Exists { path },
         Cause::Code(code) => Error::Io {
             path,
-            operation: call.operation(),
+            operation,
             code,
         },
     }
@@ -324,7 +321,7 @@ impl Files {
         if let Some(handle) = call.handle() {
             disk.release(handle);
         }
-        let result = result.map_err(|cause| error(&cause, path, call));
+        let result = result.map_err(|cause| error(cause, path, call.operation()));
         Ended { result, held }
     }
 

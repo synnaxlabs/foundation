@@ -362,16 +362,6 @@ fn a_rename_of_a_path_that_is_a_link_to_the_file_gives_not_found() {
 }
 
 #[test]
-fn a_rename_to_a_name_with_a_trailing_slash_gives_enotdir() {
-    run(|files, _| async move {
-        let mut file = create(&files, "a", 4 * KIB).await;
-        let found = file.rename(Path::new("b/")).await.unwrap_err();
-        assert_eq!(found, io("a", Operation::Rename, 20));
-        files.open(Path::new("a"), Mode::Read).await.unwrap();
-    });
-}
-
-#[test]
 fn a_write_open_of_the_new_name_gives_busy_until_the_handle_closes() {
     run(|files, data| async move {
         let mut file = create(&files, "a", 4 * KIB).await;

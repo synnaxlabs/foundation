@@ -415,8 +415,9 @@ impl File {
     ///
     /// # Panics
     ///
-    /// When the file was opened with [`Mode::Read`], or when `to` is empty, absolute,
-    /// has a `..` segment, or is not in the directory of the file.
+    /// When the file was opened with [`Mode::Read`], or when `to` is absolute, has a
+    /// `..` segment, is not in the directory of the file, or does not end in a name:
+    /// it is empty, or ends in `.` or `/`, so names a directory.
     ///
     /// ```
     /// async fn publish(file: &mut env::files::File) -> Result<(), env::files::Error> {
@@ -431,7 +432,13 @@ impl File {
         );
         check(to);
         assert!(
-            !to.as_os_str().is_empty() && dir_of(to) == dir_of(&self.path),
+            named(to),
+            "rename {} to {}, which is not a file name",
+            self.path.display(),
+            to.display()
+        );
+        assert!(
+            dir_of(to) == dir_of(&self.path),
             "rename {} to {}, which is in another directory",
             self.path.display(),
             to.display()
@@ -511,6 +518,14 @@ impl Drop for Unfinished<'_> {
             poisoned.set(true);
         }
     }
+}
+
+/// Whether a checked `path` ends in a name, not in `/` or `.`, which names only a
+/// directory.
+fn named(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let slashed = bytes.ends_with(b"/") || bytes.ends_with(b"/.");
+    !slashed && matches!(path.components().next_back(), Some(Component::Normal(_)))
 }
 
 /// The names of the directory of `path`: its names but the last, `.` dropped.
@@ -769,8 +784,8 @@ pub trait Descriptor {
     /// Renames `from` to `to` in one directory when `from` names this file, with no
     /// replace, and keeps the holds of the file. It gives [`Error::NotFound`] when
     /// `from` names another file or none, and [`Error::Exists`] when `to` is there,
-    /// and then changes nothing. [`File`] has checked the paths and made the writes
-    /// durable.
+    /// and then changes nothing. After `Ok`, the errors of later calls name `to`.
+    /// [`File`] has checked the paths and made the writes durable.
     fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()>;
 
     /// Closes the file. The future ends after the calls of the descriptor end and the
@@ -1337,11 +1352,37 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "rename ring/0 to , which is in another directory")]
+        #[should_panic(expected = "rename ring/0 to , which is not a file name")]
         fn panics_on_an_empty_path() {
             let (files, _) = Fixed::files(8);
             let mut file = open(&files, Mode::Write);
             drop(ready(file.rename(Path::new(""))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to ring/1/, which is not a file name")]
+        fn panics_on_a_trailing_slash() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("ring/1/"))));
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "rename ring/0 to ring/1/., which is not a file name"
+        )]
+        fn panics_on_a_trailing_dot() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("ring/1/."))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to ., which is not a file name")]
+        fn panics_on_the_current_directory() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("."))));
         }
 
         #[test]

@@ -32,7 +32,7 @@ pub(crate) enum Cause {
     /// A write descriptor or its calls hold the file.
     Busy,
     /// The new name of a rename is taken.
-    Exists,
+    Exists(PathBuf),
     Code(i32),
 }
 
@@ -283,25 +283,21 @@ impl Disk {
         from: &Path,
         to: &Path,
     ) -> Result<(), Cause> {
-        if slashed(to) {
-            return Err(Cause::Code(NOT_DIRECTORY));
-        }
-        let (from, to) = (segments(from), segments(to));
-        let ((old, parent), Some((new, _))) = (
-            from.split_last().expect("invariant: a rename is of a file"),
-            to.split_last(),
-        ) else {
-            unreachable!("invariant: a rename is to a name")
-        };
+        let from = segments(from);
+        let (old, parent) =
+            from.split_last().expect("invariant: a rename is of a file");
+        let new = segments(to)
+            .pop()
+            .expect("invariant: a rename is to a name");
         let dir = self.dir_mut(self.dir(parent)?);
         if dir.entries.get(*old) != Some(&inode) {
             return Err(Cause::NotFound);
         }
-        if dir.entries.contains_key(*new) {
-            return Err(Cause::Exists);
+        if dir.entries.contains_key(new) {
+            return Err(Cause::Exists(to.to_path_buf()));
         }
         dir.entries.remove(*old);
-        dir.entries.insert((*new).to_owned(), inode);
+        dir.entries.insert(new.to_owned(), inode);
         Ok(())
     }
 
