@@ -9,7 +9,7 @@ use crate::{claim, log, status};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The log did not open.
     Log(log::Error),
     /// `raft` refused the log, a message, or a proposal.

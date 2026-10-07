@@ -2396,14 +2396,25 @@ How to read this record:
   the crate in its line through an `interface` issue first. `mesh` does not re-export
   such a type: a re-export makes each change to `raft` a change to the surface of
   `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index
-  only. `Config`, `Mesh::open`, and `Mesh::serve` become public after the senders
-  (#1410), so until then no crate outside `mesh` opens a `Mesh`. `Error`,
-  `claim::Error`, and `region::Unfit` become public with them, because `open` and
-  `serve` give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the
-  module its new name. `Error` then adds `raft::Error` and `transport::Error` to the
-  types of other crates. The calls that change the region and the change records stay
-  private. The surface is approved by the architect, 2026-10-07T16:24:54Z:
-  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. `member`
+  only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and gives
+  it each stream of a peer with `Mesh::serve`. The three are public since the senders
+  (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them, because
+  `open` and `serve` give them. `claim::Error` is the `grant::Error` of the rulings:
+  #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
+  to the types of other crates. `Config` and `serve` add types that the caller builds:
+  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  `env::tasks::Tasks`, `clock::Reader`, `block::Pool`, `transport::Transport`,
+  `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
+  So a crate that opens a region has `env`, `clock`, `block`, and `transport` in its
+  line of the crate map. `open` does not check that the transport proves the key of
+  `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
+  `Debug` text of a `Config` does not show the private key. The calls that change the
+  region and the change records stay private. The surface is approved by the architect,
+  2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
+  surface as built, with the types that the caller builds and the sentence on the key of
+  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
   of the PRs is decided by the architect, 2026-10-07T17:18:52Z:
@@ -2485,7 +2496,7 @@ How to read this record:
   region by name prefix. Regions nest like names. Supersedes: K5 voters policy. The
   prefix is a `types::name::Prefix`, which can be empty: the root prefix
   (`Prefix::ROOT`, text `""`) contains each name, so the root region holds each node.
-  `mesh` holds it in `driver::Config.region` and `region::State`, and checks each name
+  `mesh` holds it in `mesh::Config.region` and `region::State`, and checks each name
   against the region with `Prefix::contains`; `ticket::Options.prefix` stays a `Name`.
   Decided by `laptop.architect` (2026-10-07T12:47:19Z):
   https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each

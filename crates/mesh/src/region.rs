@@ -59,6 +59,10 @@ impl State {
     }
 
     /// The record of the ticket with `public_key`, or `None` when none is recorded.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
     pub(crate) fn ticket(&self, public_key: PublicKey) -> Option<&Record> {
         self.tickets.get(&public_key.to_bytes())
     }
@@ -195,6 +199,10 @@ impl State {
 }
 
 /// What a node that joins gives the voter that admits it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the join answer of #336 is the first user")
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
     /// The public key of the ticket that admits the node.
@@ -277,7 +285,7 @@ impl std::error::Error for Refused {}
 
 /// Why the region cannot hold a member: a founding member, or the node of a `Join`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unfit {
+pub enum Unfit {
     /// A segment of the member's name, or of the name of one of its status channels,
     /// starts with `@`.
     Reserved {
