@@ -20,6 +20,10 @@ const RELAY: u8 = 2;
 const V4: u8 = 4;
 const V6: u8 = 6;
 
+// Every member keeps every card, so one node's card must not set the size of each
+// member's state.
+const ADDRESSES_MAX: u8 = 32;
+
 /// What a node states about itself. Its own Ed25519 key signs all of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Card {
@@ -43,8 +47,14 @@ impl Card {
     ///
     /// # Panics
     ///
-    /// When an IPv6 address has flow info or a scope.
+    /// When the card holds more than 32 addresses, or an IPv6 address has flow info or
+    /// a scope.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        let count = self.addresses.len();
+        assert!(
+            count <= usize::from(ADDRESSES_MAX),
+            "a card holds {count} addresses, more than {ADDRESSES_MAX}"
+        );
         let name = self.name.as_str().as_bytes();
         out.push(
             u8::try_from(name.len()).expect("invariant: a name is at most 255 bytes"),
@@ -52,7 +62,7 @@ impl Card {
         out.extend(name);
         out.extend(self.public_key.to_bytes());
         out.extend(self.seal_key.to_bytes());
-        put_count(self.addresses.len(), out);
+        put_count(count, out);
         for &address in &self.addresses {
             put_address(address, out);
         }
@@ -60,7 +70,8 @@ impl Card {
     }
 
     /// Takes one card from the start of `bytes`. `None` when the bytes do not start
-    /// with what [`Card::encode`] gives; `bytes` is then at no known place.
+    /// with what [`Card::encode`] gives, such as a count of more than 32 addresses;
+    /// `bytes` is then at no known place.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the `Join` change of #336 is the first user")
@@ -73,6 +84,9 @@ impl Card {
         let public_key = PublicKey::new(take(bytes)?).ok()?;
         let seal_key = SealKey::new(take(bytes)?).ok()?;
         let count = take_count(bytes)?;
+        if count > u64::from(ADDRESSES_MAX) {
+            return None;
+        }
         let mut addresses = Vec::new();
         for _ in 0..count {
             addresses.push(take_address(bytes)?);
@@ -103,8 +117,8 @@ impl Signed {
     ///
     /// # Panics
     ///
-    /// When `card.public_key` is not the public half of `private_key`, or when an IPv6
-    /// address has flow info or a scope.
+    /// When `card.public_key` is not the public half of `private_key`, when the card
+    /// holds more than 32 addresses, or when an IPv6 address has flow info or a scope.
     #[must_use]
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
         let pair = ed25519::pair(private_key);
@@ -124,7 +138,8 @@ impl Signed {
     ///
     /// # Panics
     ///
-    /// When an IPv6 address has flow info or a scope.
+    /// When the card holds more than 32 addresses, or an IPv6 address has flow info or
+    /// a scope.
     pub fn check(
         key: node::Key,
         card: Card,
@@ -543,18 +558,12 @@ mod tests {
 
     #[test]
     fn a_card_at_the_edges_round_trips() {
-        let many = Card {
-            addresses: vec![
-                Address::Udp("10.0.0.1:4100".parse().unwrap());
-                usize::from(u16::MAX) + 1
-            ],
-            ..fixed()
-        };
+        let many = many(32);
         for version in [0, u64::MAX] {
             let card = Card { version, ..fixed() };
             assert_eq!(decoded(&encoded(&card)), Some(card), "version {version}");
         }
-        assert_eq!(decoded(&encoded(&many)), Some(many), "65536 addresses");
+        assert_eq!(decoded(&encoded(&many)), Some(many), "32 addresses");
         let ports = Card {
             addresses: vec![
                 Address::Udp("0.0.0.0:0".parse().unwrap()),
@@ -567,6 +576,46 @@ mod tests {
             ..fixed()
         };
         assert_eq!(decoded(&encoded(&ports)), Some(ports), "ports, own relay");
+    }
+
+    // A card with `count` addresses of 8 bytes each.
+    fn many(count: usize) -> Card {
+        Card {
+            addresses: vec![Address::Udp("10.0.0.1:4100".parse().unwrap()); count],
+            ..fixed()
+        }
+    }
+
+    #[test]
+    fn decode_refuses_more_than_32_addresses() {
+        // The count is at 75, after the name (11 bytes) and the two keys.
+        let mut bytes = encoded(&many(32));
+        assert_eq!(bytes[75..83], 32u64.to_le_bytes());
+        let version = bytes.split_off(bytes.len() - 8);
+        bytes[75..83].copy_from_slice(&33u64.to_le_bytes());
+        bytes.extend([0, 4, 10, 0, 0, 1, 0x04, 0x10]);
+        bytes.extend(version);
+        assert_eq!(decoded(&bytes), None);
+        bytes[75..83].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(decoded(&bytes), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a card holds 33 addresses, more than 32")]
+    fn encode_refuses_more_than_32_addresses() {
+        let _bytes = encoded(&many(33));
+    }
+
+    #[test]
+    #[should_panic(expected = "a card holds 33 addresses, more than 32")]
+    fn sign_refuses_more_than_32_addresses() {
+        let _signed = Signed::sign(key(1), many(33), &private(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "a card holds 33 addresses, more than 32")]
+    fn check_refuses_more_than_32_addresses() {
+        let _checked = Signed::check(key(1), many(33), [0; 64]);
     }
 
     #[test]
