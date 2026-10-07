@@ -1932,13 +1932,14 @@ How to read this record:
   voter's mesh time interval; a voter with no mesh time proposes no `Join`), the node
   key, the card and its signature, the admission, and the status keys, which the voter
   assigns (UUIDv7). Apply refuses, in this order, a forged card, a reserved name (A3), a
-  status channel `<name>.<status>` longer than a name can be, a key that is already a
-  member, an unknown ticket, and each refusal of `Record::admit`. The name and key
-  checks are one function, which `State::new` also runs on the founding members, so a
-  later card update can run it too. A refused change is a no-op on every node, so a
-  forged card in the log cannot stop a node. A `Join` holds the node key, card, and
-  signature apart, not a `card::Signed`: decode keeps a join whose signature does not
-  hold, and apply refuses it as `Forged`. Each number in a change is little endian; a
+  name outside the region, a status channel `<name>.<status>` that is longer than a
+  name can be or reserved, a key that is already a member, an unknown ticket, and each
+  refusal of `Record::admit`. The name and key checks are one function, which
+  `State::new` also runs on the founding members. A refused change is a no-op on every
+  node, so a forged card in the log cannot stop a node. A `Join` holds a
+  `card::Unchecked`, not a `card::Signed`: it has the byte form of a signed card, decode
+  keeps a join whose signature does not hold, and apply refuses it as `Forged`. Each
+  number in a change is little endian; a
   `Ticket` is the public key, the prefix behind a length byte, a reusable byte (0 or
   1), the expiry (8 bytes), and the ephemeral span behind a presence byte. Decided by
   `laptop.architect` (2026-10-07T09:27:39Z):

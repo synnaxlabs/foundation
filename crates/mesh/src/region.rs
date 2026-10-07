@@ -18,7 +18,8 @@ use crate::ticket::{self, Options, Record};
 
 /// The region state that this node holds: its members, its tickets, and the homes that
 /// it applied.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct State {
     region: Name,
     members: BTreeMap<node::Key, Member>,

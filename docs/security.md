@@ -123,8 +123,9 @@ state on `main`.
 
 - Node-to-node traffic is authorized by role (BQ12). A new node joins only with a
   signed ticket, and voters record membership (BQ11a). Every node checks each `Join`
-  change at apply: the card's signature, the ticket's admission, scope, uses, and
-  expiry, and a key that is not yet a member. `Change::decode` checks no signature, so
+  change at apply: the card's signature, a name and status channel names that are not
+  reserved, under the region, and not too long, a key that is not yet a member, and the
+  ticket's admission, scope, uses, and expiry. `Change::decode` checks no signature, so
   a forged card in a committed entry is a refused change, not a stopped group. The
   proposing voter and the join answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
