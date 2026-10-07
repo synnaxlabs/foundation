@@ -11,6 +11,7 @@ use std::task::Poll;
 
 use block::{Block, Heap, Pool};
 use env::clock::Clock;
+use env::rng::Rng;
 use sim::node::Node;
 use types::time::Span;
 
@@ -20,28 +21,14 @@ use crate::{Address, Class, Code, Config, Error, Transport};
 const CANCELLED: Error = Error::Reset { code: Code(0) };
 const REPLY: u64 = 1 << 40;
 
-fn mix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+/// A value that depends only on `x`.
+fn hash(x: u64) -> u64 {
+    Rng::from_seed(x).next_u64()
 }
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = mix(self.0);
-        self.0
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
-
-    fn chance(&mut self, permille: u64) -> bool {
-        self.below(1000) < permille
-    }
+/// True for `permille` of 1000 draws.
+fn chance(rng: &mut Rng, permille: u64) -> bool {
+    rng.below(1000) < permille
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,8 +62,8 @@ fn send_pool() -> Pool {
 
 impl Plan {
     fn new(case: u64) -> Self {
-        let mut rng = Rng(mix(case));
-        let scarce = rng.chance(300);
+        let mut rng = Rng::from_seed(case);
+        let scarce = chance(&mut rng, 300);
         let sizes = [1472, 4096, 16384, 65536];
         let mut bytes_max = sizes[usize::try_from(rng.below(4)).expect("small")];
         if scarce {
@@ -97,13 +84,13 @@ impl Plan {
             jitter_ms: rng.below(20),
             loss: rng.below(150),
             duplication: rng.below(50),
-            rate: rng.chance(300).then(|| 100_000 + rng.below(10_000_000)),
+            rate: chance(&mut rng, 300).then(|| 100_000 + rng.below(10_000_000)),
         }
     }
 
     /// The class, whether it goes both ways, and the message count of stream `s`.
     fn stream(&self, s: u32) -> (Class, bool, u32) {
-        let mut rng = Rng(mix(self.case ^ 0xabc0_0000 ^ u64::from(s)));
+        let mut rng = Rng::from_seed(self.case ^ 0xabc0_0000 ^ u64::from(s));
         let classes = [
             Class::Command,
             Class::Latest,
@@ -111,7 +98,7 @@ impl Plan {
             Class::CatchUp,
         ];
         let class = classes[usize::try_from(rng.below(4)).expect("small")];
-        let bi = rng.chance(500);
+        let bi = chance(&mut rng, 500);
         let count = u32::try_from(rng.below(21)).expect("small");
         (class, bi, count)
     }
@@ -134,7 +121,7 @@ fn permille(n: u64) -> f64 {
 }
 
 fn len(case: u64, stream: u64, index: u64, bytes_max: usize) -> usize {
-    let h = mix(case ^ mix(stream ^ mix(index)));
+    let h = hash(case ^ hash(stream ^ hash(index)));
     let max = bytes_max as u64;
     let len = match h % 8 {
         0 => 0,
@@ -149,7 +136,7 @@ fn len(case: u64, stream: u64, index: u64, bytes_max: usize) -> usize {
 
 fn body(case: u64, stream: u64, index: u64, len: usize) -> Vec<u8> {
     let base =
-        usize::try_from(mix(case ^ (stream << 20) ^ index) >> 40).expect("small");
+        usize::try_from(hash(case ^ (stream << 20) ^ index) >> 40).expect("small");
     (0..len)
         .map(|j| u8::try_from((base + j * 7 + (j >> 8)) % 256).expect("a byte"))
         .collect()
@@ -207,7 +194,7 @@ async fn send_stream(
     pool: Rc<Pool>,
     report: Shared,
 ) {
-    let mut rng = Rng(mix(plan.case ^ 0x5e4d_0000 ^ u64::from(s)));
+    let mut rng = Rng::from_seed(plan.case ^ 0x5e4d_0000 ^ u64::from(s));
     let mut outcome = Sent::Finished(count);
     for i in 0..=count {
         let bytes = if i == 0 {
@@ -224,7 +211,7 @@ async fn send_stream(
             )
         };
         let message = block(&pool, &clock, &bytes).await;
-        let sent = if rng.chance(plan.cancel) {
+        let sent = if chance(&mut rng, plan.cancel) {
             let nanos = i64::try_from(rng.below(20_000_000)).expect("small");
             let timed = within(&clock, Span::from_nanos(nanos), sender.send(message));
             let Some(sent) = timed.await else {
@@ -287,11 +274,11 @@ async fn receive(
     clock: Clock,
     report: Shared,
 ) {
-    let mut rng = Rng(mix(plan.case ^ 0x7ec0_0000 ^ k));
+    let mut rng = Rng::from_seed(plan.case ^ 0x7ec0_0000 ^ k);
     let mut stream: Option<(u32, u32)> = None;
     let mut n = 0u32;
     let end = loop {
-        let read = if rng.chance(plan.recv_timeout) {
+        let read = if chance(&mut rng, plan.recv_timeout) {
             let nanos = i64::try_from(rng.below(20_000_000)).expect("small");
             match within(&clock, Span::from_nanos(nanos), receiver.recv()).await {
                 Some(read) => read,
@@ -525,44 +512,40 @@ macro_rules! cases {
 }
 
 cases! {
-    case_23: 23,
-    case_109: 109,
-    case_214: 214,
-    case_225: 225,
-    case_272: 272,
-    case_307: 307,
-    case_440: 440,
-    case_466: 466,
-    case_490: 490,
-    case_554: 554,
-    case_566: 566,
-    case_751: 751,
-    case_861: 861,
-    case_902: 902,
-    case_956: 956,
-    case_978: 978,
-    case_984: 984,
-    case_991: 991,
-    case_996: 996,
-    case_1010: 1010,
-    case_1067: 1067,
-    case_1095: 1095,
-    case_1112: 1112,
-    case_1137: 1137,
-    case_1173: 1173,
-    case_1181: 1181,
-    case_1190: 1190,
-    case_1237: 1237,
-    case_1447: 1447,
-    case_1460: 1460,
-    case_1550: 1550,
-    case_1706: 1706,
-    case_1760: 1760,
-    case_1795: 1795,
-    case_1861: 1861,
-    case_1875: 1875,
-    case_1894: 1894,
-    case_1897: 1897,
-    case_1934: 1934,
-    case_1973: 1973,
+    case_10: 10,
+    case_15: 15,
+    case_31: 31,
+    case_44: 44,
+    case_82: 82,
+    case_84: 84,
+    case_99: 99,
+    case_189: 189,
+    case_266: 266,
+    case_390: 390,
+    case_530: 530,
+    case_663: 663,
+    case_690: 690,
+    case_716: 716,
+    case_720: 720,
+    case_866: 866,
+    case_1018: 1018,
+    case_1020: 1020,
+    case_1041: 1041,
+    case_1090: 1090,
+    case_1191: 1191,
+    case_1197: 1197,
+    case_1286: 1286,
+    case_1351: 1351,
+    case_1362: 1362,
+    case_1430: 1430,
+    case_1453: 1453,
+    case_1583: 1583,
+    case_1600: 1600,
+    case_1628: 1628,
+    case_1700: 1700,
+    case_1742: 1742,
+    case_1755: 1755,
+    case_1789: 1789,
+    case_1950: 1950,
+    case_1972: 1972,
 }
