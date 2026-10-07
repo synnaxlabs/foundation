@@ -770,9 +770,11 @@ fn parts_mut(
 }
 
 /// Where the series bytes start in a frame of `ranges` ranges and `series`
-/// descriptors.
+/// descriptors, saturated at `usize::MAX`.
 const fn body_start(ranges: usize, series: usize) -> usize {
-    HEAD + RANGE * ranges + DESCRIPTOR * series
+    let ranges = RANGE.saturating_mul(ranges);
+    HEAD.saturating_add(ranges)
+        .saturating_add(DESCRIPTOR.saturating_mul(series))
 }
 
 /// The counts of ranges and descriptors in a frame's header.
@@ -1907,6 +1909,12 @@ mod tests {
         assert_eq!(super::charge(2, layout.body_len()), 128);
         let empty = Layout::from_ends(&set, &[(0, 0)]).unwrap();
         assert_eq!((empty.block_len(), empty.body_len()), (40, 0));
+    }
+
+    #[test]
+    fn charges_more_series_than_any_pool_holds_as_the_most_credit() {
+        assert_eq!(super::charge(usize::MAX / 8 + 1, 0), u64::MAX);
+        assert_eq!(super::charge(usize::MAX, 0), u64::MAX);
     }
 
     #[test]
