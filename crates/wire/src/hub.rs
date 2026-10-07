@@ -473,6 +473,11 @@ pub enum Error {
     },
     /// A message comes after the home ended the session with `Behind`.
     Ended,
+    /// A message that only a complete session has comes in a latest session.
+    Latest {
+        /// The kind byte of the message.
+        kind: u8,
+    },
 }
 
 impl fmt::Display for Error {
@@ -518,6 +523,10 @@ impl fmt::Display for Error {
             Self::Ended => {
                 f.write_str("a hub message came after the home ended the session")
             }
+            Self::Latest { kind } => write!(
+                f,
+                "the hub message has kind {kind}, which a latest session does not have"
+            ),
         }
     }
 }
@@ -1161,6 +1170,10 @@ mod tests {
             (
                 Error::Ended,
                 "a hub message came after the home ended the session",
+            ),
+            (
+                Error::Latest { kind: 3 },
+                "the hub message has kind 3, which a latest session does not have",
             ),
         ];
         for (error, text) in cases {

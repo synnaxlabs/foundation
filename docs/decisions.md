@@ -1409,8 +1409,9 @@ How to read this record:
   reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`, `Head`, or
   `Behind`. The home sends `Behind` after the last frame before a miss of the session,
   then finishes its stream. The reader's `next` gives each frame before it, then
-  `Ended::Behind`. A message after `Behind` is not valid (lost: a stop code, which can
-  cut off the frames sent before it; the architect, 2026-10-07T21:07:50Z,
+  `Ended::Behind`. `hub` builds both in #340 PR 4. A message after `Behind`, and a
+  `Behind` in a latest session, are not valid (lost: a stop code, which can cut off the
+  frames sent before it; the architect, 2026-10-07T21:07:50Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6046877541). Stop
   codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
   the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
