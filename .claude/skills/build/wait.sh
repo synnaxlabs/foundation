@@ -10,6 +10,8 @@
 # so a new run or a rerun replaces the old one. A canceled run counts only on a
 # required check: the Review workflow cancels its own `gate` runs, and the `review`
 # status, not `gate`, is the required check.
+# A failed check stops it also when the check is not required: a failed `gate` can
+# leave the required `review` status pending, so the PR never merges.
 set -u
 case ${1-} in
   '' | *[!0-9]*) echo "usage: wait.sh <PR number>" >&2; exit 2 ;;

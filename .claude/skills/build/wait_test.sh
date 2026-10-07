@@ -253,6 +253,11 @@ run "waits at most five times" 143 "" 5 "$(pr OPEN)" "$(pr OPEN)" "$(pr OPEN)" \
 
 got=$(STUB=$tmp/live PATH="$tmp/live:$PATH" sh "$here/wait.sh" 1428)
 check "API on #1428" $? "$got" 1 0 "#1428 merged" 1
+# The API's answer for #1428, put back in the queue: its last `gate` run was canceled,
+# and its rollup state is FAILURE.
+replay=$(jq -c '.data.repository.pullRequest += {state: "OPEN", isInMergeQueue: true}' \
+  "$tmp/live/1428.json")
+run "#1428 in the queue waits" 0 "#7 merged" 2 "$replay" "$merged"
 # The jq reads each of these fields, and a fixture can give one that the query lost.
 fields=$(jq '.data.repository.pullRequest | . as $pr
   | all("mergeable", "reviewDecision", "isInMergeQueue", "autoMergeRequest";
