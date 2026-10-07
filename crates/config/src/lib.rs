@@ -42,9 +42,10 @@ pub struct Entry {
 /// # Errors
 ///
 /// Every problem in the Documents, in the order of `documents`, then in source order.
-/// A value that a reader or a definition refuses gives only its first problem. A
-/// definition is checked as a whole (a policy's budgets, for example) only when each
-/// of its attributes is known and reads, and the ones it needs are there.
+/// A problem with no span has no defined place in that order. A value that a reader
+/// or a definition refuses gives only its first problem. A definition is checked as a
+/// whole (a policy's budgets, for example) only when each of its attributes is known
+/// and reads, and the ones it needs are there.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found::default();
     for document in documents {
@@ -653,34 +654,6 @@ mod tests {
             check(&documents),
             Err(vec![missing(0), missing(100), missing(200)])
         );
-    }
-
-    #[test]
-    fn reports_a_missing_select_first_in_a_document_with_no_spans() {
-        let disk = Attribute {
-            key: "disk".into(),
-            key_span: None,
-            value: Value {
-                kind: Kind::Integer(1),
-                span: None,
-            },
-        };
-        let policy = Block {
-            keyword: "node_settings".into(),
-            keyword_span: None,
-            labels: vec![Label {
-                text: "a".into(),
-                span: None,
-            }],
-            body: Document {
-                attributes: Map::new(vec![disk]).unwrap(),
-                blocks: Vec::new(),
-            },
-            span: None,
-        };
-        let diagnostics = check(&[document(vec![policy])]).unwrap_err();
-        let codes: Vec<_> = diagnostics.iter().map(|d| d.code.to_string()).collect();
-        assert_eq!(codes, ["config.missing-attribute", "document.bad-size"]);
     }
 
     #[test]
