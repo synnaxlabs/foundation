@@ -198,36 +198,53 @@ fn changed(seed: u64, synced: bool) -> (Vec<PathBuf>, u64) {
 }
 
 #[test]
-fn a_power_cut_undoes_the_creates_and_removes_that_no_sync_dir_covers() {
+fn a_power_cut_keeps_a_prefix_of_the_creates_and_removes_that_no_sync_dir_covers() {
+    let names = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let unsynced: BTreeSet<_> = (0..32).map(|seed| changed(seed, false)).collect();
+    let prefixes = BTreeSet::from([
+        (names(&["old"]), MIB - 64 * KIB),
+        (names(&[]), MIB),
+        (names(&["new"]), MIB - 128 * KIB),
+        (names(&["d", "new"]), MIB - 132 * KIB),
+    ]);
+    assert_eq!(unsynced, prefixes);
     for seed in 0..8 {
-        let old = (vec![PathBuf::from("old")], MIB - 64 * KIB);
-        assert_eq!(changed(seed, false), old, "seed {seed}");
-        let new = vec![PathBuf::from("d"), PathBuf::from("new")];
-        assert_eq!(changed(seed, true), (new, MIB - 132 * KIB), "seed {seed}");
+        let synced = (names(&["d", "new"]), MIB - 132 * KIB);
+        assert_eq!(changed(seed, true), synced, "seed {seed}");
     }
 }
 
-#[test]
-fn a_power_cut_drops_a_directory_whose_parent_was_never_synced() {
-    let (mut sim, node) = disk(0);
+/// The names in the data directory, the free bytes, and the result of an open of
+/// `d/f` after a power cut, when `d` and `d/f` are made and only `d` is synced.
+fn unsynced_parent(seed: u64) -> (Vec<PathBuf>, u64, Result<(), Error>) {
+    let (mut sim, node) = disk(seed);
     crash_after(&mut sim, &node, Crash::Power, |node| async move {
         let files = node.files();
         files.create_dir(Path::new("d")).await.unwrap();
         drop(create(&node, "d/f", 64 * KIB).await);
         files.sync_dir(Path::new("d")).await.unwrap();
     });
-    let (names, free, opened) = sim
-        .run_on(&node, |node, _| async move {
-            let files = node.files();
-            let names = files.list(Path::new("")).await.unwrap();
-            let opened = files.open(Path::new("d/f"), Mode::Read).await.map(drop);
-            (names, files.free().await.unwrap(), opened)
-        })
-        .unwrap();
-    assert_eq!(names, Vec::<PathBuf>::new());
-    assert_eq!(free, MIB);
-    let path = "d/f".into();
-    assert_eq!(opened, Err(Error::NotFound { path }));
+    sim.run_on(&node, |node, _| async move {
+        let files = node.files();
+        let names = files.list(Path::new("")).await.unwrap();
+        let opened = files.open(Path::new("d/f"), Mode::Read).await.map(drop);
+        (names, files.free().await.unwrap(), opened)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_power_cut_can_drop_a_directory_whose_parent_was_never_synced() {
+    let dropped = (vec![], MIB, Err(Error::NotFound { path: "d/f".into() }));
+    let kept = (vec![PathBuf::from("d")], MIB - 68 * KIB, Ok(()));
+    let both = [dropped, kept];
+    let mut reached = [false; 2];
+    for seed in 0..32 {
+        let outcome = unsynced_parent(seed);
+        let at = both.iter().position(|state| *state == outcome);
+        reached[at.unwrap_or_else(|| panic!("seed {seed}: {outcome:?}"))] = true;
+    }
+    assert_eq!(reached, [true; 2]);
 }
 
 /// Makes a synced file of 1s on `node`, then a write of 2s over both its sectors, a
@@ -463,24 +480,27 @@ fn a_power_cut_frees_a_file_that_a_call_in_flight_held() {
 
 #[test]
 fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
-    let (mut sim, node) = disk(0);
-    crash_after(&mut sim, &node, Crash::Power, |node| async move {
-        drop(create(&node, "a", 1_024).await);
-        until_crash(&node).await;
-        hang(node.files().sync_dir(Path::new(""))).await;
-    });
-    let names = sim
-        .run_on(&node, |node, _| async move {
-            node.files().list(Path::new("")).await.unwrap()
+    let outcomes: BTreeSet<_> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Power, |node| async move {
+                drop(create(&node, "a", 1_024).await);
+                until_crash(&node).await;
+                hang(node.files().sync_dir(Path::new(""))).await;
+            });
+            sim.run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap()
         })
-        .unwrap();
-    assert_eq!(names, Vec::<PathBuf>::new());
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([vec![], vec![PathBuf::from("a")]]));
 }
 
 /// The length of file `a` after `crash` cuts a create of 1 KiB of it, or `None` when
 /// no file is there, then its length after a create of 1 KiB, then the free bytes
-/// after a remove of it. A removed file keeps its room while a durable entry names it.
-/// When `empty`, a durable file `a` with no bytes is there before.
+/// after a remove of it and a `sync_dir`. When `empty`, a durable file `a` with no
+/// bytes is there before.
 fn create_at_a_crash(seed: u64, crash: Crash, empty: bool) -> (Option<u64>, u64, u64) {
     let (mut sim, node) = disk(seed);
     crash_after(&mut sim, &node, crash, move |node| async move {
@@ -498,6 +518,7 @@ fn create_at_a_crash(seed: u64, crash: Crash, empty: bool) -> (Option<u64>, u64,
         let cut = opened.ok().map(|file| file.len());
         let len = create(&node, "a", 1_024).await.len();
         files.remove(Path::new("a")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
         (cut, len, files.free().await.unwrap())
     })
     .unwrap()
@@ -514,18 +535,14 @@ fn creates_at_a_crash(crash: Crash, empty: bool) -> BTreeSet<(Option<u64>, u64, 
 fn a_crash_in_a_create_can_leave_the_file_with_no_bytes() {
     let process = BTreeSet::from([(Some(0), 1_024, MIB), (Some(1_024), 1_024, MIB)]);
     assert_eq!(creates_at_a_crash(Crash::Process, false), process);
-    let power = BTreeSet::from([
-        (None, 1_024, MIB),
-        (Some(0), 1_024, MIB - 1_024),
-        (Some(1_024), 1_024, MIB - 1_024),
-    ]);
+    let mut power = process;
+    power.insert((None, 1_024, MIB));
     assert_eq!(creates_at_a_crash(Crash::Power, false), power);
 }
 
 #[test]
 fn a_crash_in_a_create_over_a_synced_file_with_no_bytes_keeps_it() {
-    let kept = MIB - 1_024;
-    let process = BTreeSet::from([(Some(0), 1_024, kept), (Some(1_024), 1_024, kept)]);
+    let process = BTreeSet::from([(Some(0), 1_024, MIB), (Some(1_024), 1_024, MIB)]);
     assert_eq!(creates_at_a_crash(Crash::Process, true), process);
     assert_eq!(creates_at_a_crash(Crash::Power, true), process);
 }
@@ -564,7 +581,8 @@ fn a_power_crash_in_a_create_over_a_file_with_bytes_has_no_effect() {
         |node: node::Node| async move { drop(create(&node, "a", 1_024).await) };
     let power = cut_creates(Crash::Power, before);
     let lens: BTreeSet<_> = power.iter().map(|&(_, len, free)| (len, free)).collect();
-    assert_eq!(lens, BTreeSet::from([(None, MIB)]));
+    let unsynced = BTreeSet::from([(None, MIB), (Some(1_024), MIB - 1_024)]);
+    assert_eq!(lens, unsynced);
 }
 
 #[test]
@@ -578,6 +596,7 @@ fn a_create_that_a_power_crash_keeps_frees_the_file_of_the_old_entry() {
     let lens: BTreeSet<_> = power.iter().map(|&(_, len, free)| (len, free)).collect();
     let kept = MIB - 1_024;
     let reached = [
+        (None, MIB),
         (Some(4 * KIB), MIB - 4 * KIB),
         (Some(0), MIB),
         (Some(1_024), kept),
@@ -1003,6 +1022,7 @@ fn a_crash_frees_a_removed_file_that_a_leaked_handle_holds() {
         crash_after(&mut sim, &node, crash, |node| async move {
             Box::leak(Box::new(create(&node, "a", 64 * KIB).await));
             node.files().remove(Path::new("a")).await.unwrap();
+            node.files().sync_dir(Path::new("")).await.unwrap();
         });
         let free = sim
             .run_on(&node, |node, _| async move {
@@ -1207,20 +1227,22 @@ fn a_power_cut_leaves_a_renamed_file_at_one_name_with_its_synced_bytes() {
 }
 
 #[test]
-fn a_power_cut_after_a_rename_and_before_its_sync_dir_keeps_the_old_name() {
-    for seed in 0..8 {
-        let (mut sim, node) = disk(seed);
-        crash_after(&mut sim, &node, Crash::Power, |node| async move {
-            let mut file = create_synced(&node).await;
-            file.rename(Path::new("b")).await.unwrap();
-        });
-        let names = sim
-            .run_on(&node, |node, _| async move {
+fn a_power_cut_after_a_rename_and_before_its_sync_dir_keeps_one_name() {
+    let outcomes: BTreeSet<_> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Power, |node| async move {
+                let mut file = create_synced(&node).await;
+                file.rename(Path::new("b")).await.unwrap();
+            });
+            sim.run_on(&node, |node, _| async move {
                 node.files().list(Path::new("")).await.unwrap()
             })
-            .unwrap();
-        assert_eq!(names, [PathBuf::from("a")], "seed {seed}");
-    }
+            .unwrap()
+        })
+        .collect();
+    let one = BTreeSet::from([vec![PathBuf::from("a")], vec![PathBuf::from("b")]]);
+    assert_eq!(outcomes, one);
 }
 
 /// The names in the data directory after `crash` with a rename of the synced file
@@ -1275,6 +1297,7 @@ fn a_power_crash_in_a_create_at_the_old_name_of_a_renamed_file_keeps_the_file() 
     let old = (PathBuf::from("b"), vec![1, 1]);
     let all = BTreeSet::from([
         vec![(PathBuf::from("a"), vec![1, 1])],
+        vec![old.clone()],
         vec![(PathBuf::from("a"), vec![]), old.clone()],
         vec![(PathBuf::from("a"), vec![0, 0]), old],
     ]);
@@ -1282,11 +1305,109 @@ fn a_power_crash_in_a_create_at_the_old_name_of_a_renamed_file_keeps_the_file() 
 }
 
 #[test]
-fn a_process_crash_applies_a_rename_in_flight_and_a_power_cut_drops_it() {
+fn a_process_crash_applies_a_rename_in_flight_and_a_power_cut_can_drop_it() {
+    let (a, b) = (vec![PathBuf::from("a")], vec![PathBuf::from("b")]);
     for seed in 0..8 {
-        let applied = rename_in_flight(seed, Crash::Process);
-        assert_eq!(applied, [PathBuf::from("b")], "seed {seed}");
-        let dropped = rename_in_flight(seed, Crash::Power);
-        assert_eq!(dropped, [PathBuf::from("a")], "seed {seed}");
+        assert_eq!(rename_in_flight(seed, Crash::Process), b, "seed {seed}");
     }
+    let power: BTreeSet<_> = (0..32)
+        .map(|seed| rename_in_flight(seed, Crash::Power))
+        .collect();
+    assert_eq!(power, BTreeSet::from([a, b]));
+}
+
+/// The names in the data directory after a power cut, when the synced file `a` is
+/// there, a file `c` is made, and `a` is renamed to `b`, with no `sync_dir` after.
+fn renamed_after_create(seed: u64) -> Vec<PathBuf> {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        let mut file = create_synced(&node).await;
+        drop(create(&node, "c", 1_024).await);
+        file.rename(Path::new("b")).await.unwrap();
+    });
+    sim.run_on(&node, |node, _| async move {
+        node.files().list(Path::new("")).await.unwrap()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_power_cut_keeps_the_changes_in_the_order_of_their_calls() {
+    let outcomes: BTreeSet<_> = (0..64).map(renamed_after_create).collect();
+    let names = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let prefixes = [names(&["a"]), names(&["a", "c"]), names(&["b", "c"])];
+    assert_eq!(outcomes, BTreeSet::from(prefixes));
+}
+
+/// The names, the free bytes, and the sectors of `a` after a power cut, when the
+/// 1 KiB file `a` with each sector 1 is synced and then removed, with its entry
+/// never synced.
+fn removed_after_create(seed: u64) -> (Vec<PathBuf>, u64, Option<Vec<u8>>) {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        let file = create(&node, "a", 1_024).await;
+        file.write_at(0, &[block(&pool(), &[1; 1_024])])
+            .await
+            .unwrap();
+        file.sync().await.unwrap();
+        drop(file);
+        node.files().remove(Path::new("a")).await.unwrap();
+    });
+    sim.run_on(&node, |node, _| async move {
+        let files = node.files();
+        let names = files.list(Path::new("")).await.unwrap();
+        let mut sectors_of_a = None;
+        if let Ok(file) = files.open(Path::new("a"), Mode::Read).await {
+            sectors_of_a = Some(sectors(&read(&file, &pool(), 0, 1_024).await));
+        }
+        (names, files.free().await.unwrap(), sectors_of_a)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_create_that_a_power_cut_keeps_has_the_bytes_of_its_file() {
+    let outcomes: BTreeSet<_> = (0..64).map(removed_after_create).collect();
+    let kept = (vec![PathBuf::from("a")], MIB - 1_024, Some(vec![1, 1]));
+    assert_eq!(outcomes, BTreeSet::from([(vec![], MIB, None), kept]));
+}
+
+/// The names in the synced directories `x` and `y` after a power cut, when the files
+/// `x/a` and then `y/b` are made, with a `sync_dir` of `y` after them when `synced`.
+fn made_in_two_dirs(seed: u64, synced: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, move |node| async move {
+        let files = node.files();
+        files.create_dir(Path::new("x")).await.unwrap();
+        files.create_dir(Path::new("y")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        drop(create(&node, "x/a", 1_024).await);
+        drop(create(&node, "y/b", 1_024).await);
+        if synced {
+            files.sync_dir(Path::new("y")).await.unwrap();
+        }
+    });
+    sim.run_on(&node, |node, _| async move {
+        let files = node.files();
+        let x = files.list(Path::new("x")).await.unwrap();
+        (x, files.list(Path::new("y")).await.unwrap())
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_power_cut_keeps_the_changes_of_two_directories_in_the_order_of_their_calls() {
+    let outcomes: BTreeSet<_> =
+        (0..64).map(|seed| made_in_two_dirs(seed, false)).collect();
+    let (a, b) = (vec![PathBuf::from("a")], vec![PathBuf::from("b")]);
+    let prefixes = [(vec![], vec![]), (a.clone(), vec![]), (a, b)];
+    assert_eq!(outcomes, BTreeSet::from(prefixes));
+}
+
+#[test]
+fn a_sync_dir_makes_durable_only_the_changes_of_its_directory() {
+    let outcomes: BTreeSet<_> =
+        (0..64).map(|seed| made_in_two_dirs(seed, true)).collect();
+    let (a, b) = (vec![PathBuf::from("a")], vec![PathBuf::from("b")]);
+    assert_eq!(outcomes, BTreeSet::from([(vec![], b.clone()), (a, b)]));
 }

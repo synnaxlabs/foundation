@@ -53,6 +53,15 @@ pub(crate) struct Disk {
     /// or a hold keeps.
     used: u64,
     inodes: BTreeMap<u64, Inode>,
+    /// The changes of entries that no `sync_dir` covered, in the order of their calls.
+    log: Vec<Change>,
+}
+
+/// A change of the entries of directory `dir`: each name, and the inode that it then
+/// names, or none. A power cut keeps all of its edits or none.
+struct Change {
+    dir: u64,
+    edits: Vec<(OsString, Option<u64>)>,
 }
 
 /// What an open finds.
@@ -89,6 +98,8 @@ pub(crate) struct File {
     linked: bool,
     /// A durable entry names the file.
     durable: bool,
+    /// The edits in the log that name the file.
+    logged: u64,
 }
 
 /// The durable bytes of a sector, its clean bytes in the cache, and its writes.
@@ -122,6 +133,7 @@ impl Disk {
             bytes,
             used: 0,
             inodes: BTreeMap::from([(ROOT, Inode::Dir(Dir::default()))]),
+            log: Vec::new(),
         }
     }
 
@@ -197,8 +209,10 @@ impl Disk {
                     writers: 0,
                     linked: true,
                     durable: false,
+                    logged: 0,
                 };
                 self.inodes.insert(key, Inode::File(file));
+                self.change(dir, vec![(name.into(), Some(key))]);
                 key
             }
         };
@@ -249,6 +263,7 @@ impl Disk {
                 self.take(DIR_BYTES)?;
                 self.dir_mut(dir).entries.insert(name.into(), key);
                 self.inodes.insert(key, Inode::Dir(Dir::default()));
+                self.change(dir, vec![(name.into(), Some(key))]);
                 Ok(())
             }
         }
@@ -268,6 +283,7 @@ impl Disk {
             .ok_or(Cause::NotFound)?;
         self.named(inode, slashed)?.linked = false;
         self.dir_mut(dir).entries.remove(*name);
+        self.change(dir, vec![(name.into(), None)]);
         self.collect(inode);
         Ok(())
     }
@@ -286,7 +302,8 @@ impl Disk {
         let new = segments(to)
             .pop()
             .expect("invariant: a rename is to a name");
-        let dir = self.dir_mut(self.dir(parent)?);
+        let key = self.dir(parent)?;
+        let dir = self.dir_mut(key);
         if dir.entries.get(*old) != Some(&inode) {
             return Err(Cause::NotFound);
         }
@@ -295,6 +312,10 @@ impl Disk {
         }
         dir.entries.remove(*old);
         dir.entries.insert(new.to_owned(), inode);
+        self.change(
+            key,
+            vec![((*old).into(), None), (new.to_owned(), Some(inode))],
+        );
         Ok(())
     }
 
@@ -315,10 +336,12 @@ impl Disk {
 
     /// Crashes the disk by `crash`. Each hold drops, as at the death of the process
     /// that held the files, and each file that only a hold kept is freed. After a
-    /// `Power` crash, each directory goes back to its durable entries, what they no
-    /// longer reach is freed, and each sector keeps its durable bytes or its bytes
-    /// after one write that no sync covered, by `rng`.
-    pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) {
+    /// `Power` crash, each directory goes back to its durable entries with the changes
+    /// of a prefix of the log, what they no longer reach is freed, and each sector
+    /// keeps its durable bytes or its bytes after one write that no sync covered, by
+    /// `rng`. The prefix draws from `rng` only when the log is not empty. Returns the
+    /// number of changes that it kept.
+    pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) -> u64 {
         let inodes: Vec<u64> = self.inodes.keys().copied().collect();
         for inode in inodes {
             if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
@@ -326,45 +349,63 @@ impl Disk {
                 self.collect(inode);
             }
         }
-        if crash == Crash::Power {
-            self.cut_power(rng);
+        match crash {
+            Crash::Process => 0,
+            Crash::Power => self.cut_power(rng),
         }
     }
 
-    /// Frees file `inode` when no entry, no durable entry, and no hold keeps it.
+    /// Frees file `inode` when no entry, no durable entry, no edit in the log, and no
+    /// hold keeps it.
     fn collect(&mut self, inode: u64) {
         let file = self.file(inode);
-        if !file.linked && !file.durable && file.holds == 0 {
+        if !file.linked && !file.durable && file.logged == 0 && file.holds == 0 {
             self.used -= file.len;
             self.inodes.remove(&inode);
         }
     }
 
     /// Makes the entries of the directory at `path` durable, and frees each file that
-    /// only its old durable entries kept.
+    /// only its old durable entries or its changes in the log kept.
     pub(crate) fn sync_dir(&mut self, path: &Path) -> Result<(), Cause> {
         let key = self.dir(&segments(path))?;
         let dir = self.dir_mut(key);
         let old = mem::replace(&mut dir.durable, dir.entries.clone());
         let new: BTreeSet<u64> = dir.durable.values().copied().collect();
+        let (synced, log): (Vec<_>, _) = mem::take(&mut self.log)
+            .into_iter()
+            .partition(|change| change.dir == key);
+        self.log = log;
+        let mut ended: BTreeSet<u64> = old.into_values().collect();
+        for inode in synced.iter().flat_map(Change::named) {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+                file.logged -= 1;
+            }
+            ended.insert(inode);
+        }
         for &inode in &new {
             if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
                 file.durable = true;
             }
         }
-        for inode in old.into_values().filter(|inode| !new.contains(inode)) {
-            self.forget(inode);
+        for inode in ended.difference(&new) {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(inode) {
+                file.durable = false;
+                self.collect(*inode);
+            }
         }
         Ok(())
     }
 
-    /// Ends the durable entry that kept `inode`, and frees it when it is a file that
-    /// nothing else keeps.
-    fn forget(&mut self, inode: u64) {
-        if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
-            file.durable = false;
-            self.collect(inode);
+    /// Logs a change of the entries of directory `dir` by `edits`.
+    fn change(&mut self, dir: u64, edits: Vec<(OsString, Option<u64>)>) {
+        let change = Change { dir, edits };
+        for inode in change.named() {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+                file.logged += 1;
+            }
         }
+        self.log.push(change);
     }
 
     /// Whether a [`Mode::Create`] open of `path` makes its file when the disk has
@@ -406,8 +447,23 @@ impl Disk {
         }
     }
 
-    /// Cuts the power, as [`Disk::crash`] says.
-    fn cut_power(&mut self, rng: &mut Rng) {
+    /// Cuts the power, as [`Disk::crash`] says, and gives the number of changes that
+    /// it kept.
+    fn cut_power(&mut self, rng: &mut Rng) -> u64 {
+        let log = mem::take(&mut self.log);
+        let kept = match len(&log) {
+            0 => 0,
+            changes => rng.below(changes + 1),
+        };
+        for change in log.into_iter().take(index(kept)) {
+            let dir = self.dir_mut(change.dir);
+            for (name, inode) in change.edits {
+                match inode {
+                    Some(inode) => dir.durable.insert(name, inode),
+                    None => dir.durable.remove(&name),
+                };
+            }
+        }
         let mut reached = BTreeSet::from([ROOT]);
         let mut next = vec![ROOT];
         while let Some(at) = next.pop() {
@@ -423,11 +479,19 @@ impl Disk {
                 continue;
             }
             if let Inode::File(file) = &mut inode {
-                file.linked = true;
+                (file.linked, file.durable, file.logged) = (true, true, 0);
                 file.cut_power(rng);
             }
             self.inodes.insert(key, inode);
         }
+        kept
+    }
+}
+
+impl Change {
+    /// The inodes that its edits name.
+    fn named(&self) -> impl Iterator<Item = u64> {
+        self.edits.iter().filter_map(|(_, inode)| *inode)
     }
 }
 
@@ -726,7 +790,33 @@ mod tests {
             writers: 0,
             linked: true,
             durable: false,
+            logged: 0,
         }
+    }
+
+    #[test]
+    fn a_power_cut_draws_a_prefix_only_when_the_log_is_not_empty() {
+        for seed in 0..8 {
+            let mut synced = Disk::new(1 << 20);
+            assert!(synced.create_dir(1, Path::new("d")).is_ok());
+            assert!(synced.sync_dir(Path::new("")).is_ok());
+            let mut rng = Rng::from_seed(seed);
+            assert_eq!(synced.crash(Crash::Power, &mut rng), 0);
+            assert_eq!(rng.next_u64(), Rng::from_seed(seed).next_u64());
+            assert!(
+                synced
+                    .list(Path::new(""))
+                    .is_ok_and(|names| names == [PathBuf::from("d")])
+            );
+        }
+        let kept: BTreeSet<u64> = (0..64)
+            .map(|seed| {
+                let mut unsynced = Disk::new(1 << 20);
+                assert!(unsynced.create_dir(1, Path::new("d")).is_ok());
+                unsynced.crash(Crash::Power, &mut Rng::from_seed(seed))
+            })
+            .collect();
+        assert_eq!(kept, BTreeSet::from([0, 1]));
     }
 
     #[test]

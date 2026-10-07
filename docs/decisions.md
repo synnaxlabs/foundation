@@ -3523,6 +3523,22 @@ How to read this record:
   and adds a step that `env` does not have.
   Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
+  Amended (2026-10-07, #1551): the disk keeps one log, in call order, of the creates,
+  removes, and renames that no `sync_dir` of their directory covered. A rename is one
+  change. A `Power` crash keeps a prefix of the log. It draws the prefix from the files
+  stream only when the log is not empty, and the digest holds its length. Each file call
+  in flight takes effect as for `Process`, and the prefix decides whether its change
+  stays, except a `sync` or `sync_dir` in flight, which has no effect. A `sync_dir`
+  makes durable only the changes of its directory. A journaled file system can commit
+  more; `sim` does not, so a missing `sync_dir` shows. A file takes space while an
+  entry, a durable entry, a change in the log, or a handle names it. This supersedes the
+  #1449 rule that a `Power` crash undoes each rename since the last `sync_dir`, and the
+  commit of the #1264 amendment: a create that a `Power` crash cuts is whole or has no
+  bytes, and the prefix decides whether its entry stays. A cut gives a state that a
+  journaled file system can reach, or a state that only a missing `sync_dir` reaches.
+  Lost: a log for each directory, which gives states that need no missing `sync_dir`.
+  Decided by `laptop.architect-2` (2026-10-07T19:20:28Z):
+  https://github.com/synnaxlabs/foundation/issues/1551#issuecomment-6045125302.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

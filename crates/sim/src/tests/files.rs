@@ -313,12 +313,19 @@ fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
         frees.push(files.free().await.unwrap());
         drop(file);
         frees.push(files.free().await.unwrap());
+        files.sync_dir(Path::new("")).await.unwrap();
+        frees.push(files.free().await.unwrap());
         frees
     });
     let created = MIB - 64 * KIB;
     let expected = [MIB, created, created, created - 4 * KIB, created - 4 * KIB];
     assert_eq!(frees[..5], expected);
-    assert_eq!(frees[5], MIB - 4 * KIB, "the last handle closed");
+    assert_eq!(
+        frees[5],
+        created - 4 * KIB,
+        "the create of `f` is not durable"
+    );
+    assert_eq!(frees[6], MIB - 4 * KIB, "the remove of `f` is durable");
 }
 
 #[test]
@@ -690,7 +697,7 @@ fn writes_in_flight_over_filled_sectors_leave_either_bytes() {
 }
 
 /// The free bytes after an open that makes a 64 KiB file is polled once, its future
-/// drops before or after the call ends, and the file is removed.
+/// drops before or after the call ends, and the remove of the file is durable.
 fn free_after_dropped_open(ended: bool) -> u64 {
     run(0, MIB, move |node, _| async move {
         let (files, clock) = (node.files(), node.clock());
@@ -709,6 +716,7 @@ fn free_after_dropped_open(ended: bool) -> u64 {
             clock.sleep(Span::MILLISECOND).await;
         }
         files.remove(Path::new("a")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
         files.free().await.unwrap()
     })
 }
