@@ -44,9 +44,10 @@ jq='.data.repository.pullRequest |
   elif .reviewDecision == "CHANGES_REQUESTED" then "has requested changes"
   elif .isInMergeQueue or .autoMergeRequest != null then "waiting"
   else "left the merge queue" end'
+# On success gh writes to stderr only for GH_DEBUG, as stderr is not a terminal.
+unset GH_DEBUG
 failures=0
 while :; do
-  # On success gh writes nothing to stderr, which is not a terminal.
   if s=$(gh api graphql -F n="$1" -f query="$q" --jq "$jq" 2>&1); then
     failures=0
   else

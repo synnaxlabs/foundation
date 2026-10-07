@@ -4,8 +4,10 @@
 # message, an HTTP error, or no network, it exits 1, prints the body, if any, and
 # prints the error on stderr; with no login, it exits 4. After the answers run out,
 # it fails with "out of answers". `gh api rate_limit` gives the count in
-# `$STUB/left`, 1 when there is none. A stub `sleep` returns at once, and stops the
-# script on its fifth call. Needs `jq`. Exit 1 on a failure.
+# `$STUB/left.<n>` after call <n>, else in `$STUB/left`, else 1. With `GH_DEBUG`
+# set, it also logs each request on stderr. A stub `sleep` returns at once, and
+# stops the script on its fifth call; when `$STUB/slow` exists, it sleeps. Needs
+# `jq`. Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 gh=$(command -v gh)
@@ -14,8 +16,11 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin" "$tmp/live"
 cat > "$tmp/bin/gh" <<'STUB'
 #!/bin/sh
-[ "$2" != rate_limit ] || { cat "$STUB/left" 2>/dev/null || echo 1; exit 0; }
-n=$(($(cat "$STUB/calls") + 1))
+[ -z "${GH_DEBUG-}" ] || echo "* Request to https://api.github.com/graphql" >&2
+n=$(cat "$STUB/calls")
+[ "$2" != rate_limit ] ||
+  { cat "$STUB/left.$n" 2>/dev/null || cat "$STUB/left" 2>/dev/null || echo 1; exit 0; }
+n=$((n + 1))
 echo "$n" > "$STUB/calls"
 a=$STUB/$n.json
 [ -f "$a" ] || { echo "gh: out of answers" >&2; exit 1; }
@@ -37,6 +42,7 @@ jq -r "$2" "$a"
 STUB
 cat > "$tmp/bin/sleep" <<'STUB'
 #!/bin/sh
+[ ! -f "$STUB/slow" ] || exec /bin/sleep 10
 n=$(($(cat "$STUB/sleeps" 2>/dev/null || echo 0) + 1))
 echo "$n" > "$STUB/sleeps"
 [ "$n" -lt 5 ] || kill "$PPID"
@@ -70,22 +76,29 @@ with() {
   jq -c ".data.repository.pullRequest += $1"
 }
 
-# run <name> <exit> <output> <polls> <answer>...: wait.sh gets the answers in order,
-# and must stop after <polls> of them with <exit> and <output>.
-run() {
-  name=$1 code=$2 out=$3 polls=$4
-  shift 4
-  rm -f "$tmp"/*.json
+# answers <answer>...: the stub gives the answers in order.
+answers() {
+  rm -f "$tmp"/*.json "$tmp"/left* "$tmp/sleeps" "$tmp/slow"
   i=0
   for a in "$@"; do
     i=$((i + 1))
     echo "$a" > "$tmp/$i.json"
   done
   echo 0 > "$tmp/calls"
-  rm -f "$tmp/sleeps" "$tmp/left"
+}
+
+# run <name> <exit> <output> <polls> <answer>...: wait.sh gets the answers in order,
+# and must stop after <polls> of them with <exit> and <output>. `$left` sets the
+# rate limit, `$spent` the call after which it is 0, and `$debug` sets GH_DEBUG.
+run() {
+  name=$1 code=$2 out=$3 polls=$4
+  shift 4
+  answers "$@"
   [ -z "${left-}" ] || echo "$left" > "$tmp/left"
-  got=$(STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" 7)
+  [ -z "${spent-}" ] || echo 0 > "$tmp/left.$spent"
+  got=$(GH_DEBUG=${debug-} STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" 7)
   check "$name" $? "$got" "$(cat "$tmp/calls")" "$code" "$out" "$polls"
+  unset left spent debug
 }
 
 # check <name> <exit> <output> <polls> <expected exit> <output> <polls>
@@ -206,6 +219,22 @@ left=0 run "spent rate limit" 0 "#7 merged" 4 "$e" "$e" "$e" "$merged"
 left=1 run "rate limit error with calls left" 1 \
   "$stop $e
 gh: API rate limit exceeded." 3 "$e" "$e" "$e"
+spent=3 run "a spent rate limit keeps the failures" 1 \
+  "$stop error connecting to api.github.com" 4 offline offline "$e" offline
+debug=1 run "GH_DEBUG" 0 "#7 merged" 1 "$merged"
+answers "$(pr OPEN)"
+touch "$tmp/slow"
+# The shell reports a job that a signal ended on stderr.
+got=$(
+  STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" 7 > /dev/null &
+  /bin/sleep 1
+  kill "$!"
+  start=$(date +%s)
+  wait "$!"
+  echo "$? $(($(date +%s) - start))"
+) 2> /dev/null
+[ "${got#* }" -gt 2 ] || fast=yes
+check "TERM stops it at once" "${got% *}" "${fast-no}" "$(cat "$tmp/calls")" 143 yes 1
 run "waits at most five times" 143 "" 5 "$(pr OPEN)" "$(pr OPEN)" "$(pr OPEN)" \
   "$(pr OPEN)" "$(pr OPEN)"
 
