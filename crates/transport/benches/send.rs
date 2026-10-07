@@ -1,6 +1,6 @@
 //! The cost of a `stream::Sender::send` on a session between two sim nodes. Run with
-//! `cargo bench -p transport --bench send`. A figure is per send over a round, and
-//! some sends in a round cost more than others.
+//! `cargo bench -p transport --bench send`. A figure is per timed send over a round,
+//! and some sends in a round cost more than others.
 //!
 //! The lines up to `8 complete 1 KiB` time a send that is ready on its first poll.
 //! Each round fills its blocks, then times one poll of each send: a burst of 64 sends
@@ -10,12 +10,12 @@
 //!
 //! The `waiting` lines send a round on their streams at once, over a session whose
 //! peer window holds a quarter of a round, so the sends wait for the QUIC window and
-//! for their turn. They time each poll of each send, not the sim or the peer between
-//! polls. In each round of `latest and complete 1 KiB waiting`, a `Latest` send and a
-//! `Complete` send must wait at once, and the server must get one stream of each
-//! class, or the bench panics. It times a poll only while a send of the other class
-//! waits, so a class that sends alone adds nothing; `timed` gives the share of sends it
-//! timed, and a round that times under half its sends panics. Its control is
+//! for their turn. They time the polls of a send, not the sim or the peer between
+//! polls. `latest and complete 1 KiB waiting` times a send only when it ends while a
+//! send of the other class waits, so a class that sends alone adds nothing; `timed`
+//! gives the share of sends it timed. In each round, a send of each class must end
+//! while the other class waits, the round must time half its sends, and the server
+//! must get one stream of each class, or the bench panics. Its control is
 //! `complete 1 KiB waiting`, whose send must wait in each round. Each poll has a
 //! timing cost, so compare the two lines with their polls per send.
 //!
@@ -157,7 +157,8 @@ const WAITING: [(Scenario, Premise); 2] = [
 enum Premise {
     /// A send waits.
     Waits,
-    /// A `Latest` send and a `Complete` send wait at once.
+    /// A `Latest` send and a `Complete` send each end while a send of the other
+    /// class waits.
     Competes,
 }
 
@@ -401,9 +402,9 @@ async fn compete(
             tally.sends
         );
         if round >= WARMUP {
-            nanos.push(per(tally.nanos) / per(tally.sends));
-            allocations += tally.allocations;
-            polls += tally.polls;
+            nanos.push(per(tally.timed.nanos) / per(tally.sends));
+            allocations += tally.timed.allocations;
+            polls += tally.timed.polls;
             timed += tally.sends;
         }
     }
@@ -439,39 +440,50 @@ async fn send_each(
     }
 }
 
-/// The polls of the sends of one `WAITING` round. Under `Premise::Competes`, only a
-/// poll while a send of the other class waits is timed.
+/// The polls of the sends of one `WAITING` round. Under `Premise::Competes`, a send
+/// is timed only when its last poll runs while a send of the other class waits.
 struct Tally {
-    nanos: u64,
-    allocations: u64,
-    polls: u64,
-    /// The sends whose last poll was timed.
+    /// The cost of the timed sends.
+    timed: Cost,
+    /// The timed sends.
     sends: u64,
+    /// The cost so far of the current send of each sender.
+    current: Vec<Cost>,
     /// The class of each sender.
     classes: Vec<Class>,
     /// Whether the last poll of the current send of each sender waited.
     waiting: Vec<bool>,
+    /// Whether each sender finished a send while a send of the other class waited.
+    turned: Vec<bool>,
     premise: Premise,
     /// Whether the polls so far show `premise`.
     shown: bool,
 }
 
+/// The time, allocations and polls of one or more sends.
+#[derive(Clone, Copy, Default)]
+struct Cost {
+    nanos: u64,
+    allocations: u64,
+    polls: u64,
+}
+
 impl Tally {
     fn new(classes: Vec<Class>, premise: Premise) -> Self {
         Self {
-            nanos: 0,
-            allocations: 0,
-            polls: 0,
+            timed: Cost::default(),
             sends: 0,
+            current: vec![Cost::default(); classes.len()],
             waiting: vec![false; classes.len()],
+            turned: vec![false; classes.len()],
             classes,
             premise,
             shown: false,
         }
     }
 
-    /// Polls `send` of sender `at` once, and adds its time and allocations when the
-    /// poll is timed.
+    /// Polls `send` of sender `at` once, and adds the send's cost when it ends and is
+    /// timed.
     #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
     fn poll<F: Future>(
         &mut self,
@@ -479,31 +491,47 @@ impl Tally {
         send: Pin<&mut F>,
         cx: &mut Context<'_>,
     ) -> Poll<F::Output> {
-        let waits = |tally: &Self, class| {
-            let mut senders = tally.classes.iter().zip(&tally.waiting);
-            senders.any(|(&of, &waits)| of == class && waits)
+        let other = match self.classes[at] {
+            Class::Latest => Class::Complete,
+            _ => Class::Latest,
         };
-        let timed = match (self.premise, self.classes[at]) {
-            (Premise::Waits, _) => true,
-            (Premise::Competes, Class::Latest) => waits(self, Class::Complete),
-            (Premise::Competes, _) => waits(self, Class::Latest),
-        };
+        let competes = self.waits(other);
         let start = Instant::now();
         let (polled, counted) = ALLOCATOR.count(|| send.poll(cx));
-        if timed {
-            self.nanos += nanos(Instant::now().duration_since(start));
-            self.allocations += counted;
-            self.polls += 1;
-            self.sends += u64::from(polled.is_ready());
-        }
+        let current = &mut self.current[at];
+        current.nanos += nanos(Instant::now().duration_since(start));
+        current.allocations += counted;
+        current.polls += 1;
         self.waiting[at] = polled.is_pending();
+        if polled.is_ready() {
+            let cost = mem::take(current);
+            self.turned[at] |= competes;
+            if competes || matches!(self.premise, Premise::Waits) {
+                self.timed.nanos += cost.nanos;
+                self.timed.allocations += cost.allocations;
+                self.timed.polls += cost.polls;
+                self.sends += 1;
+            }
+        }
         self.shown |= match self.premise {
             Premise::Waits => self.waiting.iter().any(|&waits| waits),
             Premise::Competes => {
-                waits(self, Class::Latest) && waits(self, Class::Complete)
+                self.turned(Class::Latest) && self.turned(Class::Complete)
             }
         };
         polled
+    }
+
+    /// Whether the current send of a sender of `class` waits.
+    fn waits(&self, class: Class) -> bool {
+        let mut senders = self.classes.iter().zip(&self.waiting);
+        senders.any(|(&of, &waits)| of == class && waits)
+    }
+
+    /// Whether a sender of `class` finished a send while the other class waited.
+    fn turned(&self, class: Class) -> bool {
+        let mut senders = self.classes.iter().zip(&self.turned);
+        senders.any(|(&of, &turned)| of == class && turned)
     }
 }
 
