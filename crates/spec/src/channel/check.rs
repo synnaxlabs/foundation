@@ -70,8 +70,8 @@ fn edges(kind: &Kind) -> [Option<(Edge, channel::Key)>; 2] {
 }
 
 /// A problem across channels: an edge to a missing or wrong channel, or one key on
-/// two channels. `Display` gives the message: a
-/// lower-case clause with no final period. [`Problem::fix`] gives what to do instead.
+/// two channels. `Display` gives the message: a lower-case clause with no final
+/// period. [`Problem::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
     /// No channel has the key `to`.
