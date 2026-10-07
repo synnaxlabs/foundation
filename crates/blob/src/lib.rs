@@ -87,8 +87,8 @@ enum State {
     Listed(u64),
     /// A put returned in this open: its serial.
     Held(u64),
-    /// A put is in flight, and these calls wait for its end.
-    Writing(Vec<Waker>),
+    /// A put is in flight, and these calls wait for its end, by the key of each.
+    Writing(BTreeMap<u64, Waker>),
     /// A call of a dropped put that must end before the next open of the path: the
     /// close of its file, or its remove of a file of another length. A dropped call
     /// still runs, so a call of the digest drives it to its end first.
@@ -123,6 +123,8 @@ pub struct Store {
     /// The serial of the next flight. A read that saw one flight's state must not
     /// forget a later one's, so two flights never leave equal states.
     flights: Cell<u64>,
+    /// The key of the next call that waits for a put.
+    waiters: Cell<u64>,
 }
 
 impl Store {
@@ -156,6 +158,7 @@ impl Store {
             chunks: RefCell::new(chunks),
             corruptions: Cell::new(0),
             flights: Cell::new(1),
+            waiters: Cell::new(0),
         })
     }
 
@@ -237,16 +240,13 @@ impl Store {
 
     /// Ends when no put of `digest` is in flight.
     async fn wait(&self, digest: Digest) {
-        poll_fn(|cx| {
-            let mut chunks = self.chunks.borrow_mut();
-            let Some(State::Writing(wakers)) = chunks.get_mut(&digest) else {
-                return Poll::Ready(());
-            };
-            if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
-            }
-            Poll::Pending
-        })
+        let key = self.waiters.get();
+        self.waiters.set(key + 1);
+        Waiter {
+            store: self,
+            digest,
+            key,
+        }
         .await;
     }
 
@@ -320,6 +320,37 @@ impl Peek {
     }
 }
 
+/// A call that waits for the put of its digest. It keeps one waker, the last it was
+/// polled with, and its drop takes it back.
+struct Waiter<'a> {
+    store: &'a Store,
+    digest: Digest,
+    /// Used by no other waiter, so a drop takes no waker of another call.
+    key: u64,
+}
+
+impl Future for Waiter<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        let mut chunks = self.store.chunks.borrow_mut();
+        let Some(State::Writing(wakers)) = chunks.get_mut(&self.digest) else {
+            return Poll::Ready(());
+        };
+        wakers.insert(self.key, cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl Drop for Waiter<'_> {
+    fn drop(&mut self) {
+        let mut chunks = self.store.chunks.borrow_mut();
+        if let Some(State::Writing(wakers)) = chunks.get_mut(&self.digest) {
+            wakers.remove(&self.key);
+        }
+    }
+}
+
 /// A put in flight. It holds [`State::Writing`] for its digest, and its drop sets the
 /// next state and wakes the calls that waited. No call of the flight drops with it:
 /// a drop keeps its file's close, or its remove, in [`State::Ending`], so that the
@@ -340,7 +371,7 @@ impl<'a> Flight<'a> {
         let before = store
             .chunks
             .borrow_mut()
-            .insert(digest, State::Writing(Vec::new()));
+            .insert(digest, State::Writing(BTreeMap::new()));
         let pending = match before {
             Some(State::Writing(_)) => {
                 panic!("invariant: one put of a digest is in flight at a time")
@@ -449,7 +480,7 @@ impl Drop for Flight<'_> {
             chunks.insert(self.digest, after);
         }
         drop(chunks);
-        wakers.into_iter().for_each(Waker::wake);
+        wakers.into_values().for_each(Waker::wake);
     }
 }
 
@@ -1684,6 +1715,77 @@ mod tests {
                 largest: 2,
             };
             assert_eq!(Error::from(pool.clone()).to_string(), pool.to_string());
+        }
+    }
+
+    mod dropped {
+        use super::*;
+
+        /// A waker that counts its wakes.
+        #[derive(Default)]
+        struct Count(AtomicU64);
+
+        impl std::task::Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        fn wakers(store: &Store, digest: Digest) -> usize {
+            let chunks = store.chunks.borrow();
+            let Some(State::Writing(wakers)) = chunks.get(&digest) else {
+                panic!("no put of the digest is in flight");
+            };
+            wakers.len()
+        }
+
+        #[test]
+        fn waiters_leave_no_waker() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                let mut put = pin!(store.put(digest, &block));
+                assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                for _ in 0..1000 {
+                    let mut get = pin!(store.get(digest));
+                    let waker = Waker::from(Arc::new(Count::default()));
+                    let mut cx = std::task::Context::from_waker(&waker);
+                    assert!(get.as_mut().poll(&mut cx).is_pending());
+                }
+                assert_eq!(wakers(&store, digest), 0);
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn a_waiter_polled_with_new_wakers_keeps_the_last_one() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                let mut put = pin!(store.put(digest, &block));
+                assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                let mut get = pin!(store.get(digest));
+                let counts: Vec<_> =
+                    (0..1000).map(|_| Arc::new(Count::default())).collect();
+                for count in &counts {
+                    let waker = Waker::from(Arc::clone(count));
+                    let mut cx = std::task::Context::from_waker(&waker);
+                    assert!(get.as_mut().poll(&mut cx).is_pending());
+                }
+                assert_eq!(wakers(&store, digest), 1);
+                put.await.unwrap();
+                let woken: Vec<u64> = counts
+                    .iter()
+                    .map(|count| count.0.load(Ordering::Relaxed))
+                    .collect();
+                let mut expected = vec![0; 1000];
+                expected[999] = 1;
+                assert_eq!(woken, expected);
+                assert_eq!(&get.await.unwrap().unwrap()[..], &block[..]);
+            })
+            .unwrap();
         }
     }
 }
