@@ -51,11 +51,7 @@ impl Card {
         out.extend(name);
         out.extend(self.public_key.to_bytes());
         out.extend(self.seal_key.to_bytes());
-        let addresses = self.addresses.as_slice();
-        put_count(addresses.len(), out);
-        for &address in addresses {
-            put_address(address, out);
-        }
+        self.addresses.encode(out);
         out.extend(self.version.to_le_bytes());
     }
 
@@ -73,20 +69,13 @@ impl Card {
         let name = std::str::from_utf8(name).ok()?.parse().ok()?;
         let public_key = PublicKey::new(take(bytes)?).ok()?;
         let seal_key = SealKey::new(take(bytes)?).ok()?;
-        let count = take_count(bytes)?;
-        if count > u64::from(ADDRESSES_MAX) {
-            return None;
-        }
-        let mut addresses = Vec::new();
-        for _ in 0..count {
-            addresses.push(take_address(bytes)?);
-        }
+        let addresses = Addresses::decode(bytes)?;
         let version = u64::from_le_bytes(take(bytes)?);
         Some(Self {
             name,
             public_key,
             seal_key,
-            addresses: Addresses(addresses),
+            addresses,
             version,
         })
     }
@@ -124,6 +113,31 @@ impl Addresses {
     #[must_use]
     pub fn as_slice(&self) -> &[Address] {
         &self.0
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_count(self.0.len(), out);
+        for &address in &self.0 {
+            put_address(address, out);
+        }
+    }
+
+    // Needs no check of `new`: the count is checked first, and the byte form holds no
+    // flow info and no scope.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+    )]
+    fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        let count = take_count(bytes)?;
+        if count > u64::from(ADDRESSES_MAX) {
+            return None;
+        }
+        let mut list = Vec::new();
+        for _ in 0..count {
+            list.push(take_address(bytes)?);
+        }
+        Some(Self(list))
     }
 }
 
@@ -403,6 +417,29 @@ mod tests {
         bytes
     }
 
+    // A count of 0 to 40, then that many addresses of any kind and family, then any
+    // bytes, so that a byte form that reads more takes arbitrary values.
+    fn addresses_bytes() -> impl Strategy<Value = Vec<u8>> {
+        let address = (0..3u8, any::<bool>(), any::<[u8; 18]>(), 1..4u8);
+        let tail = prop::collection::vec(any::<u8>(), 0..64);
+        (prop::collection::vec(address, 0..=40), tail).prop_map(|(list, tail)| {
+            let mut out = Vec::new();
+            put_count(list.len(), &mut out);
+            for (kind, v6, ip, node) in list {
+                out.push(kind);
+                if kind == RELAY {
+                    out.extend(public(node).to_bytes());
+                }
+                out.push(if v6 { V6 } else { V4 });
+                let ip_len = if v6 { 16 } else { 4 };
+                out.extend(&ip[..ip_len]);
+                out.extend(&ip[16..]);
+            }
+            out.extend(tail);
+            out
+        })
+    }
+
     fn decoded(bytes: &[u8]) -> Option<Card> {
         let mut rest = bytes;
         let card = Card::decode(&mut rest)?;
@@ -420,6 +457,14 @@ mod tests {
             let bytes = encoded(&card);
             for len in 0..bytes.len() {
                 prop_assert_eq!(Card::decode(&mut &bytes[..len]), None);
+            }
+        }
+
+        #[test]
+        fn decoded_addresses_keep_the_rules(bytes in addresses_bytes()) {
+            if let Some(addresses) = Addresses::decode(&mut bytes.as_slice()) {
+                let list = addresses.as_slice().to_vec();
+                prop_assert_eq!(Addresses::new(list), Ok(addresses));
             }
         }
 
@@ -554,10 +599,8 @@ mod tests {
         );
         assert_eq!(
             Invalid::Scoped { address }.to_string(),
-            format!(
-                "the address {address:?} has IPv6 flow info or a scope, which mean \
-                 something only on the node that sets it"
-            )
+            "the address Tcp([fe80::1%3]:4100) has IPv6 flow info or a scope, which \
+             mean something only on the node that sets it"
         );
     }
 
