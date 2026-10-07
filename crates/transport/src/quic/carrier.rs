@@ -306,6 +306,9 @@ impl Drop for Session {
         let slot = slot.expect("invariant: a session keeps its slot until it drops");
         if slot.end.is_none() {
             state.close(self.key, Code(0));
+        } else {
+            // The task may now hold the last reference, and must poll to end.
+            state.wake();
         }
     }
 }
@@ -972,6 +975,30 @@ mod tests {
             drop(carrier);
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(socket(&node).err(), None);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_session_that_drops_after_it_drained_frees_the_socket() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, node| async move {
+            let session = carrier.accept().await.expect("a session");
+            drop(carrier);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            node.clock().sleep(spans(IDLE, 3)).await;
+            assert!(session.state.borrow().endpoint.drained());
+            drop(session);
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(socket(&node).err(), None);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         assert_eq!(sim.run(), Ok(()));
     }
