@@ -15,7 +15,12 @@ types = { path = "../types" }
 buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 codec = { path = "../codec" }
+counting = { path = "../counting" }
 sim = { path = "../sim" }
+
+[[test]]
+name = "alloc"
+harness = false
 
 [lints]
 workspace = true

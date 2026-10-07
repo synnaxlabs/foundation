@@ -779,6 +779,7 @@ dependencies = [
  "buffer",
  "clock",
  "codec",
+ "counting",
  "env",
  "home",
  "sim",
