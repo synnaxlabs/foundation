@@ -90,6 +90,8 @@ impl Card {
 
 /// A card that its own `public_key` signed, over `foundation/card/1`, the node key,
 /// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one.
+/// It proves only that the key in the card signed it. That the node owns the key
+/// comes from its admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signed {
     card: Card,
