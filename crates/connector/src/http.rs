@@ -2,6 +2,8 @@
 
 mod body;
 mod pool;
+#[cfg(feature = "sim")]
+pub mod sim;
 mod stream;
 
 use std::cell::Cell;
