@@ -950,6 +950,20 @@ mod tests {
                 let certificate = certificate(&Tls::new(&private_key));
                 prop_assert_eq!(key(&certificate, &[]), Ok(public(&private_key)));
             }
+
+            #[test]
+            fn certifies_the_key_that_signs(bytes: [u8; 32]) {
+                let certified = certified(&Tls::new(&PrivateKey(bytes)));
+                let signer = certified
+                    .key
+                    .choose_scheme(&[SignatureScheme::ED25519])
+                    .expect("an Ed25519 signer");
+                let signature = signer.sign(b"message").expect("a signature");
+                let key = key(&certified.cert[0], &[]).expect("a node key");
+                let verifier =
+                    UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, key.to_bytes());
+                prop_assert_eq!(verifier.verify(b"message", &signature), Ok(()));
+            }
         }
 
         #[test]
