@@ -5649,7 +5649,10 @@ mod tests {
         use rustls::crypto::CryptoProvider;
         use rustls::crypto::aws_lc_rs::{default_provider, kx_group};
 
+        use rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256;
+
         use super::*;
+        use crate::quic::packet::{self, Keys, Secrets, Suite};
         use crate::quic::pair::Foreign;
 
         /// The limits of a node with the [`Shard::config`] limits.
@@ -5685,6 +5688,43 @@ mod tests {
 
         fn foreign(pair: &mut Pair) -> &mut noq_proto::Connection {
             pair.foreign.as_mut().expect("a foreign peer").connection()
+        }
+
+        /// A pair whose server a foreign peer dialed with AES-128-GCM, after a run,
+        /// and the foreign peer's TLS secrets.
+        fn logged_dial(shard: &Shard) -> (Pair, Arc<Secrets>) {
+            let secrets = Arc::new(Secrets::default());
+            let provider = CryptoProvider {
+                cipher_suites: vec![TLS13_AES_128_GCM_SHA256],
+                ..default_provider()
+            };
+            let peer = tls::public(&pair::SERVER_KEY);
+            let mut config = (*tls::anonymous(provider, peer)).clone();
+            config.key_log = Arc::<Secrets>::clone(&secrets);
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            let mut foreign = Foreign::new(shard, |_| {});
+            foreign.dial_with(pair.now(), Arc::new(config), pair::SERVER);
+            pair.foreign = Some(foreign);
+            pair.run(RUN);
+            (pair, secrets)
+        }
+
+        /// The code of each reset of stream `id` that the server sent to the
+        /// foreign peer of [`logged_dial`], read from the wire.
+        fn reset_codes(pair: &Pair, secrets: &Secrets, id: StreamId) -> Vec<u64> {
+            let secret = secrets.get("SERVER_TRAFFIC_SECRET_0");
+            let keys = Keys::new(Suite::Aes128Gcm, &secret);
+            let sent = pair.server.sent.iter();
+            let datagrams: Vec<Vec<u8>> = sent
+                .filter(|(_, to, _)| *to == pair::FOREIGN)
+                .map(|(_, _, datagram)| datagram.clone())
+                .collect();
+            let stream = VarInt::from(id).into_inner();
+            let resets = packet::resets(&datagrams, &keys).into_iter();
+            resets
+                .filter(|reset| reset.stream == stream)
+                .map(|reset| reset.code)
+                .collect()
         }
 
         /// The bytes of the next one-way stream the node opened on the foreign peer,
@@ -5911,6 +5951,53 @@ mod tests {
                 send.finish().expect("finished");
                 pair.run(RUN);
                 let incoming = accept(&mut pair.server);
+                let reply = incoming.sender.expect("a two-way stream");
+                let (now, message) = (pair.now(), shard.block(b"b"));
+                let written =
+                    pair.server.endpoint.write(now, &reply, &mut Some(message));
+                assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+            });
+        }
+
+        #[test]
+        fn reset_at_the_hello_with_the_code_of_a_stop_before_it() {
+            // The stream has no byte, waits for its first message byte, or queues.
+            let streams: [(&[u8], bool); 3] =
+                [(&[], false), (&[1], false), (&[1, 1, b'b'], true)];
+            for (bytes, end) in streams {
+                testing::run(1, move |shard| {
+                    let (mut pair, secrets) = logged_dial(shard);
+                    let connection = foreign(&mut pair);
+                    let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                    let id = raw(connection, Dir::Bi, bytes, end);
+                    let stopped = connection.recv_stream(id).stop(VarInt::from_u32(9));
+                    stopped.expect("stopped");
+                    pair.run(RUN);
+                    assert_eq!(reset_codes(&pair, &secrets, id), [0; 0]);
+                    let mut send = foreign(&mut pair).send_stream(hello);
+                    let own = OWN.encode();
+                    assert_eq!(send.write(&own), Ok(own.len()));
+                    send.finish().expect("finished");
+                    pair.run(RUN);
+                    assert_eq!(reset_codes(&pair, &secrets, id), [9]);
+                });
+            }
+        }
+
+        #[test]
+        fn reset_with_the_code_of_a_stop() {
+            testing::run(1, |shard| {
+                let (mut pair, secrets) = logged_dial(shard);
+                let connection = foreign(&mut pair);
+                raw(connection, Dir::Uni, &OWN.encode(), true);
+                let id = raw(connection, Dir::Bi, &[1, 1, b'b'], true);
+                pair.run(RUN);
+                let incoming = accept(&mut pair.server);
+                let stopped =
+                    foreign(&mut pair).recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                pair.run(RUN);
+                assert_eq!(reset_codes(&pair, &secrets, id), [9]);
                 let reply = incoming.sender.expect("a two-way stream");
                 let (now, message) = (pair.now(), shard.block(b"b"));
                 let written =
