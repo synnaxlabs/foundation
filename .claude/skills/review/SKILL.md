@@ -2,8 +2,9 @@
 name: review
 description:
   Adversarial review of a Foundation pull request by fresh reviewer agents, by tier,
-  with a second round on the fix commits. Use when a builder's draft PR is open, when
-  asked to review a PR, or after fix commits. Argument: the PR number.
+  with a second round on the fix commits. Use on each draft PR before it merges (a
+  builder's, a record, or a rule PR), when asked to review a PR, or after fix commits.
+  Argument: the PR number.
 ---
 
 # Review

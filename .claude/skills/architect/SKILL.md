@@ -81,7 +81,8 @@ the commit you checked:
 - Post each ruling as a comment on its issue at once. The builder acts on it and adds
   it to the crate's section of `docs/decisions.md` in the code PR, with who decided and
   the comment link. Open a record PR of your own only for a ruling with no code PR, such
-  as a new milestone. Only the person's own words lock a decision.
+  as a new milestone, and run `/review` on it before `gh pr merge --auto`: the required
+  check `review` needs a round on each PR. Only the person's own words lock a decision.
 - Answer "why did we decide this" from `docs/decisions.md`, `docs/research/`, and
   `docs/history/interview-log.md`, with the citation.
 
