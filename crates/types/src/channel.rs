@@ -98,8 +98,8 @@ impl Slots {
     }
 
     /// The slot of `key`. The first call for a key assigns the next slot, from 0. A
-    /// slot is never reused. Keys come from the spec or the node's disk, never from a
-    /// peer: the table hashes with no key.
+    /// slot is never reused. Give it only keys from the spec or the node's disk, never
+    /// a key that a peer chose: the table hashes with no key.
     ///
     /// # Panics
     ///
