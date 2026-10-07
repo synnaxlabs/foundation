@@ -4,7 +4,8 @@ use std::cmp::Ordering;
 
 use super::key_set::{self, KeySet};
 use super::{
-    DESCRIPTOR, Form, Frame, Path, Range, bounds, lead, parts, to_u32, to_usize,
+    DESCRIPTOR, Form, Frame, Path, Range, bounds, descriptor_ends, lead, parts, spans,
+    to_u32, to_usize,
 };
 use crate::channel;
 
@@ -155,12 +156,14 @@ impl<'a> View<'a> {
         &self,
     ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + use<'a> {
         let (_, descriptors, _) = parts(&self.frame.0);
-        let at = move |n| at(descriptors, n);
         match &self.mask.held {
-            Held::Every => Series::Every((0..descriptors.len()).map(at)),
-            Held::Listed(held) => {
-                Series::Listed(Join::new(descriptors, &held.entries).map(at))
-            }
+            Held::Every => Series::Every(
+                spans(descriptor_ends(descriptors))
+                    .map(|(entry, start, end)| (entry, start..end)),
+            ),
+            Held::Listed(held) => Series::Listed(
+                Join::new(descriptors, &held.entries).map(move |n| at(descriptors, n)),
+            ),
         }
     }
 }

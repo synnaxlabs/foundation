@@ -416,6 +416,16 @@ fn narrow_bounds(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| bound_view(View::new(black_box(&frame), black_box(&mask))));
 }
 
+/// Makes a view through a mask that wants every channel but one, then sums the length
+/// of the bounds of each of its series.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn most_bounds(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, most(case));
+    bencher.bench_local(|| bound_view(View::new(black_box(&frame), black_box(&mask))));
+}
+
 /// Makes a mask that wants only the last present channel.
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn narrow_mask(bencher: Bencher<'_, '_>, case: &Case) {
