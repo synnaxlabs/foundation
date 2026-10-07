@@ -180,5 +180,7 @@ each issue in `gh pr view <n> --json closingIssuesReferences`, or after a closin
 in a commit message of the PR, is one that the PR finishes. GitHub closes each at the
 merge. It reads an issue link after a form of "close", "fix", or "resolve" as closing,
 also in a sentence about the past, such as "#1228 closed #1197" in the body of #1185.
-Only then is the PR marked ready: by its author, or by `laptop.monitor` for a red-team
-or rule PR.
+A pushed commit stays as it is (`CLAUDE.md`, Git rule 3). So when the message of a
+pushed commit names an issue that the PR does not finish, a new PR replaces the PR
+(Round 1). Only then is the PR marked ready: by its author, or by `laptop.monitor` for a
+red-team or rule PR.
