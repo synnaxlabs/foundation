@@ -53,6 +53,8 @@ disconnect the subscriber.
   lines are indented two spaces, so no line passes for a header.
 - Messages start at most 30 turns an hour, or the session's `turnCaps` entry in
   `roster.json`. Past that they wait, and the status line says so.
+- A session reads `roster.json` again each minute, so a new name or cap applies with no
+  restart.
 - The status line shows the name, the link, messages in and out, the queue, the cost,
   and the rate limits.
 - The `next` tool clears the context when the turn ends, then runs `/build`. A builder

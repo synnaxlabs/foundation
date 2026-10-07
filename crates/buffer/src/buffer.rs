@@ -91,10 +91,16 @@ pub enum Error {
     Version(u16),
     /// The header holds sizes that make no ring.
     Unfit(Unfit),
-    /// A header block or a record at `offset` passed its CRC but cannot be read:
-    /// another version or a defect wrote it. The ring is not written to.
+    /// A header block passed its CRC but holds a tail off a block boundary: another
+    /// version or a defect wrote it. The ring reads as it did before the open.
+    Unaligned {
+        /// The tail offset that the header block holds.
+        tail: u64,
+    },
+    /// A record at `offset` passed its CRC but cannot be read: another version or a
+    /// defect wrote it. The ring reads as it did before the open.
     Invalid {
-        /// The offset in the ring file.
+        /// The offset of the record in the ring.
         offset: u64,
     },
 }
@@ -127,6 +133,11 @@ impl fmt::Display for Error {
                 "the ring header holds an area of {} bytes and a body of at most {} \
                  bytes, which make no ring",
                 unfit.area, unfit.body_max
+            ),
+            Self::Unaligned { tail } => write!(
+                f,
+                "the ring header holds a tail at {tail}, which is not on a block \
+                 boundary"
             ),
             Self::Invalid { offset } => write!(
                 f,
@@ -215,7 +226,9 @@ impl From<header::Error> for Error {
             header::Error::Damaged => Self::Damaged,
             header::Error::Version(version) => Self::Version(version),
             header::Error::Unfit(unfit) => Self::Unfit(unfit),
-            header::Error::Unaligned(_) => Self::Invalid { offset: 0 },
+            header::Error::Unaligned(unaligned) => Self::Unaligned {
+                tail: unaligned.offset,
+            },
         }
     }
 }
@@ -333,11 +346,11 @@ impl Buffer {
     /// # Errors
     ///
     /// [`Error::Files`], [`Error::Pool`], [`Error::Length`], [`Error::Missing`],
-    /// [`Error::Damaged`], [`Error::Version`], [`Error::Unfit`], and
-    /// [`Error::Invalid`] as each says. [`Error::Full`] when the ring has no block
-    /// for its restart record. [`Error::Pool`] with `TooLarge` when a recovered
-    /// entry is over the largest block of `pool`, which a read must give it in: a
-    /// larger pool must open the ring.
+    /// [`Error::Damaged`], [`Error::Version`], [`Error::Unfit`], [`Error::Unaligned`],
+    /// and [`Error::Invalid`] as each says. [`Error::Full`] when the ring has no block
+    /// for its restart record. [`Error::Pool`] with `TooLarge` when a recovered entry
+    /// is over the largest block of `pool`, which a read must give it in: a larger pool
+    /// must open the ring.
     ///
     /// # Panics
     ///

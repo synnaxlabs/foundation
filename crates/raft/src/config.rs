@@ -16,18 +16,18 @@ pub struct Config {
 }
 
 /// The state a [`Raft`](crate::Raft) starts from: what the node had on disk. A node
-/// that founds a group starts from `Start::default()` plus the founding voters, and
-/// a node that joins one from `Start::default()`.
+/// that founds a group, or that joins one, starts from `Start::default()` plus the
+/// founding voters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Start {
     /// The stored term and vote.
     pub hard: Hard,
     /// The configuration before `entries`: the last `Voters` entry in them replaces
-    /// it. Empty for a node that joins: it takes any proof until it holds a `Voters`
-    /// entry, and the first one then shows the configuration before it, a joint
-    /// entry's outgoing set or a leave's own set. A node that is not a voter never
-    /// starts an election while its configuration is committed, but it still votes
-    /// and follows.
+    /// it. Empty only for a voter that an operator wiped: it takes any proof until it
+    /// holds a `Voters` entry, and the first one then shows the configuration before
+    /// it, a joint entry's outgoing set or a leave's own set. A node that is not a
+    /// voter never starts an election while its configuration is committed, but it
+    /// still votes and follows.
     pub voters: Voters,
     /// The log on disk, from index 1, in order.
     pub entries: Vec<Entry>,

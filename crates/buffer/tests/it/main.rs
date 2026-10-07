@@ -41,12 +41,20 @@ const COMMIT: Span = Span::from_nanos(10_000_000);
 const POOL: usize = 1 << 21;
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
-/// Where a header block keeps its version, its `body_max`, and its CRC.
+/// Where a header block keeps its version, its `body_max`, its tail offset, its tail
+/// chain, its seq, and its CRC.
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
+const TAIL_AT: usize = 22;
+const CHAIN_AT: usize = 30;
+const SEQ_AT: usize = 34;
 const CRC_AT: usize = 42;
 /// The bytes the header CRC covers.
 const COVER: usize = 512;
+/// The kind bytes of a data record and of a restart record. The chain value of the
+/// next record is the CRC of a data record and the body of a restart record.
+const DATA: u8 = 1;
+const RESTART: u8 = 3;
 
 /// What one test gets on its shard.
 struct Shard {
@@ -92,35 +100,121 @@ impl Shard {
 
     /// Puts `bytes` at `at` of both header blocks and fixes their CRCs.
     fn tamper(&self, at: usize, bytes: &[u8]) {
-        let file = self.memory.bytes(RING);
         for place in [0, to_usize(BLOCK)] {
-            let mut block = file[place..place + to_usize(BLOCK)].to_vec();
-            block[at..at + bytes.len()].copy_from_slice(bytes);
-            let crc = crc32c::crc32c(&block[..CRC_AT]);
-            let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
-            block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
-            self.memory.put(RING, place, &block);
+            self.tamper_block(place, at, bytes);
         }
     }
 
-    /// Puts `bytes` at `at` of the body of the record at `offset` of the area,
-    /// and fixes the record's CRC so that it still follows the restart record in
-    /// the block before it.
-    fn tamper_record(&self, offset: u64, at: usize, bytes: &[u8]) {
+    /// Puts `bytes` at `at` of the header block at `place` and fixes its CRC.
+    fn tamper_block(&self, place: usize, at: usize, bytes: &[u8]) {
         let file = self.memory.bytes(RING);
-        let start = to_usize(AREA_START + offset);
+        let mut block = file[place..place + to_usize(BLOCK)].to_vec();
+        block[at..at + bytes.len()].copy_from_slice(bytes);
+        let crc = crc32c::crc32c(&block[..CRC_AT]);
+        let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
+        block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
+        self.memory.put(RING, place, &block);
+    }
+
+    /// Opens a ring that holds a record at `offset` that this build cannot read. The
+    /// open must give `Invalid`, as [`Shard::open_refused`] says.
+    async fn open_invalid(&self, layout: Layout, offset: u64) {
+        self.open_refused(layout, Error::Invalid { offset }).await;
+    }
+
+    /// Opens a ring that passes its CRCs and that this build cannot read. The open
+    /// must give `error`, leave the file as it was, and not sync it.
+    async fn open_refused(&self, layout: Layout, error: Error) {
+        let before = self.memory.bytes(RING);
+        let syncs = self.memory.syncs();
+        let opened = self.open(layout, &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(error));
+        assert_eq!(self.memory.syncs(), syncs, "the open synced the ring");
+        assert!(
+            self.memory.bytes(RING) == before,
+            "the open changed the ring"
+        );
+    }
+
+    /// Puts `bytes` at `at` of the body of the record at `offset` of the area, and
+    /// seals the record.
+    fn tamper_record(&self, offset: u64, at: usize, bytes: &[u8]) {
+        let body = to_usize(AREA_START + offset) + 9;
+        self.memory.put(RING, body + at, bytes);
+        self.seal(offset);
+    }
+
+    /// Fixes the CRC of the record at `offset` of the area, so that it still follows
+    /// the record before it, a restart record or a data record. The tail offset in
+    /// each header block must be 0. The first record follows the tail chain of the
+    /// header, so for it the two header blocks must be the same up to the seq.
+    fn seal(&self, offset: u64) {
+        let file = self.memory.bytes(RING);
+        for block in [0, to_usize(BLOCK)] {
+            let tail = &file[block + TAIL_AT..block + TAIL_AT + 8];
+            assert_eq!(tail, [0; 8], "the tail offset of the ring is not 0");
+        }
         let u32_at = |at: usize| {
             u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
         };
-        let len = to_usize(u64::from(u32_at(start)));
-        let chain = u32_at(start - to_usize(BLOCK) + 9);
-        let mut body = file[start + 9..start + 9 + len].to_vec();
-        body[at..at + bytes.len()].copy_from_slice(bytes);
-        let mut crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
-        crc = crc32c::crc32c_append(crc, &file[start + 8..start + 9]);
-        crc = crc32c::crc32c_append(crc, &body);
+        let len_at = |at: usize| to_usize(u64::from(u32_at(at)));
+        let start = to_usize(AREA_START + offset);
+        let (mut before, mut at) = (None, to_usize(AREA_START));
+        while at < start {
+            before = Some(at);
+            at += (9 + len_at(at)).next_multiple_of(to_usize(BLOCK));
+        }
+        assert_eq!(at, start, "no record starts at {offset}");
+        let chain = match before.map(|before| (before, file[before + 8])) {
+            None => {
+                let [first, second] =
+                    [0, to_usize(BLOCK)].map(|block| &file[block..block + SEQ_AT]);
+                assert_eq!(first, second, "the header blocks differ before the seq");
+                assert!(first.starts_with(b"FNDNRING"), "the ring has no header");
+                u32_at(CHAIN_AT)
+            }
+            Some((before, RESTART)) => u32_at(before + 9),
+            Some((before, DATA)) => u32_at(before + 4),
+            Some((_, kind)) => panic!("no chain value of kind {kind} before {offset}"),
+        };
+        let crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
+        let end = start + 9 + len_at(start);
+        let crc = crc32c::crc32c_append(crc, &file[start + 8..end]);
         self.memory.put(RING, start + 4, &crc.to_le_bytes());
-        self.memory.put(RING, start + 9, &body);
+    }
+
+    /// Makes a ring with a data record at `BLOCK` and one at `2 * BLOCK`.
+    async fn create_two_records(&self) {
+        let mut slots = Slots::new();
+        let buffer = self
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        for (first, stamp) in [(0, 30), (3, 60)] {
+            let parts = Parts::default();
+            buffer
+                .append([entry(1, a, Path::Live, first, 3, Some(stamp), parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+    }
+
+    /// Makes a ring with a data record of two blocks at `BLOCK` and a data record at
+    /// `3 * BLOCK`, and gives its layout.
+    async fn create_long_record(&self) -> Layout {
+        let ring = layout(AREA, 3 * to_usize(BLOCK) - 9);
+        let mut slots = Slots::new();
+        let buffer = self.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let long = Parts::from(self.block(4244));
+        for (first, stamp, parts) in [(0, 30, long), (3, 60, Parts::default())] {
+            buffer
+                .append([entry(1, a, Path::Live, first, 3, Some(stamp), parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        ring
     }
 }
 
@@ -2013,8 +2107,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
         buffer.committed().await.expect("commits");
         drop(buffer);
         shard.tamper_record(BLOCK, 4 + 16, &[2]);
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+        shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
 
@@ -2049,16 +2142,17 @@ fn a_record_over_the_most_entries_is_invalid() {
             }
             assert_eq!(body.len(), len);
             shard.tamper_record(BLOCK, 0, &body);
+            if !opens {
+                return shard.open_invalid(ring, BLOCK).await;
+            }
             let mut slots = Slots::new();
-            let opened = shard.open(ring, &mut slots).await;
-            let tails =
-                opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
-            let expected = if opens {
-                Ok(tail(count.into(), Some(count.into())))
-            } else {
-                Err(Error::Invalid { offset: BLOCK })
-            };
-            assert_eq!(tails, expected, "{count} entries");
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let tails = buffer.tail(slots.assign(key(1)), Path::Live);
+            assert_eq!(
+                tails,
+                tail(count.into(), Some(count.into())),
+                "{count} entries"
+            );
         });
     }
 }
@@ -2079,8 +2173,7 @@ fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
         drop(buffer);
         // `first` of the first entry: after the count, the index, and the path.
         shard.tamper_record(BLOCK, 4 + 16 + 1, &u64::MAX.to_le_bytes());
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+        shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
 
@@ -2104,9 +2197,212 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
         // `first` of the second entry: after the count, one table of 51 bytes,
         // the index, and the path.
         shard.tamper_record(BLOCK, 4 + 51 + 16 + 1, &1u64.to_le_bytes());
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+        shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
+}
+
+/// The open writes the header blocks and the records before the invalid one again.
+#[test]
+fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
+    run(107, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
+/// One header block is zero, as a crash leaves it. The open does not repair it.
+#[test]
+fn an_open_that_finds_an_invalid_record_leaves_a_zero_header_block_as_read() {
+    for lost in [0, to_usize(BLOCK)] {
+        run(110, Memory::default(), move |shard| async move {
+            shard.create_two_records().await;
+            shard.memory.put(RING, lost, &[0; SECTOR]);
+            shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+            shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+        });
+    }
+}
+
+/// A checkpoint is in the first sector of its block. The open keeps the other bytes.
+#[test]
+fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
+    run(111, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        for block in [0, to_usize(BLOCK)] {
+            shard.memory.put(RING, block + COVER, b"past the sector");
+        }
+        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
+/// The first record follows the tail chain of the header, and a zero header block
+/// holds another one.
+#[test]
+#[should_panic(expected = "the header blocks differ before the seq")]
+fn seal_refuses_the_first_record_under_two_tail_chains() {
+    run(112, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.memory.put(RING, 0, &[0; SECTOR]);
+        shard.seal(0);
+    });
+}
+
+/// Two whole header blocks can hold two tail chains, and the open takes one of them.
+#[test]
+#[should_panic(expected = "the header blocks differ before the seq")]
+fn seal_refuses_the_first_record_under_the_tail_chains_of_two_whole_blocks() {
+    run(121, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        let last = SEQ_AT - 1;
+        let chain = shard.memory.bytes(RING)[last] ^ 1;
+        shard.tamper_block(to_usize(BLOCK), last, &[chain]);
+        shard.seal(0);
+    });
+}
+
+/// Two zero header blocks hold no tail chain: the open draws a new one.
+#[test]
+#[should_panic(expected = "the ring has no header")]
+fn seal_refuses_the_first_record_of_a_ring_with_no_header() {
+    run(120, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        for block in [0, to_usize(BLOCK)] {
+            shard.memory.put(RING, block, &[0; SECTOR]);
+        }
+        shard.seal(0);
+    });
+}
+
+/// The offset of a record can be 0, so a header block has its own error.
+#[test]
+fn a_record_of_an_unknown_kind_at_the_start_of_the_ring_is_invalid() {
+    run(118, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        shard.memory.put(RING, to_usize(AREA_START) + 8, &[4]);
+        shard.seal(0);
+        shard.open_invalid(layout(AREA, BODY_MAX), 0).await;
+    });
+}
+
+/// With a tail past 0, the record before in the file can be a newer record.
+#[test]
+#[should_panic(expected = "the tail offset of the ring is not 0")]
+fn seal_refuses_a_ring_with_a_moved_tail() {
+    run(117, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.tamper(TAIL_AT, &(2 * BLOCK).to_le_bytes());
+        shard.seal(2 * BLOCK);
+    });
+}
+
+#[test]
+#[should_panic(expected = "no record starts at 8192")]
+fn seal_refuses_a_block_inside_a_record() {
+    run(115, Memory::default(), |shard| async move {
+        shard.create_long_record().await;
+        shard.seal(2 * BLOCK);
+    });
+}
+
+#[test]
+#[should_panic(expected = "no chain value of kind 0 before 16384")]
+fn seal_refuses_a_record_after_a_block_that_is_no_record() {
+    run(116, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.seal(4 * BLOCK);
+    });
+}
+
+/// The record before the invalid one has two blocks, and a byte of its body in the
+/// second block reads as the kind of a data record.
+#[test]
+fn a_record_of_an_unknown_kind_after_a_long_record_is_invalid() {
+    run(114, Memory::default(), |shard| async move {
+        let ring = shard.create_long_record().await;
+        let kind = to_usize(AREA_START + 3 * BLOCK) + 8;
+        assert_eq!(shard.memory.bytes(RING)[kind - to_usize(BLOCK)], DATA);
+        shard.memory.put(RING, kind, &[4]);
+        shard.seal(3 * BLOCK);
+        shard.open_invalid(ring, 3 * BLOCK).await;
+    });
+}
+
+#[test]
+fn a_record_of_an_unknown_kind_is_invalid() {
+    run(109, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
+        shard.memory.put(RING, kind, &[4]);
+        shard.seal(2 * BLOCK);
+        shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
+/// A zeroed block has kind 0, so kind 0 ends the walk for each chain value.
+#[test]
+fn a_block_of_kind_zero_that_follows_the_chain_ends_the_walk() {
+    run(113, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
+        shard.memory.put(RING, kind, &[0]);
+        shard.seal(2 * BLOCK);
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Ok(()));
+        assert_eq!(shard.memory.bytes(RING)[kind], RESTART);
+    });
+}
+
+#[test]
+fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
+    run(108, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        shard.tamper(TAIL_AT, &(BLOCK + 1).to_le_bytes());
+        let unaligned = Error::Unaligned { tail: BLOCK + 1 };
+        shard.open_refused(layout(AREA, BODY_MAX), unaligned).await;
+    });
+}
+
+/// The open takes the newer header block, or the first one on a tie. It does not
+/// check the tail of the other, and an open that gives `Unaligned` leaves the two
+/// blocks as read. Each case: the block made newer, the block with the tail off a
+/// block boundary, and whether the open takes that block.
+#[test]
+fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
+    let (first, second) = (0, to_usize(BLOCK));
+    let cases = [
+        (None, first, true),
+        (None, second, false),
+        (Some(first), first, true),
+        (Some(first), second, false),
+        (Some(second), first, false),
+        (Some(second), second, true),
+    ];
+    for (newer, unaligned, taken) in cases {
+        run(119, Memory::default(), move |shard| async move {
+            let ring = layout(AREA, BODY_MAX);
+            let buffer = shard.open(ring, &mut Slots::new()).await;
+            drop(buffer.expect("opens"));
+            if let Some(place) = newer {
+                shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes());
+            }
+            shard.tamper_block(unaligned, TAIL_AT, &u64::MAX.to_le_bytes());
+            let (before, syncs) = (shard.memory.bytes(RING), shard.memory.syncs());
+            let opened = shard.open(ring, &mut Slots::new()).await;
+            let refused = Err(Error::Unaligned { tail: u64::MAX });
+            let expected = if taken { refused } else { Ok(()) };
+            let case = format!("newer: {newer:?}, the block at {unaligned}");
+            assert_eq!(opened.map(drop), expected, "{case}");
+            if taken {
+                assert_eq!(shard.memory.syncs(), syncs, "{case}: the open synced");
+                let after = shard.memory.bytes(RING);
+                assert!(after == before, "{case}: the open changed the ring");
+            }
+        });
+    }
 }
 
 #[test]
@@ -2359,6 +2655,10 @@ fn an_error_says_what_went_wrong() {
             unfit,
             "the ring header holds an area of 1 bytes and a body of at most 2 \
              bytes, which make no ring",
+        ),
+        (
+            Error::Unaligned { tail: 4097 },
+            "the ring header holds a tail at 4097, which is not on a block boundary",
         ),
         (
             Error::Invalid { offset: 4 },

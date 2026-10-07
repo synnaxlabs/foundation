@@ -5,6 +5,21 @@ on:
   merge_group:
   push:
     branches: [main]
+    paths:
+      - 'crates/**'
+      - 'bench/**'
+      - 'fuzz/**'
+      - 'xtask/**'
+      - 'oracles/**'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'clippy.toml'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - '.github/workflows/**'
 
 # Each commit on main gets its own group, so a later merge never cancels its run.
 concurrency:
@@ -177,8 +192,9 @@ jobs:
         env:
           # A mutant can allocate in a loop until the host runs out of memory, which
           # kills the runner. Each test process gets 4 GiB, so the mutant aborts and
-          # is caught. The cap counts reserved memory, not touched pages: a sim test
-          # reserves 236 MiB for its block pool, so 8 threads stay under it.
+          # is caught. The cap counts reserved memory, not touched pages: each sim
+          # node in a transport test reserves about 110 MiB for its block pool, so 8
+          # threads of tests with 4 nodes stay under it.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=4294967296 --
           RUST_TEST_THREADS: 8
         run: |

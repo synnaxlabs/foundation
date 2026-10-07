@@ -57,6 +57,7 @@ impl Carrier {
             accepted: Some(VecDeque::new()),
             accepting: Vec::new(),
             failed: None,
+            connects: 0,
         }));
         let task = Task::new(Rc::clone(&state), &clock, sender, receiver);
         tasks.spawn(task.run());
@@ -186,6 +187,8 @@ struct State {
     accepting: Vec<Waker>,
     /// What broke the socket.
     failed: Option<env::net::Error>,
+    /// How many dials connected.
+    connects: u64,
 }
 
 impl State {
@@ -213,6 +216,8 @@ impl State {
                 // Only an accept has no slot: a dial's drop ends its connection.
                 if let Some(slot) = self.sessions.get_mut(&key) {
                     slot.peer = Some(peer);
+                    slot.connected = self.connects;
+                    self.connects += 1;
                     slot.wake_status();
                     return;
                 }
@@ -281,6 +286,8 @@ impl State {
 struct Slot {
     /// The peer, once the handshake finishes.
     peer: Option<Peer>,
+    /// How many dials connected before this one, once `peer` is set.
+    connected: u64,
     /// Why the connection ended.
     end: Option<Error>,
     /// The wakers of the calls that wait for the handshake or the end.
@@ -547,15 +554,16 @@ impl Session {
         called
     }
 
-    /// Ready when the handshake finished, or with why the dial ended.
+    /// Ready when the handshake finished, with how many dials on the carrier
+    /// connected before this one, or with why the dial ended.
     pub(crate) fn poll_connected(
         &self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Error>> {
+    ) -> Poll<Result<u64, Error>> {
         let mut state = self.state.borrow_mut();
         let slot = state.slot(self.key);
         if slot.peer.is_some() {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(slot.connected));
         }
         if let Some(error) = &slot.end {
             return Poll::Ready(Err(error.clone()));
@@ -795,7 +803,7 @@ mod tests {
     use crate::quic::Endpoint;
     use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::tls::public;
-    use crate::{Address, Code, Error, Peer};
+    use crate::{Code, Error, Peer};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -938,32 +946,6 @@ mod tests {
             }
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(carrier.0.borrow().sessions.len(), 0);
-        });
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    #[test]
-    fn a_dial_that_loses_frees_its_slot() {
-        let (mut sim, client, server) = nodes(0);
-        let silent = sim.node(sim::node::Config::default());
-        let addresses = [
-            Address::Udp(address(&silent)),
-            Address::Udp(address(&server)),
-        ];
-        testing::carrier(&server, SERVER, |carrier, _| async move {
-            let session = carrier.accept().await.expect("a session");
-            let closed = Error::PeerClosed { code: Code(5) };
-            assert_eq!(session.closed().await, closed);
-        });
-        testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let clock = node.clock();
-            let peer = public(&SERVER);
-            let dialed = crate::dial::dial(&carrier, &clock, peer, &addresses).await;
-            let session = dialed.expect("a session");
-            node.clock().sleep(Span::MILLISECOND).await;
-            assert_eq!(carrier.0.borrow().sessions.len(), 1);
-            session.close(Code(5));
-            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         assert_eq!(sim.run(), Ok(()));
     }

@@ -34,6 +34,7 @@ type Saved = { queue: string[]; seen: string[] }
 type Session = Saved & {
   name: string
   roster: Roster
+  rosterText: string
   cap: number
   tls: string[]
   link: string
@@ -67,7 +68,8 @@ function parse(text: string): Record<string, unknown> {
 
 async function start($: Api): Promise<Session | undefined> {
   const name = await $.env.get('FACTORY_NAME')
-  const roster: Roster = JSON.parse(await $.fs.read(`${$.plugin.root}/roster.json`))
+  const rosterText = await $.fs.read(`${$.plugin.root}/roster.json`)
+  const roster: Roster = JSON.parse(rosterText)
   if (!name || !roster.names.includes(name)) {
     const why = name ? `${name} is not in the roster` : 'FACTORY_NAME is not set'
     $.ui.status(`${why}; messaging is off`)
@@ -79,6 +81,7 @@ async function start($: Api): Promise<Session | undefined> {
     ...saved,
     name,
     roster,
+    rosterText,
     cap: roster.turnCaps?.[name] ?? TURN_CAP,
     tls: [
       ...['-h', roster.host, '-p', String(roster.port)],
@@ -96,21 +99,7 @@ async function start($: Api): Promise<Session | undefined> {
     reported: '',
     reportedAt: 0,
   }
-  await $.tool.register({
-    name: 'send',
-    description:
-      'Sends a message to another Claude session in the factory and returns its ' +
-      'id at once. A reply comes later as a new prompt: do not wait or poll, end ' +
-      'your turn.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        to: { type: 'string', enum: roster.names.filter(n => n !== name) },
-        text: { type: 'string' },
-      },
-      required: ['to', 'text'],
-    },
-  })
+  await registerSend($, s)
   await $.tool.register({
     name: 'next',
     description:
@@ -121,8 +110,46 @@ async function start($: Api): Promise<Session | undefined> {
   })
   void listen($, s)
   void drain($, s)
-  $.clock.every(MINUTE_MS, () => void probe($, s))
+  $.clock.every(MINUTE_MS, () => {
+    void probe($, s)
+    void reread($, s)
+  })
   return s
+}
+
+async function registerSend($: Api, s: Session) {
+  await $.tool.register({
+    name: 'send',
+    description:
+      'Sends a message to another Claude session in the factory and returns its ' +
+      'id at once. A reply comes later as a new prompt: do not wait or poll, end ' +
+      'your turn.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', enum: s.roster.names.filter(n => n !== s.name) },
+        text: { type: 'string' },
+      },
+      required: ['to', 'text'],
+    },
+  })
+}
+
+// A reload happens only when code changes, so a roster edit applies here: the names
+// and the turn caps. A file caught mid-write keeps the old roster until the next read.
+async function reread($: Api, s: Session) {
+  const text = await $.fs.read(`${$.plugin.root}/roster.json`)
+  if (text === s.rosterText) return
+  let roster: Roster
+  try {
+    roster = JSON.parse(text)
+  } catch (error) {
+    return $.ui.log(`roster.json does not parse: ${error}`)
+  }
+  s.rosterText = text
+  s.roster = roster
+  s.cap = roster.turnCaps?.[s.name] ?? TURN_CAP
+  await registerSend($, s)
 }
 
 // One subscriber for the session's life.
