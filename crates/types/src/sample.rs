@@ -92,21 +92,6 @@ const SCALARS: [Scalar; 14] = [
     Scalar::Uuid,
 ];
 
-const _: () = {
-    let mut index = 0;
-    while index < SCALARS.len() {
-        assert!(
-            SCALARS[index] as usize == index,
-            "SCALARS holds each scalar in order"
-        );
-        index += 1;
-    }
-    assert!(
-        Scalar::Uuid as usize + 1 == SCALARS.len(),
-        "SCALARS ends at the last"
-    );
-};
-
 /// The byte layout of one channel's samples.
 ///
 /// Enums and flags use an integer layout, and quality uses `U32`; their meaning is in
@@ -289,6 +274,14 @@ mod tests {
     use super::*;
     use crate::common::assert_stated;
     use proptest::prelude::*;
+
+    #[test]
+    fn holds_each_scalar_in_order() {
+        for (index, scalar) in SCALARS.into_iter().enumerate() {
+            assert_eq!(scalar as usize, index, "{scalar:?}");
+        }
+        assert_eq!(Scalar::Uuid as usize + 1, SCALARS.len());
+    }
 
     fn types() -> impl Strategy<Value = Type> {
         let scalar = prop::sample::select(SCALARS.as_slice());
