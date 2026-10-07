@@ -2033,3 +2033,6 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 }
+
+#[cfg(test)]
+mod stress;
