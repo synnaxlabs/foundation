@@ -591,8 +591,9 @@ impl Shard {
     /// ([`open_complete`](Self::open_complete)) has no frame to take. Call it after
     /// each write and each commit. When a commit ended since the last call, it reads
     /// each index with live frames queued for complete readers; else it reads none.
-    /// Pass the same `keys` each time: no call allocates once a call has given as
-    /// many keys.
+    /// Pass the same `keys` each time: once a call has given as many keys, a call
+    /// allocates only when the frames waiting for a complete reader pass their most
+    /// so far.
     pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
