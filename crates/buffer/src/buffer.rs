@@ -343,7 +343,10 @@ impl Buffer {
     /// ring file with no checkpoint holds no record: the open makes it again. Each
     /// recovered index gets its slot from `slots`. Starts the commit task. Each tail
     /// it reports is durable. It reads the header and the records from the ring's
-    /// tail and writes them again, so its time grows with the records.
+    /// tail and writes them again, so its time grows with the records. Dropping this
+    /// future before it ends and then opening the same directory again in this process
+    /// can lose the commits of the second open, because a remove of the first can still
+    /// run.
     ///
     /// # Errors
     ///
