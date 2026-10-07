@@ -128,8 +128,8 @@ pub enum Message<'a> {
         /// The grant, in bytes.
         limit_bytes: u64,
     },
-    /// Home to reader: the head of one frame. Its body follows as one or more
-    /// messages, back to back, [`Head::body_len`] bytes in all.
+    /// Home to reader: the head of one frame. Its body follows as messages, back to
+    /// back, [`Head::body_len`] bytes in all. No message follows an empty body.
     Frame(Head<'a>),
 }
 
@@ -765,14 +765,24 @@ mod tests {
     }
 
     /// A kind byte from 0 to 4, then random bytes, most of them a length that a
-    /// message of some kind has.
+    /// message of some kind has. The two bytes after the kind are most often a path
+    /// and a form that a frame head can have.
     fn bytes() -> impl Strategy<Value = Vec<u8>> {
         let rest =
             prop_oneof![Just(8), Just(14), Just(16), Just(22), Just(32), 0..48_usize];
-        (0..5_u8, rest).prop_flat_map(|(kind, rest)| {
-            proptest::collection::vec(any::<u8>(), rest)
-                .prop_map(move |rest| [[kind].as_slice(), &rest].concat())
-        })
+        let small = prop_oneof![3 => 0..2_u8, 1 => any::<u8>()];
+        (0..5_u8, rest, small.clone(), small).prop_flat_map(
+            |(kind, rest, path, form)| {
+                proptest::collection::vec(any::<u8>(), rest).prop_map(
+                    move |mut rest| {
+                        for (byte, small) in rest.iter_mut().zip([path, form]) {
+                            *byte = small;
+                        }
+                        [[kind].as_slice(), &rest].concat()
+                    },
+                )
+            },
+        )
     }
 
     proptest! {
