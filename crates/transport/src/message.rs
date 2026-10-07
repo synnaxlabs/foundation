@@ -561,7 +561,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            // Private: a heap count shows the bytes freed, not the bytes kept.
+            // Private: a heap count mixes this buffer with packet buffers.
             assert_eq!(reader.held.buffer, vec![9; 8]);
             let read = reader
                 .read(
@@ -666,7 +666,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 10);
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // Private: a heap count shows the bytes freed, not the bytes kept.
+            // Private: a heap count mixes this buffer with packet buffers.
             assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message[..10]);
             assert_eq!(reader.held.buffer.capacity(), 1_024);
@@ -692,7 +692,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // Private: a heap count shows the bytes freed, not the bytes kept.
+            // Private: a heap count mixes this buffer with packet buffers.
             assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message);
             drop(held);

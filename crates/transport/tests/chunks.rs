@@ -1,9 +1,9 @@
-//! A read holds at most a fixed number of the chunks that a message comes in. Past
-//! it, the read copies them into one heap buffer, so a message in many tiny frames
-//! cannot grow its list of chunks. A packet holds at most 1472 bytes, so the only
-//! heap block that holds all of a longer pattern is that buffer. The count covers
-//! each thread, so this binary has no test harness. The sim runs on one thread, so
-//! the count is exact.
+//! A read holds at most 64 of the chunks that a message comes in. Each time the list
+//! is full, the read copies it into one heap buffer, so a message in many tiny
+//! frames cannot grow the list. A packet holds at most 1472 bytes, and with no loss
+//! noq-proto keeps each packet's bytes in place, so the only heap block that holds
+//! all of a longer pattern is that buffer. The count covers each thread, so this
+//! binary has no test harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -18,7 +18,7 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
-use transport::{Address, Class, Config, Port, Transport};
+use transport::{Address, Class, Config, Error, Port, Transport};
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -28,18 +28,31 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 const CLIENT: PrivateKey = PrivateKey([1; 32]);
 const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
-/// The bytes at the start of each message, longer than a packet.
+/// The bytes of the pattern, longer than a packet.
 const PATTERN: usize = 4096;
-/// When the server reads, after the whole message is in.
+/// Where the pattern starts in a long message. A packet carries between 1000 and
+/// 1472 bytes of a message, so the pattern lies past its first 64 packets and inside
+/// its first 128: only a second copy of a full list holds it.
+const SECOND: usize = 110_000;
+/// When the server reads after it accepts the stream, once the whole message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
+/// How long the client lives after its send: past the server's read.
+const LIVE: Span = Span::from_nanos(2_000_000_000);
+
+/// The server's one poll of its read, and the heap blocks that hold the pattern that
+/// the poll frees.
+type Out = (Poll<Result<Option<Vec<u8>>, Error>>, u64);
 
 fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
-    for (len, copies) in [(20_000, 0), (200_000, 1)] {
-        let (read, freed) = run(&pattern, len);
-        let read = read.expect("a message");
+    for (len, at, copies) in [(20_000, 0, 0), (240_000, SECOND, 1)] {
+        let (read, freed) = run(&pattern, len, at);
+        let Poll::Ready(Ok(Some(read))) = read else {
+            panic!("{len} bytes: the read gave {read:?}");
+        };
         assert_eq!(read.len(), len, "{len} bytes: the message's length");
-        assert_eq!(read[..PATTERN], pattern, "{len} bytes: the message's start");
+        let end = at.saturating_add(PATTERN);
+        assert_eq!(read[at..end], pattern, "{len} bytes: the pattern");
         assert_eq!(
             freed, copies,
             "{len} bytes: the heap buffers that the read frees with the whole pattern"
@@ -47,14 +60,14 @@ fn main() {
     }
 }
 
-/// The message of `len` bytes that starts with `pattern` as the server reads it in
-/// one poll, and the heap blocks that hold `pattern` that the poll frees.
-fn run(pattern: &[u8], len: usize) -> (Option<Vec<u8>>, u64) {
+/// The [`Out`] of the server's read of a message of `len` bytes with `pattern` at
+/// `at`.
+fn run(pattern: &[u8], len: usize, at: usize) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
-    let at = SocketAddr::new(server.addresses()[0], PORT);
-    let out = Arc::new(Mutex::new((None, 0)));
+    let address = SocketAddr::new(server.addresses()[0], PORT);
+    let out = Arc::new(Mutex::new((Poll::Pending, 0)));
     serve(&server, pattern.to_vec(), Arc::clone(&out));
     let message = pattern.to_vec();
     sim.run_on(&client, move |node, tasks| async move {
@@ -62,7 +75,7 @@ fn run(pattern: &[u8], len: usize) -> (Option<Vec<u8>>, u64) {
         let pool = Rc::clone(&config.pool);
         let transport = Transport::new(config, part(&node, 0)).expect("a transport");
         let session = transport
-            .dial(public(&SERVER), &[Address::Udp(at)])
+            .dial(public(&SERVER), &[Address::Udp(address)])
             .await
             .expect("a session");
         let mut sender = session
@@ -70,12 +83,10 @@ fn run(pattern: &[u8], len: usize) -> (Option<Vec<u8>>, u64) {
             .await
             .expect("a stream");
         sender
-            .send(filled(&pool, &message, len))
+            .send(filled(&pool, &message, len, at))
             .await
             .expect("sent");
-        let clock = node.clock();
-        clock.sleep(READ).await;
-        clock.sleep(READ).await;
+        node.clock().sleep(LIVE).await;
     })
     .expect("the run ends");
     let out = out.lock().expect("not poisoned");
@@ -83,9 +94,8 @@ fn run(pattern: &[u8], len: usize) -> (Option<Vec<u8>>, u64) {
 }
 
 /// Starts the server on `node`. Once the whole message is in, it reads it in one
-/// poll and puts the message and the heap blocks that hold `pattern` that the poll
-/// freed in `out`.
-fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<(Option<Vec<u8>>, u64)>>) {
+/// poll and puts the [`Out`] of that poll for `pattern` in `out`.
+fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -102,21 +112,19 @@ fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<(Option<Vec<u8>>, u64)>>)
             let mut cx = Context::from_waker(Waker::noop());
             ALLOCATOR.freed_holding(&pattern, || recv.as_mut().poll(&mut cx))
         };
-        let message = match read {
-            Poll::Ready(Ok(Some(block))) => Some(block.to_vec()),
-            _ => None,
-        };
+        let message =
+            read.map(|read| read.map(|block| block.map(|block| block.to_vec())));
         *out.lock().expect("not poisoned") = (message, freed);
         drop(receiver);
     });
     drop(started.expect("a shard"));
 }
 
-/// A block of `len` bytes from `pool` that starts with `start`.
-fn filled(pool: &Pool, start: &[u8], len: usize) -> Block {
+/// A block of `len` bytes from `pool` with `pattern` at `at`.
+fn filled(pool: &Pool, pattern: &[u8], len: usize, at: usize) -> Block {
     let mut block = pool.alloc(len).expect("the pool has room");
     block.fill(0x5a);
-    block[..start.len()].copy_from_slice(start);
+    block[at..at.saturating_add(pattern.len())].copy_from_slice(pattern);
     block.freeze()
 }
 
