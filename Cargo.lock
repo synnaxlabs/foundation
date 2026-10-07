@@ -955,6 +955,7 @@ dependencies = [
  "sim",
  "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
