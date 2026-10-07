@@ -517,7 +517,7 @@ impl Shard {
         &mut self,
         slot: Slot,
         limit_bytes: u64,
-        charge: delivery::complete::Charge,
+        charge: reader::complete::Charge,
     ) -> reader::complete::Key {
         let place = self.place(slot);
         let live = self.indexes[place].live_tail();

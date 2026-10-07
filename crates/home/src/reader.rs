@@ -94,7 +94,7 @@ impl Set {
         place: usize,
         live: u64,
         limit_bytes: u64,
-        charge: delivery::complete::Charge,
+        charge: complete::Charge,
     ) -> delivery::complete::Key {
         let start = Start::At(Position {
             live,

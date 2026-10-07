@@ -49,7 +49,8 @@ pub enum Charge {
 #[derive(Debug)]
 pub(super) enum Cost {
     Whole,
-    Places(Places),
+    /// Boxed, so a session of the common case stays small.
+    Places(Box<Places>),
 }
 
 #[derive(Debug)]
@@ -72,7 +73,7 @@ impl Cost {
     pub(super) fn new(charge: Charge) -> Self {
         match charge {
             Charge::Whole => Self::Whole,
-            Charge::Places(slots) => Self::Places(Places::new(slots)),
+            Charge::Places(slots) => Self::Places(Box::new(Places::new(slots))),
         }
     }
 

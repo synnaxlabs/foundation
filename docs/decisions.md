@@ -474,7 +474,17 @@ How to read this record:
   the first listing of a slot only. Catch-up uses the same `Charge`. So a remote
   session pins home blocks up to its window times the ratio of the home's frame to its
   view. laptop.architect decided this on 2026-10-07T22:47:54Z:
-  https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611. The
+  https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
+  `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
+  it, so `hub` does not depend on `delivery`. `Places` adds about 7 ns per frame to
+  `release` with one session; that is accepted, with the `Places` state boxed so that a
+  `Whole` session does not grow. laptop.architect decided both on
+  2026-10-07T23:13:16Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048741570. One layout
+  type for this charge and the frame that `serve` sends, and the two `Places` costs at
+  100k places, are #1648; laptop.architect gave the OK to defer them on
+  2026-10-07T23:22:03Z:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
   charge is part of the wire contract: a change to `block`'s header or size classes
   needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
