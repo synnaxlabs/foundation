@@ -34,10 +34,10 @@ const OPTIONS: tcp::Options = tcp::Options {
 };
 
 /// Sends HTTP/1.1 requests over `env`. It keeps one idle connection for each origin,
-/// the host and port of a URI, and reuses it with no new name lookup. It does not reuse a connection idle longer than 90 s, and the next
-/// send closes it. It drops a connection that the server closed, and the connection
-/// of a request that failed. A dropped client closes its idle connections. It stays
-/// on the thread that made it.
+/// the host and port of a URI, and reuses it with no new name lookup. It does not
+/// reuse a connection idle longer than 90 s, and the next send closes it. It drops a
+/// connection that the server closed, and the connection of a request that failed. A
+/// dropped client closes its idle connections. It stays on the thread that made it.
 ///
 /// When a request on a reused connection fails before its response, the client sends
 /// it once more on a new connection: always when the connection did not write it, and

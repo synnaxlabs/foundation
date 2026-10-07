@@ -75,6 +75,10 @@ fn gives_the_lookup_error_when_no_name_server_answers() {
         matches!(error, Error::Connect(net::Error::Io { code: 11 })),
         "{error:?}"
     );
+    assert_eq!(
+        error.to_string(),
+        "the connect failed: network call failed with OS error 11"
+    );
 }
 
 #[test]
@@ -104,6 +108,10 @@ fn gives_the_error_of_the_first_address_when_all_refuse() {
             Error::Connect(net::Error::Refused { remote: r }) if r == remote
         ),
         "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("the connect failed: {remote} refused the connection")
     );
 }
 
