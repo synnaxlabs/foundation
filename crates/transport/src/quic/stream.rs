@@ -832,9 +832,10 @@ impl Streams {
 
     /// Queues in `events` what `event` of `inner`, the connection of `key`, means to
     /// the caller, if anything. The same event in a row merges, as noq-proto repeats
-    /// one for each frame. Until the peer's hello arrives, every event but a stop
-    /// goes to the hello. A stream that the peer stops resets here with the stop's
-    /// code, except a stream it opened before the hello, which resets at the hello.
+    /// one for each frame. Until the peer's hello arrives, every event but a stop of
+    /// this side's stream goes to the hello. A stream that the peer stops resets here
+    /// with the stop's code, except a stream it opened before the hello, which resets
+    /// at the hello.
     ///
     /// # Errors
     ///
@@ -6068,7 +6069,7 @@ mod tests {
                 let (mut pair, log, id) = stopped_hello(shard, VarInt::from_u32(9));
                 pair.run(RUN);
                 let freed = pair.server.connection().send_stream(id).stopped();
-                assert!(freed.is_err(), "the hello stream is open");
+                assert!(matches!(freed, Err(ClosedStream { .. })), "{freed:?}");
                 assert_eq!(reset_codes(&pair, &log, id), [9]);
                 raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
                 pair.run(RUN);
