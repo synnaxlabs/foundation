@@ -365,53 +365,72 @@ mod tests {
     }
 
     #[test]
-    fn of_attempts_that_connect_before_a_poll_the_first_wins_and_the_other_closes() {
-        let (mut sim, client, slow) = nodes(0);
-        let fast = sim.node(sim::node::Config::default());
-        let link = sim::link::Config {
-            delay: spans(Span::MILLISECOND, 150),
-            ..sim::link::Config::default()
-        };
-        sim.link(&client, &slow, link);
-        sim.link(&slow, &client, link);
-        let ends = Arc::new(Mutex::new(Vec::new()));
-        for (name, node) in [("slow", &slow), ("fast", &fast)] {
-            let ends = Arc::clone(&ends);
-            testing::transport(node, SERVER, move |transport, node| async move {
-                let mut accept = pin!(transport.accept());
-                let mut sleep = pin!(node.clock().sleep(spans(IDLE, 3)));
-                let accepted = poll_fn(|cx| match accept.as_mut().poll(cx) {
-                    Poll::Ready(accepted) => Poll::Ready(accepted.ok()),
-                    Poll::Pending => sleep.as_mut().poll(cx).map(|()| None),
-                });
-                if let Some(session) = accepted.await {
-                    let end = session.closed().await;
-                    ends.lock().expect("a lock").push((name, end));
-                }
-            });
-        }
-        let addresses = [Address::Udp(address(&slow)), Address::Udp(address(&fast))];
-        testing::transport(&client, CLIENT, move |transport, node| async move {
-            let clock = node.clock();
-            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
-            let after_stagger = super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
-            for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
-                clock.sleep(wait).await;
-                let polled = poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx))).await;
-                assert!(polled.is_pending());
-            }
-            // Longer than the handshake on the slow link, so both attempts connect
-            // before the next poll.
-            clock.sleep(spans(Span::MILLISECOND, 500)).await;
-            let session = dialed.await.expect("a session");
-            session.close(Code(5));
-            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
-        });
-        assert_eq!(sim.run(), Ok(()));
-        let mut ends = ends.lock().expect("a lock").clone();
-        ends.sort_by_key(|(name, _)| *name);
+    fn of_attempts_that_connect_before_a_poll_the_first_to_connect_wins() {
         let peer = |code| Error::PeerClosed { code: Code(code) };
-        assert_eq!(ends, [("fast", peer(5)), ("slow", peer(0))]);
+        // The second address starts a stagger later. Fast, it connects first; as slow
+        // as the first, it connects last, and it is last in the flying list either way.
+        for (second_slow, expected) in [
+            (false, [("first", peer(0)), ("second", peer(5))]),
+            (true, [("first", peer(5)), ("second", peer(0))]),
+        ] {
+            let (mut sim, client, first) = nodes(0);
+            let second = sim.node(sim::node::Config::default());
+            let link = sim::link::Config {
+                delay: spans(Span::MILLISECOND, 150),
+                ..sim::link::Config::default()
+            };
+            let slow = if second_slow {
+                vec![&first, &second]
+            } else {
+                vec![&first]
+            };
+            for node in slow {
+                sim.link(&client, node, link);
+                sim.link(node, &client, link);
+            }
+            let ends = Arc::new(Mutex::new(Vec::new()));
+            for (name, node) in [("first", &first), ("second", &second)] {
+                let ends = Arc::clone(&ends);
+                testing::transport(node, SERVER, move |transport, node| async move {
+                    let mut accept = pin!(transport.accept());
+                    let mut sleep = pin!(node.clock().sleep(spans(IDLE, 3)));
+                    let accepted = poll_fn(|cx| match accept.as_mut().poll(cx) {
+                        Poll::Ready(accepted) => Poll::Ready(accepted.ok()),
+                        Poll::Pending => sleep.as_mut().poll(cx).map(|()| None),
+                    });
+                    if let Some(session) = accepted.await {
+                        let end = session.closed().await;
+                        ends.lock().expect("a lock").push((name, end));
+                    }
+                });
+            }
+            let addresses = [
+                Address::Udp(address(&first)),
+                Address::Udp(address(&second)),
+            ];
+            testing::transport(&client, CLIENT, move |transport, node| async move {
+                let clock = node.clock();
+                let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+                let after_stagger =
+                    super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
+                for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
+                    clock.sleep(wait).await;
+                    let polled =
+                        poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx))).await;
+                    assert!(polled.is_pending());
+                }
+                // Longer than both handshakes, so both attempts connect before the
+                // next poll.
+                clock.sleep(spans(Span::MILLISECOND, 1500)).await;
+                let session = dialed.await.expect("a session");
+                session.close(Code(5));
+                assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+            });
+            assert_eq!(sim.run(), Ok(()));
+            let mut ends = ends.lock().expect("a lock").clone();
+            ends.sort_by_key(|(name, _)| *name);
+            assert_eq!(ends, expected, "second slow: {second_slow}");
+        }
     }
 
     #[test]
