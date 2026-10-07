@@ -1,5 +1,6 @@
-//! Counts heap allocations, so a test can assert that code does not allocate, and
-//! finds freed blocks that hold given bytes, so a test can assert that code erases a
+//! Counts heap allocations, so a test can assert that code does not allocate, counts
+//! the heap bytes held, so a test can bound the memory of a structure, and finds freed
+//! blocks that hold given bytes, so a test can assert that code erases a
 //! secret before it frees it.
 
 #![expect(unsafe_code, reason = "the allocator implements `GlobalAlloc`")]
@@ -26,6 +27,7 @@ use std::{fmt, hint, ptr, slice};
 /// ```
 pub struct Allocator {
     allocations: AtomicU64,
+    held: AtomicUsize,
     scan: Scan,
 }
 
@@ -35,6 +37,7 @@ impl Allocator {
     pub const fn new() -> Self {
         Self {
             allocations: AtomicU64::new(0),
+            held: AtomicUsize::new(0),
             scan: Scan::new(),
         }
     }
@@ -47,6 +50,13 @@ impl Allocator {
         let value = f();
         let after = self.allocations.load(Relaxed);
         (value, after.strict_sub(before))
+    }
+
+    /// The bytes in the blocks that this allocator gave out and did not free, on every
+    /// thread. A block counts its `Layout` size, not what the system rounds it up to.
+    #[must_use]
+    pub fn held(&self) -> usize {
+        self.held.load(Relaxed)
     }
 
     /// Runs `f` and returns its result and the number of blocks freed through this
@@ -67,10 +77,11 @@ impl Allocator {
         (value, running.end())
     }
 
-    /// Counts `ptr` unless it is null, and returns it.
-    fn counted(&self, ptr: *mut u8) -> *mut u8 {
+    /// Counts `ptr`, a block of `layout`, unless it is null, and returns it.
+    fn counted(&self, ptr: *mut u8, layout: Layout) -> *mut u8 {
         if !ptr.is_null() {
             self.allocations.fetch_add(1, Relaxed);
+            self.held.fetch_add(layout.size(), Relaxed);
         }
         ptr
     }
@@ -86,6 +97,7 @@ impl fmt::Debug for Allocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Allocator")
             .field("allocations", &self.allocations)
+            .field("held", &self.held)
             .finish_non_exhaustive()
     }
 }
@@ -200,12 +212,12 @@ impl Drop for Running<'_> {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
-        self.counted(unsafe { System.alloc(layout) })
+        self.counted(unsafe { System.alloc(layout) }, layout)
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc_zeroed`.
-        self.counted(unsafe { System.alloc_zeroed(layout) })
+        self.counted(unsafe { System.alloc_zeroed(layout) }, layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -215,6 +227,7 @@ unsafe impl GlobalAlloc for Allocator {
             slice::from_raw_parts(ptr.cast::<MaybeUninit<u8>>(), layout.size())
         };
         self.scan.check(block);
+        self.held.fetch_sub(layout.size(), Relaxed);
         // SAFETY: the caller keeps the contract of `GlobalAlloc::dealloc`, and every
         // pointer this allocator returns comes from `System`.
         unsafe { System.dealloc(ptr, layout) }
@@ -290,6 +303,31 @@ mod tests {
     }
 
     #[test]
+    fn holds_the_layout_size_of_each_block_until_it_is_freed() {
+        let allocator = Allocator::new();
+        // SAFETY: the layout is not empty.
+        let a = unsafe { allocator.alloc(LAYOUT) };
+        // SAFETY: the layout is not empty.
+        let b = unsafe { allocator.alloc_zeroed(LAYOUT) };
+        assert!(
+            !a.is_null() && !b.is_null(),
+            "the system has no memory for 64 bytes"
+        );
+        assert_eq!(allocator.held(), 128);
+        // SAFETY: `allocator` returned `a` for `LAYOUT`, and 200 rounded up to the
+        // alignment does not pass `isize::MAX`.
+        let a = unsafe { allocator.realloc(a, LAYOUT, 200) };
+        assert!(!a.is_null(), "the system has no memory for 200 bytes");
+        assert_eq!(allocator.held(), 264);
+        free(&allocator, b, LAYOUT);
+        assert_eq!(allocator.held(), 200);
+        let layout = Layout::from_size_align(200, LAYOUT.align())
+            .expect("invariant: 200 bytes at the alignment of `u64` is a layout");
+        free(&allocator, a, layout);
+        assert_eq!(allocator.held(), 0);
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "Miri stops at an allocation it cannot make")]
     fn does_not_count_a_failed_allocation() {
         let allocator = Allocator::new();
@@ -300,6 +338,7 @@ mod tests {
             unsafe { allocator.alloc(layout) }
         });
         assert_eq!((ptr, allocations), (std::ptr::null_mut(), 0));
+        assert_eq!(allocator.held(), 0);
     }
 
     #[test]
@@ -485,11 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn shows_the_count() {
+    fn shows_the_counts() {
         let allocator = Allocator::new();
         // SAFETY: the layout is not empty.
         let ptr = unsafe { allocator.alloc(LAYOUT) };
-        assert_eq!(format!("{allocator:?}"), "Allocator { allocations: 1, .. }");
+        assert_eq!(
+            format!("{allocator:?}"),
+            "Allocator { allocations: 1, held: 64, .. }"
+        );
         free(&allocator, ptr, LAYOUT);
     }
 }
