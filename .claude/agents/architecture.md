@@ -52,11 +52,11 @@ Check:
 
 Start the report with two lines. First `Public surface: none`, or each public item (its
 signature or doc) and crate dependency that the PR changes, with file and line. Then
-`Hot path: none`, or each changed function that runs once per sample, series, frame,
-or data message, with the loop that runs it, whatever the PR body says. A function
-that a crate benchmark measures per frame, sample, series, or message is one. So is a
-stub that its caller on record will run so, and code that runs in the timed loop of a
-benchmark, such as a `GlobalAlloc` that a benchmark holds.
+`Hot path: none`, or each changed function that runs once per sample, series, frame, or
+data message, with the loop that runs it, whatever the PR body says. A function that a
+crate benchmark measures per frame, sample, series, or message is one. So is a stub that
+its caller on record will run so, and code that no product path runs but that runs in
+the timed loop of a benchmark, such as a `GlobalAlloc` that a benchmark holds.
 
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.
