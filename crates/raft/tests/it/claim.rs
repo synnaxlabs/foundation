@@ -98,7 +98,7 @@ fn an_append_claims_each_vote_then_the_change_of_each_change_it_carries() {
 }
 
 #[test]
-fn a_message_claims_its_proof_then_its_changes_then_its_grant() {
+fn an_append_claims_its_proof_then_its_changes() {
     let proof = Proof {
         grant: Grant::Vote,
         candidate: key(1),
