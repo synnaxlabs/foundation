@@ -6,6 +6,10 @@
 //! hasher with its key from `env` randomness, which comes with its first caller. A
 //! QUIC stream ID is not chosen freely: a peer must use its stream IDs in order, and
 //! the node limits how many are open.
+//!
+//! The hasher spreads a key by its low bits, so keys that differ only in their top
+//! bits fall in one bucket. A key that the node makes keeps its varying bits low, as
+//! the random bits of `channel::Key::v7` are.
 
 use rustc_hash::FxBuildHasher;
 
