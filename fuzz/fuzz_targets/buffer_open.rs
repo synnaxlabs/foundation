@@ -60,12 +60,17 @@ const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
 const BUDGET: usize = 1024;
 /// A key that no build writes. Its slot comes after each slot an open made.
 const SPARE: channel::Key = channel::Key::from_u128(u128::MAX);
-const STORED_AT: Stamp = Stamp::from_nanos(7);
 const CHECK_LAST: Stamp = Stamp::from_nanos(9);
 /// The tag of the first entry of the build and of the check. Each entry has its
-/// own tag and fills its bytes with it, so a read cannot give one entry for another.
+/// own tag, fills its bytes with it, and is stored at it, so a read cannot give one
+/// entry for another.
 const BUILD_TAG: u8 = 0x01;
 const CHECK_TAG: u8 = 0x81;
+
+/// The time an entry with `tag` is stored.
+fn stored_at(tag: u8) -> Stamp {
+    Stamp::from_nanos(i64::from(tag))
+}
 
 /// One entry of a path, as appended or as a read gave it, with its bytes off the
 /// pool, so the entries of one read do not take the blocks of the next.
@@ -298,7 +303,7 @@ async fn build(
                     Given {
                         first,
                         len: append.len,
-                        stored_at: STORED_AT,
+                        stored_at: stored_at(tag),
                         last,
                         tag,
                         bytes: part.to_vec(),
@@ -310,7 +315,7 @@ async fn build(
                     path: append.path,
                     first,
                     len: append.len,
-                    stored_at: STORED_AT,
+                    stored_at: stored_at(tag),
                     last,
                     tag,
                     parts: Parts::from(part.freeze()),
@@ -525,7 +530,7 @@ async fn check(
             commits.push(Given {
                 first: tail.seq,
                 len: 1,
-                stored_at: STORED_AT,
+                stored_at: stored_at(tag),
                 last: Some(CHECK_LAST),
                 tag,
                 bytes: part.to_vec(),
@@ -536,7 +541,7 @@ async fn check(
                 path,
                 first: tail.seq,
                 len: 1,
-                stored_at: STORED_AT,
+                stored_at: stored_at(tag),
                 last: Some(CHECK_LAST),
                 tag,
                 parts: Parts::from(part.freeze()),
