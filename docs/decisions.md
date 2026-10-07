@@ -2457,7 +2457,10 @@ How to read this record:
   session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
   as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
   datagrams that arrive at it are lost, and a send still works. Approved by the
-  coordinator on #907. Built by `simulation` in #926. Amended (2026-10-06, #943):
+  coordinator on #907. Built by `simulation` in #926. Amended (2026-10-07, #1255): a
+  receive first gives the datagrams queued before the fault, then `EIO`, so a test
+  can put a last datagram and the error in one poll (laptop.architect-2:
+  https://github.com/synnaxlabs/foundation/issues/1255). Amended (2026-10-06, #943):
   `link::Config::rate` limits a link to that many bytes per second, counted as IP
   packets with their IP and UDP or TCP headers. Each direction of a link sends one
   packet at a time: a packet starts when it is sent or when the packet before it has

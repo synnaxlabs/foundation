@@ -118,9 +118,10 @@ impl Node {
     }
 
     /// Makes the UDP socket of the node at `local` fail, as when the OS breaks it:
-    /// each receive of it then gives `Error::Io` with code 5 (`EIO`), also one that
-    /// waits. The datagrams in its receive queue and the datagrams that arrive at it
-    /// are lost. A send of it still works. A socket bound at `local` after it drops
+    /// each receive of it first gives the datagrams already in its receive queue,
+    /// then gives `Error::Io` with code 5 (`EIO`), also one that waits. The
+    /// datagrams that arrive at it after the fault are lost. A send of it still
+    /// works. A socket bound at `local` after it drops
     /// works. A fault on a socket that already failed does nothing.
     ///
     /// # Panics

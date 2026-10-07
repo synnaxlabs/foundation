@@ -1377,16 +1377,17 @@ const EIO: Net = Net::Io { code: 5 };
 /// The results of receives into a buffer of 8 bytes.
 type Results = Arc<Mutex<Vec<Result<usize, Net>>>>;
 
-/// Starts a shard on `node` that receives from `receiver` into `results` three
+/// Starts a shard on `node` that receives from `receiver` into `results` `times`
 /// times, whatever each result.
-fn receive_three(
+fn receive_times(
     node: &node::Node,
     mut receiver: Receiver,
     results: &Results,
+    times: usize,
 ) -> Handle {
     let results = Arc::clone(results);
     let handle = node.shards().start(shard("receive"), move |_| async move {
-        for _ in 0..3 {
+        for _ in 0..times {
             let (mut bytes, mut meta) = ([0; 8], [Meta::default()]);
             let result = poll_fn(|cx| {
                 let mut buffers = [IoSliceMut::new(&mut bytes)];
@@ -1400,7 +1401,7 @@ fn receive_three(
 }
 
 /// Fails the socket of `b` on port 4433 `faults` times after three datagrams from
-/// `a` arrive at it, then gives the results of its receives.
+/// `a` arrive at it, then gives the results of four receives.
 fn results_after(faults: usize) -> Vec<Result<usize, Net>> {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
@@ -1411,20 +1412,21 @@ fn results_after(faults: usize) -> Vec<Result<usize, Net>> {
         b.fail_udp(at(&b, 4433));
     }
     let results = Results::default();
-    let _receive = receive_three(&b, receiver, &results);
+    let _receive = receive_times(&b, receiver, &results, 4);
     sim.run_for(Span::SECOND).unwrap();
     results.lock().unwrap().clone()
 }
 
 #[test]
-fn each_receive_of_a_failed_socket_gives_eio_and_never_its_queue() {
-    assert_eq!(results_after(0).first(), Some(&Ok(1)));
-    assert_eq!(results_after(1), [Err(EIO), Err(EIO), Err(EIO)]);
+fn a_failed_socket_gives_its_queue_then_eio() {
+    // One batch holds the three datagrams.
+    assert_eq!(results_after(0), [Ok(1)]);
+    assert_eq!(results_after(1), [Ok(1), Err(EIO), Err(EIO), Err(EIO)]);
 }
 
 #[test]
 fn a_second_fault_does_nothing() {
-    assert_eq!(results_after(2), [Err(EIO), Err(EIO), Err(EIO)]);
+    assert_eq!(results_after(2), results_after(1));
 }
 
 #[test]
@@ -1432,7 +1434,7 @@ fn a_receive_that_waits_wakes_with_the_fault() {
     let (mut sim, _a, b) = pair(0, link::Config::default());
     let (_b, receiver) = udp(&b, 4433);
     let results = Results::default();
-    let _receive = receive_three(&b, receiver, &results);
+    let _receive = receive_times(&b, receiver, &results, 3);
     sim.run_for(millis(10)).unwrap();
     b.fail_udp(at(&b, 4433));
     sim.run_for(millis(10)).unwrap();
