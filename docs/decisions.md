@@ -1217,8 +1217,9 @@ How to read this record:
   receiver can receive into its own buffer (`recv_into`). A message longer than the
   buffer gives `Error::TooLarge` and stays queued, and so does a message whose future
   drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe (architect,
-  #1197: https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738
-  and https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575).
+  #1197: https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575,
+  after HUB WIRE
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333).
   Proposed by `network` in #55; approved by the coordinator on PR #407. The
   budgets: proposed by `network` in #228. The room order: approved by the advisor on
   #611. The hello: proposed by `network` in #55; settled by the advisor and the
