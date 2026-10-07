@@ -176,7 +176,9 @@ approval of each item, each finding of an architect review has its fix commit or
 linked answer, and each later step that a round, an architect review, an architect's
 ruling, or an issue that the PR closes names is stated on an open issue that does it (a
 new issue, or a comment on an existing one) or as a trigger in the decisions entry, and
-each issue in `gh pr view <n> --json closingIssuesReferences` is one that the PR
-finishes (GitHub closes each at the merge, also one after "Fix:" in a sentence). Only
-then is the PR marked ready: by its author, or by `laptop.monitor` for a red-team or
-rule PR.
+each issue in `gh pr view <n> --json closingIssuesReferences`, or after a closing word
+in a commit message of the PR, is one that the PR finishes. GitHub closes each at the
+merge. It reads an issue link after a form of "close", "fix", or "resolve" as closing,
+also in a sentence about the past, such as "#1228 closed #1197" in the body of #1185.
+Only then is the PR marked ready: by its author, or by `laptop.monitor` for a red-team
+or rule PR.
