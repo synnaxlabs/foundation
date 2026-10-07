@@ -4,11 +4,10 @@
 # message, an HTTP error, or no network, it exits 1, prints the body, if any, and
 # prints the error on stderr; with no login, it exits 4. After the answers run out,
 # it fails with "out of answers". `gh api rate_limit` gives the count in
-# `$STUB/left.<n>` after call <n>, else in `$STUB/left`, else 1. As gh does, it
-# logs each request on stderr for a true `GH_DEBUG`, or, when that is not set, for a
-# true `DEBUG`. A stub `sleep` returns at once, and
-# stops the script on its fifth call; when `$STUB/slow` exists, it sleeps. Needs
-# `jq`. Exit 1 on a failure.
+# `$STUB/left.<n>` after call <n>, else in `$STUB/left`, else 1. As gh does, it logs
+# each request on stderr for a true `GH_DEBUG`, or, when that is not set, for a true
+# `DEBUG`. A stub `sleep` returns at once, and stops the script on its fifth call; when
+# `$STUB/slow` exists, it sleeps. Needs `jq`. Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 gh=$(command -v gh)
