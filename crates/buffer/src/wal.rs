@@ -1889,9 +1889,9 @@ mod tests {
             assert_eq!(jumped(51, 20), Some((51, full)));
         }
 
-        /// A trim cannot free the commit in its sync, so the ring must hold the
-        /// commits that the headroom is for: three of a steady load, and four when
-        /// one commit is twice the commit before it.
+        /// A trim cannot free the commit in its sync, so the ring must hold three
+        /// commits in a row: three times a steady commit, and four times it when one
+        /// commit is twice the commit before it.
         #[test]
         fn a_ring_that_does_not_hold_the_commits_of_the_headroom_refuses_a_record() {
             let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
@@ -1910,6 +1910,25 @@ mod tests {
             };
             assert_eq!(doubled(256), None);
             assert_eq!(doubled(257), Some((400, full)));
+        }
+
+        /// The ring must also hold the blocks that a wrap skips in those commits.
+        #[test]
+        fn a_ring_that_holds_three_commits_and_no_wrap_skip_refuses_a_record() {
+            let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
+            let even = || vec![BODY_MAX; 64];
+            let skipped = [vec![8], vec![BODY_MAX; 63], vec![8; 3]].concat();
+            let doubled = |before: Vec<usize>| {
+                let ends = [before, even(), vec![BODY_MAX; 128], even()];
+                let commits = iter::repeat_n(even(), 403).chain(ends);
+                steady(layout, commits.map(|lens| (lens, vec![])))
+            };
+            assert_eq!(doubled(even()), None);
+            let full = Full {
+                needed: 16384,
+                free: 4096,
+            };
+            assert_eq!(doubled(skipped), Some((405, full)));
         }
 
         /// Four of the largest record hold three commits of one record, not of two.
