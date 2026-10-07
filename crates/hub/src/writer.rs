@@ -106,6 +106,7 @@ impl Writer {
             set: Arc::clone(&set),
         };
         let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
+        borrowed.commit.appended();
         Ok(Self {
             state: Rc::clone(state),
             key,
@@ -151,10 +152,11 @@ impl Writer {
     ) -> Result<&[home::Outcome], home::Error> {
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
-        let outcomes = state.home.write(self.key, label, frame)?;
+        let written = state.home.write(self.key, label, frame);
+        state.commit.appended();
+        let outcomes = written?;
         self.outcomes.clear();
         self.outcomes.extend_from_slice(outcomes);
-        state.commit.written();
         state.wake();
         Ok(&self.outcomes)
     }
@@ -162,6 +164,8 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        self.state.borrow_mut().home.close_writer(self.key);
+        let mut state = self.state.borrow_mut();
+        state.home.close_writer(self.key);
+        state.commit.appended();
     }
 }

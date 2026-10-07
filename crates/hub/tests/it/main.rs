@@ -603,3 +603,31 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
         assert_eq!(received.frame.range(0), Some(range));
     });
 }
+
+#[test]
+fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff() {
+    for closed in [false, true] {
+        run(16, move |test| async move {
+            let mut complete = test.reader(&["value"], Mode::Complete).await;
+            let writer = if closed {
+                let writer = test.writer("a", &["value"]).await;
+                test.clock.sleep(SETTLE).await;
+                test.node.fail_file(FilePath::new(RING), Operation::Sync);
+                drop(writer);
+                None
+            } else {
+                test.node.fail_file(FilePath::new(RING), Operation::Sync);
+                Some(test.writer("a", &["value"]).await)
+            };
+            test.clock.sleep(SETTLE).await;
+            let failed = env::files::Error::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::Sync,
+                code: 5,
+            };
+            let next = poll_once(complete.next()).map(Result::err);
+            assert_eq!(next, Poll::Ready(Some(failed)), "closed: {closed}");
+            drop(writer);
+        });
+    }
+}

@@ -7,19 +7,21 @@ use std::mem;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
-/// What the commit task and the sessions share.
+/// How the sessions tell the commit task that a commit is due.
 #[derive(Debug, Default)]
-pub(crate) struct State {
-    /// Whether a write took a frame since the task last waited for a commit.
-    pub(crate) waiting: bool,
+pub(crate) struct Signal {
+    /// Whether a home call may have appended since the task last waited for a commit.
+    pub(crate) due: bool,
     /// The task's waker while it sleeps.
     pub(crate) task: Option<Waker>,
 }
 
-impl State {
-    /// Notes a write that the home took. Wakes the task once per commit at most.
-    pub(crate) fn written(&mut self) {
-        self.waiting = true;
+impl Signal {
+    /// Notes a home call that may have appended to the buffer: a write, also a failed
+    /// one, and the handoff of a writer open or close. Wakes the task once per commit
+    /// at most.
+    pub(crate) fn appended(&mut self) {
+        self.due = true;
         if let Some(task) = self.task.take() {
             task.wake();
         }
@@ -30,11 +32,11 @@ impl State {
 /// After a failed commit, it keeps the error, wakes every reader, and ends.
 pub(crate) async fn run(state: Rc<RefCell<super::State>>) {
     loop {
-        // A commit future resolves at once when no frame waits, so the task sleeps
-        // until a write gives it one to wait for.
+        // A commit future resolves at once when nothing waits, so the task sleeps
+        // until a session gives it an append to wait for.
         let commit = poll_fn(|cx| {
             let mut state = state.borrow_mut();
-            if mem::take(&mut state.commit.waiting) {
+            if mem::take(&mut state.commit.due) {
                 return Poll::Ready(state.home.committed());
             }
             state.commit.task = Some(cx.waker().clone());

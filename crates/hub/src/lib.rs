@@ -63,7 +63,7 @@ struct State {
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// The readers that [`::home::Shard::woken`] gave last.
     woken: Vec<::home::reader::Key>,
-    commit: commit::State,
+    commit: commit::Signal,
     /// The error that ended the home's buffer.
     failed: Option<env::files::Error>,
 }
@@ -86,7 +86,7 @@ impl Hub {
             channels: hash::Map::default(),
             wakers: hash::Map::default(),
             woken: Vec::new(),
-            commit: commit::State::default(),
+            commit: commit::Signal::default(),
             failed: None,
         }));
         tasks.spawn(commit::run(Rc::clone(&state)));
