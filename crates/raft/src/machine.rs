@@ -412,24 +412,18 @@ impl Raft {
     /// unless the configuration in force removed the sender and this node still sends
     /// to it. The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
+        if !self.reads(&message)? {
+            self.answer_stale(message.from, &message.body);
+            return Ok(());
+        }
         let Message {
             from,
-            to,
             term,
             body,
             mut proof,
             chain,
+            ..
         } = message;
-        if to != self.key {
-            return Err(Error::Misrouted { to });
-        }
-        if from == self.key {
-            return Err(Error::Loopback);
-        }
-        if !self.reads(from, term, &body) {
-            self.answer_stale(from, &body);
-            return Ok(());
-        }
         let body = self.check(from, term, body, proof.as_ref(), &chain)?;
         if self.meet(from, term, &body, &mut proof) {
             self.handle(from, term, body, proof);
@@ -441,12 +435,13 @@ impl Raft {
     /// [`step`](Self::step) reads, with its signature: the grants of its proof in
     /// rising key order; then the votes and the change of each link of its chain
     /// that `step` reads; then the votes and the change of each configuration an
-    /// append carries; then the sender's grant. A message for a lower term, or a
-    /// reply from a node that is not a peer, gives no claim: `step` reads none. The
-    /// list is the one `step` reads only when `step` gets the same message, with no
-    /// call to this node between the two. The caller checks each signature against
-    /// its signer's key before `step`, and refuses a `None`: `step` keeps each
-    /// signature as it came.
+    /// append carries; then the sender's grant. A message for another node or from
+    /// this node, a message for a lower term, and a reply from a node that is not a
+    /// peer give no claim: `step` refuses the first two by their header and reads
+    /// none of the others. The list is the one `step` reads only when `step` gets
+    /// the same message, with no call to this node between the two. The caller
+    /// checks each signature against its signer's key before `step`, and refuses a
+    /// `None`: `step` keeps each signature as it came.
     pub fn claims<'a>(
         &'a self,
         message: &'a Message,
@@ -459,17 +454,25 @@ impl Raft {
             chain,
             ..
         } = message;
-        let read = self.reads(*from, *term, body).then(|| {
+        let read = matches!(self.reads(message), Ok(true)).then(|| {
             let links = self.prove(*from, *term, body, proof.as_ref(), chain).read;
             message.claims(links)
         });
         read.into_iter().flatten()
     }
 
-    // Whether `step` reads a message past its header. A message for a lower term is
+    // Whether `step` reads a message past its header. `step` refuses a message for
+    // another node or from this node with the error. A message for a lower term is
     // stale, and a reply from a node that is not a peer is dropped.
-    fn reads(&self, from: node::Key, term: Term, body: &Body) -> bool {
-        term >= self.term && (!body.answers() || self.peers.contains_key(&from))
+    fn reads(&self, message: &Message) -> Result<bool, Error> {
+        if message.to != self.key {
+            return Err(Error::Misrouted { to: message.to });
+        }
+        if message.from == self.key {
+            return Err(Error::Loopback);
+        }
+        let peer = !message.body.answers() || self.peers.contains_key(&message.from);
+        Ok(message.term >= self.term && peer)
     }
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote

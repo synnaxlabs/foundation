@@ -2087,6 +2087,42 @@ mod tests {
             });
         }
 
+        // The message of `takes_a_leader_that_the_chain_proves`, for node 3 in place
+        // of node 1. `step` refuses a message for another node before it reads a
+        // link, so `receive` checks no link of it.
+        #[test]
+        fn checks_no_link_of_a_message_for_another_node() {
+            solo(|node, tasks| async move {
+                let all = [1, 2, 3, 4];
+                let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
+                let link = |index, outgoing: &[u8]| {
+                    let at = Position {
+                        term: Term(common::TERM.0 - 1),
+                        index,
+                    };
+                    let voters = Voters {
+                        incoming: [1, 2, 3].map(key).into(),
+                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+                    };
+                    let Data::Voters(change) = common::change(2, at, voters).data
+                    else {
+                        unreachable!("a change is a voters entry");
+                    };
+                    raft::Link { at, change }
+                };
+                let mut heartbeat = proven(2, 3, Body::Heartbeat { commit: 0 });
+                heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
+                heartbeat.chain = vec![link(1, &all), link(2, &[])];
+                let misrouted = Error::Raft(raft::Error::Misrouted { to: key(3) });
+                let honest = mesh.receive(public(2), heartbeat.clone());
+                assert_eq!(honest, Err(misrouted.clone()));
+                let mut forged = heartbeat;
+                forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(2), forged), Err(misrouted));
+                assert_eq!(term(&mesh), Term(0));
+            });
+        }
+
         #[test]
         fn refuses_an_append_whose_change_is_forged_before_it_steps() {
             solo(|node, tasks| async move {

@@ -297,6 +297,30 @@ fn a_reply_from_a_node_that_is_not_a_peer_claims_nothing() {
     assert_eq!(raft.ready(), Ready::default());
 }
 
+// `step` refuses a message for another node by its header, before it reads a link.
+#[test]
+fn a_message_for_another_node_claims_nothing() {
+    let mut message = outside(7);
+    message.to = key(3);
+    message.chain = chain();
+    let mut raft = receiver(0);
+    assert_eq!(claims(&raft, &message), Vec::new());
+    assert_eq!(raft.step(message), Err(Error::Misrouted { to: key(3) }));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
+// `step` refuses a message from this node by its header, before it reads a link.
+#[test]
+fn a_message_from_this_node_claims_nothing() {
+    let mut message = outside(7);
+    message.from = key(2);
+    message.chain = chain();
+    let mut raft = receiver(0);
+    assert_eq!(claims(&raft, &message), Vec::new());
+    assert_eq!(raft.step(message), Err(Error::Loopback));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
 #[test]
 fn a_message_claims_its_proof_in_its_term_then_its_grant() {
     let proof = Proof {
