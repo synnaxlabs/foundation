@@ -175,6 +175,8 @@ risk crate, the `Public surface:` line of the last round comment links the archi
 approval of each item, each finding of an architect review has its fix commit or a
 linked answer, and each later step that a round, an architect review, an architect's
 ruling, or an issue that the PR closes names is stated on an open issue that does it (a
-new issue, or a comment on an existing one) or as a trigger in the decisions entry. Only
+new issue, or a comment on an existing one) or as a trigger in the decisions entry, and
+each issue in `gh pr view <n> --json closingIssuesReferences` is one that the PR
+finishes (GitHub closes each at the merge, also one after "Fix:" in a sentence). Only
 then is the PR marked ready: by its author, or by `laptop.monitor` for a red-team or
 rule PR.
