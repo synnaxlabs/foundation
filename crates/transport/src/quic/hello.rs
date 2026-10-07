@@ -53,7 +53,8 @@ impl Hello {
     /// The fault when the hello is over 256 bytes, ends inside a pair, has an id
     /// at or below the one before it, misses id 0 or 1, has a `message_bytes_max`
     /// below 1472, or has a `window_bytes` below its `message_bytes_max`. When more
-    /// than one applies, the first in this list.
+    /// than one applies, the first in this list, except that the pairs are read in
+    /// order: the first pair that is cut or has a low id gives its fault.
     pub fn decode(mut bytes: &[u8]) -> Result<Self, Fault> {
         if bytes.len() > BYTES_MAX {
             return Err(Fault(format!("a hello over {BYTES_MAX} bytes")));
@@ -350,6 +351,17 @@ mod tests {
         assert_eq!(
             Hello::decode(&[0x00, 0x47, 0xd0, 0x00]),
             fault("a hello that ends inside a pair")
+        );
+        let mut bytes = encode(&[(0, 4_000), (0, 4_000)]);
+        bytes.push(0x01);
+        assert_eq!(Hello::decode(&bytes), fault("a hello with id 0 after id 0"));
+        assert_eq!(
+            Hello::decode(&encode(&[(1, 1_500), (1, 1_500)])),
+            fault("a hello with id 1 after id 1")
+        );
+        assert_eq!(
+            Hello::decode(&encode(&[(1, 1_000)])),
+            fault("a hello with no window_bytes")
         );
     }
 
