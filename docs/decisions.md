@@ -2718,6 +2718,12 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
+- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
+  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+  `Prefix::contains` holds, so no caller writes the root case. Decided by
+  `laptop.architect` on 2026-10-07T12:47:19Z
+  ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
+  applied in #1402.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
