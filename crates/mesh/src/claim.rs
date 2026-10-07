@@ -320,7 +320,7 @@ mod tests {
     fn two_links() -> Message {
         let mut message = chained();
         let next = Position {
-            index: written().index + 1,
+            index: 3,
             ..written()
         };
         let pair = Voters {
@@ -726,13 +726,13 @@ mod tests {
     }
 
     // A change of `leader` at `at` to voters 1, 2 and 3, with a signed vote of
-    // each of `votes` that is not the leader.
-    fn change_voted(leader: u8, at: Position, votes: &[u8]) -> raft::Entry {
-        let voters = Voters {
+    // each of `voted` that is not the leader.
+    fn change_voted(leader: u8, at: Position, voted: &[u8]) -> raft::Entry {
+        let three = Voters {
             incoming: [key(1), key(2), key(3)].into(),
             outgoing: BTreeSet::new(),
         };
-        common::change_voted(leader, at, voters, votes)
+        common::change_voted(leader, at, three, voted)
     }
 
     // An append from leader 2 of `[bytes, change voted by 1, 2 and 3, change voted
