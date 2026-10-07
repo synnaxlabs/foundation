@@ -3,12 +3,13 @@
 use std::fmt;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use aws_lc_rs::signature::KeyPair;
 use transport::Address;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
-use crate::bytes::{put_count, put_key, take};
+use crate::bytes::{put_count, put_key, take, take_count};
+use crate::ed25519;
 
 const TAG: &[u8] = b"foundation/card/1";
 
@@ -28,7 +29,8 @@ pub struct Card {
     pub public_key: PublicKey,
     /// The key that callers seal secret values to.
     pub seal_key: SealKey,
-    /// Where to dial the node.
+    /// Where to dial the node. An IPv6 address has no flow info and no scope: each
+    /// means something only on the node that sets it.
     pub addresses: Vec<Address>,
     /// 1 for the node's first card; each later card is higher.
     pub version: u64,
@@ -38,6 +40,10 @@ impl Card {
     /// Adds the one byte form of the card to `out`: the name behind a length byte, the
     /// public key, the seal key, a count of addresses as 8 little-endian bytes, each
     /// address, then the version as 8 little-endian bytes.
+    ///
+    /// # Panics
+    ///
+    /// When an IPv6 address has flow info or a scope.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         let name = self.name.as_str().as_bytes();
         out.push(
@@ -66,7 +72,7 @@ impl Card {
         let name = std::str::from_utf8(name).ok()?.parse().ok()?;
         let public_key = PublicKey::new(take(bytes)?).ok()?;
         let seal_key = SealKey::new(take(bytes)?).ok()?;
-        let count = u64::from_le_bytes(take(bytes)?);
+        let count = take_count(bytes)?;
         let mut addresses = Vec::new();
         for _ in 0..count {
             addresses.push(take_address(bytes)?);
@@ -95,20 +101,16 @@ impl Signed {
     ///
     /// # Panics
     ///
-    /// When `card.public_key` is not the public half of `private_key`.
+    /// When `card.public_key` is not the public half of `private_key`, or when an IPv6
+    /// address has flow info or a scope.
     #[must_use]
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
-            .expect("invariant: any 32 bytes are an Ed25519 private key");
+        let pair = ed25519::pair(private_key);
         assert!(
             pair.public_key().as_ref() == card.public_key.to_bytes(),
             "the card's public key is not the public half of the private key"
         );
-        let signature = pair
-            .sign(&statement(key, &card))
-            .as_ref()
-            .try_into()
-            .expect("invariant: an Ed25519 signature is 64 bytes");
+        let signature = ed25519::sign(&pair, &statement(key, &card));
         Self { card, signature }
     }
 
@@ -117,14 +119,18 @@ impl Signed {
     /// # Errors
     ///
     /// [`Forged`] when it does not hold for `card.public_key`.
+    ///
+    /// # Panics
+    ///
+    /// When an IPv6 address has flow info or a scope.
     pub fn check(
         key: node::Key,
         card: Card,
         signature: [u8; 64],
     ) -> Result<Self, Forged> {
-        UnparsedPublicKey::new(&ED25519, card.public_key.to_bytes())
-            .verify(&statement(key, &card), &signature)
-            .map_err(|_unspecified| Forged { node: key })?;
+        if !ed25519::holds(card.public_key, &statement(key, &card), &signature) {
+            return Err(Forged { node: key });
+        }
         Ok(Self { card, signature })
     }
 
@@ -197,8 +203,7 @@ fn take_address(bytes: &mut &[u8]) -> Option<Address> {
     })
 }
 
-// A family byte, then the IP and the port; IPv6 then adds the flow info and the scope.
-// Each number is little endian.
+// A family byte, the IP, then the port as 2 little-endian bytes.
 fn put_socket(at: SocketAddr, out: &mut Vec<u8>) {
     match at {
         SocketAddr::V4(at) => {
@@ -207,11 +212,13 @@ fn put_socket(at: SocketAddr, out: &mut Vec<u8>) {
             out.extend(at.port().to_le_bytes());
         }
         SocketAddr::V6(at) => {
+            assert!(
+                at.flowinfo() == 0 && at.scope_id() == 0,
+                "a card address has IPv6 flow info or a scope"
+            );
             out.push(V6);
             out.extend(at.ip().octets());
             out.extend(at.port().to_le_bytes());
-            out.extend(at.flowinfo().to_le_bytes());
-            out.extend(at.scope_id().to_le_bytes());
         }
     }
 }
@@ -226,9 +233,7 @@ fn take_socket(bytes: &mut &[u8]) -> Option<SocketAddr> {
         V6 => {
             let ip = <[u8; 16]>::into(take(bytes)?);
             let port = u16::from_le_bytes(take(bytes)?);
-            let flow = u32::from_le_bytes(take(bytes)?);
-            let scope = u32::from_le_bytes(take(bytes)?);
-            SocketAddr::V6(SocketAddrV6::new(ip, port, flow, scope))
+            SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0))
         }
         _ => return None,
     })
@@ -246,11 +251,21 @@ mod tests {
             .prop_filter_map("a valid seal key", |bytes| SealKey::new(bytes).ok())
     }
 
+    fn socket() -> impl Strategy<Value = SocketAddr> {
+        any::<SocketAddr>().prop_map(|mut at| {
+            if let SocketAddr::V6(v6) = &mut at {
+                v6.set_flowinfo(0);
+                v6.set_scope_id(0);
+            }
+            at
+        })
+    }
+
     fn address() -> impl Strategy<Value = Address> {
         prop_oneof![
-            any::<SocketAddr>().prop_map(Address::Udp),
-            any::<SocketAddr>().prop_map(Address::Tcp),
-            (1..=u8::MAX, any::<SocketAddr>()).prop_map(|(id, at)| Address::Relay {
+            socket().prop_map(Address::Udp),
+            socket().prop_map(Address::Tcp),
+            (1..=u8::MAX, socket()).prop_map(|(id, at)| Address::Relay {
                 node: public(id),
                 at,
             }),
@@ -283,7 +298,7 @@ mod tests {
                 Address::Udp("10.0.0.1:4100".parse().unwrap()),
                 Address::Relay {
                     node: public(2),
-                    at: "[fe80::1%3]:4100".parse().unwrap(),
+                    at: "[fe80::1]:4100".parse().unwrap(),
                 },
             ],
             version: 1,
@@ -417,5 +432,23 @@ mod tests {
                                private key")]
     fn sign_refuses_another_private_key() {
         let _signed = Signed::sign(key(1), fixed(), &private(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "a card address has IPv6 flow info or a scope")]
+    fn sign_refuses_a_scoped_address() {
+        let mut card = fixed();
+        card.addresses = vec![Address::Tcp("[fe80::1%3]:4100".parse().unwrap())];
+        let _signed = Signed::sign(key(1), card, &private(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "a card address has IPv6 flow info or a scope")]
+    fn check_refuses_an_address_with_flow_info() {
+        let mut card = fixed();
+        let mut at: SocketAddrV6 = "[2001:db8::1]:4100".parse().unwrap();
+        at.set_flowinfo(1);
+        card.addresses = vec![Address::Udp(SocketAddr::V6(at))];
+        let _checked = Signed::check(key(1), card, [0; 64]);
     }
 }

@@ -1647,19 +1647,20 @@ How to read this record:
   channel keys (X27). The card's byte form is the name behind a length byte, the public
   key, the seal key, a count of addresses (8 bytes), each address, and the version (8
   bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds its node key), a
-  family byte (4 or 6), the IP, and the port; IPv6 adds the flow info and the scope.
-  Numbers are little endian. It lives only in `mesh` region state (X1), with no voter
-  flag (the raft configuration is the one source) and no lease. The seal key is inside
-  the signed card (S8). A join is one `Join` change. Every node that applies it checks
-  the card, and the admission against the ticket's public key, scope, uses, and expiry
-  at the change's mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter
-  that admits a join answers with the founding voters and their cards, and the node
-  opens with them as `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region
-  whose founders all left cannot admit a node. `secret` finds no key itself: `ops` and
-  `node` read the member and pass its seal key. A rotation, a new card, and `Remove`
-  wait for a caller; a rotation that only the node signs lets a stolen key lock the node
-  out. Lost: a record that only the admitting voter checks (a voter that lies admits any
-  key, against BQ12). Decided by the architect, #242
+  family byte (4 or 6), the IP, and the port. An IPv6 address has no flow info and no
+  scope, because each means something only on the node that sets it. Numbers are little
+  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
+  configuration is the one source) and no lease. The seal key is inside the signed card
+  (S8). A join is one `Join` change. Every node that applies it checks the card, and the
+  admission against the ticket's public key, scope, uses, and expiry at the change's
+  mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a
+  join answers with the founding voters and their cards, and the node opens with them as
+  `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
+  cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
+  and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
+  rotation that only the node signs lets a stolen key lock the node out. Lost: a record
+  that only the admitting voter checks (a voter that lies admits any key, against BQ12).
+  Decided by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There

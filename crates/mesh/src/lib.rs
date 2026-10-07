@@ -18,6 +18,7 @@ mod bytes;
 pub mod card;
 #[cfg(test)]
 mod common;
+mod ed25519;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")

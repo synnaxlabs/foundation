@@ -63,6 +63,11 @@ pub(crate) fn put_count(count: usize, out: &mut Vec<u8>) {
     out.extend(count.to_le_bytes());
 }
 
+/// Takes a count.
+pub(crate) fn take_count(bytes: &mut &[u8]) -> Option<u64> {
+    take(bytes).map(u64::from_le_bytes)
+}
+
 // Takes a count, then that many keys in rising order. After each key, `each` takes
 // what follows it. `None` when the keys are not in rising order or `each` gives
 // `None`.
@@ -70,7 +75,7 @@ fn take_rising(
     bytes: &mut &[u8],
     mut each: impl FnMut(node::Key, &mut &[u8]) -> Option<()>,
 ) -> Option<()> {
-    let count = u64::from_le_bytes(take(bytes)?);
+    let count = take_count(bytes)?;
     let mut last = None;
     for _ in 0..count {
         let key = take_key(bytes)?;
