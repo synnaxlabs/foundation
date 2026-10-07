@@ -3,10 +3,7 @@
 use std::cmp::Ordering;
 
 use super::key_set::{self, KeySet};
-use super::{
-    Form, Frame, Path, Range, body_start, bounds, charge_of, end_of, lead, next_end,
-    padded, parts, to_u32, to_usize,
-};
+use super::{Form, Frame, Path, Range, bounds, lead, parts, to_u32, to_usize};
 use crate::channel;
 
 /// The entries of one key set that a reader wants, and the index of each. Made once
@@ -21,10 +18,8 @@ pub struct Mask {
 enum Held {
     /// Every entry of a key set that has at least one.
     Every,
-    /// At most half of the entries.
-    Only(Subset),
-    /// More than half of the entries, but not all, and the entries left out.
-    Most { held: Subset, left_out: Subset },
+    /// Some of the entries, or none.
+    Listed(Subset),
 }
 
 /// Sorted entries, and the sorted groups whose index is among them.
@@ -64,22 +59,10 @@ impl Mask {
             .collect();
         entries.sort_unstable();
         entries.dedup();
-        let len = set.entries().len();
-        let held = if !entries.is_empty() && entries.len() == len {
+        let held = if !entries.is_empty() && entries.len() == set.entries().len() {
             Held::Every
-        } else if 2 * entries.len() > len {
-            // The complement costs O(k), and k < 2 * entries.len() <= 4m.
-            let mut left_out = Vec::with_capacity(len - entries.len());
-            let mut held = entries.iter().peekable();
-            left_out.extend(
-                (0..to_u32(len)).filter(|entry| held.next_if_eq(&entry).is_none()),
-            );
-            Held::Most {
-                held: Subset::new(set, entries),
-                left_out: Subset::new(set, left_out),
-            }
         } else {
-            Held::Only(Subset::new(set, entries))
+            Held::Listed(Subset::new(set, entries))
         };
         Self {
             set: set.key(),
@@ -90,7 +73,7 @@ impl Mask {
     /// Whether the mask holds no entry: the reader wants nothing of the key set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        matches!(&self.held, Held::Only(held) if held.entries.is_empty())
+        matches!(&self.held, Held::Listed(held) if held.entries.is_empty())
     }
 }
 
@@ -142,11 +125,7 @@ impl<'a> View<'a> {
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
         match &self.mask.held {
-            Held::Only(held) | Held::Most { held, .. }
-                if held.groups.binary_search(&group).is_err() =>
-            {
-                None
-            }
+            Held::Listed(held) if held.groups.binary_search(&group).is_err() => None,
             _ => self.frame.range(group),
         }
     }
@@ -156,7 +135,7 @@ impl<'a> View<'a> {
     /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
     /// mask's entries.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &'a [u8])> + use<'a> {
-        let (Held::Only(held) | Held::Most { held, .. }) = &self.mask.held else {
+        let Held::Listed(held) = &self.mask.held else {
             return Series::Every(self.frame.iter());
         };
         let (_, descriptors, body) = parts(&self.frame.0);
@@ -164,68 +143,6 @@ impl<'a> View<'a> {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
         }))
-    }
-
-    /// The charge of a frame of only the view's series (CREDIT RULES): what a remote
-    /// complete reader spends. Equal to [`Frame::charge`] when the mask holds every
-    /// present series. Time is constant when the mask holds every entry, else
-    /// O(m log n) for the smaller m and larger n of the frame's series and the shorter
-    /// of the mask's entries and the entries it leaves out.
-    #[must_use]
-    pub fn charge(&self) -> u64 {
-        charge_of(self.len())
-    }
-
-    /// The length of a frame of only the view's series.
-    fn len(&self) -> usize {
-        match &self.mask.held {
-            Held::Every => self.frame.0.len(),
-            Held::Only(held) => self.len_of(held),
-            Held::Most { left_out, .. } => self.len_without(left_out),
-        }
-    }
-
-    /// The length of a frame of only the series of `held`.
-    fn len_of(&self, held: &Subset) -> usize {
-        let (ranges, descriptors, _) = parts(&self.frame.0);
-        let groups = Join::new(ranges, &held.groups).count();
-        let (mut series, mut bytes) = (0, 0);
-        for n in Join::new(descriptors, &held.entries) {
-            let (start, end) = bounds(descriptors, n);
-            series += 1;
-            bytes = next_end(bytes, end - start);
-        }
-        body_start(groups, series) + bytes
-    }
-
-    /// The length of the frame without the series of `left_out`.
-    fn len_without(&self, left_out: &Subset) -> usize {
-        let (ranges, descriptors, body) = parts(&self.frame.0);
-        let groups = Join::new(ranges, &left_out.groups).count();
-        let (mut series, mut bytes) = (0, 0);
-        // The left-out series from `run` to `next` are the last consecutive ones.
-        let (mut run, mut next) = (0, 0);
-        for n in Join::new(descriptors, &left_out.entries) {
-            let (start, end) = bounds(descriptors, n);
-            series += 1;
-            bytes += padded(end - start);
-            if n != next {
-                run = n;
-            }
-            next = n + 1;
-        }
-        // The last kept series ends the view, without its padding.
-        let kept = if next == descriptors.len() {
-            run
-        } else {
-            descriptors.len()
-        };
-        let tail = descriptors[..kept].last().map_or(0, |&last| {
-            let end = end_of(last);
-            padded(end) - end
-        });
-        let start = body_start(ranges.len() - groups, descriptors.len() - series);
-        start + padded(body.len()) - bytes - tail
     }
 }
 
@@ -277,7 +194,7 @@ impl<const N: usize> Iterator for Join<'_, N> {
 
     #[expect(
         clippy::inline_always,
-        reason = "as a call, it made a narrow or half charge 12% to 56% slower"
+        reason = "as a call, it made a narrow walk about 30% slower"
     )]
     #[inline(always)]
     fn next(&mut self) -> Option<usize> {
@@ -299,21 +216,6 @@ impl<const N: usize> Iterator for Join<'_, N> {
                 }
             }
         }
-    }
-
-    #[expect(
-        clippy::inline_always,
-        reason = "the default calls `fold` out of line, and the charge then saves \
-                  three more register pairs on each call: a narrow charge about 12% \
-                  slower"
-    )]
-    #[inline(always)]
-    fn count(mut self) -> usize {
-        let mut count = 0;
-        while self.next().is_some() {
-            count += 1;
-        }
-        count
     }
 }
 
@@ -340,23 +242,12 @@ mod tests {
     use crate::frame::Draft;
     use crate::frame::key_set::Group;
     use crate::frame::tests::{Case, cases, frame_of, interner, key, pool, two_groups};
-    use crate::sample::{Scalar, Type};
 
     /// The entries of `set` that `mask` holds.
     fn held(set: &KeySet, mask: &Mask) -> Vec<usize> {
         match &mask.held {
             Held::Every => (0..set.entries().len()).collect(),
-            Held::Only(held) | Held::Most { held, .. } => {
-                held.entries.iter().map(|&n| to_usize(n)).collect()
-            }
-        }
-    }
-
-    /// The entries that `mask` lists as left out.
-    fn left_out(mask: &Mask) -> Option<&[u32]> {
-        match &mask.held {
-            Held::Most { left_out, .. } => Some(&left_out.entries),
-            _ => None,
+            Held::Listed(held) => held.entries.iter().map(|&n| to_usize(n)).collect(),
         }
     }
 
@@ -410,22 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn lists_the_entries_that_a_mask_of_most_leaves_out() {
-        let set = two_groups();
-        let mask = Mask::new(&set, [1, 3, 4].map(Slot::new));
-        assert_eq!(left_out(&mask), Some([1].as_slice()));
-        assert_eq!(held(&set, &mask), [0, 2, 3]);
-    }
-
-    #[test]
-    fn lists_none_left_out_when_it_holds_half() {
-        let set = two_groups();
-        let mask = Mask::new(&set, [Slot::new(2)]);
-        assert_eq!(left_out(&mask), None);
-        assert_eq!(held(&set, &mask), [0, 1]);
-    }
-
-    #[test]
     fn reads_as_the_frame_of_only_the_held_series() {
         let set = two_groups();
         let frame = full(&set);
@@ -439,128 +314,6 @@ mod tests {
         assert_eq!(view.range(0), None);
         assert_eq!(view.range(1), frame.range(1));
         assert_eq!(view.range(1), Some(Range::default()));
-    }
-
-    /// The charge of a frame of `len` bytes.
-    fn charge(len: usize) -> u64 {
-        u64::try_from(block::footprint(len)).unwrap()
-    }
-
-    /// One range, two descriptors, and 5 bytes, 3 of padding, and 1 byte of series.
-    #[test]
-    fn charges_a_frame_of_only_its_series() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask::new(&set, [Slot::new(4)]);
-        let view = View::new(&frame, &mask);
-        assert_eq!(view.len(), 16 + 16 + 2 * 8 + 8 + 1);
-        assert_eq!(view.charge(), charge(view.len()));
-    }
-
-    /// Two ranges, three descriptors, and 3 bytes and 5 of padding, 5 bytes and 3 of
-    /// padding, and 1 byte.
-    #[test]
-    fn charges_a_view_that_leaves_out_a_middle_series() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask::new(&set, [1, 3, 4].map(Slot::new));
-        let view = View::new(&frame, &mask);
-        assert_eq!(view.len(), 89);
-        assert_eq!(view.charge(), charge(89));
-    }
-
-    /// Two ranges, three descriptors, and 3 bytes and 5 of padding, 10 bytes and 6 of
-    /// padding, and 5 bytes.
-    #[test]
-    fn charges_a_view_that_leaves_out_the_last_series() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask::new(&set, [1, 2, 3].map(Slot::new));
-        assert_eq!(left_out(&mask), Some([3].as_slice()));
-        let view = View::new(&frame, &mask);
-        assert_eq!(view.len(), 101);
-        assert_eq!(view.charge(), charge(101));
-    }
-
-    /// Three groups: index 1 with 2 and 3, index 4 with 5, and index 6 alone. The view
-    /// leaves out the third group, and its frame fills a size class to the byte.
-    #[test]
-    fn charges_a_view_that_leaves_out_a_present_group() {
-        const F64: Type = Type::Scalar(Scalar::F64);
-        let set = interner().intern(&[
-            Group {
-                index: key(1),
-                data: &[(key(2), F64), (key(3), F64)],
-            },
-            Group {
-                index: key(4),
-                data: &[(key(5), F64)],
-            },
-            Group {
-                index: key(6),
-                data: &[],
-            },
-        ]);
-        let series = [(0, 8), (1, 8), (2, 8), (3, 8), (4, 136), (5, 8)];
-        let frame = |series| {
-            let draft = Draft::new(&pool(1 << 16), &set, Form::Raw, series).unwrap();
-            draft.freeze(Path::Live)
-        };
-        let (whole, narrow) = (frame(&series), frame(&series[..5]));
-        let mask = Mask::new(&set, [2, 3, 5].map(Slot::new));
-        assert_eq!(left_out(&mask), Some([5].as_slice()));
-        let view = View::new(&whole, &mask);
-        assert_eq!(view.len(), 256);
-        assert_eq!(narrow.0.len(), 256);
-        assert_eq!(view.charge(), charge(256));
-        assert_ne!(view.charge(), whole.charge());
-    }
-
-    /// One range, five descriptors, four series of 8 bytes, and 3 bytes. The view
-    /// leaves out the last two series, so it ends at the 3 bytes.
-    #[test]
-    fn charges_a_view_that_leaves_out_the_last_two_series() {
-        const F64: Type = Type::Scalar(Scalar::F64);
-        let data: Vec<_> = (2..8).map(|n| (key(n), F64)).collect();
-        let set = interner().intern(&[Group {
-            index: key(1),
-            data: &data,
-        }]);
-        let series = [(0, 8), (1, 8), (2, 8), (3, 8), (4, 3), (5, 8), (6, 8)];
-        let frame = |series| {
-            let draft = Draft::new(&pool(1 << 16), &set, Form::Raw, series).unwrap();
-            draft.freeze(Path::Live)
-        };
-        let (whole, narrow) = (frame(&series), frame(&series[..5]));
-        let mask = Mask::new(&set, (2..6).map(Slot::new));
-        assert_eq!(left_out(&mask), Some([5, 6].as_slice()));
-        let view = View::new(&whole, &mask);
-        assert_eq!(view.len(), 16 + 16 + 5 * 8 + 4 * 8 + 3);
-        assert_eq!(view.len(), narrow.0.len());
-        assert_eq!(view.charge(), charge(view.len()));
-    }
-
-    /// Only the left-out list gives 89: the held list here is empty.
-    #[test]
-    fn charges_a_mask_of_most_by_the_entries_it_leaves_out() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask {
-            set: set.key(),
-            held: Held::Most {
-                held: Subset::new(&set, Vec::new()),
-                left_out: Subset::new(&set, vec![1]),
-            },
-        };
-        assert_eq!(View::new(&frame, &mask).len(), 89);
-    }
-
-    #[test]
-    fn charges_the_whole_frame_through_a_full_mask() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask::new(&set, [1, 2, 3, 4].map(Slot::new));
-        assert_eq!(View::new(&frame, &mask).charge(), frame.charge());
     }
 
     #[test]
@@ -641,13 +394,6 @@ mod tests {
             prop_assert_eq!(mask.is_empty(), expected.is_empty());
             let every = !expected.is_empty() && expected.len() == entries;
             prop_assert_eq!(matches!(mask.held, Held::Every), every);
-            let others: Vec<u32> = (0..to_u32(entries))
-                .filter(|&entry| !expected.contains(&to_usize(entry)))
-                .collect();
-            if let Some(left_out) = left_out(&mask) {
-                prop_assert_eq!(left_out, others.as_slice());
-                prop_assert!(left_out.len() < expected.len(), "the shorter list");
-            }
         }
 
         #[test]
@@ -668,25 +414,6 @@ mod tests {
             for (group, &index) in (0..).zip(set.groups()) {
                 let range = frame.range(group).filter(|_| held.contains(&index));
                 prop_assert_eq!(view.range(group), range, "group {}", group);
-            }
-        }
-
-        /// The oracle for the charge: a frame that `Draft` makes of the view's series.
-        #[test]
-        fn view_charges_the_frame_of_its_series((case, wanted) in masked()) {
-            let (set, frame) = frame_of(&case);
-            let mask = Mask::new(&set, slots(&set, &wanted));
-            let view = View::new(&frame, &mask);
-            let series: Vec<(usize, usize)> =
-                view.iter().map(|(entry, bytes)| (entry, bytes.len())).collect();
-            let pool = pool(1 << 20);
-            let narrow = Draft::new(&pool, &set, frame.form(), &series)
-                .map_err(|error| TestCaseError::fail(error.to_string()))?
-                .freeze(frame.path());
-            prop_assert_eq!(view.len(), narrow.0.len());
-            prop_assert_eq!(view.charge(), narrow.charge());
-            if wanted.iter().all(|&wanted| wanted) {
-                prop_assert_eq!(view.charge(), frame.charge());
             }
         }
 

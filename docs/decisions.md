@@ -605,17 +605,14 @@ How to read this record:
   frame struct. Approved by the coordinator (#390).
 - **M2 (revised 2026-10-06)** Readers get a view: the frame plus a mask cached per
   key set and reader. The home routes by key set. A mask holds the index of each
-  channel it holds, so the series of a view make a frame, and `View::charge` is its
-  charge (CREDIT RULES). A mask is a sorted list of the entries it holds, or no list
-  when it holds every entry. A mask that holds more than half of its key set also
-  keeps a sorted list of the entries it leaves out. A view's walk grows with the
-  smaller of its frame's series and its mask's entries, and its charge with the
-  smaller of its frame's series and the shorter list (rule 11). A view borrows its
-  frame and mask, so making one takes no reference count. Lost: only the list of the
-  entries left out, walked as the runs of series between them, because near half
-  that walk is 20% to 74% slower than a walk of the held entries (#873). Approved by
-  the coordinator (#157). The list of entries left out (#755): approved at the gate
-  of PR #873.
+  channel it holds, so the series of a view make a frame. A mask is a sorted list of
+  the entries it holds, or no list when it holds every entry. A view's walk grows with
+  the smaller of its frame's series and its mask's entries (rule 11). A view borrows
+  its frame and mask, so making one takes no reference count. Approved by the
+  coordinator (#157). A view has no charge: a remote reader charges the frame it builds
+  (FRAME LAYOUT), so `View::charge` and the list of the entries a mask leaves out,
+  which only the charge used, are gone (architect, #1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -651,7 +648,14 @@ How to read this record:
   1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
   body at its `(tag, end)` pairs and panics on ends that do not fit. Copy mode runs
   `frame::check` once where remote records enter (X43). Decided by the coordinator
-  (#306).
+  (#306). A frame from another node is built from its ends (HUB WIRE):
+  `Layout::from_ends` checks them before a block is taken, and `Draft::body_mut` takes
+  the body as it arrives. `frame::ends` gives the ends of series of given lengths, so
+  the rule of 8 has one home. Both nodes charge such a frame with
+  `frame::charge(series, body_len)`, one function on each side, so the charges are
+  equal by construction; a `Layout::charge` would be a second way. Decided by the
+  architect (#1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -2509,6 +2513,13 @@ How to read this record:
   length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
   lost: it clones the count for every view, and nothing needs a range yet. Decided
   by `memory`.
+  Amended (2026-10-07, #1068): `block::footprint(len)` gives `usize::MAX` when `len`
+  passes the largest payload, in place of a panic. No pool holds such a block, so
+  every budget refuses it, and `frame::charge` of ends from a hostile peer passes
+  every grant with no rule of its own. Lost: an exported largest payload with a new
+  `Error` variant, a second check of a limit that `block` owns. Decided by the
+  architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156).
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
