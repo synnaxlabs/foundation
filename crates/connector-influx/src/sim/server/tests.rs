@@ -58,7 +58,8 @@ impl Network {
         let handle = server
             .shards()
             .start(shard("server"), move |tasks| async move {
-                drop(serve(listener, tasks, held, "edge".into()).await);
+                let error = serve(listener, tasks, held, "edge".into()).await;
+                panic!("the listener failed: {error}");
             })
             .expect("the shard starts");
         Self {

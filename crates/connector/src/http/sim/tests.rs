@@ -87,7 +87,8 @@ impl Network {
         let handle = server
             .shards()
             .start(shard("server"), move |tasks| async move {
-                drop(serve(listener, tasks, answer).await);
+                let error = serve(listener, tasks, answer).await;
+                panic!("the listener failed: {error}");
             })
             .expect("the shard starts");
         Self {
@@ -279,13 +280,10 @@ fn answers_an_http_1_0_request_and_ends_the_stream() {
 }
 
 #[test]
-fn resets_a_stream_whose_body_ends_early_and_answers_nothing() {
+fn answers_a_body_that_ends_early_with_400_and_nothing_reaches_answer() {
     const REQUEST: &[u8] = b"POST /a HTTP/1.1\r\ncontent-length: 30\r\n\r\nabc";
     let mut network = Network::new();
-    assert_eq!(
-        network.exchange(REQUEST, true),
-        End::Failed("10.0.0.2:8086 reset the stream".into())
-    );
+    assert_eq!(network.exchange(REQUEST, true), End::Closed(REFUSED.into()));
     assert_eq!(network.seen(), [""; 0]);
 }
 
@@ -322,7 +320,21 @@ fn answers_a_content_length_that_is_not_one_number_with_400() {
         b"POST /a HTTP/1.1\r\ncontent-length: 3\r\ncontent-length: 4\r\n\r\nabcd",
     ] {
         let mut network = Network::new();
-        let request: &'static [u8] = Box::leak(request.into());
+        assert_eq!(
+            network.exchange(request, false),
+            End::Closed(REFUSED.into())
+        );
+        assert_eq!(network.seen(), [""; 0]);
+    }
+}
+
+#[test]
+fn answers_a_chunked_body_that_breaks_http_with_400_and_ends_the_stream() {
+    for request in [
+        &b"POST /a HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\nzz\r\nabc\r\n0\r\n\r\n"[..],
+        b"POST /a HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabcXX0\r\n\r\n",
+    ] {
+        let mut network = Network::new();
         assert_eq!(
             network.exchange(request, false),
             End::Closed(REFUSED.into())
@@ -350,16 +362,65 @@ fn answers_a_chunked_body_whole() {
 fn answers_a_content_encoding_with_415_and_keeps_the_stream() {
     const REQUEST: &[u8] = b"POST /a HTTP/1.1\r\ncontent-encoding: gzip\r\n\
         content-length: 1\r\n\r\n1\
+        POST /c HTTP/1.1\r\ncontent-encoding: identity\r\ncontent-encoding: gzip\r\n\
+        content-length: 1\r\n\r\n3\
         POST /b HTTP/1.1\r\ncontent-encoding: Identity\r\ncontent-length: 1\r\n\r\n2";
     let text = "the server decodes no content-encoding, not \"gzip\"";
+    let refused = format!(
+        "HTTP/1.1 415 Unsupported Media Type\r\ncontent-length: {}\r\n\r\n{text}",
+        text.len()
+    );
     let mut network = Network::new();
     assert_eq!(
         network.exchange(REQUEST, true),
         End::Closed(format!(
-            "HTTP/1.1 415 Unsupported Media Type\r\ncontent-length: {}\r\n\r\n{text}\
-             HTTP/1.1 200 OK\r\ncontent-length: 18\r\n\r\nPOST /b HTTP/1.1 2",
-            text.len()
+            "{refused}{refused}HTTP/1.1 200 OK\r\ncontent-length: 18\r\n\r\n\
+             POST /b HTTP/1.1 2"
         ))
     );
     assert_eq!(network.seen(), ["POST /b HTTP/1.1 2"]);
+}
+
+#[test]
+fn answers_a_head_with_too_many_headers_with_431_and_ends_the_stream() {
+    let mut request = b"GET /a HTTP/1.1\r\n".to_vec();
+    for _ in 0..101 {
+        request.extend_from_slice(b"x: 1\r\n");
+    }
+    request.extend_from_slice(b"\r\n");
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(request.leak(), false),
+        End::Closed(
+            "HTTP/1.1 431 Request Header Fields Too Large\r\nconnection: close\r\n\
+             content-length: 0\r\n\r\n"
+                .into()
+        )
+    );
+    assert_eq!(network.seen(), [""; 0]);
+}
+
+#[test]
+fn answers_a_uri_that_is_too_long_with_414_and_ends_the_stream() {
+    let request = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(70_000));
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(request.into_bytes().leak(), false),
+        End::Closed(
+            "HTTP/1.1 414 URI Too Long\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+                .into()
+        )
+    );
+    assert_eq!(network.seen(), [""; 0]);
+}
+
+#[test]
+fn ends_the_stream_of_an_http2_preface_with_no_answer() {
+    const REQUEST: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(REQUEST, false),
+        End::Failed("10.0.0.2:8086 reset the stream".into())
+    );
+    assert_eq!(network.seen(), [""; 0]);
 }
