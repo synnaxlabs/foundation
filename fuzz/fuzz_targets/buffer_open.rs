@@ -704,7 +704,8 @@ async fn check(
     used: usize,
 ) {
     // The blocks taken after the open when no edit changed the ring. An open writes
-    // its restart record over the build's when the build took no batch.
+    // its restart record over the build's when the build took no batch. No input
+    // fills the area without a batch, so the `wal` unit tests own that case.
     let used = input
         .edits
         .is_empty()
