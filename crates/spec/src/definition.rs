@@ -92,7 +92,8 @@ pub enum Definition {
     Time(time::Policy),
 }
 
-/// The kind of a definition, which its tree key names.
+/// The kind of a definition. Its tree key names it, except for a connector, which is at
+/// its own name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// An access policy.
