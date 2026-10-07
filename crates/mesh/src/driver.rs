@@ -113,7 +113,6 @@ impl Mesh {
         }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
         let unapplied = joins(&stored.entries).collect();
-        let synced = stored.entries.last().map(|entry| entry.at);
         let start = Start {
             hard: stored.hard,
             voters: Voters {
@@ -138,7 +137,7 @@ impl Mesh {
             proposals: Vec::new(),
             slots: 0,
             unapplied,
-            synced: synced.unwrap_or_default(),
+            synced: Position::default(),
             waits: None,
         }));
         let weak = Rc::downgrade(&group);
@@ -2266,6 +2265,32 @@ mod tests {
                 assert_eq!(mesh.receive(public(4), reply(4)), Ok(()));
                 let spoofed = Error::Spoofed { from: key(6) };
                 assert_eq!(mesh.receive(public(6), reply(6)), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_join_after_the_synced_entry_gives_its_key_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let homes = append(common::TERM, changes(&[home(1), home(1)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, homes)), Ok(()));
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let mut data = changes(&[join(4), home(1)]).into_iter();
+                let entries = [3, 4].map(|index| Entry {
+                    at: at(index),
+                    data: data.next().unwrap(),
+                });
+                let next = Body::Append {
+                    prev: at(2),
+                    entries: entries.into(),
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, next)), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply), Ok(()));
             });
         }
 
