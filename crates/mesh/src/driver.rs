@@ -195,7 +195,10 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
     ///   voter of this node's configuration.
-    /// - [`Error::Claim`] when a claim in the message does not hold.
+    /// - [`Error::Claim`] when a claim of a known signer in the message does not
+    ///   hold. A claim of a signer with no key at this node is not an error: a voter
+    ///   of the proof with no key is removed, and an append is cut before the first
+    ///   entry with a claim of such a signer, so the group takes the shorter run.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
@@ -2008,7 +2011,7 @@ mod tests {
 
     mod unapplied {
         use super::*;
-        use crate::common::proven_at;
+        use crate::common::{TERM, proven_at};
 
         fn later() -> Term {
             Term(common::TERM.0 + 1)
@@ -2040,11 +2043,12 @@ mod tests {
             bytes.collect()
         }
 
-        /// A change to `incoming` and `outgoing` by leader 2, with the votes of 1,
-        /// 2 and 3, and no signature yet.
-        fn voters(incoming: &[u8], outgoing: &[u8]) -> Data {
+        /// A change to `incoming` and `outgoing` by leader 2 in `term`, with the
+        /// votes of 1, 2 and 3, and no signature yet.
+        fn voters(term: Term, incoming: &[u8], outgoing: &[u8]) -> Data {
             let keys = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
-            let proof = proven(2, 1, Body::HeartbeatReply).proof;
+            let votes = [1, 2, 3].map(|voter| (voter, voter));
+            let proof = proven_at(2, 1, term, &votes, Body::HeartbeatReply).proof;
             Data::Voters(raft::Change {
                 voters: Voters {
                     incoming: keys(incoming),
@@ -2073,7 +2077,10 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 let mut data = changes(&[join(4)]);
-                data.extend([voters(&[2, 4], &[2, 3]), voters(&[2, 4], &[])]);
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
                 write(&mesh, data).await;
                 let proven = heartbeat(4, later(), &[(2, 2), (4, 4)]);
                 assert_eq!(mesh.receive(public(4), proven), Ok(()));
@@ -2086,7 +2093,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 let mut data = changes(&[join(4)]);
-                data.push(voters(&[2, 4], &[2, 3]));
+                data.push(voters(TERM, &[2, 4], &[2, 3]));
                 write(&mesh, data).await;
                 let answer = mesh.answer(public(4), home(1)).await;
                 let leader = Some(key(2));
@@ -2212,7 +2219,10 @@ mod tests {
                 forged.card.card.public_key = public(5);
                 write(&mesh, changes(&[Change::Join(forged)])).await;
                 let mut data = changes(&[join(4)]);
-                data.extend([voters(&[2, 4], &[2, 3]), voters(&[2, 4], &[])]);
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
                 let entries = iter::zip(2.., data)
                     .map(|(index, data)| Entry {
                         at: Position {
@@ -2251,7 +2261,10 @@ mod tests {
                 forged.card.card.public_key = public(5);
                 write(&mesh, changes(&[Change::Join(forged)])).await;
                 let mut data = changes(&[join(4)]);
-                data.extend([voters(&[2, 3, 4], &[2, 3]), voters(&[2, 3, 4], &[])]);
+                data.extend([
+                    voters(later(), &[2, 3, 4], &[2, 3]),
+                    voters(later(), &[2, 3, 4], &[]),
+                ]);
                 let replace = append(later(), data);
                 let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
                 assert_eq!(mesh.receive(public(3), replace), Ok(()));
@@ -3880,5 +3893,333 @@ mod tests {
             .for_each(|message| queue.push(message));
         let expected: Vec<_> = (1..=64).map(heartbeat).collect();
         assert_eq!(Vec::from(queue.messages), expected);
+    }
+
+    /// An append that the check cuts before an entry with a claim of a node whose
+    /// join is in the same run.
+    mod cut {
+        use super::*;
+        use crate::common::proven_at;
+
+        fn at(term: u64, index: u64) -> Position {
+            Position {
+                term: Term(term),
+                index,
+            }
+        }
+
+        /// The configuration entry `voters` that `leader` wrote at `at` with the
+        /// votes of `voted`, signed as the leader signs it.
+        fn change(leader: u8, at: Position, voters: Voters, voted: &[u8]) -> Entry {
+            let signed: Vec<_> = voted.iter().map(|&voter| (voter, voter)).collect();
+            let proven = proven_at(leader, 1, at.term, &signed, Body::HeartbeatReply);
+            let entry = Entry {
+                at,
+                data: Data::Voters(raft::Change {
+                    voters,
+                    votes: proven.proof.unwrap(),
+                    signature: None,
+                }),
+            };
+            let mut ready = Ready {
+                entries: vec![entry],
+                ..Ready::default()
+            };
+            common::signer(leader).sign(&mut ready);
+            ready.entries.remove(0)
+        }
+
+        fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+            Voters {
+                incoming: incoming.iter().map(|&id| key(id)).collect(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            }
+        }
+
+        fn bytes(at: Position, change: &Change) -> Entry {
+            Entry {
+                at,
+                data: Data::Bytes(encoded(change)),
+            }
+        }
+
+        fn empty(at: Position) -> Entry {
+            Entry {
+                at,
+                data: Data::Empty,
+            }
+        }
+
+        /// The log of a region whose founders are 1, 2 and 3. Leader 2 of term 4
+        /// admits node 4 and makes it a voter. Leader 2 of term 5, which 2, 3 and 4
+        /// elected, removes it as a voter. Leader 3 of term 6 starts its term.
+        fn history() -> Vec<Entry> {
+            vec![
+                empty(at(4, 1)),
+                bytes(at(4, 2), &ticket()),
+                bytes(at(4, 3), &join(4)),
+                change(2, at(4, 4), voters(&[1, 2, 3, 4], &[1, 2, 3]), &[2, 3]),
+                change(2, at(4, 5), voters(&[1, 2, 3, 4], &[]), &[2, 3]),
+                empty(at(5, 6)),
+                change(2, at(5, 7), voters(&[1, 2, 3], &[1, 2, 3, 4]), &[2, 3, 4]),
+                change(2, at(5, 8), voters(&[1, 2, 3], &[]), &[2, 3, 4]),
+                empty(at(6, 9)),
+            ]
+        }
+
+        /// The append of `entries` after `prev` from leader 3 of term 6, which 2
+        /// and 3 elected, to node `to`.
+        fn append(
+            to: u8,
+            prev: Position,
+            entries: Vec<Entry>,
+            commit: u64,
+        ) -> raft::Message {
+            let body = Body::Append {
+                prev,
+                entries,
+                commit,
+            };
+            proven_at(3, to, Term(6), &[(2, 2), (3, 3)], body)
+        }
+
+        /// Gives `mesh` the append of `entries` after `prev` from leader 3, and the
+        /// body of the reply.
+        async fn take(
+            mesh: &Mesh,
+            prev: Position,
+            entries: Vec<Entry>,
+            commit: u64,
+        ) -> Body {
+            let append = append(1, prev, entries, commit);
+            assert_eq!(mesh.receive(public(3), append), Ok(()));
+            let reply = mesh.outgoing(key(3)).await.unwrap();
+            assert_eq!(
+                (reply.from, reply.to, reply.term),
+                (key(1), key(3), Term(6))
+            );
+            reply.body
+        }
+
+        /// The entries in the log of `node`, which had a power cut.
+        fn stored(sim: &mut Sim, node: &sim::node::Node) -> Vec<Entry> {
+            sim.run_on(node, |node, _| async move {
+                let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                    .await
+                    .unwrap();
+                stored.entries
+            })
+            .unwrap()
+        }
+
+        /// Runs `body` on node 1, and gives the entries its log then holds.
+        fn solo_stored<F: Future<Output = ()> + 'static>(
+            body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+        ) -> Vec<Entry> {
+            let mut sim = Sim::new(sim::Config::default());
+            let node = sim.node(sim::node::Config::default());
+            sim.run_on(&node, body).unwrap();
+            sim.crash(&node, Crash::Power);
+            stored(&mut sim, &node)
+        }
+
+        // Node 1 was down from the start. It holds no entry, so its members are the
+        // founders. The leader sends it the log in one append, as `raft` does for a
+        // log of at most 64 entries. The node cuts the run before the first change
+        // with the vote of node 4, and takes the rest from there.
+        #[test]
+        fn a_founder_that_was_down_takes_the_log_of_a_leader_in_a_cut_and_the_rest() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let reply = take(&mesh, Position::default(), history(), 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 6 });
+                assert!(mesh.member(key(4)).is_some());
+                let rest = history().split_off(6);
+                let reply = take(&mesh, at(5, 6), rest, 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 9 });
+            });
+            assert_eq!(entries, history());
+        }
+
+        // The same log in two appends: the join of node 4 commits and applies before
+        // the append that holds the vote of node 4.
+        #[test]
+        fn a_founder_that_was_down_takes_the_same_log_in_two_appends() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut first = history();
+                let second = first.split_off(3);
+                let reply = take(&mesh, Position::default(), first, 3).await;
+                assert_eq!(reply, Body::AppendReply { last: 3 });
+                node.clock().sleep(TICK).await;
+                assert!(mesh.member(key(4)).is_some());
+                let reply = take(&mesh, at(4, 3), second, 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 9 });
+            });
+            assert_eq!(entries, history());
+        }
+
+        #[test]
+        fn a_forged_change_of_a_known_leader_before_the_cut_refuses_the_append() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut forged = history();
+                let Data::Voters(change) = &mut forged[3].data else {
+                    unreachable!()
+                };
+                change.signature.as_mut().unwrap().0[0] ^= 1;
+                let append = append(1, Position::default(), forged, 9);
+                let refused = Error::Claim(claim::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(3), append), Err(refused));
+                assert!(quiet(&mesh, 3).await);
+                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(mesh.member(key(4)), None);
+                let reply = take(&mesh, at(4, 3), Vec::new(), 0).await;
+                assert_eq!(reply, Body::AppendReject { hint: 0 });
+            });
+            assert_eq!(entries, []);
+        }
+
+        #[test]
+        fn a_cut_run_after_a_prev_the_node_does_not_hold_is_rejected() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let rest = history().split_off(3);
+                let reply = take(&mesh, at(4, 3), rest, 9).await;
+                assert_eq!(reply, Body::AppendReject { hint: 0 });
+                assert_eq!(mesh.member(key(4)), None);
+                let reply = take(&mesh, Position::default(), history(), 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 6 });
+                let rest = history().split_off(6);
+                let reply = take(&mesh, at(5, 6), rest, 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 9 });
+            });
+            assert_eq!(entries, history());
+        }
+
+        #[test]
+        fn the_commit_after_a_cut_is_not_above_the_last_entry_kept() {
+            let mut whole = history();
+            whole.push(bytes(at(6, 10), &home(1)));
+            let expected = whole.clone();
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                assert_eq!(watch.next().await, Ok(None));
+                let reply = take(&mesh, Position::default(), whole.clone(), 10).await;
+                assert_eq!(reply, Body::AppendReply { last: 6 });
+                node.clock().sleep(TICK).await;
+                assert!(mesh.member(key(4)).is_some());
+                assert!(now(pin!(watch.next())).await.is_pending());
+                let rest = whole.split_off(6);
+                let reply = take(&mesh, at(5, 6), rest, 10).await;
+                assert_eq!(reply, Body::AppendReply { last: 10 });
+                assert_eq!(watch.next().await, Ok(Some(key(1))));
+            });
+            assert_eq!(entries, expected);
+        }
+
+        /// Sends each message for node 2 as one datagram, and records its body.
+        async fn send_recorded(
+            mesh: Mesh,
+            mut sender: udp::Sender,
+            bodies: Arc<Mutex<Vec<Body>>>,
+        ) -> ! {
+            loop {
+                let message = mesh.outgoing(key(2)).await.unwrap();
+                bodies.lock().unwrap().push(message.body.clone());
+                let contents = Message::Raft(message).encode();
+                let transmit = Transmit {
+                    destination: address(2),
+                    source: None,
+                    ecn: None,
+                    contents: &contents,
+                    segment: None,
+                };
+                poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+            }
+        }
+
+        /// Node `id` of a pair over UDP. Node 2 first takes the history from leader
+        /// 3, in two appends. Node 1 records the body of each message it sends.
+        async fn peer(
+            node: sim::node::Node,
+            tasks: Tasks,
+            id: u8,
+            bodies: Arc<Mutex<Vec<Body>>>,
+        ) -> ! {
+            let mesh = open(&node, &tasks, id, &IDS, &IDS).await.unwrap();
+            if id == 2 {
+                let mut first = history();
+                let second = first.split_off(3);
+                let head = append(2, Position::default(), first, 3);
+                assert_eq!(mesh.receive(public(3), head), Ok(()));
+                mesh.outgoing(key(3)).await.unwrap();
+                let tail = append(2, at(4, 3), second, 9);
+                assert_eq!(mesh.receive(public(3), tail), Ok(()));
+                mesh.outgoing(key(3)).await.unwrap();
+            }
+            let config = udp::Config {
+                local: address(id),
+                send_buffer_bytes: 1 << 20,
+                recv_buffer_bytes: 1 << 20,
+            };
+            let (sender, receiver) = node.net().udp(&config).unwrap();
+            let sending = mesh.clone();
+            tasks.spawn(async move {
+                if id == 1 {
+                    send_recorded(sending, sender, bodies).await;
+                } else {
+                    send(sending, sender, 1).await;
+                }
+            });
+            receive(mesh, receiver).await
+        }
+
+        // Node 2 holds the history and leads term 7 with the vote of node 1, which
+        // holds no entry. Its first append to node 1 is cut before index 7. With no
+        // proposal, node 1 holds the whole log of node 2 after the next heartbeat.
+        #[test]
+        fn a_follower_that_cut_a_run_holds_the_whole_log_after_the_next_heartbeat() {
+            let mut sim = Sim::new(sim::Config {
+                link: wide(link::Config::default()),
+                ..sim::Config::default()
+            });
+            let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            for (node, id) in nodes.iter().zip([1, 2]) {
+                let (own, bodies) = (node.clone(), Arc::clone(&bodies));
+                let config = env::shards::Config {
+                    name: format!("peer-{id}"),
+                    core: None,
+                };
+                let main =
+                    move |tasks| async move { peer(own, tasks, id, bodies).await };
+                drop(node.shards().start(config, main).unwrap());
+            }
+            sim.run_for(seconds(10)).unwrap();
+            let answers: Vec<_> = mem::take(&mut *bodies.lock().unwrap())
+                .into_iter()
+                .filter(|body| {
+                    matches!(body, Body::AppendReply { .. } | Body::AppendReject { .. })
+                })
+                .collect();
+            let expected = [
+                Body::AppendReject { hint: 0 },
+                Body::AppendReply { last: 6 },
+                Body::AppendReply { last: 10 },
+            ];
+            assert_eq!(answers[..3], expected, "{answers:?}");
+            assert_eq!(answers.last(), Some(&Body::AppendReply { last: 10 }));
+            for node in &nodes {
+                sim.crash(node, Crash::Power);
+            }
+            let [one, two] = nodes;
+            let (one, two) = (stored(&mut sim, &one), stored(&mut sim, &two));
+            assert_eq!(two[..9], history());
+            assert_eq!(two.len(), 10, "{two:?}");
+            assert_eq!(two[9].at.term, Term(7));
+            assert_eq!(one, two);
+        }
     }
 }
