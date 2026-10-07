@@ -1520,4 +1520,43 @@ mod tests {
         });
         assert_eq!(sim.run(), Ok(()));
     }
+
+    #[test]
+    fn a_recv_after_a_dropped_wait_and_a_drained_session_gives_the_end() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete, Class::Complete], Span::ZERO)
+                    .await;
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                side.session.close(Code(4));
+                let closed = Error::Closed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                let held = first.recv().await.expect("a message").expect("a block");
+                let mut second =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert!(poll_once(pin!(second.recv())).await.is_none());
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+                clock.sleep(spans(IDLE, 3)).await;
+                let mut read = pin!(second.recv());
+                let mut deadline = pin!(clock.sleep(Span::SECOND));
+                let read = poll_fn(|cx| {
+                    if let Poll::Ready(read) = read.as_mut().poll(cx) {
+                        return Poll::Ready(Some(bytes(read)));
+                    }
+                    deadline.as_mut().poll(cx).map(|()| None)
+                })
+                .await;
+                assert_eq!(read, Some(Err(closed)));
+                drop(held);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
 }

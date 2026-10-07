@@ -190,8 +190,7 @@ impl Transport {
     }
 }
 
-/// What a [`Transport`] counted since [`Transport::new`]. `node` publishes it on
-/// status channels.
+/// What a [`Transport`] counted since [`Transport::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
     /// The time that at least one stream read waited for a block from the shard's
