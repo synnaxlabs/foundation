@@ -28,6 +28,10 @@ sim = { path = "../sim" }
 name = "held"
 harness = false
 
+[[test]]
+name = "chunks"
+harness = false
+
 [[bench]]
 name = "send"
 harness = false
