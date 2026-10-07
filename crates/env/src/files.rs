@@ -1,6 +1,7 @@
 //! Files under one data directory.
 
 use std::cell::Cell;
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -395,6 +396,65 @@ impl File {
         result
     }
 
+    /// Makes the writes that ended before the call durable, as [`File::sync`], then
+    /// gives the file the name `to` in the same directory. It never replaces a file.
+    /// The errors of the handle then name `to`, and the handle keeps its hold: a write
+    /// open of `to` gives [`Error::Busy`] until the handle closes.
+    ///
+    /// The new name is not durable until [`Files::sync_dir`] on the directory ends. A
+    /// crash before then can undo the rename. A crash never leaves the file at both
+    /// names, nor at neither when its old name was durable.
+    ///
+    /// A drop of the future before it ends poisons the handle, as for [`File::sync`].
+    /// The rename can still end later, and then the file has the name `to`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Exists`] when `to` is there. Nothing changes.
+    /// - [`Error::NotFound`] when the path of the handle no longer names its file:
+    ///   another call removed or renamed the path. Nothing changes.
+    /// - The errors of [`File::sync`]. The file keeps its name.
+    /// - [`Error::Io`] for other failures, with the old path. A file system that cannot
+    ///   rename with no replace gives it (Linux: `EINVAL`).
+    ///
+    /// # Panics
+    ///
+    /// When the file was opened with [`Mode::Read`], or when `to` is absolute, has a
+    /// `..` segment, or is not a name in the directory of the file: in another
+    /// directory, empty, `.`, or ending in `/` or `/.`.
+    ///
+    /// ```
+    /// async fn publish(file: &mut env::files::File) -> Result<(), env::files::Error> {
+    ///     file.rename(std::path::Path::new("ring")).await
+    /// }
+    /// ```
+    pub async fn rename(&mut self, to: &Path) -> Result<(), Error> {
+        assert!(
+            self.mode != Mode::Read,
+            "rename {}, which was opened to read",
+            self.path.display()
+        );
+        check(to);
+        let bytes = to.as_os_str().as_encoded_bytes();
+        assert!(
+            matches!(to.components().next_back(), Some(Component::Normal(_)))
+                && !bytes.ends_with(b"/")
+                && !bytes.ends_with(b"/.")
+                && dir_of(to) == dir_of(&self.path),
+            "rename {} to {}, which is not a name in the directory of the file",
+            self.path.display(),
+            to.display()
+        );
+        self.sync().await?;
+        let mut unfinished = Unfinished(Some(&self.poisoned));
+        let result = self.descriptor.rename(&self.path, to).await;
+        unfinished.0 = None;
+        if result.is_ok() {
+            self.path = to.to_path_buf();
+        }
+        result
+    }
+
     /// Closes the file. The future ends after every call of this handle ends, those
     /// of dropped futures too, and the file is closed. A write open of the same path
     /// then succeeds, unless another handle holds the file. A drop closes the handle
@@ -462,6 +522,18 @@ impl Drop for Unfinished<'_> {
     }
 }
 
+/// The names of the directory of `path`: its names but the last, `.` dropped.
+fn dir_of(path: &Path) -> Vec<&OsStr> {
+    let mut names: Vec<&OsStr> = (path.components())
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    names.pop();
+    names
+}
+
 /// Panics on a path that leaves the data directory.
 fn check(path: &Path) {
     for component in path.components() {
@@ -510,6 +582,11 @@ pub enum Error {
         /// The path of the file.
         path: PathBuf,
     },
+    /// [`File::rename`] found a file or directory at its new name.
+    Exists {
+        /// The new name.
+        path: PathBuf,
+    },
     /// [`Mode::Create`] found a file of another length.
     Length {
         /// The path of the file.
@@ -550,6 +627,9 @@ impl fmt::Display for Error {
                 "file {} is open for writing in another handle",
                 path.display()
             ),
+            Self::Exists { path } => {
+                write!(f, "path {} is already there", path.display())
+            }
             Self::Length {
                 path,
                 expected,
@@ -599,6 +679,8 @@ pub enum Operation {
     ReadAt,
     /// [`File::sync`].
     Sync,
+    /// [`File::rename`].
+    Rename,
 }
 
 impl fmt::Display for Operation {
@@ -613,6 +695,7 @@ impl fmt::Display for Operation {
             Self::WriteAt => "write_at",
             Self::ReadAt => "read_at",
             Self::Sync => "sync",
+            Self::Rename => "rename",
         })
     }
 }
@@ -691,6 +774,13 @@ pub trait Descriptor {
 
     /// Makes the writes that ended before the call durable.
     fn sync(&self) -> Request<'_, ()>;
+
+    /// Renames `from` to `to` in one directory when `from` names this file, with no
+    /// replace, and keeps the holds of the file. It gives [`Error::NotFound`] when
+    /// `from` names another file or none, and [`Error::Exists`] when `to` is there,
+    /// and then changes nothing. After `Ok`, the errors of later calls name `to`.
+    /// [`File`] has checked the paths and made the writes durable.
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()>;
 
     /// Closes the file. The future ends after the calls of the descriptor end and the
     /// file is closed.
@@ -805,14 +895,55 @@ mod tests {
             Box::pin(async { self.sync.clone() })
         }
 
+        fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
+            self.record(format!("rename {} {}", from.display(), to.display()));
+            let result = match to.file_name().and_then(OsStr::to_str) {
+                Some("taken") => Err(Error::Exists { path: to.into() }),
+                Some("gone") => Err(Error::NotFound { path: from.into() }),
+                _ => Ok(()),
+            };
+            Box::pin(async { result })
+        }
+
         fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
             self.record("close".into());
             Box::pin(async {})
         }
     }
 
-    /// Never ends a sync.
-    struct Stuck;
+    /// A driver that hangs the call of `on` after `remaining` calls of it ended.
+    struct Stuck {
+        on: Operation,
+        remaining: Cell<u32>,
+    }
+
+    impl Stuck {
+        fn file(on: Operation) -> File {
+            Self::file_after(on, 0)
+        }
+
+        fn file_after(on: Operation, remaining: u32) -> File {
+            File {
+                descriptor: Box::new(Self {
+                    on,
+                    remaining: Cell::new(remaining),
+                }),
+                path: "ring/0".into(),
+                mode: Mode::Write,
+                poisoned: Cell::new(false),
+            }
+        }
+
+        fn request(&self, operation: Operation) -> Request<'_, ()> {
+            if self.on == operation {
+                if self.remaining.get() == 0 {
+                    return Box::pin(std::future::pending());
+                }
+                self.remaining.set(self.remaining.get() - 1);
+            }
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     impl Descriptor for Stuck {
         fn len(&self) -> u64 {
@@ -828,12 +959,25 @@ mod tests {
         }
 
         fn sync(&self) -> Request<'_, ()> {
-            Box::pin(std::future::pending())
+            self.request(Operation::Sync)
+        }
+
+        fn rename<'a>(&'a self, _: &'a Path, _: &'a Path) -> Request<'a, ()> {
+            self.request(Operation::Rename)
         }
 
         fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
             Box::pin(async {})
         }
+    }
+
+    /// Polls `future` once, which must leave it pending, and drops it.
+    fn drop_pending(future: impl Future) {
+        let mut future = Box::pin(future);
+        let poll = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert!(poll.is_pending(), "the future ended");
     }
 
     fn ready<T>(future: impl Future<Output = T>) -> T {
@@ -1087,22 +1231,188 @@ mod tests {
 
         #[test]
         fn poisons_the_file_when_dropped_before_it_ends() {
-            let file = File {
-                descriptor: Box::new(Stuck),
-                path: "ring/0".into(),
-                mode: Mode::Write,
-                poisoned: Cell::new(false),
-            };
-            let mut sync = Box::pin(file.sync());
-            let poll = sync.as_mut().poll(&mut Context::from_waker(Waker::noop()));
-            assert_eq!(poll, Poll::Pending);
-            drop(sync);
+            let file = Stuck::file(Operation::Sync);
+            drop_pending(file.sync());
             assert_eq!(
                 ready(file.write_at(0, &[])),
                 Err(Error::Poisoned {
                     path: "ring/0".into()
                 })
             );
+        }
+    }
+
+    mod rename {
+        use super::*;
+
+        fn poisoned(path: &str) -> Result<(), Error> {
+            Err(Error::Poisoned { path: path.into() })
+        }
+
+        #[test]
+        fn syncs_then_renames_and_the_handle_takes_the_new_path() {
+            let (files, calls) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            ready(file.rename(Path::new("ring/1"))).expect("the driver renames");
+            assert_eq!(calls.borrow()[1..], ["sync", "rename ring/0 ring/1"]);
+            ready(file.rename(Path::new("ring/2"))).expect("the driver renames");
+            assert_eq!(calls.borrow()[3..], ["sync", "rename ring/1 ring/2"]);
+        }
+
+        #[test]
+        fn accepts_a_current_directory_segment() {
+            let (files, calls) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            ready(file.rename(Path::new("./ring/1"))).expect("the driver renames");
+            assert_eq!(calls.borrow()[2], "rename ring/0 ./ring/1");
+        }
+
+        #[test]
+        fn an_error_after_the_rename_names_the_new_path() {
+            let mut file = Stuck::file_after(Operation::Sync, 1);
+            ready(file.rename(Path::new("ring/1"))).expect("the driver renames");
+            drop_pending(file.sync());
+            assert_eq!(ready(file.write_at(0, &[])), poisoned("ring/1"));
+        }
+
+        #[test]
+        fn a_poisoned_file_does_not_rename() {
+            let mut file = Stuck::file(Operation::Sync);
+            drop_pending(file.sync());
+            assert_eq!(ready(file.rename(Path::new("ring/1"))), poisoned("ring/0"));
+        }
+
+        #[test]
+        fn a_failed_sync_keeps_the_name_and_poisons() {
+            let (files, calls) = Fixed::with_sync(8, Err(io(Operation::Sync)));
+            let mut file = open(&files, Mode::Write);
+            assert_eq!(
+                ready(file.rename(Path::new("ring/1"))),
+                Err(io(Operation::Sync))
+            );
+            assert_eq!(
+                calls.borrow()[1..],
+                ["sync"],
+                "a failed sync reached rename"
+            );
+            assert_eq!(ready(file.rename(Path::new("ring/1"))), poisoned("ring/0"));
+        }
+
+        #[test]
+        fn exists_and_not_found_keep_the_name_and_do_not_poison() {
+            let (files, calls) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            assert_eq!(
+                ready(file.rename(Path::new("ring/taken"))),
+                Err(Error::Exists {
+                    path: "ring/taken".into()
+                })
+            );
+            assert_eq!(
+                ready(file.rename(Path::new("ring/gone"))),
+                Err(Error::NotFound {
+                    path: "ring/0".into()
+                })
+            );
+            ready(file.rename(Path::new("ring/1"))).expect("the driver renames");
+            assert_eq!(
+                calls.borrow()[1..],
+                [
+                    "sync",
+                    "rename ring/0 ring/taken",
+                    "sync",
+                    "rename ring/0 ring/gone",
+                    "sync",
+                    "rename ring/0 ring/1"
+                ]
+            );
+        }
+
+        #[test]
+        fn poisons_the_file_when_dropped_before_it_ends() {
+            let mut file = Stuck::file(Operation::Rename);
+            drop_pending(file.rename(Path::new("ring/1")));
+            assert_eq!(ready(file.write_at(0, &[])), poisoned("ring/0"));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0, which was opened to read")]
+        fn panics_on_a_file_opened_to_read() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Read);
+            drop(ready(file.rename(Path::new("ring/1"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to segments/0, which is not a name")]
+        fn panics_on_a_path_in_another_directory() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("segments/0"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename a to , which is not a name")]
+        fn panics_on_an_empty_path() {
+            let (files, _) = Fixed::files(8);
+            let mut file = ready(files.open(Path::new("a"), Mode::Write)).unwrap();
+            drop(ready(file.rename(Path::new(""))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to ring/1/, which is not a name")]
+        fn panics_on_a_trailing_slash() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("ring/1/"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to ring/1/., which is not a name")]
+        fn panics_on_a_trailing_dot() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("ring/1/."))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename a to ., which is not a name")]
+        fn panics_on_the_current_directory() {
+            let (files, _) = Fixed::files(8);
+            let mut file = ready(files.open(Path::new("a"), Mode::Write)).unwrap();
+            drop(ready(file.rename(Path::new("."))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to ./, which is not a name")]
+        fn panics_on_the_current_directory_with_a_slash() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("./"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "rename ring/0 to ring, which is not a name")]
+        fn panics_on_the_directory_of_the_file() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("ring"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "path /ring/1 is absolute")]
+        fn panics_on_an_absolute_path() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("/ring/1"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "path ring/../ring/1 has a `..` segment")]
+        fn panics_on_a_parent_segment() {
+            let (files, _) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            drop(ready(file.rename(Path::new("ring/../ring/1"))));
         }
     }
 
@@ -1216,6 +1526,15 @@ mod tests {
         #[test]
         fn names_create_dir() {
             assert_eq!(Operation::CreateDir.to_string(), "create_dir");
+        }
+
+        #[test]
+        fn says_the_new_name_is_taken() {
+            let e = Error::Exists {
+                path: "ring".into(),
+            };
+            assert_eq!(e.to_string(), "path ring is already there");
+            assert_eq!(Operation::Rename.to_string(), "rename");
         }
 
         #[test]

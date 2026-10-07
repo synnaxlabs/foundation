@@ -13,7 +13,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
@@ -403,6 +403,134 @@ where
     let (mut sim, handle) = start(seed, memory, main);
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
+}
+
+/// The result of a call to the memory driver, which ends at once.
+fn ready<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("a memory call ends at once"),
+    }
+}
+
+#[test]
+fn a_memory_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    let files = Memory::default().files();
+    let create = Mode::Create { len: 4_096 };
+    drop(ready(files.open(FilePath::new("b"), create)).unwrap());
+    let mut file = ready(files.open(FilePath::new("a"), create)).unwrap();
+    let found = ready(file.rename(FilePath::new("./b")));
+    assert_eq!(found, Err(FileError::Exists { path: "./b".into() }));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+    ready(file.rename(FilePath::new("./c"))).unwrap();
+    let reopened = ready(files.open(FilePath::new("c"), Mode::Read)).unwrap();
+    assert_eq!(reopened.len(), 4_096);
+}
+
+#[test]
+fn a_memory_path_spelled_with_a_dot_names_the_same_file_in_each_call() {
+    let memory = Memory::default();
+    let files = memory.files();
+    let create = Mode::Create { len: 4_096 };
+    let mut file = ready(files.open(FilePath::new("./a"), create)).unwrap();
+    drop(ready(files.open(FilePath::new("a"), create)).unwrap());
+    assert_eq!(memory.bytes("./a").len(), 4_096);
+    ready(file.rename(FilePath::new("b"))).unwrap();
+    ready(files.remove(FilePath::new("./b"))).unwrap();
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, Vec::<PathBuf>::new());
+}
+
+#[test]
+fn a_memory_path_with_a_trailing_slash_names_only_a_directory() {
+    let files = Memory::default().files();
+    drop(ready(files.open(FilePath::new("a"), Mode::Create { len: 1 })).unwrap());
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("a/", Mode::Write),
+        ("a/.", Mode::Read),
+        ("a//", Mode::Read),
+        ("a/", Mode::Create { len: 1 }),
+        ("b/", Mode::Create { len: 1 }),
+        ("b/", Mode::Read),
+        ("b/.", Mode::Read),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("a/"))));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(
+        names,
+        [PathBuf::from("a")],
+        "a refused remove keeps the file"
+    );
+    for path in ["b/", "a"] {
+        results.push(ready(files.remove(FilePath::new(path))));
+    }
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let expected = [
+        Err(io("a/", Operation::Open, 20)),
+        Err(io("a/.", Operation::Open, 20)),
+        Err(io("a//", Operation::Open, 20)),
+        Err(io("a/", Operation::Open, 21)),
+        Err(io("b/", Operation::Open, 21)),
+        Err(FileError::NotFound { path: "b/".into() }),
+        Err(FileError::NotFound { path: "b/.".into() }),
+        Err(io("a/", Operation::Remove, 20)),
+        Ok(()),
+        Ok(()),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_memory_path_of_the_data_directory_names_no_file() {
+    let files = Memory::default().files();
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("./", Mode::Read),
+        ("./", Mode::Write),
+        (".", Mode::Read),
+        (".", Mode::Create { len: 1 }),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("."))));
+    let expected = [
+        Err(io("./", Operation::Open, 21)),
+        Err(io("./", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Remove, 21)),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_memory_empty_path_names_no_file() {
+    let files = Memory::default().files();
+    let mut results = Vec::new();
+    for mode in [Mode::Read, Mode::Write, Mode::Create { len: 1 }] {
+        results.push(ready(files.open(FilePath::new(""), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new(""))));
+    let not_found = || FileError::NotFound { path: "".into() };
+    let expected = [Err(not_found()), Err(not_found()), Err(not_found()), Ok(())];
+    assert_eq!(results, expected);
+    assert_eq!(
+        ready(files.list(FilePath::new(""))).unwrap(),
+        Vec::<PathBuf>::new()
+    );
 }
 
 #[test]
@@ -3013,6 +3141,23 @@ fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
 }
 
 #[test]
+fn a_header_with_an_area_under_four_records_is_unfit() {
+    run(157, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = 3 * BLOCK;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area,
+            body_max: BODY_MAX,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
+    });
+}
+
+#[test]
 fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     let area = u64::MAX - 4095;
     assert_eq!(
@@ -3046,9 +3191,9 @@ fn each_open_starts_a_new_chain() {
 /// it has blocks opens and takes its largest record.
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
-    for area in [2 * BLOCK, AREA] {
+    for ring in [least(BODY_MAX), layout(AREA, BODY_MAX)] {
         run(24, Memory::default(), move |shard| async move {
-            let ring = layout(area, BODY_MAX);
+            let area = ring.area();
             for _ in 0..area / BLOCK {
                 drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
             }

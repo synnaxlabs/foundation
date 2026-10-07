@@ -63,6 +63,13 @@ state on `main`.
   it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
+- `types::hash` maps hash with no key (R16-7), so a peer that chooses keys freely can
+  make them collide. A peer must use its QUIC stream IDs in order, and `streams_max`
+  limits how many are open in each session, so a lookup in a stream map of one session
+  costs at most that many compares. Open: #1506 (the map of reads that wait for a block
+  holds the streams of each session of a carrier, so that bound does not hold for it). A
+  map keyed by a value that a peer chooses freely needs the keyed hasher of R16-7, which
+  is not built.
 - A key of small order needs no private key. `types::node::PublicKey::new` refuses
   each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
   `types`; the TLS check uses it.
@@ -134,12 +141,13 @@ state on `main`.
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
-  authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). Before it acts, `raft` checks the index a heartbeat or an append
-  answer names, the order of an append's entries, and that no entry is above the
-  append's term. A node that a change removed and that missed its release can win
-  an election once no voter has a lease, and lead until it commits the leave
-  (#483).
+  authenticates the sender and decides which nodes may send (RAFT SURFACE).
+  `Mesh::receive` refuses a message whose sender is not the peer that holds the
+  stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
+  `raft` checks the index a heartbeat or an append answer names, the order of an
+  append's entries, and that no entry is above the append's term. A node that a
+  change removed and that missed its release can win an election once no voter has
+  a lease, and lead until it commits the leave (#483).
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
@@ -148,17 +156,19 @@ state on `main`.
 - A node that may send to a group and lies could stop the group for good with one
   message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
-  VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
-  voter that lies can still break safety, because a false `AppendReply` counts as held,
-  so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed `AppendReply` is
-  #882.
+  VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
+  refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
+  A voter that lies can still break safety, because a false `AppendReply` counts as
+  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed
+  `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
   `raft` counts the keys of a proof, and `mesh::claim` checks each signature
-  against the voter's public key. Until the driver (#471) runs that check before
-  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
+  against the voter's public key. `Mesh::receive` runs that check before `step`, and
+  `Mesh::serve` runs it for each `raft` message of a one-way stream. No node serves
+  mesh streams yet (#471). `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
   and refuses a leader it cannot prove. It rejoins at the next election whose grants
   are a quorum of what it holds. When a second node fails before that, the group
@@ -198,7 +208,8 @@ state on `main`.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
   `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
-  it must come before); the `block_before_kept` inputs hold it.
+  it must come before); the `block_before_kept` inputs hold it. `config::check`
+  reads the documents into definitions. Fuzzed: `config_check`.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -311,6 +322,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, and each definition decodes to itself; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |

@@ -1,6 +1,6 @@
 //! A file driver over memory, a stand-in until `sim` has files (#114).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -79,9 +79,40 @@ impl Memory {
 
     fn file(&self, path: &str) -> Bytes {
         lock(&self.files)
-            .get(Path::new(path))
+            .get(&key(Path::new(path)))
             .cloned()
             .unwrap_or_else(|| panic!("no file at {path}"))
+    }
+}
+
+/// The key of `path` in the map: its spelling with each `.` segment dropped, so
+/// `./b` and `b` name one file, as on a disk.
+fn key(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|part| *part != Component::CurDir)
+        .collect()
+}
+
+/// Whether `path` ends in `/` or `/.`, as `a/` does. Such a path names only a
+/// directory. The driver gives `EISDIR` (21) on a create and `ENOTDIR` (20) on
+/// a file that is there, as a disk does for a path ending in `/`.
+fn slashed(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    bytes.ends_with(b"/") || bytes.ends_with(b"/.")
+}
+
+/// Whether `path` is the data directory itself by a `.` segment, as `.` or `./`
+/// is: a disk gives `EISDIR` on each file call. The empty path is not one: a disk
+/// finds no file at it, a create too.
+fn directory(path: &Path) -> bool {
+    !path.as_os_str().is_empty() && key(path).as_os_str().is_empty()
+}
+
+fn io(path: &Path, operation: Operation, code: i32) -> Error {
+    Error::Io {
+        path: path.into(),
+        operation,
+        code,
     }
 }
 
@@ -100,8 +131,16 @@ impl Driver for Memory {
         mode: Mode,
     ) -> Request<'a, Box<dyn Descriptor>> {
         let mut files = lock(&self.files);
-        let found = files.get(path).cloned();
+        let found = files.get(&key(path)).cloned();
         let result = match (found, mode) {
+            _ if path.as_os_str().is_empty() => {
+                Err(Error::NotFound { path: path.into() })
+            }
+            _ if directory(path) => Err(io(path, Operation::Open, 21)),
+            (_, Mode::Create { .. }) if slashed(path) => {
+                Err(io(path, Operation::Open, 21))
+            }
+            (Some(_), _) if slashed(path) => Err(io(path, Operation::Open, 20)),
             (Some(bytes), Mode::Create { len })
                 if to_u64(lock(&bytes).len()) != len =>
             {
@@ -114,7 +153,7 @@ impl Driver for Memory {
             (Some(bytes), _) => Ok(bytes),
             (None, Mode::Create { len }) => {
                 let bytes = Arc::new(Mutex::new(vec![0; to_usize(len)]));
-                files.insert(path.into(), Arc::clone(&bytes));
+                files.insert(key(path), Arc::clone(&bytes));
                 Ok(bytes)
             }
             (None, _) => Err(Error::NotFound { path: path.into() }),
@@ -123,7 +162,8 @@ impl Driver for Memory {
             self.opens.fetch_add(1, Relaxed);
             let open: Box<dyn Descriptor> = Box::new(Open {
                 bytes,
-                path: path.into(),
+                files: Arc::clone(&self.files),
+                path: Mutex::new(path.into()),
                 syncs_fail: Arc::clone(&self.syncs_fail),
                 syncs: Arc::clone(&self.syncs),
                 opens: Arc::clone(&self.opens),
@@ -145,8 +185,16 @@ impl Driver for Memory {
     }
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
-        lock(&self.files).remove(path);
-        Box::pin(async { Ok(()) })
+        let mut files = lock(&self.files);
+        let result = if directory(path) {
+            Err(io(path, Operation::Remove, 21))
+        } else if files.contains_key(&key(path)) && slashed(path) {
+            Err(io(path, Operation::Remove, 20))
+        } else {
+            files.remove(&key(path));
+            Ok(())
+        };
+        Box::pin(async { result })
     }
 
     fn sync_dir<'a>(&'a self, _: &'a Path) -> Request<'a, ()> {
@@ -160,7 +208,9 @@ impl Driver for Memory {
 
 struct Open {
     bytes: Bytes,
-    path: PathBuf,
+    files: Arc<Mutex<hash::Map<PathBuf, Bytes>>>,
+    /// The path of the file now: a rename changes it.
+    path: Mutex<PathBuf>,
     syncs_fail: Arc<AtomicBool>,
     syncs: Arc<AtomicU64>,
     opens: Arc<AtomicU64>,
@@ -200,7 +250,7 @@ impl Descriptor for Open {
         self.syncs.fetch_add(1, Relaxed);
         let result = if self.syncs_fail.load(Relaxed) {
             Err(Error::Io {
-                path: self.path.clone(),
+                path: lock(&self.path).clone(),
                 operation: Operation::Sync,
                 code: 5,
             })
@@ -214,6 +264,27 @@ impl Descriptor for Open {
             }
             result
         })
+    }
+
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
+        let mut files = lock(&self.files);
+        let (old, new) = (key(from), key(to));
+        let result = match files.get(&old) {
+            Some(bytes) if !Arc::ptr_eq(bytes, &self.bytes) => {
+                Err(Error::NotFound { path: from.into() })
+            }
+            None => Err(Error::NotFound { path: from.into() }),
+            Some(_) if files.contains_key(&new) => {
+                Err(Error::Exists { path: to.into() })
+            }
+            Some(_) => {
+                let bytes = files.remove(&old).expect("invariant: `from` was found");
+                files.insert(new, bytes);
+                *lock(&self.path) = to.into();
+                Ok(())
+            }
+        };
+        Box::pin(async { result })
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
