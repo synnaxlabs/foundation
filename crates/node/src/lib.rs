@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use env::thread::Handle;
 use types::frame::key_set::Interner;
-use types::time::Span;
+use types::time::{Span, Stamp};
 
 use crate::handoff::{Give, Take};
 use crate::stop::{Guard, Stop};
@@ -96,6 +96,11 @@ struct Shard {
 const BODY_MAX: usize = 1 << 20;
 /// The longest an entry waits for its group commit to start.
 const COMMIT: Span = Span::from_nanos(2_000_000);
+/// The stamps each home accepts, a patch until they are settings (#1285).
+const LIMITS: home::order::Limits = home::order::Limits {
+    earliest: Stamp::from_nanos(946_684_800_000_000_000),
+    ahead: Span::from_nanos(10_000_000_000),
+};
 
 impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
@@ -114,14 +119,20 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// If a shard's part of the budget needs more address space than a `usize` holds.
+    /// If a shard's part of the budget needs more address space than a `usize` holds,
+    /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let budget =
             u64::try_from(config.budget).expect("invariant: a usize fits a u64");
         let cores = config.shards.cores().get();
         match parts(budget, config.disk, cores) {
-            Ok(parts) => Self::spawn(config, parts),
+            Ok(parts) => {
+                let Ok(count) = u32::try_from(cores) else {
+                    panic!("the host has {cores} cores, more than a node numbers");
+                };
+                Self::spawn(config, parts.into_iter().zip(0..count))
+            }
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
@@ -140,10 +151,10 @@ impl Node {
         }
     }
 
-    /// Starts the shards of `config`, each with its part in `parts`.
+    /// Starts the shards of `config`, each with its part and its number in `parts`.
     fn spawn<M: block::Memory + 'static>(
         config: Config<M>,
-        parts: Vec<(block::Config, buffer::Layout)>,
+        parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
         let Config {
             shards,
@@ -157,15 +168,14 @@ impl Node {
         } = config;
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
-        let cores = shards.cores().get();
-        let (mesh, _reader) = clock::Clock::new(monotonic.clone());
+        let (mesh, clock) = clock::Clock::new(monotonic.clone());
         // Shard 0 runs the mesh clock, and gives the first interner once it has
-        // claimed the data directory.
-        let mut first = Some((mesh, wall, give));
+        // claimed the data directory for the node's cores.
+        let mut first = Some((mesh, wall, give, shards.cores().get()));
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
-        for (core, (config, layout)) in parts.into_iter().enumerate() {
+        for (core, ((config, layout), number)) in parts.enumerate() {
             // A shard that does not start drops `give`, so `interner` gives `None`.
             let (give, take) = handoff::pair();
             let take = std::mem::replace(&mut interner, take);
@@ -184,10 +194,11 @@ impl Node {
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
             let open = Open {
-                core,
+                shard: number,
                 take,
                 give,
-                clock: monotonic.clone(),
+                monotonic: monotonic.clone(),
+                clock: clock.clone(),
                 entropy: entropy.clone(),
                 layout,
                 failed: Arc::clone(&failed),
@@ -197,7 +208,7 @@ impl Node {
             let make = files();
             let main = move |tasks: env::tasks::Tasks| {
                 let files = make();
-                if let Some((mesh, wall, give)) = first {
+                if let Some((mesh, wall, give, cores)) = first {
                     tasks.spawn(async { mesh.run(wall).await });
                     tasks.spawn(open.claim(files.clone(), cores, give));
                 }
@@ -270,14 +281,17 @@ fn error(
 }
 
 /// The disk steps of a shard, made before the shard starts: shard 0's claim of the
-/// data directory, and the open of the shard's buffer. The shards open one after
-/// another, in order of core, because each open assigns slots in the node's one
-/// interner.
+/// data directory, and the open of the shard's buffer, with the shard's home over
+/// it. The shards open one after another, in order of core, because each open
+/// assigns slots in the node's one interner.
 struct Open {
-    core: usize,
+    /// The shard's number on its node: its core.
+    shard: u32,
     take: Take<Interner>,
     give: Give<Interner>,
-    clock: env::clock::Clock,
+    monotonic: env::clock::Clock,
+    /// The node's clocks, for the shard's home.
+    clock: clock::Reader,
     entropy: env::entropy::Entropy,
     layout: buffer::Layout,
     failed: Arc<OnceLock<Error>>,
@@ -333,8 +347,8 @@ impl Open {
         }
     }
 
-    /// Opens the shard's buffer and keeps it until `guard` completes. A failed open
-    /// drops `guard`, which stops the node.
+    /// Opens the shard's buffer, builds its home over it, and keeps the home until
+    /// `guard` completes. A failed open drops `guard`, which stops the node.
     async fn serve(
         self,
         files: env::files::Files,
@@ -342,31 +356,33 @@ impl Open {
         tasks: env::tasks::Tasks,
         guard: Guard,
     ) {
-        if let Some(buffer) = self.run(files, pool, tasks).await {
+        if let Some(home) = self.run(files, pool, tasks).await {
             guard.await;
-            drop(buffer);
+            drop(home);
         }
     }
 
-    /// Waits for the interner, opens the shard's buffer on the shard's thread, and
-    /// gives the interner to the next shard. A failed open is kept for
-    /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
-    /// So does a stop raised before the open, but it is not a failure.
+    /// Waits for the interner, opens the shard's buffer on the shard's thread, gives
+    /// the interner to the next shard, and gives the shard's home over the buffer. A
+    /// failed open is kept for [`Node::join`], keeps the interner from the shards
+    /// after it, and gives `None`. So does a stop raised before the open, but it is
+    /// not a failure.
     async fn run(
         self,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
-    ) -> Option<buffer::Buffer> {
+    ) -> Option<home::Shard> {
         let mut interner = self.take.await?;
         if self.stop.raised() {
             return None;
         }
+        let core = usize::try_from(self.shard).expect("invariant: a u32 fits a usize");
         let config = buffer::Config {
             files,
-            dir: directory::shard(self.core),
+            dir: directory::shard(core),
             pool,
-            clock: self.clock,
+            clock: self.monotonic,
             tasks,
             entropy: self.entropy,
             layout: self.layout,
@@ -375,13 +391,15 @@ impl Open {
         match buffer::Buffer::open(config, interner.slots()).await {
             Ok(buffer) => {
                 self.give.give(interner);
-                Some(buffer)
+                Some(home::Shard::new(home::Config {
+                    shard: self.shard,
+                    buffer,
+                    clock: self.clock,
+                    limits: LIMITS,
+                }))
             }
             Err(error) => {
-                let error = Error::Buffer {
-                    core: self.core,
-                    error,
-                };
+                let error = Error::Buffer { core, error };
                 self.failed
                     .set(error)
                     .expect("invariant: a shard opens its buffer once");

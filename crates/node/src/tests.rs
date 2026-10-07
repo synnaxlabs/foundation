@@ -1303,3 +1303,157 @@ mod directory {
         );
     }
 }
+
+mod home {
+    use std::rc::Rc;
+    use std::sync::OnceLock;
+
+    use ::home::{Outcome, Refusal, order, writer};
+    use types::authority::Authority;
+    use types::channel::{Key, Slot};
+    use types::frame::key_set::{Group, Interner};
+    use types::frame::{Draft, Form, Label, Path as Stream, Range};
+    use types::sample::{Scalar, Type};
+    use types::time::Stamp;
+
+    use super::*;
+    use crate::stop::Stop;
+    use crate::{BODY_MAX, Open, handoff};
+
+    /// What the home that `Open::run` gives for shard `shard` of `host` does: the key
+    /// of a writer of one index, at `slot`, and the outcomes of a frame of one sample
+    /// at each stamp that `stamps` gives for mesh time `now`.
+    struct Written {
+        key: writer::Key,
+        slot: Slot,
+        now: Stamp,
+        outcomes: Vec<Vec<Outcome>>,
+    }
+
+    fn written(
+        sim: &mut sim::Sim,
+        host: &sim::node::Node,
+        shard: u32,
+        stamps: fn(Stamp) -> Vec<Stamp>,
+    ) -> Written {
+        sim.run_on(host, move |host, tasks| async move {
+            let (driver, clock) = clock::Clock::new(host.clock());
+            let wall = host.wall();
+            tasks.spawn(async move { driver.run(wall).await });
+            let (give, take) = handoff::pair();
+            give.give(Interner::new());
+            let (give, next) = handoff::pair();
+            let config = block::Config { budget: 1 << 22 };
+            let memory = block::Heap::new(config.reservation());
+            let pool = block::Pool::new(config, memory);
+            let open = Open {
+                shard,
+                take,
+                give,
+                monotonic: host.clock(),
+                clock: clock.clone(),
+                entropy: host.entropy(),
+                layout: ::buffer::Layout::new(64 << 20, BODY_MAX).expect("a ring"),
+                failed: Arc::new(OnceLock::new()),
+                stop: Stop::default(),
+            };
+            let opened = open.run(host.files(), Rc::new(pool), tasks).await;
+            let mut home = opened.expect("the buffer opens");
+            let mut interner = next.await.expect("the open gives the interner");
+            let (index, values) = (Key::from_u128(1), Key::from_u128(2));
+            let slot = interner.slots().assign(index);
+            interner.slots().assign(values);
+            let set = interner.intern(&[Group {
+                index,
+                data: &[(values, Type::Scalar(Scalar::I64))],
+            }]);
+            home.carry(slot);
+            let now = mesh_now(&clock, &host.clock()).await;
+            let key = home
+                .open_writer(writer::Writer {
+                    subject: "a".parse().expect("a name"),
+                    authority: Authority(1),
+                    lease: None,
+                    set: Arc::clone(&set),
+                })
+                .expect("the writer opens");
+            let mut outcomes = Vec::new();
+            for stamp in stamps(now) {
+                let mut frame =
+                    Draft::new(home.pool(), &set, Form::Raw, &[(0, 8), (1, 8)])
+                        .expect("a frame");
+                for (entry, sample) in [(0, stamp.nanos()), (1, 7)] {
+                    let series =
+                        frame.series_mut(entry).expect("the series is present");
+                    series.copy_from_slice(&sample.to_le_bytes());
+                }
+                frame.set_count(0, 1);
+                let written = home.write(key, Label::Path(Stream::Live), frame);
+                outcomes.push(written.expect("the write runs").to_vec());
+            }
+            Written {
+                key,
+                slot,
+                now,
+                outcomes,
+            }
+        })
+        .expect("the run ends")
+    }
+
+    /// The midpoint of mesh time, once `clock` has one.
+    async fn mesh_now(clock: &clock::Reader, monotonic: &env::clock::Clock) -> Stamp {
+        loop {
+            if let Some(mesh) = clock.now().mesh {
+                let (earliest, latest) = (mesh.earliest.nanos(), mesh.latest.nanos());
+                return Stamp::from_nanos(earliest.midpoint(latest));
+            }
+            monotonic.sleep(Span::MILLISECOND).await;
+        }
+    }
+
+    /// Each shard's home numbers its writers with the shard's core, and accepts
+    /// stamps from 2000-01-01 to 10 s past mesh time.
+    #[test]
+    fn each_shard_builds_its_home_with_its_core_and_the_stamp_limits() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let earliest = Stamp::from_nanos(946_684_800_000_000_000);
+        let ahead = Span::from_nanos(10 * Span::SECOND.nanos());
+        let at = |now: Stamp| {
+            let latest = now.checked_add(Span::from_nanos(10 * Span::SECOND.nanos()));
+            let latest = latest.expect("mesh time is far from the end");
+            let past = latest.checked_add(Span::NANOSECOND).expect("in range");
+            let early = Stamp::from_nanos(946_684_800_000_000_000 - 1);
+            vec![early, past, latest]
+        };
+        let zero = written(&mut sim, &host, 0, at);
+        let one = written(&mut sim, &host, 1, at);
+        // The first writer of each shard, which differ only by the shard's number.
+        assert_ne!(zero.key, one.key);
+        let latest = one.now.checked_add(ahead).expect("in range");
+        let refused = |error| Outcome::Refused {
+            slot: one.slot,
+            refusal: Refusal::Order(error),
+        };
+        let early = Stamp::from_nanos(earliest.nanos() - 1);
+        let past = latest.checked_add(Span::NANOSECOND).expect("in range");
+        assert_eq!(
+            one.outcomes,
+            [
+                vec![refused(order::Error::Early {
+                    stamp: early,
+                    earliest,
+                })],
+                vec![refused(order::Error::Ahead {
+                    stamp: past,
+                    latest,
+                })],
+                vec![Outcome::Applied {
+                    slot: one.slot,
+                    range: Range { seq: 0, count: 1 },
+                }],
+            ]
+        );
+    }
+}

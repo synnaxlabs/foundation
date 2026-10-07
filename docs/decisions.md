@@ -1271,15 +1271,24 @@ How to read this record:
   coordinator under the person's delegation (#55). A sender can send one message from
   parts of one block (`send_parts`, `try_send_parts`), and the budgets count it as one
   message, of the sum of its parts. A `stream::Part` is a range of the block, then at
-  most 7 zeros. The stream never sends a byte of the block outside the ranges, because
+  most 255 zeros. The stream never sends a byte of the block outside the ranges, because
   those bytes can hold stale data of another channel; the padding is zeros, which `hub`
   computes from FRAME LAYOUT. Lost: a range that runs past the series, because it sends
   stale block bytes; a pad rule in the stream, because it puts the hub layout in
   `transport` and is wrong for a series split across messages (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575, after
   HUB WIRE
-  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). A
-  receiver can receive into its own buffer (`recv_into`). A message longer than the
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). The
+  stream sends the zeros from one static constant of 255 zero bytes, and `Part` holds no
+  invariant, so its fields are public. Lost: the cap of 7, because it is FRAME LAYOUT's
+  alignment inside `transport` and adds a panic; private fields and a fallible
+  constructor for that cap. `stream::Sender::bytes_max` gives the peer's
+  `message_bytes_max`, which the hello gives before any stream opens, and `hub` cuts
+  each run at it. Lost: a `send_parts` that cuts a run into messages, because the stream
+  knows no key or end of HUB WIRE and `try_send_parts` could then send part of a run; a
+  probe with `TooLarge`, a guess with one failed call for each session (architect,
+  #1197: https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6033870280).
+  A receiver can receive into its own buffer (`recv_into`). A message longer than the
   buffer gives `Error::TooLarge` and stays queued, and so does a message whose future
   drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe. Lost: the
   `Message` type of the proposal, because it changes `send` and `try_send` for each
@@ -2829,6 +2838,16 @@ How to read this record:
   `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
   architect on #1062 (#1174):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+- **SHARD HOMES (2026-10-07)** Each shard builds its `home::Shard` over its buffer
+  once the buffer opens, with the node's `clock::Reader`, and keeps the home until the
+  node stops. Its number is its core. It carries no index until the hub picks them
+  (#585). The stamp limits (A5) are a patch until #1285 makes them settings: earliest
+  2000-01-01T00:00:00Z, which refuses a clock that reads near 1970 but not one that
+  resets to 2000-01-01, and refuses backfill from before 2000; ahead 10 s, ten times
+  the MVP time error target of 1 s. A field of `node::Config` lost, because a setting
+  comes from the spec (NODE SETTINGS), not from the caller of `Node::start`.
+  Decided by the architect on #1287:
+  https://github.com/synnaxlabs/foundation/pull/1287#issuecomment-6034425115.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

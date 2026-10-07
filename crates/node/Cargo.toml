@@ -15,6 +15,7 @@ buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 env = { path = "../env" }
 estimate = { path = "../estimate" }
+home = { path = "../home" }
 ops = { path = "../ops" }
 os = { path = "../os" }
 types = { path = "../types" }
