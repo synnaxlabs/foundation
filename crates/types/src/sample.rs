@@ -81,6 +81,8 @@ impl Scalar {
 ///
 /// Enums and flags use an integer layout, and quality uses `U32`; their meaning is in
 /// `spec`.
+// Declared in the order of the STORED BODY kind codes, so each tag is its kind code
+// and `home::stored` maps one to the other with no branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     /// One fixed-width value per sample.
@@ -243,8 +245,9 @@ pub enum Error {
     /// The element of an array, a matrix, or a list is not a scalar, as in `string[3]`
     /// or `list<f32[2], 4>`.
     Element,
-    /// A length or a maximum is not ASCII digits with no leading zero that fit in a
-    /// `u32`, as in `f32[]`, `f32[03]`, or `f32[-1]`.
+    /// A length or a maximum is not ASCII digits with no leading zero, or an array
+    /// length or a list maximum is over 4294967295, as in `f32[]`, `f32[03]`, or
+    /// `f32[-1]`.
     Count,
     /// An array has more than two lengths, as in `u8[1][1][1]`.
     Lengths,

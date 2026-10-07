@@ -158,7 +158,7 @@ pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
 
 /// The kind code, element code, and `n` of `data_type`. The `n` of a matrix is
 /// `rows | columns << 16`.
-const fn codes(data_type: Type) -> (u8, u8, u32) {
+fn codes(data_type: Type) -> (u8, u8, u32) {
     match data_type {
         Type::Scalar(element) => (0, code(element), 0),
         Type::Array { element, len } => (1, code(element), len),
@@ -169,10 +169,7 @@ const fn codes(data_type: Type) -> (u8, u8, u32) {
             element,
             rows,
             columns,
-        } => {
-            let ([r0, r1], [c0, c1]) = (rows.to_le_bytes(), columns.to_le_bytes());
-            (5, code(element), u32::from_le_bytes([r0, r1, c0, c1]))
-        }
+        } => (5, code(element), u32::from(rows) | u32::from(columns) << 16),
     }
 }
 
