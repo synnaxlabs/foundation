@@ -7,8 +7,10 @@
 //! the peer's `message_bytes_max`. A message of a run never splits a key or an end,
 //! and no message is empty. The keys run holds exactly [`Open::channels`] keys, and the
 //! ends run exactly [`Head::series`] ends, so the receiver counts them to find where a
-//! run ends. The body starts a new message. A message with more keys or ends than
-//! remain is not valid.
+//! run ends. The body starts a new message.
+//!
+//! [`Home`] decodes the messages from the reader's node, and [`Reader`] those from the
+//! home. Each checks the order and the runs of its side of the session.
 //!
 //! A message that does not decode, comes from the wrong side, or breaks a rule of this
 //! module stops the stream with [`MALFORMED`](crate::header::MALFORMED).
@@ -23,8 +25,13 @@
 //! - [`keys`]: each channel key (`u128`).
 //! - [`ends`]: place and end (each `u32`) for each series.
 
+mod home;
+mod reader;
+
 use std::{fmt, mem};
 
+pub use home::{FromReader, Home};
+pub use reader::{FromHome, Reader};
 use types::frame::{Path, Range};
 
 const LATEST: u8 = 1;
@@ -67,14 +74,18 @@ impl Open {
     pub fn encode(&self, out: &mut [u8]) {
         assert!(self.channels > 0, "an open names at least one channel");
         let mut out = Writer::new(out, self.encoded_len());
-        match self.mode {
-            Mode::Latest => out.put(&[LATEST]),
-            Mode::Complete { limit_bytes } => {
-                out.put(&[COMPLETE]);
-                out.put(&limit_bytes.to_le_bytes());
-            }
+        out.put(&[self.kind()]);
+        if let Mode::Complete { limit_bytes } = self.mode {
+            out.put(&limit_bytes.to_le_bytes());
         }
         out.put(&self.channels.to_le_bytes());
+    }
+
+    fn kind(&self) -> u8 {
+        match self.mode {
+            Mode::Latest => LATEST,
+            Mode::Complete { .. } => COMPLETE,
+        }
     }
 
     /// Decodes the open in `bytes`.
@@ -84,7 +95,7 @@ impl Open {
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no open, [`Error::Length`] when the length fits no open of that kind, and
     /// [`Error::Channels`] when the open names no channel.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+    fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, bytes.len());
         let mode = match kind {
@@ -145,7 +156,7 @@ impl Credit {
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no credit, and [`Error::Length`] when `bytes` is not [`Credit::LEN`]
     /// bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+    fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         if kind != CREDIT {
             return Err(Error::Kind { kind });
@@ -216,7 +227,7 @@ impl Reply {
     /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
     /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names
     /// no series.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+    fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, bytes.len());
         match kind {
@@ -246,9 +257,12 @@ impl Reply {
 }
 
 /// The run of keys after an open, in the open's order. A series of the session has
-/// the place of its channel's first key in the run, from 0. The index, when the run
-/// does not hold it, has place [`Open::channels`](crate::hub::Open::channels).
+/// the place of its channel's first key in the run, from 0. The run holds the key of
+/// the open's index. [`Home`] does not check this: it does not know the index, so its
+/// caller does.
 pub mod keys {
+    use std::slice;
+
     use types::channel;
 
     use super::{Error, Writer, run};
@@ -268,19 +282,33 @@ pub mod keys {
         }
     }
 
+    /// The keys of one message of the run, in order.
+    #[derive(Clone, Debug)]
+    pub struct Iter<'m>(slice::Iter<'m, [u8; LEN]>);
+
+    impl Iterator for Iter<'_> {
+        type Item = channel::Key;
+
+        fn next(&mut self) -> Option<channel::Key> {
+            let &key = self.0.next()?;
+            Some(channel::Key::from_u128(u128::from_le_bytes(key)))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.0.size_hint()
+        }
+    }
+
+    impl ExactSizeIterator for Iter<'_> {}
+
     /// The keys in `message`, one message of the run.
     ///
     /// # Errors
     ///
     /// [`Error::Empty`] when `message` is empty, and [`Error::Length`] when it is not
     /// a whole count of keys.
-    pub fn decode(
-        message: &[u8],
-    ) -> Result<impl ExactSizeIterator<Item = channel::Key> + '_, Error> {
-        let keys = run::<LEN>(message)?;
-        Ok(keys
-            .iter()
-            .map(|&key| channel::Key::from_u128(u128::from_le_bytes(key))))
+    pub(super) fn decode(message: &[u8]) -> Result<Iter<'_>, Error> {
+        run::<LEN>(message).map(|keys| Iter(keys.iter()))
     }
 }
 
@@ -292,6 +320,8 @@ pub mod keys {
 /// that is not above the place before it, or that is below the start of its series, is
 /// not valid.
 pub mod ends {
+    use std::slice;
+
     use super::{Error, run};
 
     /// The bytes of one end.
@@ -332,25 +362,46 @@ pub mod ends {
         );
     }
 
-    /// The ends in `message`, one message of the run, each a place and an end.
+    /// The ends of one message of the run, in order, each a place and an end.
+    #[derive(Clone, Debug)]
+    pub struct Iter<'m>(slice::Iter<'m, [u8; LEN]>);
+
+    impl Iterator for Iter<'_> {
+        type Item = (u32, u32);
+
+        fn next(&mut self) -> Option<(u32, u32)> {
+            self.0.next().copied().map(end)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.0.size_hint()
+        }
+    }
+
+    impl ExactSizeIterator for Iter<'_> {}
+
+    impl Iter<'_> {
+        /// The last end of the message.
+        pub(super) fn last_end(&self) -> Option<u32> {
+            self.0.as_slice().last().map(|&bytes| end(bytes).1)
+        }
+    }
+
+    /// The ends in `message`, one message of the run.
     ///
     /// # Errors
     ///
     /// [`Error::Empty`] when `message` is empty, and [`Error::Length`] when it is not
     /// a whole count of ends.
-    pub fn decode(
-        message: &[u8],
-    ) -> Result<
-        impl ExactSizeIterator<Item = (u32, u32)> + DoubleEndedIterator + '_,
-        Error,
-    > {
-        let ends = run::<LEN>(message)?;
-        Ok(ends.iter().map(|&[p0, p1, p2, p3, e0, e1, e2, e3]| {
-            (
-                u32::from_le_bytes([p0, p1, p2, p3]),
-                u32::from_le_bytes([e0, e1, e2, e3]),
-            )
-        }))
+    pub(super) fn decode(message: &[u8]) -> Result<Iter<'_>, Error> {
+        run::<LEN>(message).map(|ends| Iter(ends.iter()))
+    }
+
+    fn end([p0, p1, p2, p3, e0, e1, e2, e3]: [u8; LEN]) -> (u32, u32) {
+        (
+            u32::from_le_bytes([p0, p1, p2, p3]),
+            u32::from_le_bytes([e0, e1, e2, e3]),
+        )
     }
 }
 
@@ -378,6 +429,38 @@ pub enum Error {
         /// The path byte.
         byte: u8,
     },
+    /// A message opens a session that is open: a second open or opened.
+    Reopen {
+        /// The kind byte of the message.
+        kind: u8,
+    },
+    /// A message comes before the session is open: a credit before the open, or a
+    /// head before opened.
+    Unopened {
+        /// The kind byte of the message.
+        kind: u8,
+    },
+    /// A head has more series than the session has places.
+    Places {
+        /// The series of the head.
+        series: u32,
+        /// The places of the session.
+        places: u32,
+    },
+    /// A message of a run has more keys or ends than remain in the run.
+    Run {
+        /// The keys or ends of the message.
+        items: usize,
+        /// The keys or ends that remain in the run.
+        remain: u32,
+    },
+    /// A message of a body has more bytes than remain in the body.
+    Body {
+        /// The bytes of the message.
+        len: usize,
+        /// The bytes that remain in the body.
+        remain: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -397,6 +480,28 @@ impl fmt::Display for Error {
             Self::Path { byte } => write!(
                 f,
                 "the frame head names path {byte}, which this node does not know"
+            ),
+            Self::Reopen { kind } => write!(
+                f,
+                "the hub message has kind {kind}, which opens the session, and the \
+                 session is open"
+            ),
+            Self::Unopened { kind } => write!(
+                f,
+                "the hub message has kind {kind}, and the session is not open"
+            ),
+            Self::Places { series, places } => write!(
+                f,
+                "the frame head names {series} series, and the session has {places} \
+                 places"
+            ),
+            Self::Run { items, remain } => write!(
+                f,
+                "the run message holds {items} items, and {remain} remain in the run"
+            ),
+            Self::Body { len, remain } => write!(
+                f,
+                "the body message has {len} bytes, and {remain} remain in the body"
             ),
         }
     }
@@ -459,6 +564,14 @@ impl<'b> Fields<'b> {
     }
 }
 
+/// The items that remain in a run of `remain` after a message of `items` items.
+fn rest_of_run(remain: u32, items: usize) -> Result<u32, Error> {
+    u32::try_from(items)
+        .ok()
+        .and_then(|count| remain.checked_sub(count))
+        .ok_or(Error::Run { items, remain })
+}
+
 /// The items of `N` bytes in `message`, one message of a run.
 fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
     let (items, rest) = message.as_chunks::<N>();
@@ -495,7 +608,7 @@ mod tests {
 
     use super::*;
 
-    fn key(bits: u128) -> channel::Key {
+    pub(super) fn key(bits: u128) -> channel::Key {
         channel::Key::from_u128(bits)
     }
 
@@ -511,34 +624,50 @@ mod tests {
         head(Path::Live, 0, 0, 1)
     }
 
-    fn encode_open(open: Open) -> Vec<u8> {
+    pub(super) fn encode_open(open: Open) -> Vec<u8> {
         let mut out = vec![0xaa; open.encoded_len()];
         open.encode(&mut out);
         out
     }
 
-    fn encode_credit(credit: Credit) -> Vec<u8> {
+    pub(super) fn encode_credit(credit: Credit) -> Vec<u8> {
         let mut out = vec![0xaa; Credit::LEN];
         credit.encode(&mut out);
         out
     }
 
-    fn encode_reply(reply: Reply) -> Vec<u8> {
+    pub(super) fn encode_reply(reply: Reply) -> Vec<u8> {
         let mut out = vec![0xaa; reply.encoded_len()];
         reply.encode(&mut out);
         out
     }
 
-    fn encode_keys(keys: &[channel::Key]) -> Vec<u8> {
+    pub(super) fn encode_keys(keys: &[channel::Key]) -> Vec<u8> {
         let mut out = vec![[0xaa; 16]; keys.len()].concat();
         super::keys::encode(keys, &mut out);
         out
     }
 
-    fn encode_ends(ends: &[(u32, u32)]) -> Vec<u8> {
+    pub(super) fn encode_ends(ends: &[(u32, u32)]) -> Vec<u8> {
         let mut out = vec![[0xaa; 8]; ends.len()].concat();
         super::ends::encode(ends.iter().copied(), &mut out);
         out
+    }
+
+    /// `items` cut into messages, each of the next size in `sizes`, the last of what
+    /// remains.
+    pub(super) fn cut<'i, T>(
+        mut items: &'i [T],
+        sizes: &mut impl Iterator<Item = usize>,
+    ) -> Vec<&'i [T]> {
+        let mut messages = Vec::new();
+        while !items.is_empty() {
+            let size = sizes.next().expect("the sizes repeat").min(items.len());
+            let (message, rest) = items.split_at(size);
+            messages.push(message);
+            items = rest;
+        }
+        messages
     }
 
     /// `kind`, then `len - 1` zeros.
@@ -830,9 +959,8 @@ mod tests {
         #[test]
         fn gives_the_body_length_as_the_last_end() {
             let message = encode_ends(&[(1, 8), (0, u32::MAX)]);
-            let last =
-                super::super::ends::decode(&message).map(|mut ends| ends.next_back());
-            assert_eq!(last, Ok(Some((0, u32::MAX))));
+            let last = super::super::ends::decode(&message).map(|ends| ends.last_end());
+            assert_eq!(last, Ok(Some(u32::MAX)));
         }
 
         #[test]
@@ -982,6 +1110,36 @@ mod tests {
             (
                 Error::Path { byte: 2 },
                 "the frame head names path 2, which this node does not know",
+            ),
+            (
+                Error::Reopen { kind: 1 },
+                "the hub message has kind 1, which opens the session, and the session \
+                 is open",
+            ),
+            (
+                Error::Unopened { kind: 3 },
+                "the hub message has kind 3, and the session is not open",
+            ),
+            (
+                Error::Places {
+                    series: 4,
+                    places: 3,
+                },
+                "the frame head names 4 series, and the session has 3 places",
+            ),
+            (
+                Error::Run {
+                    items: 3,
+                    remain: 2,
+                },
+                "the run message holds 3 items, and 2 remain in the run",
+            ),
+            (
+                Error::Body {
+                    len: 11,
+                    remain: 10,
+                },
+                "the body message has 11 bytes, and 10 remain in the body",
             ),
         ];
         for (error, text) in cases {

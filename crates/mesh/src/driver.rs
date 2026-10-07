@@ -585,7 +585,7 @@ mod tests {
     use block::testing::Scarce;
     use env::files::{self, Operation};
     use env::net::udp::{self, Meta, Transmit};
-    use raft::{Answer, Hard, Term};
+    use raft::{Answer, Grant, Hard, Proof, Term};
     use sim::{Crash, Sim, link};
     use transport::Address;
     use types::node::SealKey;
@@ -2184,6 +2184,45 @@ mod tests {
             let cause = log::Error::Files(files::Error::Busy { path });
             assert_eq!(busy.to_string(), cause.to_string());
             assert_eq!(busy, Error::Log(cause));
+        });
+    }
+
+    #[test]
+    fn open_gives_the_error_of_raft() {
+        solo(|node, tasks| async move {
+            let (mut log, _) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
+            let at = Position {
+                term: Term(1),
+                index: 1,
+            };
+            let data = Data::Voters(Voters::default());
+            let entries = [Entry { at, data }];
+            let proof = Proof {
+                grant: Grant::Vote,
+                candidate: key(1),
+                voters: [(key(1), Some(common::signature(1, Grant::Vote, 1)))].into(),
+            };
+            let hard = Hard {
+                term: Term(1),
+                vote: Some(key(1)),
+                leader: Some(key(1)),
+                proof: Some(proof),
+            };
+            log.write(Some(hard.clone()), &entries).await.unwrap();
+            drop(log);
+            let refused = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
+            assert_eq!(refused, Error::Raft(raft::Error::NoVoters));
+            let text = "a configuration has an empty incoming voter set";
+            assert_eq!(refused.to_string(), text);
+            let again = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
+            assert_eq!(again, Error::Raft(raft::Error::NoVoters));
+            let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
+            let wrote = (hard, entries.to_vec());
+            assert_eq!((stored.hard, stored.entries), wrote);
         });
     }
 

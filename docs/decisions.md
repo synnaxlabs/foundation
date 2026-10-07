@@ -154,6 +154,10 @@ How to read this record:
   other. Decided by the architect, #756
   (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
   https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
+  Amended: `Kind` and `Data` take the edge form as a parameter, with `channel::Key`
+  as the default: `config` gives each edge as a name, and `plan` gives each name its
+  key. `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -1152,48 +1156,51 @@ How to read this record:
   `Head` has no form. The body holds only the series of the reader's view, the index
   series too, written from the frame's block as slices, and both ends charge the frame
   that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
-  in the open, from 0; the index, when the open does not list it, has place `channels`.
-  The reader's `hub` lists the keys in the entry order of its own frame (its slot
-  order), the index too, so a place is an entry of the reader's frame. An open of no
-  channel is not valid. Only the fixed part of `Open` and of `Head` is one message. The
-  rest is one run of bytes, in messages of at most the peer's `message_bytes_max`, back
-  to back with no prefix: after `Open`, the keys; after `Head`, the place and end of
-  each series in the body, then the body. A message never splits a key or an end, so
-  each side decodes each message as it arrives. The keys run holds exactly `channels`
-  keys and the ends run exactly the head's number of series, so each side counts them to
-  find where a run ends, and the body starts a new message. So no count of channels or
-  series has a cap, and the reader fills one block of its frame's length: the header,
-  the range, a descriptor for each series, and the body to the last end. A run message
-  with more keys or ends than remain is not valid. A head of no series is not valid,
-  since a frame holds its index. The home checks each key as it arrives and never
-  allocates by the peer's count. A head with more series than places, or an end with a
-  place the session does not have or that is not above the place before it, is not
-  valid; the reader's `hub` checks this as the head and each end arrive, so it holds no
-  more ends than it has places. The ends and the body are in place order: the home
-  writes the series of each place it has, from 0, each from the frame's block as a
-  slice, with ends it computes in that order. At the open it makes the list of each
-  place and its home entry, sorted by place, and writes each ends message from it with
-  `wire::hub::ends::encode`, which sizes the message by its buffer, so no scratch buffer
-  holds the ends (the architect, #1146,
+  in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
+  frame (its slot order), the index too, so a place is an entry of the reader's frame
+  and a session has `channels` places. An open whose keys do not hold the index is not
+  valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
+  `UNKNOWN`; the architect, 2026-10-07,
+  https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
+  of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
+  message. The rest is one run of bytes, in messages of at most the peer's
+  `message_bytes_max`, back to back with no prefix: after `Open`, the keys; after
+  `Head`, the place and end of each series in the body, then the body. A message never
+  splits a key or an end, so each side decodes each message as it arrives. The keys run
+  holds exactly `channels` keys and the ends run exactly the head's number of series, so
+  each side counts them to find where a run ends, and the body starts a new message. So
+  no count of channels or series has a cap, and the reader fills one block of its
+  frame's length: the header, the range, a descriptor for each series, and the body to
+  the last end. A run message with more keys or ends than remain is not valid. A head of
+  no series is not valid, since a frame holds its index. The home checks each key as it
+  arrives and never allocates by the peer's count. A head with more series than places,
+  or an end with a place the session does not have or that is not above the place before
+  it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
+  the ends, so the reader holds no more ends than it has places. The ends and the body
+  are in place order: the home writes the series of each place it has, from 0, each from
+  the frame's block as a slice, with ends it computes in that order. At the open it
+  makes the list of each place and its home entry, sorted by place, and writes each ends
+  message from it with `wire::hub::ends::encode`, which sizes the message by its buffer,
+  so no scratch buffer holds the ends (the architect, #1146,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
   takes exactly the ends the buffer holds and no more, so one iterator passed with
   `by_ref()` splits a run into messages; the caller owns the count of the run (the
   architect,
-  https://github.com/synnaxlabs/foundation/pull/1258#issuecomment-6033667563). The
-  first series starts at 0, and each other at the end before it rounded up to a multiple
-  of 8. So the body is the series bytes of the reader's own frame (FRAME LAYOUT), and
-  the reader builds that frame in one block: the header and descriptors that `types`
-  writes, then the body as it arrives, with no copy of a series after the receive. An
-  end below the start of its series is not valid; `types` refuses it, as `frame::check`
-  does. The padding may hold any bytes (FRAME LAYOUT). Each direction has its own
-  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
-  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
-  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode, comes from the wrong side, or breaks a rule above), which every
-  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
-  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
-  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
-  `Open`, because the home knows its index and a second copy needs a check; the whole
+  https://github.com/synnaxlabs/foundation/pull/1258#issuecomment-6033667563). The first
+  series starts at 0, and each other at the end before it rounded up to a multiple of 8.
+  So the body is the series bytes of the reader's own frame (FRAME LAYOUT), and the
+  reader builds that frame in one block: the header and descriptors that `types` writes,
+  then the body as it arrives, with no copy of a series after the receive. An end below
+  the start of its series is not valid; `types` refuses it, as `frame::check` does. The
+  padding may hold any bytes (FRAME LAYOUT). Each direction has its own messages: the
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
+  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
+  decode, comes from the wrong side, or breaks a rule above), which every protocol may
+  use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
+  a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
+  because the home knows its index and a second copy needs a check; the whole
   `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
   open needs no mesh time (READER RULES), and a later named open can add one; grants for
   many sessions in one message, which wait until a link carries a second session; a
@@ -1218,7 +1225,12 @@ How to read this record:
   byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
-  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
+  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`. Amended
+  (2026-10-07, #1196): the message order, the runs, and the head bound move from `hub`
+  to two stateful decoders in `wire`, `hub::Home` at the home and `hub::Reader` at the
+  reader's node, each with an exact error for each broken rule, so `hub` checks no wire
+  rule. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
@@ -2005,9 +2017,13 @@ How to read this record:
 - **A1 (current part)** One home per index orders samples, keeps the buffer, and runs
   the gate. Reads may come from a copy. Supersedes: A1 channel home field, A1 standby in
   the mesh file.
-- **S12 (placement part) + B7** Placement is a policy: `placement { select, standby,
-  copies }`. With no placement, an index's home is the node of the connector that writes
-  it (precedence in X22).
+- **S12 (placement part) + B7** Placement is a policy: `placement { select, home,
+  standby, copies }`. Each node field is optional, but a placement names at least one
+  node, and no node has two roles. When no placement selects the index, or the winning
+  placement names no home, an index's home is the node of the connector that writes it
+  (precedence in X22). Amended: the `home` field restores the recorded intent
+  ("placement decides home", r8 Q8), which the bootstrap list left out (architect,
+  #1150, https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
@@ -2407,7 +2423,11 @@ How to read this record:
   beside them, so `config`, `ops`, and `node` never match a producer's variants. An
   error from a crate below `document` that a producer shows as a diagnostic gives its
   message with `Display` and its fix with `fix()`; the producer adds the code and the
-  span. `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
+  span. A fix that shows a value in a Document shows it as the file writes it, so
+  `document.bad-size` quotes the size for `Syntax` and `Range` (`Use at most
+  "16777215TiB"`), while `byte::Error::fix` stays bare for a flag (architect,
+  https://github.com/synnaxlabs/foundation/issues/1070#issuecomment-6032077046).
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
   breaks no producer. No severity field: the warnings in K2 and R13-10 belong to plan
   output.
   `ops` operation error codes use `Code` too, so the grammar has one home. A code
@@ -3214,7 +3234,7 @@ Storage classes used in the table:
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
 | Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
 | Retention policy | Spec; selects indexes | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
-| Placement policy | Spec; selects connectors and indexes: `{ select, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
+| Placement policy | Spec; selects connectors and indexes: `{ select, home, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
 | Compression policy | Spec; selects indexes; `mode` auto, raw, or max. The actual codec is a 1-byte tag per vector in the encoded bytes | Files | `codec` at the encoder (the home, or the writer's `hub`) | `spec`, `codec` |
 | Reduction policy | Spec; selects data channels; deadband checked against the channel's unit | Files | Connector library component through `hub.spec()` | `spec`, `connector` |
@@ -3552,9 +3572,14 @@ covers a connector and every index under its name. B7 gives indexes a default ho
 the connector's node. A placement selecting the same connector could name another node.
 Resolution: the connector's `node` is its required primary node (it is
 attached to a device, and `discover` writes it). A placement that selects a connector
-may add `standby` and `copies` but may not move its primary; `plan` fails if it tries.
+may add `standby` and `copies`, and may name only the connector's `node` as `home`;
+`plan` fails otherwise.
 An index's home, in order: a placement that selects the index, then the node of the
-connector that writes it (B7), then a plan error. Basis: BQ10, B7, C5 SHAPE.
+connector that writes it (B7), then a plan error. The placement resolves as a whole
+policy (X25): when the winning placement names no home, a less specific one does not
+give it (architect, #1150,
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+Basis: BQ10, B7, C5 SHAPE.
 
 **X23. The `index` edge stated twice.**
 Conflict: S5 puts `index` on the data channel, and BQ9 re-indexes "by changing `index`

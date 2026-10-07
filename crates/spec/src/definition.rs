@@ -11,7 +11,8 @@
 //! region        := epoch:u64 count:u64 text*                                tag 3
 //! node_settings := select:patterns disk:u64 pool:u64                       tag 4
 //! compression   := select:patterns mode:u8                                  tag 5
-//! placement     := select:patterns standby:optional copies:names            tag 6
+//! placement     := select:patterns home:optional standby:optional           tag 6
+//!                  copies:names
 //! time          := select:patterns peers:optional_names                     tag 7
 //! channel       := key kind                                                 tag 8
 //! kind          := 0 error:optional_key control:optional_key                index
@@ -175,13 +176,8 @@ impl Definition {
             Self::Placement(policy) => {
                 out.push(PLACEMENT);
                 patterns(&mut out, policy.select());
-                match policy.standby() {
-                    None => out.push(0),
-                    Some(node) => {
-                        out.push(1);
-                        text(&mut out, node.as_str());
-                    }
-                }
+                optional(&mut out, policy.home().map(Name::as_str));
+                optional(&mut out, policy.standby().map(Name::as_str));
                 names(&mut out, policy.copies());
             }
             Self::Time(policy) => {
@@ -328,16 +324,10 @@ fn channel(out: &mut Vec<u8>, definition: &Channel) {
         }
         channel::Kind::Data(data) => {
             out.push(1);
-            key(out, data.index());
-            optional_key(out, data.quality());
+            key(out, *data.index());
+            optional_key(out, data.quality().copied());
             data_type(out, data.data_type());
-            match data.unit() {
-                None => out.push(0),
-                Some(unit) => {
-                    out.push(1);
-                    text(out, unit.as_str());
-                }
-            }
+            optional(out, data.unit().map(Unit::as_str));
         }
     }
 }
@@ -366,6 +356,16 @@ fn patterns(out: &mut Vec<u8>, selector: &Selector) {
         out.push(excluded);
         count(out, body.len());
         out.extend_from_slice(body.as_bytes());
+    }
+}
+
+fn optional(out: &mut Vec<u8>, found: Option<&str>) {
+    match found {
+        None => out.push(0),
+        Some(found) => {
+            out.push(1);
+            text(out, found);
+        }
     }
 }
 
@@ -507,6 +507,14 @@ impl<'a> Reader<'a> {
             .map_err(|error| Error::Name { at, error })
     }
 
+    fn optional_name(&mut self) -> Result<Option<Name>, Error> {
+        if self.flag()? {
+            self.name().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Reads a list of names in strict name order.
     fn names(&mut self) -> Result<Vec<Name>, Error> {
         let n = self.count(TEXT_MIN)?;
@@ -566,13 +574,12 @@ impl<'a> Reader<'a> {
     fn placement(&mut self) -> Result<placement::Policy, Error> {
         let select = self.patterns()?;
         let at = self.at();
-        let standby = if self.flag()? {
-            Some(self.name()?)
-        } else {
-            None
+        let nodes = placement::Nodes {
+            home: self.optional_name()?,
+            standby: self.optional_name()?,
+            copies: self.names()?,
         };
-        let copies = self.names()?;
-        placement::Policy::new(select, standby, copies)
+        placement::Policy::new(select, nodes)
             .map_err(|error| Error::Placement { at, error })
     }
 
@@ -765,9 +772,9 @@ pub enum Error {
         /// Why they make no policy.
         error: node_settings::Error,
     },
-    /// A placement's standby and copies make no policy.
+    /// A placement's nodes make no policy.
     Placement {
-        /// Where the standby presence flag is.
+        /// Where the home presence flag is.
         at: usize,
         /// Why they make no policy.
         error: placement::Error,

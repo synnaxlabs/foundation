@@ -1910,30 +1910,146 @@ mod tests {
     // the one the next record needs.
     #[test]
     fn removes_a_file_with_no_record_after_the_end() {
-        let (mut sim, node) = create_node(0);
-        sim.run_on(&node, |node, _| async move {
+        removes_a_spare(512);
+    }
+
+    // A crash before the allocation of a create leaves a file with no bytes.
+    #[test]
+    fn removes_a_file_with_no_bytes_after_the_end() {
+        removes_a_spare(0);
+    }
+
+    /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
+    /// and no record, then cuts the power.
+    fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
+        sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len: 512 };
+            let mode = Mode::Create { len };
             drop(node.files().open(&file("log-1"), mode).await.unwrap());
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
         .unwrap();
-        let expected = sim
+        sim.crash(node, Crash::Power);
+    }
+
+    /// The files of a log after `create_spare`.
+    fn spare(len: u64) -> [(PathBuf, u64); 2] {
+        [("log-0".into(), SEGMENT), ("log-1".into(), len)]
+    }
+
+    fn removes_a_spare(len: u64) {
+        let (mut sim, node) = create_node(0);
+        create_spare(&mut sim, &node, len);
+        sim.run_on(&node, move |node, _| async move {
+            assert_eq!(lens(&node).await, spare(len));
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored.entries, [bytes(1, 10)]);
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, [PathBuf::from("log-0")]);
+            log.write(None, &[bytes(2, LARGE)]).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, 10), bytes(2, LARGE)],
+        };
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    #[test]
+    fn a_failed_remove_of_a_spare_fails_the_open() {
+        for len in [0, 512] {
+            let (mut sim, node) = create_node(0);
+            create_spare(&mut sim, &node, len);
+            let (refused, lens) = sim
+                .run_on(&node, |node, _| async move {
+                    node.fail_file(&file("log-1"), Operation::Remove);
+                    let refused = open(&node).await.map(|(_, stored)| stored);
+                    (refused, lens(&node).await)
+                })
+                .unwrap();
+            let expected = io("log-1", Operation::Remove);
+            assert_eq!(refused, Err(expected), "{len} bytes");
+            assert_eq!(lens, spare(len));
+            sim.crash(&node, Crash::Power);
+            let expected = Stored {
+                hard: Hard::default(),
+                entries: vec![bytes(1, 10)],
+            };
+            assert_eq!(stored(&mut sim, &node), Ok(expected), "{len} bytes");
+        }
+    }
+
+    /// The name and the length of each file of the log.
+    async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
+        let mut lens = Vec::new();
+        for name in node.files().list(Path::new(DIR)).await.unwrap() {
+            let path = Path::new(DIR).join(&name);
+            let len = node.files().open(&path, Mode::Read).await.unwrap().len();
+            lens.push((name, len));
+        }
+        lens
+    }
+
+    /// Makes `log-0` with no bytes, as a crash before the allocation of a create
+    /// leaves it, then cuts the power.
+    fn create_first_file_with_no_bytes(sim: &mut Sim, node: &sim::node::Node) {
+        sim.run_on(node, |node, _| async move {
+            node.files().create_dir(Path::new(DIR)).await.unwrap();
+            let mode = Mode::Create { len: 0 };
+            drop(node.files().open(&file("log-0"), mode).await.unwrap());
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+            node.files().sync_dir(Path::new("")).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(node, Crash::Power);
+    }
+
+    #[test]
+    fn a_first_file_with_no_bytes_is_an_empty_log() {
+        let (mut sim, node) = create_node(0);
+        create_first_file_with_no_bytes(&mut sim, &node);
+        sim.run_on(&node, |node, _| async move {
+            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), 0)]);
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored, Stored::default());
+            log.write(None, &[bytes(1, 10)]).await.unwrap();
+            drop(log);
+            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), SEGMENT)]);
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, 10)],
+        };
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    // The write removes a first file with no record to make it again, larger.
+    #[test]
+    fn a_failed_remove_of_a_first_file_with_no_bytes_poisons_the_log() {
+        let (mut sim, node) = create_node(0);
+        create_first_file_with_no_bytes(&mut sim, &node);
+        let (errors, lens) = sim
             .run_on(&node, |node, _| async move {
-                let (mut log, stored) = open(&node).await.unwrap();
-                let names = node.files().list(Path::new(DIR)).await.unwrap();
-                assert_eq!(names, [PathBuf::from("log-0")]);
-                let large = bytes(2, LARGE);
-                log.write(None, std::slice::from_ref(&large)).await.unwrap();
-                Stored {
-                    hard: Hard::default(),
-                    entries: stored.entries.into_iter().chain([large]).collect(),
-                }
+                let (mut log, _) = open(&node).await.unwrap();
+                node.fail_file(&file("log-0"), Operation::Remove);
+                let first = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+                let second = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+                drop(log);
+                ((first, second), lens(&node).await)
             })
             .unwrap();
-        assert_eq!(expected.entries.len(), 2);
-        assert_eq!(stored(&mut sim, &node), Ok(expected));
+        let poisoned = Error::Poisoned {
+            path: file("log-0"),
+        };
+        assert_eq!(errors, (io("log-0", Operation::Remove), poisoned));
+        assert_eq!(lens, [(PathBuf::from("log-0"), 0)]);
+        sim.crash(&node, Crash::Power);
+        assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
     }
 
     #[test]
@@ -2309,17 +2425,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stored(&mut sim, &node), Ok(records(&[340, 10])));
-    }
-
-    /// The name and the length of each file of the log.
-    async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
-        let mut lens = Vec::new();
-        for name in node.files().list(Path::new(DIR)).await.unwrap() {
-            let path = Path::new(DIR).join(&name);
-            let len = node.files().open(&path, Mode::Read).await.unwrap().len();
-            lens.push((name, len));
-        }
-        lens
     }
 
     /// Writes a record for each of `before`, then a record of 3 MiB that the pool
