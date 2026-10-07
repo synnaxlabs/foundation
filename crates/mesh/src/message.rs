@@ -47,8 +47,8 @@ pub(crate) enum Message {
         /// can replace it.
         at: Position,
     },
-    /// Answers a [`Message::Propose`] that the receiver did not propose, because it
-    /// does not lead.
+    /// Answers a [`Message::Propose`] whose change the receiver holds in no entry,
+    /// because it does not lead.
     NotLeader {
         /// The leader that the receiver knows.
         leader: Option<node::Key>,

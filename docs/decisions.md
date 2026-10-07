@@ -1777,17 +1777,20 @@ How to read this record:
   position can hold another change. A second call that waits for the write lost: no
   caller needs a position that is not on disk, and a caller that skips the wait gets
   that defect again (decided by the architect, 2026-10-07T08:18:51Z:
-  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033920665). A node
-  that gets a forwarded proposal (MESH WIRE) proposes the change, and its answer is the
-  position, or "not the leader" with the leader that it knows. A proposal from a peer
-  whose key no voter of this node's configuration holds is refused (`Error::NotVoter`);
-  a member that is not a voter proposes with join (#336). The leader does not check the
-  home of a forwarded change: `Error::NotMember` checks only the argument of a local
-  caller, and the check of a home at apply on each node is #1273. A forwarded change
-  applies at least one time: a member that got no answer forwards it again, and the
-  leader then appends a second entry. `Change::Home` sets a value, so a repeat is safe.
-  A `Change` kind that is not safe to repeat needs a ruling before a member forwards it
-  (decided by the architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033920665). When the
+  append of a new leader replaces the entry before a write holds it, `propose` gives
+  "not the leader": the task tells each proposal whether the `Ready` that it wrote held
+  the entry. A node that gets a forwarded proposal (MESH WIRE) proposes the change, and
+  its answer is the position, or "not the leader" with the leader that it knows. A
+  proposal from a peer whose key no voter of this node's configuration holds is refused
+  (`Error::NotVoter`); a member that is not a voter proposes with join (#336). The
+  leader does not check the home of a forwarded change: `Error::NotMember` checks only
+  the argument of a local caller, and the check of a home at apply on each node is
+  #1273. A forwarded change applies at least one time: a member that got no answer
+  forwards it again, and the leader then appends a second entry. `Change::Home` sets a
+  value, so a repeat gives the state of a call that took effect last. A later `Change`
+  kind that is not safe to repeat needs a ruling before a member forwards it (decided by
+  the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
