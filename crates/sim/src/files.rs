@@ -350,8 +350,9 @@ impl Files {
 
     /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
     /// hold of the node ends, a leaked one too. A call in flight ends as one whose
-    /// future dropped, in the order of its end time. After a `Power` crash only each
-    /// write takes effect, and the disk keeps what is durable. Returns the wakers of
+    /// future dropped, in the order of its end time. A create open in flight can make
+    /// its file with no bytes. After a `Power` crash only each write takes effect, and
+    /// such a create whose file is then durable, and the disk keeps what is durable. Returns the wakers of
     /// the closes and the blocks of the calls, for the caller to drop after it
     /// releases the lock.
     pub(crate) fn crash(
@@ -373,10 +374,25 @@ impl Files {
             let close = flight.call.handle().map(|handle| handle.key);
             closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
-            let applied =
-                crash == Crash::Process || matches!(flight.call, Call::Write { .. });
+            // A create made the entry and has not yet allocated the file. On a power
+            // crash, the file system can commit that entry by itself.
+            let cut = matches!(flight.call, Call::Open(Mode::Create { .. }))
+                && self.rng.below(2) == 0;
+            if cut {
+                flight.call = Call::Open(Mode::Create { len: 0 });
+            }
+            let applied = crash == Crash::Process
+                || cut
+                || matches!(flight.call, Call::Write { .. });
+            let path = (cut && crash == Crash::Power).then(|| flight.path.clone());
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
+                if let (Some(path), Ok(Done::Open { handle, .. })) =
+                    (path, &ended.result)
+                    && handle.inode == key
+                {
+                    self.disks[node].commit(&path);
+                }
                 (ended.result.is_ok(), ended.held)
             } else {
                 (false, flight.held)

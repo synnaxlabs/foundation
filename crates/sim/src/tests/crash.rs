@@ -477,6 +477,50 @@ fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
     assert_eq!(names, Vec::<PathBuf>::new());
 }
 
+/// The length of file `a` after `crash` cuts a create of 1 KiB of it, or `None` when
+/// no file is there, then its length after a create of 1 KiB. When `empty`, a durable
+/// file `a` with no bytes is there before.
+fn create_at_a_crash(seed: u64, crash: Crash, empty: bool) -> (Option<u64>, u64) {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, crash, move |node| async move {
+        if empty {
+            drop(create(&node, "a", 0).await);
+            node.files().sync_dir(Path::new("")).await.unwrap();
+        }
+        until_crash(&node).await;
+        let mode = Mode::Create { len: 1_024 };
+        hang(node.files().open(Path::new("a"), mode)).await;
+    });
+    sim.run_on(&node, |node, _| async move {
+        let opened = node.files().open(Path::new("a"), Mode::Write).await;
+        let cut = opened.ok().map(|file| file.len());
+        (cut, create(&node, "a", 1_024).await.len())
+    })
+    .unwrap()
+}
+
+/// The outcomes of [`create_at_a_crash`] over 32 seeds.
+fn creates_at_a_crash(crash: Crash, empty: bool) -> BTreeSet<(Option<u64>, u64)> {
+    (0..32)
+        .map(|seed| create_at_a_crash(seed, crash, empty))
+        .collect()
+}
+
+#[test]
+fn a_crash_in_a_create_can_leave_the_file_with_no_bytes() {
+    let process = BTreeSet::from([(Some(0), 1_024), (Some(1_024), 1_024)]);
+    assert_eq!(creates_at_a_crash(Crash::Process, false), process);
+    assert_eq!(creates_at_a_crash(Crash::Process, true), process);
+    let power = BTreeSet::from([(None, 1_024), (Some(0), 1_024)]);
+    assert_eq!(creates_at_a_crash(Crash::Power, false), power);
+}
+
+#[test]
+fn a_power_crash_in_a_create_over_a_synced_file_with_no_bytes_keeps_it() {
+    let kept = BTreeSet::from([(Some(0), 1_024)]);
+    assert_eq!(creates_at_a_crash(Crash::Power, true), kept);
+}
+
 /// The digest of a run in which the power is cut during [`write_in_flight`].
 fn cut(failed: bool) -> u64 {
     let (mut sim, node) = disk(0);

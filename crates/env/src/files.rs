@@ -55,8 +55,9 @@ impl Files {
     }
 
     /// Opens the file at `path`. A file that [`Mode::Create`] makes is not durable
-    /// until [`Files::sync_dir`] on its directory ends. After that, a crash leaves it
-    /// whole, with `len` zero bytes. A create that gives [`Error::Full`] leaves no file
+    /// until [`Files::sync_dir`] on its directory ends, and a crash before the open
+    /// ends can leave it with no bytes. After `sync_dir` ends, a crash leaves it whole,
+    /// with `len` zero bytes. A create that gives [`Error::Full`] leaves no file
     /// at `path` and keeps no blocks. Another error can leave an empty file at `path`,
     /// as a crash can.
     ///
@@ -244,10 +245,10 @@ pub enum Mode {
     /// Reads and writes a file that is there. One handle at a time writes a file; see
     /// [`Files::open`].
     Write,
-    /// Reads and writes a file. When it is not there, makes it with `len` bytes,
-    /// allocated and zeroed, and makes the allocation durable before the open ends. A
-    /// file that is there keeps its bytes and must have `len` bytes. One handle at a
-    /// time writes a file; see [`Files::open`].
+    /// Reads and writes a file. When it is not there, or is there with no bytes, makes
+    /// it with `len` bytes, allocated and zeroed, and makes the allocation durable
+    /// before the open ends. Any other file that is there keeps its bytes and must
+    /// have `len` bytes. One handle at a time writes a file; see [`Files::open`].
     Create {
         /// The length of the file.
         len: u64,
@@ -629,10 +630,9 @@ impl fmt::Display for Operation {
 /// }
 /// ```
 pub trait Driver {
-    /// Opens the file at `path`. [`Mode::Create`] makes a missing file with `len`
-    /// zeroed bytes. It treats an empty file that is there as missing and allocates
-    /// it, because a crash between the create and the allocation leaves one. It opens
-    /// any other file that is there as it is. A create that gives [`Error::Full`]
+    /// Opens the file at `path`. [`Mode::Create`] makes a missing file, or a file with
+    /// no bytes, `len` zeroed bytes, and opens any other file that is there as it is.
+    /// A create that gives [`Error::Full`]
     /// leaves no file at `path` and keeps no blocks. Another error can leave an empty
     /// file at `path`, as a crash can. It makes the allocation durable before it ends
     /// (`os`: `fallocate`, then `fsync` the file), so a `sync_dir` alone makes the file

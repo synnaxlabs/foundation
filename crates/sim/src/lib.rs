@@ -563,7 +563,8 @@ pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
     /// keeps each call that ended. Each file call in flight takes effect at the
     /// crash, as if its future dropped, so a write keeps any subset of its sectors.
-    /// Each TCP stream and listener drops.
+    /// A [`Mode::Create`](env::files::Mode::Create) open in flight that makes a file
+    /// leaves it whole or with no bytes. Each TCP stream and listener drops.
     Process,
     /// The machine loses power and boots again.
     ///
@@ -573,6 +574,8 @@ pub enum Crash {
     ///   of one of them.
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
+    /// - A [`Mode::Create`](env::files::Mode::Create) open in flight that makes a
+    ///   file leaves no file, or a file with no bytes whose entry is durable.
     /// - Other file calls in flight have no effect.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.
