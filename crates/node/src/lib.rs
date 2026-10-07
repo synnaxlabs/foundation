@@ -279,10 +279,10 @@ fn error(
     first.or(panicked).map_or(Ok(()), Err)
 }
 
-/// The disk steps of a shard, made before the shard starts: shard 0's claim of the
-/// data directory, and the open of the shard's buffer, with the shard's home over
-/// it. The shards open one after another, in order of core, because each open
-/// assigns slots in the node's one interner.
+/// A shard's steps, made before the shard starts: shard 0's claim of the data
+/// directory, then the open of the shard's buffer, with the shard's home over it, held
+/// until the node stops. The shards open one after another, in order of core, because
+/// each open assigns slots in the node's one interner.
 struct Open {
     /// The shard's number on its node: its core.
     shard: u32,
