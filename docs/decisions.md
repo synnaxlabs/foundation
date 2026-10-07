@@ -443,9 +443,9 @@ How to read this record:
   driver and in `sim`. An open that fails with `Invalid` wrote only bytes that it read,
   where it read them, and did not sync the ring: the ring reads as it did before the
   open. That is a statement about what a read gives, not about what is durable. On a
-  disk that refuses a write, such an open can give `Files`. Lost: a first walk that only reads,
-  which reads each record twice, and windows held until the walk ends, which takes
-  memory up to the area. Decided by the architect (#1049,
+  disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
+  reads, which reads each record twice, and windows held until the walk ends, which
+  takes memory up to the area. Decided by the architect (#1049,
   https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). The
   restart record needs one free block: an open of a full ring first moves records at the
   tail to a segment. The walk holds one pool block at a time and reads a longer record
