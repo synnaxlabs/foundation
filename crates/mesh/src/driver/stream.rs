@@ -6,7 +6,7 @@ use types::node::PublicKey;
 
 use super::Mesh;
 use crate::error::Error;
-use crate::message::{ANSWER_MAX, Message};
+use crate::message::Message;
 
 /// The code of a stream that carried a message that is not valid for it.
 const MALFORMED: Code = Code(wire::header::MALFORMED);
@@ -21,12 +21,14 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Malformed`] when a message is the byte form of no message, or is not
-    ///   one that its stream carries. The stream stops with code 2.
+    ///   one that its stream carries. The stream stops with code 2, but after the
+    ///   answer only the half that `serve` reads stops.
     /// - [`Error::Spoofed`], [`Error::NotVoter`], [`Error::PeerNotVoter`],
     ///   [`Error::Grant`], and [`Error::Raft`] when the group refuses a message.
-    /// - [`Error::Pool`] when the pool has no block for a proposal: for its answer, or
-    ///   while the group waits to write its log. A `raft` message that gets it on a
-    ///   one-way stream is dropped, and the stream goes on.
+    /// - [`Error::Pool`] when the pool has no block: while the group waits to write its
+    ///   log, which refuses the message, or for the answer to a proposal, which the
+    ///   group took. A `raft` message that gets it on a one-way stream is dropped, and
+    ///   the stream goes on.
     /// - [`Error::Stream`] when the stream or its session fails.
     /// - [`Error::Stopped`] when the group stopped.
     pub(crate) async fn serve(
@@ -39,14 +41,14 @@ impl Mesh {
             sender,
             ..
         } = incoming;
-        let served = match sender {
-            None => self.deliver(peer, &mut receiver).await,
-            Some(sender) => self.exchange(peer, &mut receiver, sender).await,
+        let Some(sender) = sender else {
+            let delivered = self.deliver(peer, &mut receiver).await;
+            if let Some(code) = delivered.as_ref().err().and_then(code) {
+                receiver.stop(code);
+            }
+            return delivered;
         };
-        if let Some(code) = served.as_ref().err().and_then(code) {
-            receiver.stop(code);
-        }
-        served
+        self.exchange(peer, receiver, sender).await
     }
 
     /// Gives the group each `raft` message of a stream that only `peer` sends on.
@@ -72,49 +74,48 @@ impl Mesh {
     async fn exchange(
         &self,
         peer: PublicKey,
-        receiver: &mut Receiver,
+        mut receiver: Receiver,
         mut sender: Sender,
     ) -> Result<(), Error> {
-        if let Err(error) = self.reply(peer, receiver, &mut sender).await {
-            if let Some(code) = code(&error) {
-                sender.reset(code);
+        let answer = match self.ask(peer, &mut receiver).await {
+            Ok(answer) => answer.encode(),
+            Err(error) => {
+                if let Some(code) = code(&error) {
+                    sender.reset(code);
+                    receiver.stop(code);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
+        // The group took the proposal, so no error from here is a refusal: a sender
+        // that drops ends the reply half with no code of the mesh.
+        let mut block = self.pool.alloc(answer.len()).map_err(Error::Pool)?;
+        block.copy_from_slice(&answer);
+        sender.send(block.freeze()).await?;
+        sender.finish()?;
         // A reset takes back an answer that the peer does not have yet, so from here
         // only the receiver stops.
-        match receiver.recv().await? {
-            None => Ok(()),
-            Some(_) => Err(Error::Malformed),
+        if receiver.recv().await?.is_some() {
+            receiver.stop(MALFORMED);
+            return Err(Error::Malformed);
         }
+        Ok(())
     }
 
-    /// Reads the proposal, gives it to the group, and sends its answer whole.
-    async fn reply(
+    /// Reads the proposal, and gives the answer of the group to it.
+    async fn ask(
         &self,
         peer: PublicKey,
         receiver: &mut Receiver,
-        sender: &mut Sender,
-    ) -> Result<(), Error> {
-        let first = receiver.recv().await?;
+    ) -> Result<Message, Error> {
+        // The block of the proposal drops with this statement: the group writes the
+        // entry from the same pool.
         let Some(Message::Propose { change }) =
-            first.as_deref().and_then(Message::decode)
+            receiver.recv().await?.as_deref().and_then(Message::decode)
         else {
             return Err(Error::Malformed);
         };
-        // The block comes first, so a refusal for memory changes nothing.
-        let mut block = self.pool.alloc(ANSWER_MAX).map_err(Error::Pool)?;
-        let answer = self.answer(peer, change).await?.encode();
-        // The answer ends the block, and the stream skips the bytes before it.
-        let start = ANSWER_MAX
-            .checked_sub(answer.len())
-            .expect("invariant: ANSWER_MAX bounds an answer");
-        block
-            .get_mut(start..)
-            .expect("invariant: the block has ANSWER_MAX bytes")
-            .copy_from_slice(&answer);
-        sender.send(block.freeze().skip(start)).await?;
-        Ok(sender.finish()?)
+        self.answer(peer, change).await
     }
 }
 

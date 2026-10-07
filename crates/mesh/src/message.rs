@@ -29,9 +29,6 @@ const APPEND: u8 = 7;
 const APPEND_REPLY: u8 = 8;
 const APPEND_REJECT: u8 = 9;
 
-/// The most bytes in the byte form of an answer to a [`Message::Propose`].
-pub(crate) const ANSWER_MAX: usize = 17;
-
 /// One message between two nodes of a region.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Message {
@@ -606,17 +603,6 @@ mod tests {
         #[test]
         fn a_message_round_trips(message in a_message()) {
             prop_assert_eq!(Message::decode(&message.encode()), Some(message));
-        }
-
-        #[test]
-        fn an_answer_to_a_proposal_has_answer_max_bytes_at_most(
-            at in a_position(),
-            leader in prop::option::of(any::<u128>()),
-        ) {
-            let leader = leader.map(node);
-            for answer in [Message::Proposed { at }, Message::NotLeader { leader }] {
-                prop_assert!(answer.encode().len() <= ANSWER_MAX, "{answer:?}");
-            }
         }
 
         #[test]

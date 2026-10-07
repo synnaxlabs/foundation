@@ -1096,6 +1096,22 @@ mod tests {
         mesh.group.borrow().raft.term()
     }
 
+    /// What `future` gives, or `None` when it waits for longer than `limit`.
+    async fn within<F: Future>(
+        clock: &Clock,
+        limit: Span,
+        mut future: Pin<&mut F>,
+    ) -> Option<F::Output> {
+        let mut end = clock.sleep(limit);
+        poll_fn(|cx| {
+            if let Poll::Ready(output) = future.as_mut().poll(cx) {
+                return Poll::Ready(Some(output));
+            }
+            Pin::new(&mut end).poll(cx).map(|()| None)
+        })
+        .await
+    }
+
     /// Gives the output of `future` when it does not wait.
     async fn now<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
