@@ -95,7 +95,7 @@ use crate::{handoff, order, split, stored};
 ///     },
 /// });
 /// shard.carry(index);
-/// let reader = shard.open_complete(index, 1 << 20)?;
+/// let reader = shard.open_complete(index, 1 << 20);
 /// let writer = shard.open_writer(writer::Writer {
 ///     subject: "a".parse()?,
 ///     authority: Authority(1),
@@ -222,12 +222,9 @@ pub enum Outcome {
     },
 }
 
-/// Why a write or a reader open failed. No seq moves for any of them.
+/// Why a write failed. No seq moves for any of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The node has no mesh time yet, so the shard opens no reader. Open it again
-    /// later.
-    Unsynced,
     /// The frame is labeled resend, which the home does not take yet.
     Resend,
     /// A backfill frame found no room in the ring or the pool. No seq moves. The pool
@@ -245,12 +242,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsynced => {
-                write!(
-                    f,
-                    "the node has no mesh time yet: open the session again later"
-                )
-            }
             Self::Resend => write!(f, "the home does not take a resend frame yet"),
             Self::Full => write!(f, "the ring or the pool has no room for the frame"),
             Self::Large => write!(f, "the frame is too large for one write: split it"),
@@ -491,43 +482,29 @@ impl Shard {
     /// `limit_bytes`. From the index's live tail on, it gets each live frame after
     /// the commit that holds it, while it has credit for the frame.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Unsynced`] before the node first has mesh time.
-    ///
     /// # Panics
     ///
-    /// If the shard does not carry `slot`, in a call that gives no error.
+    /// If the shard does not carry `slot`.
     pub fn open_complete(
         &mut self,
         slot: Slot,
         limit_bytes: u64,
-    ) -> Result<reader::complete::Key, Error> {
-        if self.now().is_none() {
-            return Err(Error::Unsynced);
-        }
+    ) -> reader::complete::Key {
         let place = self.place(slot);
         let live = self.indexes[place].live_tail();
         let session = self.readers.open_complete(place, live, limit_bytes);
-        Ok(reader::complete::Key { slot, session })
+        reader::complete::Key { slot, session }
     }
 
     /// Opens an unnamed latest reader on the index at `slot`. It gets the index's
     /// newest live frame, before its commit.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Unsynced`] before the node first has mesh time.
-    ///
     /// # Panics
     ///
-    /// If the shard does not carry `slot`, in a call that gives no error.
-    pub fn open_latest(&mut self, slot: Slot) -> Result<reader::Key, Error> {
-        if self.now().is_none() {
-            return Err(Error::Unsynced);
-        }
+    /// If the shard does not carry `slot`.
+    pub fn open_latest(&mut self, slot: Slot) -> reader::Key {
         let session = self.readers.open_latest(self.place(slot)).into();
-        Ok(reader::Key { slot, session })
+        reader::Key { slot, session }
     }
 
     /// Raises the credit of the complete reader `key` to `limit_bytes` since it
@@ -590,11 +567,11 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// Before the node first has mesh time. No session opens before it, and mesh time
+    /// Before the node first has mesh time. No writer opens before it, and mesh time
     /// stays once known.
     fn time(&self) -> (Monotonic, Stamp) {
         let now = self.now();
-        now.expect("invariant: a session opened with mesh time, which stays")
+        now.expect("invariant: a writer opened with mesh time, which stays")
     }
 
     /// The place in `indexes` of the index at `slot`.
@@ -2128,22 +2105,13 @@ mod tests {
     }
 
     #[test]
-    fn opens_no_session_before_the_node_has_mesh_time() {
+    fn opens_no_writer_before_the_node_has_mesh_time() {
         run(60, |test| async move {
             let mut shard = test.unsynced().await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
-            let set = two_indexes();
-            let a = shard.open_writer(writer("a", 1, &set));
-            let complete = shard.open_complete(Slot::new(0), 1);
-            let latest = shard.open_latest(Slot::new(0));
+            let a = shard.open_writer(writer("a", 1, &two_indexes()));
             assert_eq!(a, Err(writer::Error::Unsynced));
-            assert_eq!(complete, Err(Error::Unsynced));
-            assert_eq!(latest, Err(Error::Unsynced));
-            assert_eq!(
-                Error::Unsynced.to_string(),
-                "the node has no mesh time yet: open the session again later"
-            );
         });
     }
 
@@ -2298,11 +2266,7 @@ mod tests {
         run(84, |test| async move {
             let mut shard = test.unsynced().await;
             let a = shard.open_writer(writer("a", 1, &not_carried()));
-            let complete = shard.open_complete(Slot::new(3), 1);
-            let latest = shard.open_latest(Slot::new(3));
             assert_eq!(a, Err(writer::Error::Unsynced));
-            assert_eq!(complete, Err(Error::Unsynced));
-            assert_eq!(latest, Err(Error::Unsynced));
         });
     }
 
@@ -2445,11 +2409,11 @@ mod tests {
 
         /// Opens a complete reader on the index at `slot`, with a credit of `CREDIT`.
         fn complete(shard: &mut Shard, slot: Slot) -> reader::Key {
-            shard.open_complete(slot, CREDIT).expect("synced").into()
+            shard.open_complete(slot, CREDIT).into()
         }
 
         fn latest(shard: &mut Shard, slot: Slot) -> reader::Key {
-            shard.open_latest(slot).expect("synced")
+            shard.open_latest(slot)
         }
 
         /// The seq of the index group `group` of each frame `reader` takes now.
@@ -2477,6 +2441,23 @@ mod tests {
 
         fn seq(seq: u64, count: u32) -> Range {
             Range { seq, count }
+        }
+
+        #[test]
+        fn opens_and_closes_a_reader_of_each_mode_with_no_mesh_time() {
+            run(97, |test| async move {
+                let mut shard = test.unsynced().await;
+                shard.carry(Slot::new(0));
+                let session = shard.open_complete(Slot::new(0), 1);
+                let readers = [session.into(), shard.open_latest(Slot::new(0))];
+                assert_ne!(readers[0], readers[1]);
+                shard.grant(session, CREDIT);
+                for reader in readers {
+                    assert_eq!(taken(&mut shard, reader, 0), []);
+                    close(&mut shard, reader);
+                }
+                assert_eq!(woken(&mut shard), []);
+            });
         }
 
         #[test]
@@ -2611,7 +2592,7 @@ mod tests {
             run(37, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let session = shard.open_complete(Slot::new(0), 1).expect("synced");
+                let session = shard.open_complete(Slot::new(0), 1);
                 let reader = reader::Key::from(session);
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
@@ -2632,7 +2613,7 @@ mod tests {
             run(25, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let session = shard.open_complete(Slot::new(0), 1).expect("synced");
+                let session = shard.open_complete(Slot::new(0), 1);
                 let reader = reader::Key::from(session);
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
@@ -2652,10 +2633,10 @@ mod tests {
         fn ignores_a_grant_to_a_closed_complete_reader() {
             run(46, |test| async move {
                 let mut shard = test.shard(AREA).await;
-                let session = shard.open_complete(Slot::new(0), 1).expect("synced");
+                let session = shard.open_complete(Slot::new(0), 1);
                 close(&mut shard, session.into());
                 shard.grant(session, CREDIT);
-                let after = shard.open_complete(Slot::new(0), 1).expect("synced");
+                let after = shard.open_complete(Slot::new(0), 1);
                 assert_ne!(after, session);
             });
         }
@@ -2990,7 +2971,7 @@ mod tests {
                 let reader = shard.open_complete(Slot::new(2), CREDIT);
                 let other = reader::complete::Key {
                     slot: Slot::new(3),
-                    ..reader.expect("synced")
+                    ..reader
                 };
                 shard.grant(other, CREDIT + 1);
             });
