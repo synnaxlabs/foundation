@@ -24,9 +24,9 @@ const STREAK: u32 = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Each live frame, after the commit that holds it. A session that misses a frame
-    /// ends with [`Ended::Behind`] after the frames before it: it misses one when the
-    /// frames it has not given back (the one it holds and those it has not taken)
-    /// reach a window, or when one commit holds more than a window of frames.
+    /// ends with [`Ended::Behind`] after the frames before it: it misses one that
+    /// comes when the frames it has not given back (the one it holds and those it has
+    /// not taken) reach a window.
     Complete,
     /// The newest live frame, before its commit.
     Latest,

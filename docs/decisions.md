@@ -613,11 +613,11 @@ How to read this record:
 - **HUB SESSIONS (#1133)** `hub::Reader::next` yields once after 128 frames in a row: it
   wakes its own task and returns `Pending`. So it yields under `sim` as under `os`, and
   `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does nothing
-  outside a Tokio runtime. A complete session that misses a frame (the frames it has
-  not given back, held or untaken, reach a window, or a commit holds more than a
-  window) gets no later frame, as there is no catch-up from the buffer yet. The
-  director chose that `delivery` reports the miss and wakes the session, and that
-  `next` then ends with an error
+  outside a Tokio runtime. A complete session that misses a frame (one that comes when
+  the frames it has not given back, held or untaken, reach a window) gets no later
+  frame, as there is no catch-up from the buffer yet. The director chose that
+  `delivery` reports the miss and wakes the session, and that `next` then ends with
+  an error
   (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
   `delivery::Readers::release` also names a session that missed a frame and has none
   waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`

@@ -627,6 +627,28 @@ fn keeps_a_complete_reader_that_called_next_before_a_commit_under_a_window() {
 }
 
 #[test]
+fn keeps_a_complete_reader_that_takes_a_commit_of_more_than_a_window() {
+    run_on(1, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write_samples(&mut writer, now, 80_000);
+        write_samples(&mut writer, now + 80_000, 80_000);
+        test.clock.sleep(SETTLE).await;
+        let first = reader.next().await.expect("a frame").view.charge();
+        let second = reader.next().await.expect("a frame").view.charge();
+        assert!(
+            first + second > WINDOW,
+            "{first} + {second} bytes pass a window"
+        );
+        write_samples(&mut writer, now + 160_000, 1);
+        test.clock.sleep(SETTLE).await;
+        let third = reader.next().await.map(|received| received.view.charge());
+        assert_eq!(third.map(|third| third < 4096), Ok(true));
+    });
+}
+
+#[test]
 fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
     run(22, |test| async move {
         let mut latest = test.reader(&["value"], Mode::Latest).await;
