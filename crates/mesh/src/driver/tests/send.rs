@@ -12,7 +12,7 @@ use super::*;
 /// The largest message that node 2 takes, when a test sets no other.
 const LIMIT: usize = 1 << 16;
 
-/// Node 2, with its transport.
+/// The peer of node 1 at the address of node 2, with its transport.
 struct Peer {
     node: sim::node::Node,
     transport: Transport,
@@ -140,6 +140,20 @@ where
     M: Future<Output = ()> + 'static,
     P: Future<Output: Send + 'static> + 'static,
 {
+    run_as(2, limit, mesh, peer)
+}
+
+/// As [`run`], with the keys of node `id` at the address of node 2.
+fn run_as<M, P>(
+    id: u8,
+    limit: usize,
+    mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> P::Output
+where
+    M: Future<Output = ()> + 'static,
+    P: Future<Output: Send + 'static> + 'static,
+{
     let mut sim = Sim::new(sim::Config::default());
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
     let shard = |name: &str| env::shards::Config {
@@ -156,7 +170,7 @@ where
         let config = transport::Config {
             message_bytes_max: NonZeroUsize::new(limit).unwrap(),
             window_bytes: limit,
-            ..transport_config(&node, &tasks, 2, Rc::clone(&pool))
+            ..transport_config(&node, &tasks, id, Rc::clone(&pool))
         };
         let transport = bind(&node, PORT, config);
         let side = Peer {
@@ -304,32 +318,60 @@ fn a_task_that_waits_in_a_dial_holds_no_block() {
     });
 }
 
+// Node 1 has no record of node 4 until 10 s after a voter set names it. Node 4 then
+// joins with the address of node 2, so only a task that went on reaches it.
 #[test]
 fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
-    solo(|node, tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+    let mesh = |node: sim::node::Node, tasks: Tasks| async move {
+        let members = vec![create_voter(1), common::member(2), common::member(3)];
+        let config = Config {
+            members,
+            ..config_at(&node, &tasks, 1, PORT, &IDS, &IDS)
+        };
         let mesh = Mesh::open(config).await.unwrap();
         let voters = Voters {
             incoming: [1, 2, 4].map(key).into(),
             outgoing: IDS.map(key).into(),
         };
-        let at = Position {
+        let at = |index| Position {
             term: common::TERM,
-            index: 1,
+            index,
         };
-        let data = Data::Voters(voters);
+        let entry = |index, data| Entry {
+            at: at(index),
+            data,
+        };
         let append = Body::Append {
             prev: Position::default(),
-            entries: vec![Entry { at, data }],
+            entries: vec![entry(1, Data::Voters(voters))],
             commit: 0,
         };
         assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
         let clock = node.clock();
         clock.sleep(seconds(10)).await;
-        // A campaign can start at this tick, and the task of node 4 then runs next.
-        clock.sleep(Span::MILLISECOND).await;
-        assert!(quiet(&mesh, 4).await, "the task of node 4 took no message");
+        assert_eq!(mesh.member(key(4)), None);
+        let mut card = common::member(4).card.card().clone();
+        let addresses = vec![Address::Udp(address(2))];
+        card.addresses = card::addresses::Addresses::new(addresses).unwrap();
+        let card = card::Signed::sign(key(4), card, &private(4));
+        let join = join_with(&card, 7, Stamp::EPOCH);
+        let append = Body::Append {
+            prev: at(1),
+            entries: vec![
+                entry(2, Data::Bytes(encoded(&ticket()))),
+                entry(3, Data::Bytes(encoded(&join))),
+            ],
+            commit: 3,
+        };
+        assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+        pending::<()>().await;
+    };
+    let first = run_as(4, LIMIT, mesh, |peer| async move {
+        let session = peer.session().await;
+        let mut receiver = stream(&session).await;
+        next(&mut receiver).await.unwrap().map(|message| message.to)
     });
+    assert_eq!(first, Some(key(4)));
 }
 
 /// Whether node 2, which takes a message of at most `limit` bytes, got the entry of
@@ -458,8 +500,8 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             .await;
         }
         clock.sleep(seconds(10)).await;
-        // No public call tells a task that waits in a send from one that sends: only
-        // the count of the messages that wait for it does.
+        // A call of `Mesh::outgoing` takes a message or the waker of the task, so the
+        // test reads the count of the messages that wait for the task.
         let waiting = {
             let group = mesh.group.borrow();
             group.queues.get(&key(2)).map(|queue| queue.messages.len())
