@@ -56,7 +56,14 @@ or a line range.
 9. If review changed code, run the gate again. When review is done (`/review`,
    "Done"), run `gh pr ready <n>` and `gh pr merge <n> --auto`. The merge queue takes
    it when the checks pass.
-10. **Wait once.** Run `.claude/skills/build/wait.sh <n>` with `run_in_background`.
+10. **Wait once.** Run the wait script as it is on `main` (the copy on a branch can be
+    older), with `run_in_background`:
+
+    ```sh
+    git fetch -q origin main
+    git show origin/main:.claude/skills/build/wait.sh | bash -s <n>
+    ```
+
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
     - Exit 0 (merged): comment the final state on the issue, call
