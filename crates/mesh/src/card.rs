@@ -551,5 +551,17 @@ mod tests {
             assert_eq!(decoded(&encoded(&card)), Some(card), "version {version}");
         }
         assert_eq!(decoded(&encoded(&many)), Some(many), "300 addresses");
+        let ports = Card {
+            addresses: vec![
+                Address::Udp("0.0.0.0:0".parse().unwrap()),
+                Address::Tcp("[::]:65535".parse().unwrap()),
+                Address::Relay {
+                    node: public(1),
+                    at: "1.2.3.4:0".parse().unwrap(),
+                },
+            ],
+            ..fixed()
+        };
+        assert_eq!(decoded(&encoded(&ports)), Some(ports), "ports, own relay");
     }
 }
