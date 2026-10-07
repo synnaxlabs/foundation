@@ -1270,8 +1270,8 @@ mod tests {
         }
     }
 
-    // The record is 615 bytes. The largest block of a pool of 704 bytes holds 640, and
-    // the pool has no room for a block of one sector and a block of the rest.
+    // The record is 640 bytes, the largest block of a pool of 704 bytes. The pool has
+    // no room for a block of one sector and a block of the rest.
     #[test]
     fn writes_a_record_that_one_block_of_the_pool_holds() {
         let (mut sim, node) = sim(0);
@@ -1280,9 +1280,9 @@ mod tests {
                 let config = block::Config { budget: 704 };
                 let memory = block::Heap::new(config.reservation());
                 let pool = Rc::new(Pool::new(config, memory));
-                let entry = bytes(1, 555);
+                let entry = bytes(1, 580);
                 let record = encode(0, None, std::slice::from_ref(&entry)).len();
-                assert_eq!((record, pool.largest()), (615, 640));
+                assert_eq!((record, pool.largest()), (640, 640));
                 let files = node.files();
                 let (mut log, _) =
                     Log::open(files.clone(), DIR.into(), Rc::clone(&pool))
@@ -1294,7 +1294,7 @@ mod tests {
                 written.map(|()| stored.entries)
             })
             .unwrap();
-        assert_eq!(written, Ok(vec![bytes(1, 555)]));
+        assert_eq!(written, Ok(vec![bytes(1, 580)]));
     }
 
     // The record is 1,892 bytes. The pool of 2,048 bytes holds it as blocks of 1,792
@@ -1317,30 +1317,33 @@ mod tests {
         assert_eq!(written, Ok(vec![bytes(1, 1832)]));
     }
 
-    // The record is `CHUNK` and 1 bytes. With a block of 81,920 bytes held, the pool
-    // has room for blocks of `CHUNK` and of 1 byte, and for no second block of 81,920.
+    // With a block of 81,920 bytes held, the first pool has room for one block of
+    // `CHUNK` and no more. The second has room for blocks of `CHUNK` and of 1 byte, and
+    // for no second block of 81,920.
     #[test]
     fn a_block_of_a_write_is_at_most_a_chunk() {
-        let (mut sim, node) = sim(0);
-        let written = sim
-            .run_on(&node, |node, _| async move {
-                let config = block::Config { budget: 147_712 };
-                let memory = block::Heap::new(config.reservation());
-                let pool = Rc::new(Pool::new(config, memory));
-                let entry = bytes(1, CHUNK - 59);
-                let record = encode(0, None, std::slice::from_ref(&entry)).len();
-                assert_eq!(record, CHUNK + 1);
-                let files = node.files();
-                let (mut log, _) = Log::open(files, DIR.into(), Rc::clone(&pool))
-                    .await
-                    .unwrap();
-                let held = pool.alloc(81_920).unwrap();
-                let written = log.write(None, std::slice::from_ref(&entry)).await;
-                drop(held);
-                written
-            })
-            .unwrap();
-        assert_eq!(written, Ok(()));
+        for (budget, record) in [(147_584, CHUNK), (147_712, CHUNK + 1)] {
+            let (mut sim, node) = sim(0);
+            let written = sim
+                .run_on(&node, move |node, _| async move {
+                    let config = block::Config { budget };
+                    let memory = block::Heap::new(config.reservation());
+                    let pool = Rc::new(Pool::new(config, memory));
+                    let entry = bytes(1, record - 60);
+                    let encoded = encode(0, None, std::slice::from_ref(&entry));
+                    assert_eq!(encoded.len(), record);
+                    let files = node.files();
+                    let (mut log, _) = Log::open(files, DIR.into(), Rc::clone(&pool))
+                        .await
+                        .unwrap();
+                    let held = pool.alloc(81_920).unwrap();
+                    let written = log.write(None, std::slice::from_ref(&entry)).await;
+                    drop(held);
+                    written
+                })
+                .unwrap();
+            assert_eq!(written, Ok(()), "record {record}");
+        }
     }
 
     #[test]
