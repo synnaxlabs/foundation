@@ -1,4 +1,4 @@
-use super::{Error, HEAD, Head, OPENED, Open, Reply, ends, rest_of_run};
+use super::{BEHIND, Error, HEAD, Head, OPENED, Open, Reply, ends, rest_of_run};
 
 /// The decoder at the reader's node: it takes each message from the home, in order,
 /// and checks the order and the runs of the session.
@@ -13,8 +13,15 @@ pub struct Reader {
 enum Next {
     Opened,
     Head,
-    Ends { remain: u32 },
-    Body { end: usize, remain: usize },
+    Ends {
+        remain: u32,
+    },
+    Body {
+        end: usize,
+        remain: usize,
+    },
+    /// No message: the home sent `Behind`.
+    Ended,
 }
 
 /// A message from the home, decoded.
@@ -39,6 +46,8 @@ pub enum FromHome<'m> {
         /// The body ends with this message.
         last: bool,
     },
+    /// The session missed a frame, so the home ended it. No message follows.
+    Behind,
 }
 
 impl Reader {
@@ -65,7 +74,8 @@ impl Reader {
     /// run of the session: [`Error::Unopened`] for a head before `Opened`,
     /// [`Error::Reopen`] for a second `Opened`, [`Error::Places`] for a head with more
     /// series than places, [`Error::Run`] for a message with more ends than remain,
-    /// and [`Error::Body`] for a message longer than the rest of the body. A message
+    /// [`Error::Body`] for a message longer than the rest of the body, and
+    /// [`Error::Ended`] for a message after `Behind`. A message
     /// of a run has no kind, so a message where a run continues is read as one. The
     /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
     /// caller stops it.
@@ -107,6 +117,10 @@ impl Reader {
                     next,
                 )
             }
+            Next::Ended => {
+                let &kind = message.first().ok_or(Error::Empty)?;
+                return Err(Error::Ended { kind });
+            }
         };
         self.next = next;
         Ok(event)
@@ -118,7 +132,7 @@ impl Reader {
     pub fn body(&self) -> Option<usize> {
         match self.next {
             Next::Body { end, remain } => Some(start(end, remain)),
-            Next::Opened | Next::Head | Next::Ends { .. } => None,
+            Next::Opened | Next::Head | Next::Ends { .. } | Next::Ended => None,
         }
     }
 
@@ -126,6 +140,8 @@ impl Reader {
         match (Reply::decode(message)?, self.next) {
             (Reply::Opened, Next::Opened) => Ok((FromHome::Opened, Next::Head)),
             (Reply::Head(_), Next::Opened) => Err(Error::Unopened { kind: HEAD }),
+            (Reply::Behind, Next::Opened) => Err(Error::Unopened { kind: BEHIND }),
+            (Reply::Behind, _) => Ok((FromHome::Behind, Next::Ended)),
             (Reply::Opened, _) => Err(Error::Reopen { kind: OPENED }),
             (Reply::Head(head), _) if head.series > self.places => Err(Error::Places {
                 series: head.series,
@@ -190,6 +206,7 @@ mod tests {
             FromHome::Head(head) => Event::Head(head.series),
             FromHome::Ends { ends, last } => Event::Ends(ends.collect(), last),
             FromHome::Body { bytes, last } => Event::Body(bytes.to_vec(), last),
+            FromHome::Behind => Event::Behind,
         })
     }
 
@@ -199,6 +216,7 @@ mod tests {
         Head(u32),
         Ends(Vec<(u32, u32)>, bool),
         Body(Vec<u8>, bool),
+        Behind,
     }
 
     #[test]
@@ -263,6 +281,55 @@ mod tests {
             Some(Error::Unopened { kind: 2 })
         );
         assert_eq!(event(&mut reader, &[OPENED]), Ok(Event::Opened));
+    }
+
+    #[test]
+    fn refuses_a_behind_before_opened() {
+        let mut reader = Reader::new(&open(1));
+        assert_eq!(
+            reader.decode(&[BEHIND]).err(),
+            Some(Error::Unopened { kind: 3 })
+        );
+        assert_eq!(event(&mut reader, &[OPENED]), Ok(Event::Opened));
+    }
+
+    #[test]
+    fn ends_the_session_at_behind() {
+        let mut reader = opened(1);
+        assert_eq!(event(&mut reader, &head(1)), Ok(Event::Head(1)));
+        let ends = encode_ends(&[(0, 2)]);
+        assert_eq!(
+            event(&mut reader, &ends),
+            Ok(Event::Ends(vec![(0, 2)], true))
+        );
+        assert_eq!(
+            event(&mut reader, &[4, 5]),
+            Ok(Event::Body(vec![4, 5], true))
+        );
+        assert_eq!(event(&mut reader, &[BEHIND]), Ok(Event::Behind));
+        assert_eq!(reader.body(), None);
+        for message in [vec![OPENED], vec![BEHIND], head(1), ends, vec![4]] {
+            let kind = message[0];
+            assert_eq!(reader.decode(&message).err(), Some(Error::Ended { kind }));
+        }
+        assert_eq!(reader.decode(&[]).err(), Some(Error::Empty));
+    }
+
+    #[test]
+    fn reads_a_behind_in_a_run_as_run_bytes() {
+        let mut reader = opened(1);
+        reader.decode(&head(1)).expect("the head decodes");
+        assert_eq!(
+            reader.decode(&[BEHIND]).err(),
+            Some(Error::Length { len: 1 })
+        );
+        reader
+            .decode(&encode_ends(&[(0, 1)]))
+            .expect("the end decodes");
+        assert_eq!(
+            event(&mut reader, &[BEHIND]),
+            Ok(Event::Body(vec![3], true))
+        );
     }
 
     #[test]
@@ -405,6 +472,7 @@ mod tests {
                 (Just(places), proptest::collection::vec(frame(places), 0..4))
             }),
             sizes in proptest::collection::vec(1..=24_usize, 1..8),
+            behind in any::<bool>(),
         ) {
             let mut sizes = sizes.into_iter().cycle();
             let mut reader = Reader::new(&open(places));
@@ -433,6 +501,9 @@ mod tests {
                     at = at.checked_add(message.len()).expect("the body fits a usize");
                 }
                 prop_assert_eq!(reader.body(), None);
+            }
+            if behind {
+                prop_assert_eq!(event(&mut reader, &[BEHIND]), Ok(Event::Behind));
             }
         }
     }
