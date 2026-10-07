@@ -28,5 +28,9 @@ sim = { path = "../sim" }
 name = "send"
 harness = false
 
+[[bench]]
+name = "recv"
+harness = false
+
 [lints]
 workspace = true
