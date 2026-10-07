@@ -95,7 +95,23 @@ fn skips_a_comment_after_spaces_and_tabs() {
 }
 
 #[test]
-fn refuses_a_tab_in_a_line_and_nul_in_a_measurement() {
+fn a_quote_in_a_comment_runs_across_the_next_lines() {
+    let body = "# a=\"b\nm v=1 10\nm v=1 20\n";
+    let (store, error) = refused(body);
+    assert_eq!(
+        error,
+        Error::Parse {
+            line: body.into(),
+            message:
+                "Could not parse entire line. Found trailing content: '\nm v=1 20\n'"
+                    .into(),
+        }
+    );
+    assert_eq!(store.points("m", &[]).count(), 0);
+}
+
+#[test]
+fn refuses_a_bare_tab_and_nul_in_a_measurement() {
     const TAKE: &str = "A generic parsing error occurred: TakeWhile1";
     for (line, message) in [
         ("m\tx v=1 10", TAKE),
@@ -117,12 +133,17 @@ fn refuses_a_tab_in_a_line_and_nul_in_a_measurement() {
 }
 
 #[test]
-fn stores_a_backslash_in_a_name_and_nul_in_a_key() {
-    let store = stored("m\\x,a\\b=c,d\0e=f v\\w=1,x\0y=2 10\n");
+fn stores_a_backslash_or_nul_that_the_writer_refuses() {
+    let store = stored("m\\x,a\\b=c,d\0e=f,g=h\\i,j=k\0l v\\w=1,x\0y=2 10\n");
     let point = store.points("m\\x", &[]).next().unwrap();
     assert_eq!(
         point.tags,
-        &map(&[("a\\b", "c".to_owned()), ("d\0e", "f".to_owned())])
+        &map(&[
+            ("a\\b", "c".to_owned()),
+            ("d\0e", "f".to_owned()),
+            ("g", "h\\i".to_owned()),
+            ("j", "k\0l".to_owned()),
+        ])
     );
     assert_eq!(
         point.fields,

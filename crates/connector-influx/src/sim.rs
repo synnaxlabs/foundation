@@ -35,8 +35,9 @@ type Fields = BTreeMap<String, Field>;
 
 impl Store {
     /// Stores each line of `body`. Like InfluxDB, it stores each valid line, also
-    /// after a line that is not valid. It skips a blank line, and a line whose first
-    /// character after spaces and tabs is `#`.
+    /// after a line that is not valid. It splits lines as InfluxDB 3 does, so a `"`
+    /// opens a string that runs across newlines, also in a comment. It skips a blank
+    /// line, and a line whose first character after spaces and tabs is `#`.
     ///
     /// # Errors
     ///
