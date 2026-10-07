@@ -413,6 +413,50 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
     })
 }
 
+/// `join` gives the node's own failure, else the first shard error by core, else the
+/// first panic by core, and joins every shard.
+#[test]
+fn join_gives_errors_in_order_of_precedence() {
+    let panicked = |core: usize| thread::Panicked {
+        name: format!("shard-{core}"),
+    };
+    let memory = Error::Memory {
+        core: 2,
+        error: os::memory::Error::Refused,
+    };
+    let shards = |stored: usize| Error::Shards { stored, cores: 3 };
+    let mut joined = 0;
+    let all = [
+        (Err(panicked(0)), Some(shards(2))),
+        (Ok(()), Some(shards(4))),
+    ];
+    let all = all.into_iter().inspect(|_| joined += 1);
+    assert_eq!(crate::error(Some(memory.clone()), all), Err(memory));
+    assert_eq!(joined, 2);
+    let cases = [
+        (
+            vec![(Err(panicked(0)), None), (Ok(()), Some(shards(2)))],
+            shards(2),
+        ),
+        (
+            vec![(Ok(()), Some(shards(2))), (Ok(()), Some(shards(4)))],
+            shards(2),
+        ),
+        (
+            vec![
+                (Ok(()), None),
+                (Err(panicked(1)), None),
+                (Err(panicked(2)), None),
+            ],
+            Error::Panicked(panicked(1)),
+        ),
+    ];
+    for (shards, error) in cases {
+        assert_eq!(crate::error(None, shards.into_iter()), Err(error));
+    }
+    assert_eq!(crate::error(None, [(Ok(()), None)].into_iter()), Ok(()));
+}
+
 mod buffer {
     use std::cell::RefCell;
     use std::pin::Pin;
@@ -593,8 +637,12 @@ mod buffer {
     }
 
     /// Starts a node of 3 shards, after `faults` aim at its shards, with memory from
-    /// `memory`. Gives the calls of the files maker and the functions that ran.
-    fn made(faults: &[(usize, Fault)], memory: Memory) -> (usize, usize) {
+    /// `memory`. Gives the result of `join`, the calls of the files maker, and the
+    /// functions that ran.
+    fn made(
+        faults: &[(usize, Fault)],
+        memory: Memory,
+    ) -> (Result<(), Error>, usize, usize) {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 3);
         for &(core, fault) in faults {
@@ -618,21 +666,62 @@ mod buffer {
             ..config(&host, 1 << 20, memory)
         });
         assert_eq!(sim.run(), Ok(()));
-        assert!(node.join().is_err());
-        (*made.borrow(), *ran.lock().unwrap())
+        (node.join(), *made.borrow(), *ran.lock().unwrap())
     }
 
     /// `node` makes the files of a shard after its memory and before its start. A
     /// shard that does not start drops its function unrun.
     #[test]
     fn a_shard_that_does_not_start_drops_its_files_unrun() {
-        let refused = refuse(1, os::memory::Error::Refused);
-        assert_eq!(made(&[], refused), (1, 1), "no memory");
-        assert_eq!(
-            made(&[(1, Fault::Start)], Box::new(heap)),
-            (2, 1),
-            "no start"
-        );
+        let error = os::memory::Error::Refused;
+        let memory = Err(Error::Memory { core: 1, error });
+        assert_eq!(made(&[], refuse(1, error)), (memory, 1, 1), "no memory");
+        let start = Err(Error::Start(thread::Error::Start {
+            name: "shard-1".into(),
+            reason: "injected".into(),
+        }));
+        let made = made(&[(1, Fault::Start)], Box::new(heap));
+        assert_eq!(made, (start, 2, 1), "no start");
+    }
+
+    #[test]
+    fn a_stop_before_the_opens_makes_no_ring() {
+        let mut run = start(7, 3, &[]);
+        run.node.stop();
+        assert_eq!(run.sim.run(), Ok(()));
+        assert_eq!(run.node.join(), Ok(()));
+        assert_eq!(listed(&mut run.sim, &run.host, ""), Vec::<PathBuf>::new());
+    }
+
+    /// A stop at any point of the claim and the opens ends each step that started
+    /// and starts no other, so the data directory holds the claim and the rings of
+    /// the first shards, each whole. A stop between the claim and the first open
+    /// leaves the claim alone.
+    #[test]
+    fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
+        let all = ["shard-0", "shard-1", "shard-2", "shards-3"].map(PathBuf::from);
+        let mut seen = [false; 5];
+        for step in 0..200 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 3);
+            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let after = Span::from_nanos(step * 10_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()), "at {after:?}");
+            assert_eq!(node.join(), Ok(()), "at {after:?}");
+            let listed = listed(&mut sim, &host, "");
+            let rings = listed.len().saturating_sub(1);
+            let made: Vec<PathBuf> = if listed.is_empty() {
+                Vec::new()
+            } else {
+                all[..rings].iter().chain(&all[3..]).cloned().collect()
+            };
+            assert_eq!(listed, made, "at {after:?}");
+            seen[listed.len()] = true;
+            assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
+        }
+        assert_eq!(seen[1..], [true; 4], "a stop after each step");
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -726,16 +815,21 @@ mod buffer {
         }
     }
 
+    /// A shard that panics as it starts stops the node before shard 1 starts its
+    /// open, so `join` gives the panic.
     #[test]
-    fn join_gives_a_ring_that_did_not_open_over_a_shard_that_panicked() {
+    fn a_shard_that_panics_before_an_open_skips_it() {
         for seed in 0..32 {
             let e = refused(seed, 3, 1, &[(2, Fault::Panic)]);
-            assert_eq!(e, opened(1), "seed {seed}");
+            let panicked = thread::Panicked {
+                name: "shard-2".into(),
+            };
+            assert_eq!(e, Error::Panicked(panicked), "seed {seed}");
         }
     }
 
     #[test]
-    fn join_gives_a_shard_that_could_not_start_over_a_ring_that_did_not_open() {
+    fn a_shard_that_cannot_start_skips_a_ring_that_would_not_open() {
         for seed in 0..32 {
             let e = refused(seed, 3, 1, &[(2, Fault::Start)]);
             let start = thread::Error::Start {
@@ -785,10 +879,11 @@ mod directory {
     }
 
     /// With more than one record of another count, the error gives the smallest, in
-    /// any order of the list.
+    /// any order of the list. `shards-10` lists before `shards-3`.
     #[test]
     fn the_smallest_other_count_is_the_stored_one() {
-        for (records, stored) in [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4)] {
+        let cases = [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4), (&[10, 3], 3)];
+        for (records, stored) in cases {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
             for &k in records {
@@ -851,6 +946,29 @@ mod directory {
             .expect("the run ends");
             assert_eq!(run_on(&mut sim, &host), made, "{cores} cores");
         }
+    }
+
+    /// The count of rings with no record is one over the largest index, in any order
+    /// of the list. `shard-10` lists before `shard-9`.
+    #[test]
+    fn the_largest_ring_gives_the_count() {
+        let (stored, cores) = (11, 2);
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, cores);
+        sim.run_on(&host, |host, _| async move {
+            let files = host.files();
+            for name in ["shard-10", "shard-9"] {
+                files.create_dir(Path::new(name)).await.expect("makes");
+            }
+        })
+        .expect("the run ends");
+        let e = run_on(&mut sim, &host).unwrap_err();
+        assert_eq!(e, Error::Shards { stored, cores });
+        assert_eq!(
+            e.to_string(),
+            "the data directory holds 11 shards, but this node starts 2; start it \
+             on 11 cores"
+        );
     }
 
     #[test]
@@ -943,12 +1061,12 @@ mod directory {
         }
     }
 
-    /// A shard with no memory comes before a refused data directory in `join`.
+    /// A shard with no memory stops the node before the claim starts, so the claim
+    /// records no shard count.
     #[test]
-    fn join_gives_a_shard_with_no_memory_over_a_refused_data_directory() {
+    fn a_shard_with_no_memory_skips_the_claim() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        record(&mut sim, &host, 3);
         let refused = os::memory::Error::Refused;
         let node = Node::start(config(&host, 1 << 20, refuse(1, refused)));
         assert_eq!(sim.run(), Ok(()));
@@ -960,10 +1078,21 @@ mod directory {
                 error: refused
             })
         );
+        assert_eq!(listed(&mut sim, &host, ""), Vec::<PathBuf>::new());
     }
 
+    /// A claim that started before a shard panicked runs to its end, and `join` gives
+    /// its error over the panic. A panic before the claim skips it.
     #[test]
     fn join_gives_a_refused_data_directory_over_a_shard_that_panicked() {
+        let shards = Error::Shards {
+            stored: 2,
+            cores: 3,
+        };
+        let panicked = Error::Panicked(thread::Panicked {
+            name: "shard-2".into(),
+        });
+        let mut seen = [false; 2];
         for seed in 0..32 {
             let mut sim = sim::Sim::new(sim::Config {
                 seed,
@@ -981,14 +1110,13 @@ mod directory {
             };
             panics(&mut run);
             let e = run.node.join().unwrap_err();
-            assert_eq!(
-                e,
-                Error::Shards {
-                    stored: 2,
-                    cores: 3
-                },
-                "seed {seed}"
-            );
+            let claimed = e == shards;
+            assert!(claimed || e == panicked, "seed {seed}: {e:?}");
+            seen[usize::from(claimed)] = true;
         }
+        assert_eq!(
+            seen, [true; 2],
+            "a panic before and after the claim started"
+        );
     }
 }

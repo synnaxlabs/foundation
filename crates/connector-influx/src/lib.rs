@@ -7,6 +7,7 @@
     clippy::string_slice
 )]
 
+pub mod gap;
 pub mod line;
 #[cfg(feature = "sim")]
 pub mod sim;
