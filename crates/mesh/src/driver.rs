@@ -2489,6 +2489,39 @@ mod tests {
         });
     }
 
+    // The stamp is the time at which the voter admitted the request, so a commit
+    // after the expiry does not refuse it.
+    #[test]
+    fn a_join_that_commits_after_the_expiry_admits_its_node() {
+        solo(|node, tasks| async move {
+            let time = synced(&node);
+            let config = Config {
+                time: time.clone(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
+            let Change::Join(join) = &stamped else {
+                panic!("{stamped:?} is not a join")
+            };
+            let expiry = join.at + seconds(1);
+            mesh.propose(ticket_of(8, "plant", false, expiry))
+                .await
+                .unwrap();
+            node.clock().sleep(seconds(3600)).await;
+            assert!(time.now().mesh.unwrap().earliest > expiry);
+            mesh.propose(stamped).await.unwrap();
+            mesh.propose(home(2)).await.unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(2))));
+            let admitted = mesh.member(key(4)).map(|member| member.card);
+            assert_eq!(admitted, Some(common::member(4).card));
+        });
+    }
+
     #[test]
     fn a_node_with_no_mesh_time_of_known_error_at_or_after_the_epoch_stamps_no_join() {
         for case in ["unsynced", "before the epoch", "unknown error"] {
