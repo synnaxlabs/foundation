@@ -114,6 +114,10 @@ impl Connection {
                 break;
             }
         }
+        // After every event, so that each stop has reset its stream.
+        if self.live() {
+            self.streams.pump(&mut self.inner, events);
+        }
         assert!(
             !drained || !self.live(),
             "invariant: noq-proto ends a connection before it drains"

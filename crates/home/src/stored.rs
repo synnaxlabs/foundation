@@ -254,7 +254,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::{SCALARS, create_pool, interner, key};
+    use crate::common::{SCALARS, create_interner, create_pool, key};
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.
@@ -284,7 +284,7 @@ mod tests {
 
     /// The stored body of one index series of 8 bytes: 38 bytes.
     fn stored() -> Vec<u8> {
-        let set = interner().intern(&[Group {
+        let set = create_interner().intern(&[Group {
             index: key(Slot::new(1)),
             data: &[],
         }]);
@@ -301,7 +301,7 @@ mod tests {
             // The data channel's slot is below its index's, so the first series of
             // the frame is not the index.
             let data = [(key(Slot::new(2)), Type::Scalar(Scalar::U8))];
-            let set = interner().intern(&[
+            let set = create_interner().intern(&[
                 Group {
                     index: key(Slot::new(1)),
                     data: &[],
@@ -340,7 +340,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "the frame has no series")]
         fn panics_on_a_frame_of_no_series_also_with_a_full_pool() {
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(1)),
                 data: &[],
             }]);
@@ -428,7 +428,7 @@ mod tests {
                 .zip(cases)
                 .map(|(slot, (data_type, _))| (key(Slot::new(slot)), data_type))
                 .collect();
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(1)),
                 data: &data,
             }]);
@@ -457,7 +457,7 @@ mod tests {
 
         #[test]
         fn returns_the_pool_error_when_the_pool_is_full() {
-            let set = interner().intern(&[Group {
+            let set = create_interner().intern(&[Group {
                 index: key(Slot::new(1)),
                 data: &[],
             }]);
@@ -491,7 +491,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is not encoded")]
             fn panics_on_a_raw_frame() {
-                let set = interner().intern(&[Group {
+                let set = create_interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[],
                 }]);
@@ -503,7 +503,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is not of the key set")]
             fn panics_on_a_frame_of_another_key_set() {
-                let mut interner = interner();
+                let mut interner = create_interner();
                 let [of, other] = [1, 2].map(|slot| {
                     interner.intern(&[Group {
                         index: key(Slot::new(slot)),
@@ -518,7 +518,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame has more than one group")]
             fn panics_on_a_frame_of_two_groups() {
-                let set = interner().intern(&[1, 2].map(|slot| Group {
+                let set = create_interner().intern(&[1, 2].map(|slot| Group {
                     index: key(Slot::new(slot)),
                     data: &[],
                 }));

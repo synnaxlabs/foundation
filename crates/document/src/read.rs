@@ -41,7 +41,8 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
 
 /// The fix for `text`, which `byte::Size` refuses with `error`. It is `Write` and the
 /// text with no whitespace and the unit that `text` likely means, when that text reads,
-/// so `"200 GB"` gets `Write "200GiB"`. Otherwise it is the fix for `error`.
+/// so `"200 GB"` gets `Write "200GiB"`. Otherwise it is the fix for `error`, with
+/// each size quoted as the file writes it.
 fn size_fix(text: &str, error: byte::Error) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
     // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it has no likely text.
@@ -65,7 +66,11 @@ fn size_fix(text: &str, error: byte::Error) -> String {
             return format!("Write \"{likely}\"");
         }
     }
-    error.fix()
+    match error {
+        byte::Error::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
+        byte::Error::Range { largest } => format!("Use at most \"{largest}\""),
+        byte::Error::Unit { .. } | byte::Error::Fraction => error.fix(),
+    }
 }
 
 /// Reads a block label as a name, such as `"site_a.cell_1"`.
@@ -152,7 +157,7 @@ mod tests {
     use crate::{Map, Position, Source, Span};
     use proptest::prelude::*;
 
-    const SYNTAX: &str = "Write a size such as 200GiB or 1.5GiB";
+    const SYNTAX: &str = "Write a size such as \"200GiB\" or \"1.5GiB\"";
     const UNIT: &str = "Use a unit such as `MiB` or `GiB`, with exact case";
     const FRACTION: &str = "Round the size to whole bytes";
     const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in that \
@@ -308,13 +313,13 @@ mod tests {
                 "16777216TiB",
                 "cannot read the byte size \"16777216TiB\": expected a size of at most \
                  16777215TiB",
-                "Use at most 16777215TiB",
+                "Use at most \"16777215TiB\"",
             ),
             (
                 "18446744073709551616B",
                 "cannot read the byte size \"18446744073709551616B\": expected a size \
                  of at most 18446744073709551615B",
-                "Use at most 18446744073709551615B",
+                "Use at most \"18446744073709551615B\"",
             ),
         ]);
     }
@@ -673,7 +678,13 @@ mod tests {
                     if let Some(likely) = likely {
                         prop_assert!(size(&string(likely)).is_ok(), "{:?}", text);
                     } else {
-                        prop_assert_eq!(diagnostic.fix, error.fix(), "{:?}", text);
+                        // The fix is the error's, with each size quoted.
+                        prop_assert_eq!(
+                            diagnostic.fix.replace('"', ""),
+                            error.fix(),
+                            "{:?}",
+                            text
+                        );
                     }
                 }
                 (read, parsed) => {
