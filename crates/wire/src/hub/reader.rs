@@ -392,13 +392,13 @@ mod tests {
         let mut reader = opened(1);
         reader.decode(&head(1)).expect("the head decodes");
         assert_eq!(
-            reader.decode(&head(1)).err(),
+            reader.decode(&head(2)).err(),
             Some(Error::Length { len: 18 })
         );
         reader
             .decode(&encode_ends(&[(0, 18)]))
             .expect("the end decodes");
-        assert_eq!(event(&mut reader, &head(1)), Ok(Event::Body(head(1), true)));
+        assert_eq!(event(&mut reader, &head(2)), Ok(Event::Body(head(2), true)));
     }
 
     #[test]
