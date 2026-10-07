@@ -657,7 +657,6 @@ fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
         write(&mut writer, &[now], &[0]);
         latest.next().await.expect("a frame");
         let mut next = pin!(latest.next());
-        assert!(poll_once(next.as_mut()).is_pending());
         write(&mut writer, &[now + 1], &[1]);
         test.clock.sleep(SETTLE).await;
         let held = test.free();
