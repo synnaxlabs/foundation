@@ -63,6 +63,27 @@ impl Reader {
         }
     }
 
+    /// A reader, as [`Reader::new`], that has read `first`, the first byte of the
+    /// stream's first message.
+    pub(crate) fn started(bytes_max: usize, first: u8) -> Self {
+        let len = varint::len(first);
+        let state = if len == 1 {
+            State::Sized {
+                len: varint::value(&[first]),
+            }
+        } else {
+            let mut bytes = [0; varint::BYTES_MAX];
+            let [head, ..] = &mut bytes;
+            *head = first;
+            State::Prefix {
+                bytes,
+                have: 1,
+                len,
+            }
+        };
+        Self { bytes_max, state }
+    }
+
     /// Reads the next whole message into a block. `take(len)` gives a block of
     /// exactly `len` bytes for the next message, or `None` when it may not have one
     /// now. `source(max)` gives the stream's next 1 to `max` bytes, `Pending` when it
@@ -289,6 +310,23 @@ mod tests {
                 let pool = pool(1 << 16);
                 let mut source = Source::new(encode(&messages), split);
                 let mut reader = Reader::new(300);
+                let read = read_all(&mut reader, &pool, &mut source);
+                prop_assert_eq!(read, Ok(messages));
+            }
+
+            #[test]
+            fn started_gives_what_new_gives_after_the_first_byte(
+                messages in prop::collection::vec(
+                    prop::collection::vec(any::<u8>(), 0..=20_000),
+                    1..4,
+                ),
+                split in 1_usize..400,
+            ) {
+                let pool = pool(1 << 16);
+                let mut bytes = encode(&messages);
+                let first = bytes.remove(0);
+                let mut source = Source::new(bytes, split);
+                let mut reader = Reader::started(20_000, first);
                 let read = read_all(&mut reader, &pool, &mut source);
                 prop_assert_eq!(read, Ok(messages));
             }

@@ -87,6 +87,33 @@ with two lines for a person who has not read the code:
 
 A reviewer that did not write the PR gives both. An author never rates its own PR.
 
+## Round comment
+
+The required check `review` (`cargo xtask review`) reads only comments by
+`synnax-foundation-factory[bot]`, and parses this text. Write each round comment so:
+
+```
+Quality: <n>/10
+<summary>
+
+## Review round <n>
+
+Reviewers: reviewer, architecture, breaker
+Range: `<from>..<head sha>`
+Findings: <count, or none>
+
+<the findings, most severe first>
+```
+
+`Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
+skips `breaker` adds the line
+``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
+range of the last round: each `.rs` line it adds or removes, trimmed, must be empty or
+start with `//`, and it must change no `Cargo.toml` or `Cargo.lock` line. A moved file
+counts as each of its lines removed and added. A head that is the range end plus clean
+merges of the base needs no new round. A red-team PR labeled `oracle` also needs the
+director's verdict with the line ``Director: approved at `<sha>` `` at the head.
+
 ## Second round
 
 In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that
@@ -103,25 +130,27 @@ nothing checked again. So when round 1 led to fix commits:
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
-   of a round with no commit is low and in text, the author fixes each with the
-   `reviewer`'s words as given, and needs no further round.
+   of a round with no commit is low and in text, its comment gives `Findings: none` and
+   lists them under a line `Text fixes:`. The author applies each with the `reviewer`'s
+   words as given, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
-commits and the fix commits out of every round range. A merge gets a round that checks
-its resolution (`git show --remerge-diff <merge>`). When that diff changes no `.rs`
-line, the round runs `reviewer` alone, and its comment says so. Otherwise it runs as
-step 1 says.
+commits and the fix commits out of every round range. A clean merge, whose
+`git show --remerge-diff <merge>` is empty, needs no round. A merge with a resolution
+gets a round on that diff. When it changes no `.rs` line, the round runs `reviewer`
+alone, and its comment says so. Otherwise it runs as step 1 says.
 
 ## Done
 
-Review is done when the last round comment ends at the PR head and finds nothing (or
-only text that it fixes as "Second round" step 2 says), each round comment names each
-reviewer its round requires (round 1: the table; a later round: `reviewer`, `breaker`
-unless its range changes only comments, and `performance` with new numbers when its
-`Hot path:` line names a function), the `Deferred:` line of each round comment links the
-OK of each deferral in a risk crate, the `Public surface:` line of the last round
-comment links the architect's approval of each item, each finding of an architect review
-has its fix commit or a linked answer, and each later step that a round, an architect
-review, an architect's ruling, or an issue that the PR closes names is stated on an open
-issue that does it (a new issue, or a comment on an existing one) or as a trigger in the
-decisions entry. Only then does the author run `gh pr ready`.
+Review is done when the last round comment ends at the PR head, or at a head before
+clean merges of `main`, and finds nothing (each `Text fixes:` item applied as "Second
+round" step 2 says), each round comment names each reviewer its round requires (round 1:
+the table; a later round: `reviewer`, `breaker` unless its range changes only comments,
+and `performance` with new numbers when its `Hot path:` line names a function), the
+`Deferred:` line of each round comment links the OK of each deferral in a risk crate,
+the `Public surface:` line of the last round comment links the architect's approval of
+each item, each finding of an architect review has its fix commit or a linked answer,
+and each later step that a round, an architect review, an architect's ruling, or an
+issue that the PR closes names is stated on an open issue that does it (a new issue, or
+a comment on an existing one) or as a trigger in the decisions entry. Only then does the
+author run `gh pr ready`.

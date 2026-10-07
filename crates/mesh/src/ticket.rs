@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use types::name::Name;
+use types::name::{Name, Prefix};
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
@@ -68,7 +68,7 @@ pub struct Voter {
 /// key only, and it has no `Display`, no `Clone`, and no equality.
 pub struct Ticket {
     private_key: PrivateKey,
-    region: Name,
+    region: Prefix,
     voters: Vec<Voter>,
 }
 
@@ -80,7 +80,7 @@ impl Ticket {
     ///
     /// When `voters` is empty: a region always has a voter.
     #[must_use]
-    pub fn new(private_key: PrivateKey, region: Name, voters: Vec<Voter>) -> Self {
+    pub fn new(private_key: PrivateKey, region: Prefix, voters: Vec<Voter>) -> Self {
         assert!(!voters.is_empty(), "a ticket names at least one voter");
         Self {
             private_key,
@@ -97,7 +97,7 @@ impl Ticket {
 
     /// The prefix of the ticket's region.
     #[must_use]
-    pub const fn region(&self) -> &Name {
+    pub const fn region(&self) -> &Prefix {
         &self.region
     }
 
@@ -301,8 +301,14 @@ mod tests {
     #[test]
     fn a_ticket_keeps_its_region_and_voters() {
         let ticket = ticket(7);
-        assert_eq!(ticket.region().as_str(), "plant");
+        assert_eq!(ticket.region(), &"plant".parse().unwrap());
         assert_eq!(ticket.voters(), [voter()]);
+    }
+
+    #[test]
+    fn a_ticket_for_the_root_region_keeps_the_root() {
+        let ticket = Ticket::new(private(7), Prefix::ROOT, vec![voter()]);
+        assert_eq!(ticket.region(), &Prefix::ROOT);
     }
 
     #[test]
@@ -317,7 +323,7 @@ mod tests {
 
     #[test]
     fn debug_writes_the_region_and_the_public_key_only() {
-        let region: Name = "plant".parse().unwrap();
+        let region: Prefix = "plant".parse().unwrap();
         assert_eq!(
             format!("{:?}", ticket(7)),
             format!(
