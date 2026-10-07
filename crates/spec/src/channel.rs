@@ -120,6 +120,7 @@ impl DataType {
             Self::Sample(
                 sample::Type::Scalar(element)
                 | sample::Type::Array { element, .. }
+                | sample::Type::Matrix { element, .. }
                 | sample::Type::List { element, .. },
             ) => *element,
             Self::Sample(sample::Type::String | sample::Type::Bytes)
@@ -189,10 +190,17 @@ mod tests {
     const OTHERS: [Scalar; 4] =
         [Scalar::Bool, Scalar::Stamp, Scalar::Span, Scalar::Uuid];
 
-    fn shapes(element: Scalar) -> [DataType; 3] {
+    fn shapes(element: Scalar) -> [DataType; 4] {
         [
             DataType::Sample(sample::Type::Scalar(element)),
             DataType::Sample(sample::Type::Array { element, len: 3 }),
+            DataType::Sample(sample::Type::Matrix {
+                element,
+                sides: sample::Sides {
+                    rows: 2,
+                    columns: 3,
+                },
+            }),
             DataType::Sample(sample::Type::List { element, max: 3 }),
         ]
     }

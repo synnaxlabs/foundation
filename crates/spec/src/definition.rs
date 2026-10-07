@@ -19,6 +19,7 @@
 //! kind          := 0 error:optional_key control:optional_key                index
 //!                | 1 index:key quality:optional_key data_type unit:optional  data
 //! data_type     := 0 scalar:u8 | 1 scalar:u8 len:u32 | 2 scalar:u8 max:u32 | 3 | 4 | 5
+//!                | 6 scalar:u8 rows:u16 columns:u16
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! text          := length:u64 UTF-8 bytes
@@ -48,10 +49,10 @@
 //!
 //! A retention `keep` is in nanoseconds, zero or more.
 //!
-//! A `data_type` is a scalar, an array, a list, a string, bytes, or quality, in that
-//! order from 0. A `scalar` is bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7,
-//! u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. Only a scalar from 1 to 10,
-//! or an array or list of one, has a unit.
+//! A `data_type` is a scalar, an array, a list, a string, bytes, quality, or a matrix,
+//! in that order from 0. A `scalar` is bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6,
+//! u32 7, u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. Only a scalar from 1
+//! to 10, or an array, list, or matrix of one, has a unit.
 
 #![deny(
     clippy::indexing_slicing,
@@ -269,6 +270,7 @@ const LIST: u8 = 2;
 const STRING: u8 = 3;
 const BYTES: u8 = 4;
 const QUALITY: u8 = 5;
+const MATRIX: u8 = 6;
 
 /// The code of a scalar. [`scalar`] is its inverse.
 const fn code(scalar: Scalar) -> u8 {
@@ -323,6 +325,14 @@ fn data_type(out: &mut Vec<u8>, data_type: &DataType) {
         DataType::Sample(sample::Type::List { element, max }) => {
             out.extend_from_slice(&[LIST, code(element)]);
             out.extend_from_slice(&max.to_le_bytes());
+        }
+        DataType::Sample(sample::Type::Matrix {
+            element,
+            sides: sample::Sides { rows, columns },
+        }) => {
+            out.extend_from_slice(&[MATRIX, code(element)]);
+            out.extend_from_slice(&rows.to_le_bytes());
+            out.extend_from_slice(&columns.to_le_bytes());
         }
         DataType::Sample(sample::Type::String) => out.push(STRING),
         DataType::Sample(sample::Type::Bytes) => out.push(BYTES),
@@ -432,6 +442,16 @@ impl<'a> Reader<'a> {
             .ok_or(Error::Truncated { at })?;
         self.rest = rest;
         Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn u16(&mut self) -> Result<u16, Error> {
+        let at = self.at();
+        let (&bytes, rest) = self
+            .rest
+            .split_first_chunk()
+            .ok_or(Error::Truncated { at })?;
+        self.rest = rest;
+        Ok(u16::from_le_bytes(bytes))
     }
 
     fn u32(&mut self) -> Result<u32, Error> {
@@ -661,6 +681,13 @@ impl<'a> Reader<'a> {
             STRING => sample::Type::String,
             BYTES => sample::Type::Bytes,
             QUALITY => return Ok(DataType::Quality),
+            MATRIX => sample::Type::Matrix {
+                element: self.scalar()?,
+                sides: sample::Sides {
+                    rows: self.u16()?,
+                    columns: self.u16()?,
+                },
+            },
             found => return Err(Error::DataType { at, found }),
         };
         Ok(DataType::Sample(sample))
