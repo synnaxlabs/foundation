@@ -53,9 +53,11 @@ Check:
   public call that shows the same behavior. When the PR replaces such a compare, or
   another compare of a whole value, name each part that the old compare checked, and the
   test that now fails when a call changes it. A part with no test is a finding. When a
-  test that asserts through a field or call that is not public has a reason that holds,
-  make each change that `cargo mutants` makes to the code it checks, such as `<` to
-  `<=`, and run the other tests. A change that only such a test catches is a finding,
+  test asserts through a field or call that is not public, or compares the `Debug`
+  string, with a reason that holds, list the mutants of each file that it checks (`cargo
+  mutants --list --file <file>`, which builds nothing). Make by hand each one on a line
+  that the PR changes, such as `<` to `<=`, and run the other tests of the crate with
+  `--all-features`, as CI does. A change that only such a test catches is a finding,
   unless a `.cargo/mutants.toml` entry gives its reason (`testing.md`). When the PR
   exists to remove work, which test fails if it is reverted? For a bug fix, revert the
   fix, run its regression test, and name the call chain through which it fails. A test

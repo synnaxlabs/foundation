@@ -42,11 +42,12 @@ whole scope. Never cap a run on a box with `prlimit --data`: it counts reserved 
 not touched pages (#803,
 https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6009258555,
 2026-10-06T04:20:13Z). CI keeps it until each runner host has the cgroup cap (#899). An
-assertion on a private field is never the only kill. `.cargo/mutants.toml` lists the few
-functions it skips. Each entry is as narrow as one function. Its comment says why no
-caller or peer can see the mutant, or names the test that kills it in a job that the
-mutants run does not see (Miri, loom, another OS). A mutant that a test could kill but
-none does links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
+assertion through a private field or call, or a compare of the `Debug` string of the
+type under test, is never the only kill. `.cargo/mutants.toml` lists the few functions
+it skips. Each entry is as narrow as one function. Its comment says why no caller or
+peer can see the mutant, or names the test that kills it in a job that the mutants run
+does not see (Miri, loom, another OS). A mutant that a test could kill but none does
+links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
 `rust-toolchain-nightly`, that only those gates use.
 
 ## Fuzzing
