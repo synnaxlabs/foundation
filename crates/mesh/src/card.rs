@@ -277,7 +277,7 @@ mod tests {
     // The card of node `id`, with its own public key.
     fn card(id: u8) -> impl Strategy<Value = Card> {
         (
-            "[a-z]{1,8}(\\.[a-z0-9_-]{1,8}){0,3}",
+            "@?[A-Za-z0-9_-]{1,8}(\\.@?[A-Za-z0-9_-]{1,8}){0,3}",
             seal_key(),
             prop::collection::vec(address(), 0..4),
             any::<u64>(),
