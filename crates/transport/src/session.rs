@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::poll_fn;
 use std::rc::Rc;
 
 use types::node::PublicKey;
@@ -82,8 +83,9 @@ impl Session {
     /// }
     /// ```
     pub async fn open(&self, class: Class) -> Result<(Sender, Receiver), Error> {
-        let _ = class;
-        todo!("#68")
+        let (sender, receiver) = poll_fn(|cx| self.0.poll_open(cx, class)).await?;
+        let sender = Sender::new(Rc::clone(&self.0), class, sender);
+        Ok((sender, Receiver::new(Rc::clone(&self.0), receiver)))
     }
 
     /// Opens a stream that only this node sends on. It waits while the peer allows no
@@ -102,8 +104,8 @@ impl Session {
     /// }
     /// ```
     pub async fn open_sender(&self, class: Class) -> Result<Sender, Error> {
-        let _ = class;
-        todo!("#68")
+        let sender = poll_fn(|cx| self.0.poll_open_sender(cx, class)).await?;
+        Ok(Sender::new(Rc::clone(&self.0), class, sender))
     }
 
     /// Waits for the next stream the peer opened, highest class first. Every clone
@@ -125,7 +127,8 @@ impl Session {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Incoming, Error> {
-        todo!("#68")
+        let incoming = poll_fn(|cx| self.0.poll_accept(cx)).await?;
+        Ok(Incoming::new(&self.0, incoming))
     }
 
     /// The session's datagrams. Every call gives halves of the same queues.
@@ -199,15 +202,13 @@ pub enum Peer {
 
 #[cfg(test)]
 mod tests {
-    use types::node::PrivateKey;
+    use std::pin::pin;
+
     use types::time::Span;
 
-    use crate::testing::{self, IDLE};
+    use crate::testing::{self, CLIENT, IDLE, SERVER, join, poll_once, spans};
     use crate::tls::public;
-    use crate::{Code, Error};
-
-    const CLIENT: PrivateKey = PrivateKey([1; 32]);
-    const SERVER: PrivateKey = PrivateKey([2; 32]);
+    use crate::{Class, Code, Config, Error, message};
 
     #[test]
     fn a_session_stays_open_until_its_last_clone_drops() {
@@ -230,6 +231,171 @@ mod tests {
             assert_eq!(session.closed().await, closed);
             assert!(node.clock().now() - connected >= held);
         });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dropped_recv_gives_its_wait_for_room_to_the_next_stream() {
+        // The receive budget is the window plus the largest message: 2^17 bytes.
+        let narrow = |config| Config {
+            window_bytes: 1 << 16,
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+                let complete = 2;
+                for len in [65_000, 65_000, 1 << 16] {
+                    let header =
+                        [[complete].as_slice(), &message::prefix(len)].concat();
+                    side.session.0.raw(&header);
+                }
+                let small = [&[complete], &*message::prefix(100), &[7; 100]].concat();
+                side.session.0.raw(&small);
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                let mut receivers = Vec::new();
+                for _ in 0..4 {
+                    let incoming = side.session.accept().await.expect("a stream");
+                    assert_eq!(incoming.class, Class::Complete);
+                    receivers.push(incoming.receiver);
+                }
+                let [first, second, waits, small] = &mut receivers[..] else {
+                    unreachable!("four streams");
+                };
+                assert!(poll_once(pin!(first.recv())).await.is_none());
+                assert!(poll_once(pin!(second.recv())).await.is_none());
+                // Boxed, so that the drop below ends the future, not only a borrow.
+                let mut waiting = Box::pin(waits.recv());
+                assert!(poll_once(waiting.as_mut()).await.is_none());
+                // The small message fits, but waits behind the one before it.
+                assert!(poll_once(pin!(small.recv())).await.is_none());
+                drop(waiting);
+                let read = poll_once(pin!(small.recv())).await;
+                let read = read.map(|read| read.map(|m| m.map(|block| block.to_vec())));
+                assert_eq!(read, Some(Ok(Some(vec![7; 100]))));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn accept_gives_the_waiting_streams_highest_class_first() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut senders = Vec::new();
+                for class in [
+                    Class::CatchUp,
+                    Class::Complete,
+                    Class::Latest,
+                    Class::Command,
+                ] {
+                    let opened = side.session.open_sender(class).await;
+                    let mut sender = opened.expect("a stream");
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    senders.push(sender);
+                }
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+                let mut classes = Vec::new();
+                for _ in 0..4 {
+                    let incoming = side.session.accept().await.expect("a stream");
+                    classes.push(incoming.class);
+                }
+                let order = [
+                    Class::Command,
+                    Class::Latest,
+                    Class::Complete,
+                    Class::CatchUp,
+                ];
+                assert_eq!(classes, order);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_close_by_the_peer_ends_each_call_that_waits_and_each_later_one() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, _receiver) = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                side.session.close(Code(5));
+                let closed = Error::Closed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let incoming = side.session.accept().await.expect("a stream");
+                let (mut receiver, mut sender) = (incoming.receiver, incoming.sender);
+                let read = receiver.recv().await.map(|m| m.map(|block| block.to_vec()));
+                assert_eq!(read, Ok(Some(b"a".to_vec())));
+                let closed = Error::PeerClosed { code: Code(5) };
+                let (accepted, read) =
+                    join(side.session.accept(), receiver.recv()).await;
+                assert_eq!(accepted.map(|_| ()), Err(closed.clone()));
+                assert_eq!(read.map(|_| ()), Err(closed.clone()));
+                let opened = side.session.open(Class::Complete).await;
+                assert_eq!(opened.map(|_| ()), Err(closed.clone()));
+                let opened = side.session.open_sender(Class::Complete).await;
+                assert_eq!(opened.map(|_| ()), Err(closed.clone()));
+                let sender = sender.as_mut().expect("a reply half");
+                assert_eq!(sender.send(side.block(b"b")).await, Err(closed.clone()));
+                let tried = sender.try_send(side.block(b"b")).map(|_| ());
+                assert_eq!(tried, Err(closed.clone()));
+                assert_eq!(sender.finish(), Err(closed.clone()));
+                assert_eq!(receiver.recv().await.map(|_| ()), Err(closed));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_stream_keeps_its_session_open_after_the_session_drops() {
+        let held = Span::from_nanos(2 * IDLE.nanos());
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            move |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, mut receiver) = opened.expect("a stream");
+                drop(side.session);
+                side.node.clock().sleep(held).await;
+                sender
+                    .send(testing::block(&side.pool, b"a"))
+                    .await
+                    .expect("sent");
+                sender.finish().expect("finished");
+                let read = receiver.recv().await.map(|m| m.map(|block| block.to_vec()));
+                assert_eq!(read, Ok(Some(b"b".to_vec())));
+            },
+            |side| async move {
+                let incoming = side.session.accept().await.expect("a stream");
+                let (mut receiver, mut sender) = (incoming.receiver, incoming.sender);
+                let read = receiver.recv().await.map(|m| m.map(|block| block.to_vec()));
+                assert_eq!(read, Ok(Some(b"a".to_vec())));
+                let sender = sender.as_mut().expect("a reply half");
+                sender.send(side.block(b"b")).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+        );
         assert_eq!(sim.run(), Ok(()));
     }
 }

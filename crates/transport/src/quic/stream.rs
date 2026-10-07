@@ -214,6 +214,11 @@ impl Sender {
         self.key
     }
 
+    /// Whether [`Endpoint::finish`](super::Endpoint::finish) took it.
+    pub(crate) fn finished(&self) -> bool {
+        self.finished
+    }
+
     /// Takes `message` as the message in hand, after its header. The sender holds no
     /// part of a message and is not finished.
     pub(super) fn load(&mut self, message: Block) {
