@@ -3331,22 +3331,79 @@ mod tests {
     }
 
     /// Opens [`testing::STREAMS_MAX`] raw streams in `dir` on the client, writes
-    /// `bytes` on each, and ends each before the first byte of its first message:
-    /// with a reset of `code`, or else with a finish.
+    /// `bytes` on each and lets the server read them, then ends each before the first
+    /// byte of its first message: with a reset of `code`, or else with a finish.
+    /// Gives the ids.
     fn end_before_the_first_message_byte(
         pair: &mut Pair,
         dir: Dir,
         bytes: &[u8],
         code: Option<VarInt>,
-    ) {
-        for _ in 0..testing::STREAMS_MAX {
-            let id = raw(pair.client.connection(), dir, bytes, code.is_none());
-            if let Some(code) = code {
-                let reset = pair.client.connection().send_stream(id).reset(code);
-                reset.expect("reset");
+    ) -> Vec<StreamId> {
+        let ids: Vec<_> = (0..testing::STREAMS_MAX)
+            .map(|_| raw(pair.client.connection(), dir, bytes, false))
+            .collect();
+        pair.run(RUN);
+        for &id in &ids {
+            let mut send = pair.client.connection().send_stream(id);
+            match code {
+                Some(code) => send.reset(code).expect("reset"),
+                None => send.finish().expect("finished"),
             }
         }
         pair.run(RUN);
+        ids
+    }
+
+    #[test]
+    fn that_end_after_only_their_class_byte_reset_the_reply() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            for code in [None, Some(VarInt::from_u32(7))] {
+                let bytes = [byte(Class::Complete)];
+                let ids =
+                    end_before_the_first_message_byte(&mut pair, Dir::Bi, &bytes, code);
+                let open = pair
+                    .server
+                    .connection()
+                    .streams()
+                    .remote_open_streams(Dir::Bi);
+                assert_eq!(open, 0, "{code:?}");
+                assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
+                for id in ids {
+                    let reset =
+                        pair.client.connection().recv_stream(id).received_reset();
+                    assert_eq!(reset, Ok(Some(VarInt::from_u32(0))), "{code:?}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_stop_after_only_the_class_byte_fails_the_first_write_of_the_reply() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let bytes = [byte(Class::Complete)];
+            let id = raw(pair.client.connection(), Dir::Bi, &bytes, false);
+            pair.run(RUN);
+            let stopped = pair.client.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            pair.run(RUN);
+            let mut send = pair.client.connection().send_stream(id);
+            assert_eq!(send.write(&[1, b'a']), Ok(2));
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![b"a".to_vec()], false));
+            let mut reply = incoming.sender.expect("a two-way stream");
+            let message = shard.block(b"b");
+            let written =
+                pair.server
+                    .endpoint
+                    .write(now, &mut reply, &mut Some(message));
+            assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
+        });
     }
 
     #[test]
