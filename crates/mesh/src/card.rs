@@ -501,4 +501,19 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_name_of_255_bytes_is_one_length_byte_then_the_name() {
+        let name = format!("{}.{}", "a".repeat(127), "b".repeat(127));
+        let card = Card {
+            name: name.parse().unwrap(),
+            addresses: Vec::new(),
+            ..fixed()
+        };
+        let bytes = encoded(&card);
+        assert_eq!(bytes[0], 255);
+        assert_eq!(&bytes[1..256], name.as_bytes());
+        assert_eq!(bytes.len(), 1 + 255 + 32 + 32 + 8 + 8);
+        assert_eq!(decoded(&bytes), Some(card));
+    }
 }
