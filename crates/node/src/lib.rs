@@ -2,6 +2,9 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench;
 mod directory;
 mod handoff;
 mod scope;
