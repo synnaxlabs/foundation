@@ -131,13 +131,13 @@ impl Shard {
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
-    /// the record before it, a restart record or a data record. The tail of the ring
-    /// must be at 0 of the area.
+    /// the record before it, a restart record or a data record. The tail offset in
+    /// each header block must be 0.
     fn seal(&self, offset: u64) {
         let file = self.memory.bytes(RING);
         for block in [0, to_usize(BLOCK)] {
             let tail = &file[block + TAIL_AT..block + TAIL_AT + 8];
-            assert_eq!(tail, [0; 8], "the tail of the ring is not at 0");
+            assert_eq!(tail, [0; 8], "the tail offset of the ring is not 0");
         }
         let u32_at = |at: usize| {
             u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
@@ -2216,8 +2216,8 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
     });
 }
 
-/// The first record follows the chain value of the header, which the helper does not
-/// read.
+/// The first record follows the chain value of the header, and the helper does not
+/// read that value.
 #[test]
 #[should_panic(expected = "the first record of the area follows no record")]
 fn seal_refuses_the_first_record_of_the_area() {
@@ -2229,7 +2229,7 @@ fn seal_refuses_the_first_record_of_the_area() {
 
 /// With a tail past 0, the record before in the file can be a newer record.
 #[test]
-#[should_panic(expected = "the tail of the ring is not at 0")]
+#[should_panic(expected = "the tail offset of the ring is not 0")]
 fn seal_refuses_a_ring_with_a_moved_tail() {
     run(117, Memory::default(), |shard| async move {
         shard.create_two_records().await;
