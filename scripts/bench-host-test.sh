@@ -218,7 +218,8 @@ check "a failed run posts the report up to it and exits 1" eval '
 BIG=1 run '[]' "${args[@]}"
 check "each run of a long output posts its end" eval '
     [[ $status == 0 && $(posted 1047 | grep -c "^table") == 4 ]] &&
-    has "$(posted 1047)" "(only the last 15000 bytes"'
+    has "$(posted 1047)" "(only the last 15000 bytes" &&
+    ! has "$(posted 1047)" xxxxxxxx'
 
 FAIL_REPORT=1 run '[]' "${args[@]}"
 check "a report that does not post is printed, and the run exits 1" eval '
@@ -247,11 +248,13 @@ pid=$!
 until grep -qs delete-security-group "$T/calls" || ! kill -0 "$pid" 2>/dev/null; do
     /bin/sleep 0.2
 done
-kill -0 "$pid" 2>/dev/null && kill -TERM "$pid"
+signaled=
+kill -TERM "$pid" 2>/dev/null && signaled=1
 status=0
 wait "$pid" || status=$?
 check "a signal during the cleanup does not stop it" eval '
-    [[ $status == 1 ]] && has "$(posted 15)" "Security group sg-1 is left." &&
+    [[ -n $signaled && $status == 1 ]] &&
+    has "$(posted 15)" "Security group sg-1 is left." &&
     [[ $(grep -c delete-security-group "$T/calls") == 24 ]]'
 
 run '[]' 1047 box2.red-team delivery missing bbbb2222
