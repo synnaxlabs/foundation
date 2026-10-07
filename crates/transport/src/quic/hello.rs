@@ -219,19 +219,25 @@ mod tests {
         (value | 0xc0 << 56).to_be_bytes()
     }
 
-    /// What the `decode` doc gives for a hello of `pairs`, then the start of one more
-    /// pair when `cut`, with the reason of a fault. A hello of at most 256 bytes.
-    fn doc_decode(pairs: &[(u64, u64)], cut: bool) -> Result<Hello, String> {
+    /// What the `decode` doc gives for a hello of `pairs` then `tail`, the start of
+    /// one more pair when not empty, with the reason of a fault.
+    fn doc_decode(pairs: &[(u64, u64)], tail: &[u8]) -> Result<Hello, String> {
+        if encode(pairs).len() + tail.len() > 256 {
+            return Err("a hello over 256 bytes".to_owned());
+        }
         let mut after = pairs.iter().zip(pairs.iter().skip(1));
         if let Some(((last, _), (id, _))) =
             after.find(|((last, _), (id, _))| id <= last)
         {
             return Err(format!("a hello with id {id} after id {last}"));
         }
-        if cut {
+        if !tail.is_empty() {
             return Err("a hello that ends inside a pair".to_owned());
         }
-        let value = |id| pairs.iter().find(|pair| pair.0 == id).map(|pair| pair.1);
+        let value = |id| {
+            let pair = pairs.iter().find(|pair| pair.0 == id)?;
+            Some(usize::try_from(pair.1).unwrap_or(usize::MAX))
+        };
         let Some(window) = value(0) else {
             return Err("a hello with no window_bytes".to_owned());
         };
@@ -249,34 +255,67 @@ mod tests {
             ));
         }
         Ok(Hello {
-            window_bytes: usize::try_from(window).unwrap_or(usize::MAX),
-            message_bytes_max: usize::try_from(message).unwrap_or(usize::MAX),
+            window_bytes: window,
+            message_bytes_max: message,
         })
     }
 
-    /// Up to 6 pairs of ids 0 to 3 and values near the limits: in any order, or
-    /// half the time with ids that rise, as a valid hello's do.
+    /// A value near the limits, or any varint.
+    fn value() -> impl Strategy<Value = u64> {
+        prop_oneof![
+            0_u64..3_000,
+            Just(1_471),
+            Just(1_472),
+            0..=VarInt::MAX.into_inner(),
+        ]
+    }
+
+    /// An unknown id of each varint length.
+    fn unknown() -> impl Strategy<Value = u64> {
+        prop_oneof![
+            4 => 2_u64..64,
+            1 => Just(1 << 14),
+            1 => Just(1 << 30),
+            1 => Just(VarInt::MAX.into_inner()),
+        ]
+    }
+
+    /// Up to 31 pairs in one of four shapes: any ids in any order; ids that rise,
+    /// with up to two pairs of any ids after them; ids 0 and 1, then unknown ids that
+    /// rise; or ids 0 and 1, then pairs of 8-byte ids to near 256 bytes.
     fn pairs() -> impl Strategy<Value = Vec<(u64, u64)>> {
-        let value = || {
-            prop_oneof![
-                0_u64..3_000,
-                Just(1_471),
-                Just(1_472),
-                0..=VarInt::MAX.into_inner(),
-            ]
-        };
-        let any = prop::collection::vec((0_u64..4, value()), 0..6);
+        let id = || prop_oneof![0_u64..4, unknown()];
+        let any = prop::collection::vec((id(), value()), 0..32);
         let rising = (
-            prop::collection::btree_set(0_u64..4, 0..=4),
-            prop::collection::vec(value(), 4),
-            prop::collection::vec((0_u64..4, value()), 0..2),
+            prop::collection::btree_set(id(), 0..=24),
+            prop::collection::vec(value(), 24),
+            prop::collection::vec((id(), value()), 0..=2),
         )
             .prop_map(|(ids, values, more)| {
                 let mut pairs: Vec<_> = ids.into_iter().zip(values).collect();
                 pairs.extend(more);
                 pairs
             });
-        prop_oneof![any, rising]
+        let limits = (
+            value(),
+            value(),
+            prop::collection::btree_set(unknown(), 0..=24),
+            prop::collection::vec(value(), 24),
+        )
+            .prop_map(|(window, message, ids, values)| {
+                let mut pairs = vec![(0, window), (1, message)];
+                pairs.extend(ids.into_iter().zip(values));
+                pairs
+            });
+        let long = (value(), value(), prop::collection::vec(value(), 12..=22))
+            .prop_map(|(window, message, values)| {
+                let mut pairs = vec![(0, window), (1, message)];
+                let max = VarInt::MAX.into_inner();
+                let ids = max - u64::try_from(values.len()).expect("22 at most")..max;
+                pairs.extend(ids.zip(values));
+                pairs
+            });
+        prop_oneof![any, rising, limits, long]
     }
 
     proptest! {
@@ -352,8 +391,23 @@ mod tests {
             let mut bytes = encode(&pairs);
             bytes.extend(&tail);
             let decoded = Hello::decode(&bytes).map_err(|fault| fault.0);
-            prop_assert_eq!(decoded, doc_decode(&pairs, !tail.is_empty()));
+            prop_assert_eq!(decoded, doc_decode(&pairs, &tail));
         }
+    }
+
+    #[test]
+    fn decode_reads_every_pair() {
+        let mut pairs = vec![(0, 2_000), (1, 1_500)];
+        pairs.extend((2..=63).map(|id| (id, 0)));
+        pairs.push((63, 0));
+        assert_eq!(
+            Hello::decode(&encode(&pairs)),
+            fault("a hello with id 63 after id 63")
+        );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (1 << 40, 0), (2, 0)])),
+            fault("a hello with id 2 after id 1099511627776")
+        );
     }
 
     #[test]
