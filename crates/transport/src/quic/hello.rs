@@ -249,8 +249,8 @@ mod tests {
             ));
         }
         Ok(Hello {
-            window_bytes: usize::try_from(window).expect("64 bits"),
-            message_bytes_max: usize::try_from(message).expect("64 bits"),
+            window_bytes: usize::try_from(window).unwrap_or(usize::MAX),
+            message_bytes_max: usize::try_from(message).unwrap_or(usize::MAX),
         })
     }
 
