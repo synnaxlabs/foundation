@@ -51,9 +51,10 @@ impl Home {
     /// The [`Error`] of a message that does not decode, or that breaks the order or
     /// the run of the session: [`Error::Unopened`] for a credit before the open,
     /// [`Error::Reopen`] for a second open, [`Error::Latest`] for a credit in a latest
-    /// session, and [`Error::Run`] for a message with more keys than remain. A message of a run has no kind, so a message where the run
-    /// continues is read as one. The session is then not valid
-    /// ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
+    /// session, and [`Error::Run`] for a message with more keys than remain. A message
+    /// of a run has no kind, so a message where the run continues is read as one. The
+    /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
+    /// caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromReader<'m>, Error> {
         let (event, next) = match self.next {
             Next::Keys { remain, latest } => {
