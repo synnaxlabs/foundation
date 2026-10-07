@@ -472,15 +472,13 @@ fn poll_parts(sender: &mut Sender, blocks: Vec<Block>, parts: &[Part]) -> u64 {
     nanos(Instant::now().duration_since(start))
 }
 
-/// Polls one send of each block once, on `senders` in turn, and gives the nanoseconds
-/// it took.
+/// Copies `parts` of each block into a new block of `bytes` from `pool`, polls a send
+/// of it once, and gives the nanoseconds it took.
 ///
 /// # Panics
 ///
 /// When a send waits or fails.
 #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
-/// Copies `parts` of each block into a new block of `bytes` from `pool`, and polls a
-/// send of it once.
 fn poll_copies(
     sender: &mut Sender,
     pool: &Pool,
@@ -506,6 +504,13 @@ fn poll_copies(
     nanos(Instant::now().duration_since(start))
 }
 
+/// Polls one send of each block once, on `senders` in turn, and gives the nanoseconds
+/// it took.
+///
+/// # Panics
+///
+/// When a send waits or fails.
+#[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
 fn poll_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
     let mut cx = Context::from_waker(Waker::noop());
     let mut blocks = blocks.into_iter();

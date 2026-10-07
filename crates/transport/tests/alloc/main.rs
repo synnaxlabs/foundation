@@ -43,6 +43,32 @@ struct Shape {
     cause: &'static str,
 }
 
+const SHAPES: [Shape; 3] = [
+    Shape {
+        ranges: 3,
+        len: 8 << 10,
+        stride: (8 << 10) + 8,
+        over: 0,
+        cause: "none: the segment queue holds the header and 3 slices",
+    },
+    // noq-proto shrinks its segment queue as the peer acknowledges it, so each
+    // message grows it again.
+    Shape {
+        ranges: 8,
+        len: 8 << 10,
+        stride: (8 << 10) + 8,
+        over: 2,
+        cause: "the segment queue grows to 8, then 16: the header and 8 slices",
+    },
+    Shape {
+        ranges: 1000,
+        len: 8,
+        stride: 16,
+        over: 1,
+        cause: "noq-proto copies the stretch into a new allocation",
+    },
+];
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
@@ -67,58 +93,8 @@ fn main() {
             .open_sender(Class::Complete)
             .await
             .expect("a stream");
-        let shapes = [
-            Shape {
-                ranges: 3,
-                len: 8 << 10,
-                stride: (8 << 10) + 8,
-                over: 0,
-                cause: "none: the segment queue holds the header and 3 slices",
-            },
-            // noq-proto drops its segment queue once the peer acknowledges it all, so
-            // each message grows it again.
-            Shape {
-                ranges: 8,
-                len: 8 << 10,
-                stride: (8 << 10) + 8,
-                over: 2,
-                cause: "the segment queue grows to 8, then 16, for the header and slices",
-            },
-            Shape {
-                ranges: 1000,
-                len: 8,
-                stride: 16,
-                over: 1,
-                cause: "the copy of the stretch",
-            },
-        ];
-        for shape in &shapes {
-            let parts: Vec<Part> = (0..shape.ranges)
-                .map(|at| Part {
-                    range: at * shape.stride..at * shape.stride + shape.len,
-                    zeros: 0,
-                })
-                .collect();
-            let bytes = shape.ranges * shape.len;
-            let large = shape.ranges * shape.stride;
-            for round in 0..WARMUP + ROUNDS {
-                clock.sleep(PAUSE).await;
-                let block = filled(&pool, bytes);
-                let sent = ALLOCATOR.count(|| poll(&mut sender, block, &[])).1;
-                clock.sleep(PAUSE).await;
-                let block = filled(&pool, large);
-                let parted = ALLOCATOR.count(|| poll(&mut sender, block, &parts)).1;
-                if round >= WARMUP {
-                    assert_eq!(
-                        parted,
-                        sent + shape.over,
-                        "{} ranges of {} bytes, over send: {}",
-                        shape.ranges,
-                        shape.len,
-                        shape.cause
-                    );
-                }
-            }
+        for shape in &SHAPES {
+            measure(&mut sender, &pool, &clock, shape).await;
         }
         sender.finish().expect("finished");
         clock.sleep(PAUSE).await;
@@ -126,6 +102,46 @@ fn main() {
         clock.sleep(Span::MILLISECOND).await;
     })
     .expect("the test runs");
+}
+
+/// Sends messages of `shape` and of a single block of the same bytes, and checks the
+/// allocations of each after warm-up.
+///
+/// # Panics
+///
+/// When a count is not that of `shape`.
+async fn measure(
+    sender: &mut Sender,
+    pool: &Pool,
+    clock: &env::clock::Clock,
+    shape: &Shape,
+) {
+    let parts: Vec<Part> = (0..shape.ranges)
+        .map(|at| Part {
+            range: at * shape.stride..at * shape.stride + shape.len,
+            zeros: 0,
+        })
+        .collect();
+    let bytes = shape.ranges * shape.len;
+    let large = shape.ranges * shape.stride;
+    for round in 0..WARMUP + ROUNDS {
+        clock.sleep(PAUSE).await;
+        let block = filled(pool, bytes);
+        let sent = ALLOCATOR.count(|| poll(sender, block, &[])).1;
+        clock.sleep(PAUSE).await;
+        let block = filled(pool, large);
+        let parted = ALLOCATOR.count(|| poll(sender, block, &parts)).1;
+        if round >= WARMUP {
+            assert_eq!(
+                parted,
+                sent + shape.over,
+                "{} ranges of {} bytes, over send: {}",
+                shape.ranges,
+                shape.len,
+                shape.cause
+            );
+        }
+    }
 }
 
 /// Polls a send of `parts` of `block` once, or of all of it when `parts` is empty.
@@ -164,7 +180,7 @@ fn serve(node: &Node) {
                 Err(error) => panic!("the server failed to read: {error}"),
             }
         }
-        assert_eq!(session.closed().await, CLOSED);
+        assert_eq!(session.closed().await, CLOSED, "the client closes");
     });
     drop(started.expect("a shard"));
 }
