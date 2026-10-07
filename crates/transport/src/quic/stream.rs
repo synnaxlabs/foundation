@@ -6109,7 +6109,9 @@ mod tests {
                 pair.run(RUN);
                 let stats = pair.server.connection().stats();
                 assert_eq!(stats.frame_rx.stop_sending, 1);
-                assert!(available(&pair.server));
+                let now = pair.now();
+                let next = pair.server.endpoint.open_sender(now, key, Class::Complete);
+                assert!(next.is_some(), "the connection stays up");
                 let closed = |event: &&Event| matches!(event, Event::Closed { .. });
                 assert!(!events(&pair.server).iter().any(closed));
                 assert!(reset_codes(&pair, &log, id).is_empty());
