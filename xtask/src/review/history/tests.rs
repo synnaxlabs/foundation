@@ -11,19 +11,31 @@ impl Repo {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir()
             .join(format!("xtask-history-{name}-{}", std::process::id()));
+        // A killed run with the same PID can leave the directory behind.
+        match std::fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("{e}"),
+            _ => {}
+        }
         std::fs::create_dir_all(&dir).unwrap();
         let repo = Self { dir };
         repo.git(&["init", "--quiet", "--initial-branch", "main"]);
         repo
     }
 
-    fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
+    /// A `git` command in the repository, with an identity and no global or system
+    /// config, so the machine's settings cannot change a test.
+    fn command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
             .current_dir(&self.dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .output()
-            .unwrap();
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"]);
+        command
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        let output = self.command().args(args).output().unwrap();
         assert!(output.status.success(), "git {args:?}: {output:?}");
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
@@ -104,9 +116,8 @@ fn refuses_a_merge_that_resolves_a_conflict() {
     let (repo, _) = Repo::with_pr("conflict");
     let end = repo.commit("a.txt", "pr side\n");
     repo.advance_main("a.txt", "main side\n");
-    let merge = Command::new("git")
-        .current_dir(&repo.dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+    let merge = repo
+        .command()
         .args(["merge", "--no-edit", "origin/main"])
         .output()
         .unwrap();
@@ -430,8 +441,8 @@ fn names_a_path_that_is_not_utf8() {
     let (repo, from) = Repo::with_pr("bytes");
     let blob = repo.git(&["rev-parse", "HEAD:b.txt"]);
     let info = [b"100644,", blob.as_bytes(), b",a\xff.rs"].concat();
-    let status = Command::new("git")
-        .current_dir(&repo.dir)
+    let status = repo
+        .command()
         .args(["update-index", "--add", "--cacheinfo"])
         .arg(std::ffi::OsStr::from_bytes(&info))
         .status()
@@ -552,4 +563,14 @@ fn a_tag_does_not_stand_in_for_a_missing_base() {
                 .to_string()
         )
     );
+}
+
+#[test]
+fn a_directory_left_by_a_killed_run_does_not_break_a_test() {
+    let stale = std::mem::ManuallyDrop::new(Repo::with_pr("stale").0);
+    let _cleanup = Repo {
+        dir: stale.dir.clone(),
+    };
+    let (repo, end) = Repo::with_pr("stale");
+    assert_eq!(repo.reaches(&end, &end), Ok(true));
 }
