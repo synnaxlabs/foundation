@@ -15,7 +15,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Frame, Layout, Mask, Path, View};
+use types::frame::{self, Draft, Form, Frame, Layout, Mask, Path, Places, View};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -437,6 +437,63 @@ fn narrow_mask(bencher: Bencher<'_, '_>, case: &Case) {
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn most_mask(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| Mask::new(black_box(&case.set), most(case)));
+}
+
+/// Lays out a frame for places of only the last present channel.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_lay(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut places = Places::new(last(case).into());
+    bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
+}
+
+/// Lays out a frame for places of each channel, last first.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn reversed_lay(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut places = Places::new(reversed(case));
+    bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
+}
+
+/// Charges a frame for places of each channel, last first.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn reversed_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut places = Places::new(reversed(case));
+    bencher.bench_local(|| places.charge(black_box(&frame), &case.set));
+}
+
+/// Charges a frame for places of each channel in entry order: the home's frame.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn whole_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut places = Places::new(every(case).collect());
+    bencher.bench_local(|| places.charge(black_box(&frame), &case.set));
+}
+
+/// Makes places of each channel, last first, and charges their first frame, which
+/// learns the key set.
+#[divan::bench(args = cases(), sample_count = 100)]
+fn reversed_first_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    bencher
+        .with_inputs(|| Places::new(reversed(case)))
+        .bench_local_values(|mut places| places.charge(black_box(&frame), &case.set));
+}
+
+/// Each channel of `case`, last first.
+fn reversed(case: &Case) -> Box<[channel::Slot]> {
+    case.set
+        .entries()
+        .iter()
+        .rev()
+        .map(|entry| entry.slot)
+        .collect()
 }
 
 /// Each channel of `case`.

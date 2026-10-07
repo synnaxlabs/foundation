@@ -106,9 +106,8 @@ impl Places {
             let place = held.entries[at].1;
             series += 1;
             padding += padded(bounds.len());
-            if last.is_none_or(|(last, _)| last < place) {
-                last = Some((place, bounds.len()));
-            }
+            // Places are unique, so the length never decides.
+            last = last.max(Some((place, bounds.len())));
         });
         let body = last.map_or(0, |(_, len)| padding - padded(len) + len);
         charge(series, body)
@@ -121,10 +120,8 @@ fn each(held: &Held, frame: &Frame, mut f: impl FnMut(usize, Range<usize>)) {
     let mut at = 0;
     for (entry, range) in View::new(frame, &held.mask).bounds() {
         let entry = to_u32(entry);
+        at = gallop(&held.entries, at, entry);
         // The mask adds the index of each group, which a place need not name.
-        while held.entries.get(at).is_some_and(|&(held, _)| held < entry) {
-            at += 1;
-        }
         if held.entries.get(at).is_some_and(|&(held, _)| held == entry) {
             f(at, range);
             at += 1;
@@ -154,6 +151,21 @@ fn lay(
         bounds,
         end,
     }));
+}
+
+/// The first position from `at` in `entries` whose entry is not below `entry`. Time
+/// is logarithmic in the distance moved.
+fn gallop(entries: &[(u32, u32)], at: usize, entry: u32) -> usize {
+    let below = |n: usize| entries.get(n).is_some_and(|&(held, _)| held < entry);
+    if !below(at) {
+        return at;
+    }
+    let mut step = 2;
+    while below(at + step - 1) {
+        step *= 2;
+    }
+    let (start, end) = (at + step / 2, (at + step).min(entries.len()));
+    start + entries[start..end].partition_point(|&(held, _)| held < entry)
 }
 
 impl Held {
