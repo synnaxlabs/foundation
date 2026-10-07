@@ -1489,7 +1489,7 @@ mod tests {
         let other = Member {
             card: card::Signed::sign(key(2), card, &private(3)),
             admission: [1; 64],
-            expiry: Some(Span::MILLISECOND),
+            ephemeral: Some(Span::MILLISECOND),
             status: [("clock.offset".parse().unwrap(), INDEX)].into(),
         };
         let cases = [
