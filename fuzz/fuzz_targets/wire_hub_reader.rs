@@ -101,10 +101,7 @@ fn refused(next: Next, places: u32, message: &[u8], error: Error) -> bool {
         Next::Body { remain, .. } => {
             len > remain && error == Error::Body { len, remain }
         }
-        Next::Ended => match message.first() {
-            None => error == Error::Empty,
-            Some(&kind) => error == Error::Ended { kind },
-        },
+        Next::Ended => error == Error::Ended,
     }
 }
 

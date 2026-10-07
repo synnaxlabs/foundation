@@ -445,7 +445,7 @@ pub enum Error {
         kind: u8,
     },
     /// A message comes before the session is open: a credit before the open, or a
-    /// head before opened.
+    /// head or a behind before opened.
     Unopened {
         /// The kind byte of the message.
         kind: u8,
@@ -472,10 +472,7 @@ pub enum Error {
         remain: usize,
     },
     /// A message comes after the home ended the session with `Behind`.
-    Ended {
-        /// The first byte of the message.
-        kind: u8,
-    },
+    Ended,
 }
 
 impl fmt::Display for Error {
@@ -518,10 +515,9 @@ impl fmt::Display for Error {
                 f,
                 "the body message has {len} bytes, and {remain} remain in the body"
             ),
-            Self::Ended { kind } => write!(
-                f,
-                "the hub message has kind {kind}, and the home ended the session"
-            ),
+            Self::Ended => {
+                f.write_str("a hub message came after the home ended the session")
+            }
         }
     }
 }
@@ -1163,8 +1159,8 @@ mod tests {
                 "the body message has 11 bytes, and 10 remain in the body",
             ),
             (
-                Error::Ended { kind: 1 },
-                "the hub message has kind 1, and the home ended the session",
+                Error::Ended,
+                "a hub message came after the home ended the session",
             ),
         ];
         for (error, text) in cases {

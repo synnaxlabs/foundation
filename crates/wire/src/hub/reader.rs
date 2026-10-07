@@ -13,14 +13,8 @@ pub struct Reader {
 enum Next {
     Opened,
     Head,
-    Ends {
-        remain: u32,
-    },
-    Body {
-        end: usize,
-        remain: usize,
-    },
-    /// No message: the home sent `Behind`.
+    Ends { remain: u32 },
+    Body { end: usize, remain: usize },
     Ended,
 }
 
@@ -75,10 +69,9 @@ impl Reader {
     /// [`Error::Reopen`] for a second `Opened`, [`Error::Places`] for a head with more
     /// series than places, [`Error::Run`] for a message with more ends than remain,
     /// [`Error::Body`] for a message longer than the rest of the body, and
-    /// [`Error::Ended`] for a message after `Behind`. A message
-    /// of a run has no kind, so a message where a run continues is read as one. The
-    /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
-    /// caller stops it.
+    /// [`Error::Ended`] for a message after `Behind`. A message of a run has no kind,
+    /// so a message where a run continues is read as one. The session is then not
+    /// valid ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromHome<'m>, Error> {
         let (event, next) = match self.next {
             Next::Opened | Next::Head => self.reply(message)?,
@@ -117,10 +110,7 @@ impl Reader {
                     next,
                 )
             }
-            Next::Ended => {
-                let &kind = message.first().ok_or(Error::Empty)?;
-                return Err(Error::Ended { kind });
-            }
+            Next::Ended => return Err(Error::Ended),
         };
         self.next = next;
         Ok(event)
@@ -308,11 +298,9 @@ mod tests {
         );
         assert_eq!(event(&mut reader, &[BEHIND]), Ok(Event::Behind));
         assert_eq!(reader.body(), None);
-        for message in [vec![OPENED], vec![BEHIND], head(1), ends, vec![4]] {
-            let kind = message[0];
-            assert_eq!(reader.decode(&message).err(), Some(Error::Ended { kind }));
+        for message in [vec![OPENED], vec![BEHIND], head(1), ends, vec![4], vec![]] {
+            assert_eq!(reader.decode(&message).err(), Some(Error::Ended));
         }
-        assert_eq!(reader.decode(&[]).err(), Some(Error::Empty));
     }
 
     #[test]
