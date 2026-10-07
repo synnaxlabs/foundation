@@ -1248,9 +1248,8 @@ How to read this record:
   users of the shard pool (M4) are not in this order. A waiting read that then waits
   for room in its connection's receive budget keeps its place but holds no turn, so a
   connection that holds its budget stops no read of another connection (STREAM WIRE).
-  `transport` counts the time that
-  reads wait and each refused commit, and `node` publishes them on status channels
-  (BQ11b). `Transport::status` gives `Status { waited, refusals }`, pulled, not pushed:
+  `transport` counts the time that reads wait and each refused commit, and `node`
+  publishes them on status channels (BQ11b). `Transport::status` gives `Status { waited, refusals }`, pulled, not pushed:
   `waited` is the time that at least one read waited, not the sum over reads (architect,
   #68: https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032541901). A
   caller ends a wait when it drops the future; it can then call `stop`.

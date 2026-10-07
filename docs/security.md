@@ -73,7 +73,7 @@ state on `main`.
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
   byte arrives). A connection now holds at most its receive budget (#467), and a
-  size takes the budget of a size with no block in use (#270), and a stream on another
+  size takes the budget of a size with no block in use (#270). A stream on another
   connection reads while one connection holds its budget (RECV WAITS). Still open:
   many connections before admission (#563).
 - Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
