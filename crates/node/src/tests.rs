@@ -54,7 +54,10 @@ fn config(
         memory,
         files: {
             let host = host.clone();
-            Arc::new(move || host.files())
+            Box::new(move || {
+                let host = host.clone();
+                Box::new(move || host.files())
+            })
         },
         entropy: host.entropy(),
     }
@@ -411,6 +414,7 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
 }
 
 mod buffer {
+    use std::cell::RefCell;
     use std::pin::Pin;
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
@@ -553,28 +557,39 @@ mod buffer {
         assert_eq!(len, 8192 + (64 << 20));
     }
 
-    /// Each shard makes its files once, so shard 0 claims the data directory and
-    /// opens its ring on one disk.
+    /// `node` calls the maker on the start thread just before it starts each shard,
+    /// so call `k` is for shard `k`, and each shard runs the function it gets once.
     #[test]
-    fn each_shard_makes_its_files_once() {
+    fn the_maker_makes_each_shard_its_files_before_the_shard_starts() {
         let mut sim = sim::Sim::new(sim::Config::default());
-        let host = host(&mut sim, 2);
-        let made = Arc::new(Mutex::new(0));
-        let mut config = config(&host, 1 << 20, Box::new(heap));
-        let files = config.files;
-        config.files = {
-            let made = Arc::clone(&made);
-            Arc::new(move || {
-                *made.lock().unwrap() += 1;
-                files()
-            })
-        };
-        let node = Node::start(config);
+        let host = host(&mut sim, 3);
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let made = Rc::new(RefCell::new(Vec::new()));
+        let node = Node::start(Config {
+            files: {
+                let host = host.clone();
+                let ran = Arc::clone(&ran);
+                let made = Rc::clone(&made);
+                Box::new(move || {
+                    let call = made.borrow().len();
+                    made.borrow_mut().push(host.shard_starts().len());
+                    let (host, ran) = (host.clone(), Arc::clone(&ran));
+                    Box::new(move || {
+                        ran.lock().unwrap().push(call);
+                        host.files()
+                    })
+                })
+            },
+            ..config(&host, 1 << 20, Box::new(heap))
+        });
+        assert_eq!(*made.borrow(), [0, 1, 2], "shards started before each call");
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
         node.stop();
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
-        assert_eq!(*made.lock().unwrap(), 2);
+        let mut ran = ran.lock().unwrap().clone();
+        ran.sort_unstable();
+        assert_eq!(ran, [0, 1, 2]);
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
