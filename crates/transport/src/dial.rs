@@ -90,17 +90,19 @@ impl Dial<'_> {
     }
 
     /// Takes each attempt that ended. Gives the session of one that connected, or
-    /// [`Error::Network`] when the socket broke.
+    /// [`Error::Network`] when the socket broke and none connected.
     fn poll_flying(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Option<Result<quic::Session, Error>> {
-        let mut at = 0;
+        let (mut at, mut broken) = (0, None);
         while let Some((index, session)) = self.flying.get(at) {
             match session.poll_connected(cx) {
                 Poll::Ready(Ok(())) => return Some(Ok(self.flying.swap_remove(at).1)),
+                // A later attempt can have connected before the break.
                 Poll::Ready(Err(error @ Error::Network { .. })) => {
-                    return Some(Err(error));
+                    broken = Some(error);
+                    at += 1;
                 }
                 Poll::Ready(Err(error)) => {
                     self.causes[*index] = Some(error);
@@ -109,7 +111,7 @@ impl Dial<'_> {
                 Poll::Pending => at += 1,
             }
         }
-        None
+        broken.map(Err)
     }
 
     /// Starts the attempt at `index`.
@@ -155,6 +157,7 @@ mod tests {
     use std::future::poll_fn;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::pin::pin;
+    use std::sync::{Arc, Mutex};
     use std::task::Poll;
 
     use sim::node::Node;
@@ -163,7 +166,7 @@ mod tests {
 
     use crate::testing::{self, IDLE, address, nodes, spans};
     use crate::tls::public;
-    use crate::{Address, Code, Error, Peer};
+    use crate::{Address, Code, Error, Peer, Session};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -219,6 +222,65 @@ mod tests {
             let dialed = transport.dial(peer, &addresses).await;
             assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
         });
+    }
+
+    /// Dials `SERVER` from `CLIENT` in a run from `value`, after a silent address
+    /// when `silent`, and breaks the client's socket the instant the server's attempt
+    /// connects. Gives whether the server accepted, which it does only once the
+    /// client's handshake finished, and what the dial gave.
+    fn break_as_it_connects(value: u64, silent: bool) -> (bool, Result<Peer, Error>) {
+        let (mut sim, client, server) = nodes(value);
+        let quiet = sim.node(sim::node::Config::default());
+        let (accepted, dialed) =
+            (Arc::new(Mutex::new(false)), Arc::new(Mutex::new(None)));
+        let flag = Arc::clone(&accepted);
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let mut accept = pin!(transport.accept());
+            let mut sleep = pin!(node.clock().sleep(spans(IDLE, 3)));
+            let ok = poll_fn(|cx| match accept.as_mut().poll(cx) {
+                Poll::Ready(accepted) => Poll::Ready(accepted.is_ok()),
+                Poll::Pending => sleep.as_mut().poll(cx).map(|()| false),
+            });
+            *flag.lock().expect("a lock") = ok.await;
+        });
+        let (mut addresses, mut at) = (vec![Address::Udp(address(&server))], 1_500_000);
+        if silent {
+            addresses.insert(0, Address::Udp(address(&quiet)));
+            at += 250_000_000;
+        }
+        let out = Arc::clone(&dialed);
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let result = transport.dial(public(&SERVER), &addresses).await;
+            let peer = result.as_ref().map(Session::peer).map_err(Clone::clone);
+            *out.lock().expect("a lock") = Some(peer);
+            node.clock().sleep(spans(IDLE, 3)).await;
+        });
+        testing::shard(&client, OTHER, move |_, node| async move {
+            node.clock().sleep(Span::from_nanos(at)).await;
+            node.fail_udp(address(&node));
+        });
+        assert_eq!(sim.run(), Ok(()));
+        let accepted = *accepted.lock().expect("a lock");
+        (
+            accepted,
+            dialed.lock().expect("a lock").take().expect("a dial"),
+        )
+    }
+
+    #[test]
+    fn an_attempt_that_connected_before_the_break_wins_with_or_without_a_silent_one() {
+        for silent in [false, true] {
+            let mut connected = 0;
+            for value in 0..64 {
+                let (accepted, dialed) = break_as_it_connects(value, silent);
+                if accepted {
+                    connected += 1;
+                    let peer = Ok(Peer::Node(public(&SERVER)));
+                    assert_eq!(dialed, peer, "silent {silent}, value {value}");
+                }
+            }
+            assert!(connected > 0, "silent {silent}");
+        }
     }
 
     #[test]
