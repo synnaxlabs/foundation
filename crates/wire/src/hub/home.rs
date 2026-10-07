@@ -50,7 +50,7 @@ impl Home {
     /// [`Error::Reopen`] for a second open, and [`Error::Run`] for a message with more
     /// keys than remain. A message of a run has no kind, so a message where the run
     /// continues is read as one. The session is then not valid
-    /// ([`MALFORMED`](crate::header::MALFORMED)), and the decoder does not change.
+    /// ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromReader<'m>, Error> {
         let (event, next) = match self.next {
             Next::Keys { remain } => {

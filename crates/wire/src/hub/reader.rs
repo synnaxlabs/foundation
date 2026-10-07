@@ -24,15 +24,15 @@ pub enum FromHome<'m> {
     Opened,
     /// The head of one frame. The run of its ends follows.
     Head(Head),
-    /// One message of the ends run. `last` when the run ends with it. When the last
-    /// end is 0, no body follows.
+    /// One message of the ends run. After the last, [`Reader::body`] is `None` when
+    /// the frame has no body.
     Ends {
         /// The ends in the message, each a place and an end.
         ends: ends::Iter<'m>,
         /// The run ends with this message.
         last: bool,
     },
-    /// One message of the body. It starts at [`Reader::body`] in the body.
+    /// One message of the body. It starts where [`Reader::body`] was before the call.
     Body {
         /// The bytes of the message.
         bytes: &'m [u8],
@@ -68,7 +68,7 @@ impl Reader {
     /// and [`Error::Body`] for a message longer than the rest of the body. A message
     /// of a run has no kind, so a message where a run continues is read as one. The
     /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
-    /// decoder does not change.
+    /// caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromHome<'m>, Error> {
         let (event, next) = match self.next {
             Next::Opened | Next::Head => self.reply(message)?,
@@ -96,9 +96,8 @@ impl Reader {
                 let next = if remain == 0 {
                     Next::Head
                 } else {
-                    // Never wraps: `at + len` is at most the last end, a `u32`.
                     Next::Body {
-                        at: at.wrapping_add(len),
+                        at: after(at, len),
                         remain,
                     }
                 };
@@ -117,7 +116,7 @@ impl Reader {
     }
 
     /// Where in the body the next message starts, when the next message is body
-    /// bytes.
+    /// bytes. Read it before [`Reader::decode`] takes that message.
     #[must_use]
     pub fn body(&self) -> Option<usize> {
         match self.next {
@@ -147,6 +146,11 @@ impl Reader {
 
 fn body_len(end: u32) -> usize {
     usize::try_from(end).expect("invariant: a usize holds a u32")
+}
+
+fn after(at: usize, len: usize) -> usize {
+    at.checked_add(len)
+        .expect("invariant: a body message ends at or before the last end")
 }
 
 #[cfg(test)]

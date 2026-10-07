@@ -1045,15 +1045,15 @@ How to read this record:
   allocates by the peer's count. A head with more series than places, or an end with a
   place the session does not have or that is not above the place before it, is not
   valid; `wire::hub::Reader` checks the head as it arrives and `types` checks the ends,
-  so the reader holds no more ends than it has places. The ends and the body are in place order: the home
-  writes the series of each place it has, from 0, each from the frame's block as a
-  slice, with ends it computes in that order. The first series starts at 0, and each
-  other at the end before it rounded up to a multiple of 8. So the body is the series
-  bytes of the reader's own frame (FRAME LAYOUT), and the reader builds that frame in
-  one block: the header and descriptors that `types` writes, then the body as it
-  arrives, with no copy of a series after the receive. An end below the start of its
-  series is not valid; `types` refuses it, as `frame::check` does. The padding may hold
-  any bytes (FRAME LAYOUT). Each direction has its own messages: the reader sends
+  so the reader holds no more ends than it has places. The ends and the body are in
+  place order: the home writes the series of each place it has, from 0, each from the
+  frame's block as a slice, with ends it computes in that order. The first series starts
+  at 0, and each other at the end before it rounded up to a multiple of 8. So the body
+  is the series bytes of the reader's own frame (FRAME LAYOUT), and the reader builds
+  that frame in one block: the header and descriptors that `types` writes, then the body
+  as it arrives, with no copy of a series after the receive. An end below the start of
+  its series is not valid; `types` refuses it, as `frame::check` does. The padding may
+  hold any bytes (FRAME LAYOUT). Each direction has its own messages: the reader sends
   `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop codes: 16
   `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not the home
   of the index), and 2 `wire::header::MALFORMED` (a message that does not decode, comes
@@ -1083,11 +1083,11 @@ How to read this record:
   byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
-  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
-  Amended (2026-10-07, #1196): the message order, the runs, and the head bound move
-  from `hub` to two stateful decoders in `wire`, `hub::Home` at the home and
-  `hub::Reader` at the reader's node, each with an exact error for each broken rule, so
-  `hub` checks no wire rule. Decided by the architect
+  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`. Amended
+  (2026-10-07, #1196): the message order, the runs, and the head bound move from `hub`
+  to two stateful decoders in `wire`, `hub::Home` at the home and `hub::Reader` at the
+  reader's node, each with an exact error for each broken rule, so `hub` checks no wire
+  rule. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
