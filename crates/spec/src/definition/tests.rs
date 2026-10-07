@@ -1291,3 +1291,20 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
+    let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/retention");
+    let negative =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/retention_negative");
+    let keep = Span::from_nanos(3 * Span::DAY.nanos());
+    let policy = retention::Policy::new(selector(&["a.*"]), keep).unwrap();
+    assert_eq!(Definition::decode(valid), Ok(Definition::Retention(policy)));
+    assert_eq!(
+        Definition::decode(negative),
+        Err(Error::Retention {
+            at: 22,
+            error: retention::Error::Negative(Span::from_nanos(-1)),
+        })
+    );
+}

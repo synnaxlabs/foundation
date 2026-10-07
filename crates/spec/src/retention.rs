@@ -15,7 +15,7 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Makes a policy. A `keep` of zero is valid: a closed reader then holds nothing.
+    /// Makes a policy. A `keep` of zero is valid.
     ///
     /// # Errors
     ///
