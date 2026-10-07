@@ -51,7 +51,8 @@ pub struct Entry {
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there.
+/// and reads, and the ones it needs are there. A block inside a policy does not stop
+/// that check: a policy holds no block, so each block inside one is a separate problem.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found::default();
     for document in documents {
@@ -1216,6 +1217,65 @@ mod tests {
         }
 
         #[test]
+        fn refuses_only_the_unknown_attribute_of_a_placement_with_no_node() {
+            let attributes = [("select", string("edge.*")), ("node", string("edge"))];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 12),
+                    "`node` is not an attribute of the `placement` block",
+                    "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement() {
+            let [mut documents] =
+                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![refused(
+                    "config.unknown-block",
+                    at(0, 50),
+                    "the `placement` block cannot hold the `inner` block",
+                    "Remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn checks_a_placement_that_holds_a_block_as_a_whole() {
+            let [mut documents] = placement(&[("select", string("edge.*"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.empty-placement",
+                        at(0, 0),
+                        "the `placement` block names no home, no standby, and no copy",
+                        "Name a `home`, a `standby`, or a node in `copies`",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `placement` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
         fn refuses_an_attribute_that_a_placement_does_not_have() {
             let attributes = [
                 ("select", string("edge.*")),
@@ -1345,6 +1405,70 @@ mod tests {
                     at(0, 14),
                     "`hold` is not an attribute of the `retention` block",
                     "Use `select` or `keep`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_only_the_unknown_attribute_of_a_retention_with_a_negative_keep() {
+            let documents = retention(&[
+                ("select", string("edge.**")),
+                ("keep", string("-1s")),
+                ("hold", string("1d")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 14),
+                    "`hold` is not an attribute of the `retention` block",
+                    "Use `select` or `keep`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn checks_a_retention_that_holds_a_block_as_a_whole() {
+            let [mut documents] =
+                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.negative-span",
+                        at(0, 13),
+                        "a retention keeps -1s, which is below zero",
+                        "Write a keep time of zero or more",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `retention` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_retention() {
+            let [mut documents] =
+                retention(&[("select", string("edge.**")), ("keep", string("3d"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![refused(
+                    "config.unknown-block",
+                    at(0, 50),
+                    "the `retention` block cannot hold the `inner` block",
+                    "Remove it",
                 )])
             );
         }
