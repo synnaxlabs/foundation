@@ -5,6 +5,7 @@ use transport::stream::{Incoming, Receiver, Sender};
 use types::node::PublicKey;
 
 use super::Mesh;
+use crate::bytes::block;
 use crate::error::Error;
 use crate::message::Message;
 
@@ -94,9 +95,8 @@ impl Mesh {
         };
         // The group can hold the entry of the proposal, so no error from here is a
         // refusal: a sender that drops ends the reply half with no code of the mesh.
-        let mut block = self.pool.alloc(answer.len()).map_err(Error::Pool)?;
-        block.copy_from_slice(&answer);
-        sender.send(block.freeze()).await?;
+        let answer = block(&self.pool, &answer).map_err(Error::Pool)?;
+        sender.send(answer).await?;
         sender.finish()?;
         // A reset takes back an answer that the peer does not have yet, so from here
         // only the receiver stops.

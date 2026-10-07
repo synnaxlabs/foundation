@@ -15,7 +15,7 @@ use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
-use transport::Transport;
+use transport::{Session, Transport};
 use types::channel;
 use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
@@ -177,6 +177,7 @@ impl Mesh {
             raft: Raft::new(fixed, start)?,
             state,
             queues: BTreeMap::new(),
+            sessions: BTreeMap::new(),
             stopped: Rc::default(),
             task: None,
             watches: BTreeMap::new(),
@@ -477,6 +478,9 @@ struct Group {
     raft: Raft,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
+    // The session to each member that its task dialed, until a send finds that the
+    // session failed or the group stops.
+    sessions: BTreeMap<node::Key, Session>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
     stopped: Rc<OnceCell<Stopped>>,
     // The task of `run`, while it waits for an input.
@@ -555,8 +559,9 @@ impl Group {
         Poll::Ready(message)
     }
 
-    // Wakes each task that sends, so that it ends.
-    fn wake_senders(&mut self) {
+    // Wakes each task that sends, so that it ends, and drops each session.
+    fn end_senders(&mut self) {
+        self.sessions.clear();
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
         waiting.chain(self.starter.take()).for_each(Waker::wake);
@@ -589,7 +594,7 @@ impl Group {
 
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
-        self.wake_senders();
+        self.end_senders();
         self.wake_watches();
         for proposal in &self.proposals {
             proposal.wake();
@@ -608,7 +613,7 @@ impl Drop for Group {
     // that each mesh dropped.
     fn drop(&mut self) {
         self.wake();
-        self.wake_senders();
+        self.end_senders();
         self.wake_watches();
     }
 }
