@@ -91,7 +91,7 @@ impl Shard {
     }
 
     /// Makes the ring file with `len` zero bytes and no header.
-    async fn zeroed(&self, len: u64) {
+    async fn create_zeroed(&self, len: u64) {
         self.memory
             .files()
             .open(FilePath::new(RING), Mode::Create { len })
@@ -1328,7 +1328,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
         let blocks = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
         let files = shard.memory.files();
         files.remove(FilePath::new(RING)).await.expect("removes");
-        shard.zeroed(AREA_START).await;
+        shard.create_zeroed(AREA_START).await;
         shard.memory.put(RING, 0, &blocks);
         let opened = shard
             .open(layout(2 * AREA, BODY_MAX), &mut Slots::new())
@@ -1346,7 +1346,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
 #[test]
 fn a_file_shorter_than_the_header_blocks_is_not_read() {
     run(17, Memory::default(), |shard| async move {
-        shard.zeroed(BLOCK).await;
+        shard.create_zeroed(BLOCK).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(
             opened.map(drop),
@@ -1361,7 +1361,7 @@ fn a_file_shorter_than_the_header_blocks_is_not_read() {
 #[test]
 fn a_file_with_no_header_is_missing() {
     run(11, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA).await;
+        shard.create_zeroed(AREA_START + AREA).await;
         shard.memory.put(RING, 0, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
@@ -1372,7 +1372,7 @@ fn a_file_with_no_header_is_missing() {
 #[test]
 fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
     run(11, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA).await;
+        shard.create_zeroed(AREA_START + AREA).await;
         shard.memory.put(RING, COVER, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
