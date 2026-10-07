@@ -693,7 +693,7 @@ mod tests {
 
     use env::files::Operation;
     use proptest::prelude::*;
-    use raft::{Data, Grant, Proof, Signature, Voters};
+    use raft::{Change, Data, Grant, Proof, Signature, Voters};
     use sim::{Crash, Sim};
     use types::node;
     use types::time::Span;
@@ -786,12 +786,26 @@ mod tests {
         entry(1, index, Data::Bytes(vec![byte; len]))
     }
 
+    // A change of node 1 with `signature`, signed as the log takes it.
+    fn change(voters: Voters, signature: u8) -> Data {
+        Data::Voters(Change {
+            voters,
+            votes: Proof {
+                grant: Grant::Vote,
+                candidate: key(1),
+                voters: [(key(1), Some(Signature([1; 64])))].into(),
+            },
+            signature: Some(Signature([signature; 64])),
+        })
+    }
+
     fn voters(incoming: &[u128], outgoing: &[u128]) -> Data {
         let set = |ids: &[u128]| ids.iter().copied().map(key).collect();
-        Data::Voters(Voters {
+        let voters = Voters {
             incoming: set(incoming),
             outgoing: set(outgoing),
-        })
+        };
+        change(voters, 2)
     }
 
     #[test]
@@ -1789,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
     fn encode_panics_on_an_unsigned_proof_entry() {
         let mut proof = proof(Grant::Vote, 2, &[2, 3]);
         proof.voters.insert(key(2), None);
@@ -2659,9 +2673,11 @@ mod tests {
         prop_oneof![
             Just(Data::Empty),
             prop::collection::vec(any::<u8>(), 0..64).prop_map(Data::Bytes),
-            (keys(), keys()).prop_map(|(incoming, outgoing)| {
-                Data::Voters(Voters { incoming, outgoing })
-            }),
+            (keys(), keys(), any::<u8>()).prop_map(
+                |(incoming, outgoing, signature)| {
+                    change(Voters { incoming, outgoing }, signature)
+                }
+            ),
         ]
     }
 

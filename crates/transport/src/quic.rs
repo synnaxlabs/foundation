@@ -4,6 +4,10 @@ mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
+#[cfg_attr(
+    not(feature = "fuzzing"),
+    expect(unreachable_pub, reason = "only the fuzzing feature exports it")
+)]
 mod hello;
 #[cfg(test)]
 mod pair;
@@ -32,9 +36,12 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
+use crate::message::Reader;
 use crate::{Class, Code, Config, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
+#[cfg(feature = "fuzzing")]
+pub use self::hello::Hello;
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
@@ -292,7 +299,8 @@ impl Endpoint {
         class: Class,
     ) -> Option<(Sender, Receiver)> {
         let sender = self.start(now, key, Dir::Bi, class)?;
-        let receiver = Receiver::new(sender.key(), class, self.message_bytes_max);
+        let reader = Reader::new(self.message_bytes_max);
+        let receiver = Receiver::new(sender.key(), class, reader);
         Some((sender, receiver))
     }
 
@@ -325,9 +333,10 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream. Each later write gives it
-    /// too. [`Error::TooLarge`] when `message` is over the peer's largest message.
-    /// Nothing of it is sent, and it stays in `message`.
+    /// [`Error::TooLarge`] when `message` is over the peer's largest message.
+    /// Nothing of it is sent, and it stays in `message`. Then [`Error::Reset`] with
+    /// `Code(0)` after an [`Endpoint::cancel`] reset the stream, and
+    /// [`Error::Stopped`] when the peer stopped it; each later write gives it too.
     /// The error of the connection's [`Event::Closed`] when it ended, until it
     /// drains.
     ///
@@ -340,7 +349,7 @@ impl Endpoint {
         sender: &Sender,
         message: &mut Option<Block>,
     ) -> Result<Poll<()>, Error> {
-        sender.check_unfinished();
+        sender.check_open();
         if let Some(message) = message {
             stream::check_size(message.len(), sender.bytes_max())?;
         }
@@ -360,8 +369,7 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream. [`Error::TooLarge`] when
-    /// `message` is over the peer's largest message. Nothing of it is sent.
+    /// As [`Endpoint::write`]. Nothing of `message` is sent.
     /// The error of the connection's [`Event::Closed`] when it ended, until it
     /// drains.
     ///
@@ -374,7 +382,7 @@ impl Endpoint {
         sender: &Sender,
         message: Block,
     ) -> Result<Option<Block>, Error> {
-        sender.check_unfinished();
+        sender.check_open();
         stream::check_size(message.len(), sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
@@ -392,9 +400,10 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream. Each later finish gives
-    /// it too. The error of the connection's [`Event::Closed`] when it ended, until
-    /// it drains.
+    /// [`Error::Reset`] with `Code(0)` after an [`Endpoint::cancel`] reset the
+    /// stream, and [`Error::Stopped`] when the peer stopped it; each later finish
+    /// gives it too. The error of the connection's [`Event::Closed`] when it ended,
+    /// until it drains.
     ///
     /// # Panics
     ///
@@ -404,7 +413,7 @@ impl Endpoint {
         now: Monotonic,
         sender: &mut Sender,
     ) -> Result<(), Error> {
-        sender.check_unfinished();
+        sender.check_open();
         let stream = sender.key();
         self.streams(now, stream.connection, (), |streams, inner, _, _| {
             streams.finish(inner, stream.id)?;
@@ -447,8 +456,10 @@ impl Endpoint {
     /// the stream's blocks go back to the pool at the latest when the peer
     /// acknowledges the reset. A stream this side opened that resets before its first
     /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
-    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
-    pub(crate) fn reset(&mut self, now: Monotonic, sender: Sender, code: Code) {
+    /// [`Error::Reset`] with code 0. Does nothing when the connection ended. Each
+    /// later write or finish with `sender` panics.
+    pub(crate) fn reset(&mut self, now: Monotonic, sender: &mut Sender, code: Code) {
+        sender.end();
         let key = sender.key().connection;
         let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
         else {
@@ -456,6 +467,23 @@ impl Endpoint {
         };
         let Connection { inner, streams, .. } = connection;
         streams.reset(inner, sender, code);
+        self.drive(key.handle, self.instant(now));
+    }
+
+    /// Cancels the message that `sender`'s stream took from the last
+    /// [`Endpoint::write`] and holds. When no byte of it went, its header included,
+    /// the message drops and the stream stays open. Else the stream resets with
+    /// `Code(0)`, as [`Endpoint::reset`] does, and each later write and finish gives
+    /// [`Error::Reset`] with `Code(0)`. Either way the send budget and the turn of
+    /// the message come back now. Does nothing when the connection ended.
+    pub(crate) fn cancel(&mut self, now: Monotonic, sender: &Sender) {
+        let key = sender.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.cancel(inner, sender);
         self.drive(key.handle, self.instant(now));
     }
 

@@ -415,7 +415,7 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`.
+    /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
     pub(crate) fn poll_write(
         &self,
         cx: &mut Context<'_>,
@@ -445,10 +445,10 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After a [`Session::finish`] that gave `Ok`.
+    /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
         self.with(|endpoint, clock, slot, _| {
-            sender.check_unfinished();
+            sender.check_open();
             if let Some(error) = &slot.end {
                 return Err(error.clone());
             }
@@ -456,11 +456,47 @@ impl Session {
         })
     }
 
+    /// Puts `message` on `sender`'s stream when the stream can take it now, as
+    /// [`Endpoint::try_write`] does. Else gives it back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::try_write`], or why the session ended.
+    ///
+    /// # Panics
+    ///
+    /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
+    pub(crate) fn try_write(
+        &self,
+        sender: &Sender,
+        message: Block,
+    ) -> Result<Option<Block>, Error> {
+        self.with(|endpoint, clock, slot, _| {
+            let given = endpoint.try_write(clock.now(), sender, message)?;
+            match &slot.end {
+                Some(error) => Err(error.clone()),
+                None => Ok(given),
+            }
+        })
+    }
+
     /// Resets `sender`'s stream with `code`, as [`Endpoint::reset`] does.
-    pub(crate) fn reset(&self, sender: Sender, code: Code) {
+    pub(crate) fn reset(&self, sender: &mut Sender, code: Code) {
         self.with(|endpoint, clock, slot, _| {
             slot.writing.remove(&sender.key().id);
             endpoint.reset(clock.now(), sender, code);
+        });
+    }
+
+    /// Ends the last [`Session::poll_write`] on `sender`'s stream: drops its waker,
+    /// and when `taken`, cancels the message the stream took from it, as
+    /// [`Endpoint::cancel`] does.
+    pub(crate) fn abandon(&self, sender: &Sender, taken: bool) {
+        self.with(|endpoint, clock, slot, _| {
+            slot.writing.remove(&sender.key().id);
+            if taken {
+                endpoint.cancel(clock.now(), sender);
+            }
         });
     }
 

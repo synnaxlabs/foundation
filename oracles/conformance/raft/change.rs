@@ -2,10 +2,11 @@
 //! The etcd Authors, Apache License 2.0, see `LICENSE`). This file is modified from
 //! the etcd source: `README.md` lists each source and the changes.
 
-use raft::{Body, Data, Entry, Error, Hard, Role, Voters};
+use raft::{Body, Change, Data, Entry, Error, Grant, Hard, Role, Voters};
 
 use crate::common::{
-    ELECTION, accept_all, at_term, elect, leader, noop, position, reply, set, start,
+    ELECTION, accept_all, at_term, elect, leader, noop, position, proof, reply, set,
+    start,
 };
 
 fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
@@ -15,10 +16,16 @@ fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
     }
 }
 
-fn config(term: u64, index: u64, voters: Voters) -> Entry {
+/// The configuration entry node 1 writes at `index` in `term`, with its votes from
+/// `elected` as the proof.
+fn config(term: u64, index: u64, voters: Voters, elected: &[u8]) -> Entry {
     Entry {
         at: position(term, index),
-        data: Data::Voters(voters),
+        data: Data::Voters(Change {
+            voters,
+            votes: proof(Grant::Vote, 1, elected),
+            signature: None,
+        }),
     }
 }
 
@@ -33,7 +40,7 @@ fn step_config() {
     assert_eq!(disk.last(), index + 1);
     assert_eq!(
         disk.entries.last(),
-        Some(&config(1, index + 1, voters(&[1, 2], &[1, 2])))
+        Some(&config(1, index + 1, voters(&[1, 2], &[1, 2]), &[1, 2]))
     );
     assert_eq!(
         raft.propose_voters(set(&[1, 2])),
@@ -67,7 +74,7 @@ fn new_leader_pending_config() {
     for (entries, pending) in [
         (vec![noop(1, 1)], None),
         (
-            vec![noop(1, 1), config(1, 2, voters(&[1, 2], &[]))],
+            vec![noop(1, 1), config(1, 2, voters(&[1, 2], &[]), &[1, 2])],
             Some(position(1, 2)),
         ),
     ] {
@@ -92,8 +99,8 @@ fn add_node() {
         disk.committed,
         [
             noop(1, 1),
-            config(1, 2, voters(&[1, 2], &[1])),
-            config(1, 3, voters(&[1, 2], &[]))
+            config(1, 2, voters(&[1, 2], &[1]), &[1]),
+            config(1, 3, voters(&[1, 2], &[]), &[1])
         ]
     );
 }
@@ -146,12 +153,12 @@ fn commit_after_remove_node() {
         disk.committed,
         [
             noop(1, 1),
-            config(1, 2, voters(&[1], &[1, 2])),
+            config(1, 2, voters(&[1], &[1, 2]), &[1, 2]),
             Entry {
                 at: position(1, 3),
                 data: Data::Bytes(b"hello".to_vec()),
             },
-            config(1, 4, voters(&[1], &[])),
+            config(1, 4, voters(&[1], &[]), &[1, 2]),
         ]
     );
     raft.propose(b"world".to_vec()).unwrap();
