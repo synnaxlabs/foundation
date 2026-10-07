@@ -2032,4 +2032,66 @@ mod tests {
         );
         assert_eq!(sim.run(), Ok(()));
     }
+
+    /// The server's pool holds one message of its largest, and its window is two.
+    /// A `Complete` stream sends 2 such messages and a `Latest` stream sends 3. The
+    /// server reads both streams at once and drops each message when it gets it.
+    #[test]
+    fn streams_read_at_once_from_a_scarce_pool_get_every_message() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let got: Arc<[AtomicU32; 2]> = Arc::default();
+        let counts = Arc::clone(&got);
+        testing::shard(&server, testing::SERVER, |config, node| async move {
+            let tasks = config.tasks.clone();
+            let config = scarce(config, heap());
+            let largest = config.message_bytes_max.get();
+            let config = Config {
+                window_bytes: 2 * largest,
+                ..config
+            };
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let session = transport.accept().await.expect("a session");
+            for _ in 0..2 {
+                let mut receiver = session.accept().await.expect("a stream").receiver;
+                let counts = Arc::clone(&counts);
+                tasks.spawn(async move {
+                    while let Some(message) = receiver.recv().await.expect("a read") {
+                        assert_eq!(message.len(), largest);
+                        let index = usize::from(message[0]);
+                        counts[index].fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+            std::future::pending::<()>().await;
+            drop((transport, session));
+        });
+        testing::shard(&client, testing::CLIENT, move |config, node| async move {
+            let tasks = config.tasks.clone();
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(config, part).expect("a transport");
+            let server = crate::tls::public(&testing::SERVER);
+            let session = transport.dial(server, &at).await.expect("a session");
+            for (byte, class, count) in [(0, Class::Complete, 2), (1, Class::Latest, 3)] {
+                let opened = session.open_sender(class).await;
+                let mut sender = opened.expect("a stream");
+                let pool = Rc::clone(&pool);
+                tasks.spawn(async move {
+                    for _ in 0..count {
+                        let message = vec![byte; sender.bytes_max()];
+                        let block = testing::block(&pool, &message);
+                        sender.send(block).await.expect("sent");
+                    }
+                    sender.finish().expect("finished");
+                });
+            }
+            std::future::pending::<()>().await;
+            drop((transport, session));
+        });
+        assert_eq!(sim.run_for(spans(Span::SECOND, 60)), Ok(()));
+        let got = got.each_ref().map(|count| count.load(Ordering::Relaxed));
+        assert_eq!(got, [2, 3]);
+    }
 }
