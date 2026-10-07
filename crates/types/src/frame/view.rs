@@ -3,7 +3,9 @@
 use std::cmp::Ordering;
 
 use super::key_set::{self, KeySet};
-use super::{Form, Frame, Path, Range, bounds, lead, parts, to_u32, to_usize};
+use super::{
+    DESCRIPTOR, Form, Frame, Path, Range, bounds, lead, parts, to_u32, to_usize,
+};
 use crate::channel;
 
 /// The entries of one key set that a reader wants, and the index of each. Made once
@@ -140,8 +142,8 @@ impl<'a> View<'a> {
         };
         let (_, descriptors, body) = parts(&self.frame.0);
         Series::Listed(Join::new(descriptors, &held.entries).map(move |n| {
-            let (start, end) = bounds(descriptors, n);
-            (to_usize(lead(&descriptors[n])), &body[start..end])
+            let (entry, range) = at(descriptors, n);
+            (entry, &body[range])
         }))
     }
 
@@ -153,10 +155,7 @@ impl<'a> View<'a> {
         &self,
     ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + use<'a> {
         let (_, descriptors, _) = parts(&self.frame.0);
-        let at = move |n| {
-            let (start, end) = bounds(descriptors, n);
-            (to_usize(lead(&descriptors[n])), start..end)
-        };
+        let at = move |n| at(descriptors, n);
         match &self.mask.held {
             Held::Every => Series::Every((0..descriptors.len()).map(at)),
             Held::Listed(held) => {
@@ -164,6 +163,12 @@ impl<'a> View<'a> {
             }
         }
     }
+}
+
+/// The entry of descriptor `n` and the bytes of its series in the frame's body.
+fn at(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, std::ops::Range<usize>) {
+    let (start, end) = bounds(descriptors, n);
+    (to_usize(lead(&descriptors[n])), start..end)
 }
 
 /// The series of a view: those of the whole frame, or those of the listed entries.

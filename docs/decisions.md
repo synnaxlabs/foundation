@@ -5193,4 +5193,3 @@ after the heal in place of `OUTAGE`: two times the sum of the delay before the d
 starts and the time to send `WRITTEN` at the drain rate measured in the lab.
 `laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
-
