@@ -68,7 +68,7 @@ fn scarce_pool() -> Pool {
 }
 
 fn send_pool() -> Pool {
-    let config = block::Config { budget: 1 << 24 };
+    let config = block::Config { budget: 1 << 20 };
     let memory = Heap::new(config.reservation());
     Pool::new(config, memory)
 }
