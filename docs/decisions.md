@@ -2197,8 +2197,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
   starts the tasks that send: one for each member, from the first message for it
   (approved by the architect, 2026-10-07T13:40:50Z:
-  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881), so a
-  member that is slow holds only its own messages. `mesh` dials and `node` accepts:
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881, which
+  supersedes the start at open in the plan that
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501 approved),
+  so a member that is slow holds only its own messages. `mesh` dials and `node` accepts:
   `node` gives each stream of `wire::Protocol::Mesh` to `serve`. A task dials a session
   to each member at the addresses of the member's card, as the group holds the card
   then, and sends each `raft` message as one message of one one-way stream of
