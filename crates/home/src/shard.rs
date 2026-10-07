@@ -2816,12 +2816,11 @@ mod tests {
                 let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
+                let first = shard.committed();
                 test.clock.sleep(SYNC).await;
                 assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0, "a sync runs");
                 write(&test, &mut shard, a, &[20]);
-                while stored(&shard, Slot::new(0), Path::Live) == 0 {
-                    test.clock.sleep(Span::from_nanos(1_000)).await;
-                }
+                first.await.expect("the first commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.committed().await.expect("the commit ends");
@@ -2838,11 +2837,10 @@ mod tests {
                 let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
+                let first = shard.committed();
                 test.clock.sleep(SYNC).await;
                 write(&test, &mut shard, a, &[20]);
-                while stored(&shard, Slot::new(0), Path::Live) == 0 {
-                    test.clock.sleep(Span::from_nanos(1_000)).await;
-                }
+                first.await.expect("the first commit ends");
                 let place = shard.place(Slot::new(0));
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
