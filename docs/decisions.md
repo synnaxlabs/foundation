@@ -3079,9 +3079,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1321
   "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
   ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
-  are open, so a set of keys that collide costs the peer many streams and a lookup at
-  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  are open, so a set of keys that collide costs the peer many streams and a lookup in a
+  map of one session at most that many compares. A map that holds the streams of many
+  sessions has no such bound (#1506). Decided by `laptop.architect`
+  (2026-10-07T14:37:40Z):
   https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
+  The bound is for one session by `laptop.architect` (2026-10-07T17:29:27Z):
+  https://github.com/synnaxlabs/foundation/pull/1493#issuecomment-6043218811
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
