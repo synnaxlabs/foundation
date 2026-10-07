@@ -441,9 +441,9 @@ impl Group {
     }
 
     // Takes the joins that `raft` appended since the last sync. It runs after each
-    // step and proposal; a tick adds no join. When `unstable` no longer holds the
-    // synced entry, a step replaced it or `ready` took it, and the joins from the
-    // first unstable index go.
+    // step and proposal; a tick adds no join. When `unstable` starts at or below the
+    // synced entry and no longer holds it, a step replaced it, and the joins from
+    // the first unstable index go.
     fn sync(&mut self) {
         let unstable = self.raft.unstable();
         let (Some(first), Some(last)) = (unstable.first(), unstable.last()) else {
@@ -452,7 +452,7 @@ impl Group {
         let synced = self.synced;
         let new = unstable.iter().rev().take_while(|entry| entry.at != synced);
         let new = new.count();
-        if new == unstable.len() {
+        if new == unstable.len() && first.at.index <= synced.index {
             self.unapplied.split_off(&first.at.index);
         }
         let (_, new) = unstable.split_at(unstable.len().saturating_sub(new));
