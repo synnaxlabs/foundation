@@ -70,8 +70,10 @@ person.
 Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
 that each new test fails on the code it targets. Post one comment that starts with the
 rating and summary of the last round, as given, then the line
-``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. A
-later push needs a new approval.
+``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. Send
+each approval, with the PR number and the sha, to `laptop.monitor`, which approves the
+PR on the person's account, marks it ready, and queues it. A later push needs a new
+approval.
 
 ## The bar
 
