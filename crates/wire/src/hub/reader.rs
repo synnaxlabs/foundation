@@ -32,7 +32,7 @@ pub enum FromHome<'m> {
         /// The run ends with this message.
         last: bool,
     },
-    /// One message of the body, from [`Reader::body`].
+    /// One message of the body. It starts at [`Reader::body`] in the body.
     Body {
         /// The bytes of the message.
         bytes: &'m [u8],
