@@ -2307,6 +2307,55 @@ mod tests {
         }
 
         #[test]
+        fn a_written_join_does_not_move_the_key_of_an_applied_member() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[ticket(), join(4)])).await;
+                let commit = proven(2, 1, Body::Heartbeat { commit: 2 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::MILLISECOND).await;
+                let admitted = mesh.member(key(4)).map(|member| member.card);
+                assert_eq!(admitted, Some(common::member(4).card));
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let next = Body::Append {
+                    prev: at(2),
+                    entries: vec![Entry {
+                        at: at(3),
+                        data: changes(&[Change::Join(forged)]).remove(0),
+                    }],
+                    commit: 2,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, next)), Ok(()));
+                let reply = || message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply()), Ok(()));
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(5), reply()), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_reopen_keeps_each_written_join() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(6)])).await;
+                drop(mesh);
+                node.clock().sleep(Span::MILLISECOND).await;
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                for id in [4, 6] {
+                    let reply = message(id, 1, Body::HeartbeatReply);
+                    assert_eq!(mesh.receive(public(id), reply), Ok(()), "{id}");
+                }
+            });
+        }
+
+        #[test]
         fn a_join_after_the_synced_entry_gives_its_key_before_the_write() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
