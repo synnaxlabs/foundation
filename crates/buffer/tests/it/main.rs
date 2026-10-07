@@ -1838,6 +1838,69 @@ fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
     }
 }
 
+/// Drops an open of a ring with no checkpoint `after` nanoseconds into it, opens the
+/// ring again at once, commits one entry, kills the process, and opens the ring.
+/// Returns whether the entry is there, or `None` when the first open had ended or
+/// the second open or its commit failed.
+fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
+    let (mut sim, node) = one_node(seed);
+    create_unwritten(&mut sim, &node, AREA_START + AREA);
+    let committed = sim.run_on(&node, move |node, tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&node, tasks.clone(), DIR);
+        let mut first = Box::pin(Buffer::open(config, &mut slots));
+        let mut sleep = Box::pin(node.clock().sleep(Span::from_nanos(after)));
+        let ended = poll_fn(|cx| {
+            if first.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(true);
+            }
+            sleep.as_mut().poll(cx).map(|()| false)
+        })
+        .await;
+        drop(first);
+        if ended {
+            return None;
+        }
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots).await;
+        let buffer = buffer.ok()?;
+        let slot = slots.assign(key(1));
+        buffer
+            .append([entry(1, slot, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.ok()
+    });
+    committed.expect("the run ends")?;
+    sim.crash(&node, sim::Crash::Process);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens again");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    Some(recovered.expect("the last open ends") == tail(3, Some(30)))
+}
+
+/// A known defect, <https://github.com/synnaxlabs/foundation/issues/1310>: the
+/// remove of a dropped open can still run and remove the ring that the next open
+/// made, so a kill loses an entry that the next open committed. This pins the loss.
+#[test]
+fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
+    let cases = [
+        (143_161, 70_000),
+        (150_046, 120_000),
+        (189_172, 80_000),
+        (231_911, 70_000),
+        (275_938, 140_000),
+        (359_697, 130_000),
+    ];
+    for (seed, after) in cases {
+        let kept = drop_an_open_then_commit(seed, after);
+        assert_eq!(kept, Some(false), "seed {seed}, drop at {after} ns");
+    }
+}
+
 /// Starts a new ring on a node with `seed`, appends one entry, and kills the
 /// process `cut` nanoseconds after a point at most 10 µs before the deadline of the
 /// first commit. Returns the sim, the node, and whether the commit had ended.
@@ -2223,7 +2286,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
 }
 
 /// A failed sync of the ring's directory or of its parent fails the open. The next
-/// open makes the ring durable.
+/// open makes a durable ring.
 #[test]
 fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
     for dir in ["", DIR] {
@@ -2243,6 +2306,43 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
         let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
         assert_eq!(recovered, tail(3, Some(30)), "{dir:?}");
     }
+}
+
+/// A failed sync of the ring's directory at any point of a first open fails the open,
+/// before the create and after it. The next open makes the ring.
+#[test]
+fn a_failed_directory_sync_at_any_point_of_the_open_fails_it() {
+    let (new, len) = (layout(AREA, BODY_MAX), AREA_START + AREA);
+    let mut left = BTreeSet::new();
+    for at in (0..).step_by(5_000) {
+        let (mut sim, node) = one_node(1);
+        let result = Arc::new(Mutex::new(None));
+        let (own, shared) = (node.clone(), Arc::clone(&result));
+        drop(on_node(&node, "open", move |tasks| async move {
+            let config = node_config(&own, tasks, DIR);
+            let opened = Buffer::open(config, &mut Slots::new()).await.map(drop);
+            *shared.lock().expect("no panic") = Some(opened);
+            std::future::pending::<()>().await;
+        }));
+        sim.run_for(Span::from_nanos(at)).expect("the run goes on");
+        node.fail_file(FilePath::new(DIR), Operation::SyncDir);
+        sim.run_for(commits(2)).expect("the run goes on");
+        let opened = result.lock().expect("no panic").take();
+        if opened == Some(Ok(())) {
+            break;
+        }
+        let error = FileError::Io {
+            path: PathBuf::from(DIR),
+            operation: Operation::SyncDir,
+            code: 5,
+        };
+        assert_eq!(opened, Some(Err(Error::Files(error))), "fault at {at} ns");
+        sim.crash(&node, sim::Crash::Process);
+        let found = open_with(&mut sim, &node, new);
+        assert_eq!((found.1, found.2), (Ok(new), len), "fault at {at} ns");
+        left.insert(found.0);
+    }
+    assert_eq!(left, BTreeSet::from([Found::Absent, Found::Unwritten(len)]));
 }
 
 /// The open syncs the parent of a nested ring directory, not the data directory.

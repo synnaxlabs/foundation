@@ -840,8 +840,8 @@ mod buffer {
     #[test]
     fn a_crash_during_the_opens_leaves_rings_the_next_start_opens() {
         for crash in [sim::Crash::Process, sim::Crash::Power] {
-            // The claim ends at about 250 us, and the opens at about 1.3 ms.
-            for step in 0..60 {
+            // The claim ends at about 250 us, and the opens at about 1.6 ms.
+            for step in 0..70 {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
@@ -862,7 +862,7 @@ mod buffer {
         let mut failed = Vec::new();
         for crash in [sim::Crash::Process, sim::Crash::Power] {
             let mut last = None;
-            for step in 0..60 {
+            for step in 0..70 {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
@@ -878,7 +878,7 @@ mod buffer {
                 }
                 last = Some(lens);
             }
-            // The cuts go past the opens: at the last one each ring has a checkpoint.
+            // At the last cut each ring has its checkpoint: the cuts pass each create.
             assert_eq!(last, Some(Ok([DISK.bytes() / 2; 2])), "{crash:?}");
         }
         assert_eq!(failed, Vec::<String>::new());

@@ -659,7 +659,8 @@ async fn open_written(
             return Ok(Some((file, blocks)));
         }
     }
-    // The handle stays through the remove, so no other open takes this file.
+    // The handle stays through the remove, so no other open takes this file. A drop
+    // closes with no wait, and the create needs the room that the close gives back.
     files.remove(&path).await?;
     file.close().await;
     Ok(None)
