@@ -133,14 +133,16 @@ nothing checked again. So when round 1 led to fix commits:
    with the round 1 comment and each architect review attached. Only a range that
    changes no `.rs` line but comments skips `breaker`, and its round comment says so.
    The `reviewer` also gets each answer that changed no code, and checks it against the
-   code. Its report gives the `Public surface:` and `Hot path:` lines for the range. The
-   round comment adds each item of the first to its own `Public surface:` line, and
-   copies the second. When the `Hot path:` line names a function, run `performance`
-   again on the range, and update the Performance section with its numbers.
+   code and against "Findings" step 3: an answer that names later work and is not on the
+   `Deferred:` line, or a deferral in a risk crate with no linked OK, is a finding. Its
+   report gives the `Public surface:` and `Hot path:` lines for the range. The round
+   comment adds each item of the first to its own `Public surface:` line, and copies the
+   second. When the `Hot path:` line names a function, run `performance` again on the
+   range, and update the Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
-   of a round with no commit is low and in text, its comment gives `Findings: none` and
+   of a round is low and in the PR title or body, its comment gives `Findings: none` and
    lists them under a line `Text fixes:`. Each item gives the exact new text: an item
    that asks the author to write text is a finding. The author applies each with the
    `reviewer`'s words as given, and needs no further round.
