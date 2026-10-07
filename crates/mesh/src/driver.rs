@@ -2575,6 +2575,29 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "feeds the mesh clock of a test")]
+    fn a_node_in_holdover_stamps_a_join_at_the_later_edge() {
+        solo(|node, tasks| async move {
+            let (mut clock, time) = clock::Clock::new(node.clock());
+            let config = Config {
+                time: time.clone(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let source = clock.add();
+            let wall = clock::source::Wall::new(node.wall(), node.clock());
+            clock.push(source, wall.measure());
+            clock.remove(source);
+            assert!(matches!(time.status(), clock::Status::Holdover(..)));
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
+            let Change::Join(join) = stamped else {
+                panic!("{stamped:?} is not a join")
+            };
+            assert_eq!(join.at, time.now().mesh.unwrap().latest);
+        });
+    }
+
+    #[test]
     fn a_join_request_with_65_status_names_is_refused() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();

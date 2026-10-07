@@ -2055,15 +2055,16 @@ How to read this record:
   record for one public key and a prefix that is not under the region's prefix; the
   signature of the admin who made the ticket waits for #1213. A `Join` change (kind 2)
   carries the ticket's public key, a `Stamp` (the later edge of the admitting voter's
-  mesh time interval; a voter with no mesh time proposes no `Join`), the node key, the
-  card and its signature, the admission, and the status keys, which the voter assigns
-  (UUIDv7). Apply refuses, in this order, a forged card, a reserved name (A3), a name
-  outside the region, a status channel `<name>.<status>` that is longer than a name can
-  be or reserved, a key that is already a member, a name that a member holds, a status
-  key that a member holds or that the join repeats (A4), an unknown ticket, and each
-  refusal of `Record::admit`. So no refusal counts a use. A member's names are its card
-  name and each `<name>.<status>`, and two names are equal when they differ only in
-  ASCII case (A3, X27), so each full name maps to at most one member. Region state
+  mesh time interval; a voter with no mesh time of known error at or after the Unix
+  epoch stamps no `Join`), the node key, the card and its signature, the admission,
+  and the status keys, which the voter assigns (UUIDv7). Apply refuses, in this order,
+  a forged card, a reserved name (A3), a name outside the region, a status channel
+  `<name>.<status>` that is longer than a name can be or reserved, a key that is
+  already a member, a name that a member holds, a status key that a member holds or
+  that the join repeats (A4), an unknown ticket, and each refusal of `Record::admit`.
+  So no refusal counts a use. A member's names are its card name and each
+  `<name>.<status>`, and two names are equal when they differ only in ASCII case (A3,
+  X27), so each full name maps to at most one member. Region state
   cannot see the keys of the spec, so the status key check covers members only. The name
   and key checks are one function, which `State::new` also runs on the founding members;
   both give a `region::Unfit`, which `Refused::Unfit` wraps. A member and a `Join` hold
