@@ -12,7 +12,7 @@ use std::task::Poll;
 use env::net::{Error as Net, Listener, Tcp, tcp};
 use types::time::{Monotonic, Span};
 
-use super::{after, at, delay, millis, pair, panicked, shard};
+use super::{EIO, after, at, delay, millis, pair, panicked, shard};
 use crate::{Crash, Error, link, node};
 
 /// What a shard gave, once it ended.
@@ -1527,8 +1527,6 @@ fn a_late_ack_from_a_reset_stream_resets_no_newer_stream_on_its_pair() {
     ran.unwrap();
 }
 
-const EIO: Net = Net::Io { code: 5 };
-
 /// One accept, which gives the peer of the stream.
 async fn try_accept(listener: &mut Listener) -> Result<SocketAddr, Net> {
     poll_fn(|cx| listener.poll_accept(cx))
@@ -1678,6 +1676,23 @@ fn a_stream_that_a_failed_listener_accepted_still_works() {
     b.fail_listener(remote);
     sim.run().unwrap();
     assert_eq!(take(&echo), Ok(b"ping".to_vec()));
+}
+
+#[test]
+fn a_failed_listener_keeps_its_address_until_it_drops() {
+    let (_sim, _a, b) = pair(0, link::Config::default());
+    let local = at(&b, 4433);
+    let _failed = listen(&b, 4433);
+    b.fail_listener(local);
+    let listen = tcp::Listen {
+        local,
+        backlog: 4,
+        options: options(),
+    };
+    assert_eq!(
+        b.net().listen(&listen).err(),
+        Some(Net::AddressInUse { local })
+    );
 }
 
 #[test]
