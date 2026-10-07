@@ -2389,11 +2389,11 @@ pub(super) mod tests {
                 }
                 let built = built(&sets.pool, &read);
                 // The parts too, as two errors in them could cancel in the charge.
-                let mut places = complete::Places::new(slots.clone().into());
-                prop_assert_eq!(
-                    places.size(&frame, &sets.wide),
-                    (read.len(), built.body().len())
-                );
+                let mut places = types::frame::Places::new(slots.clone().into());
+                let placed = places.lay(&frame, &sets.wide);
+                prop_assert_eq!(placed.len(), read.len());
+                let end = placed.last().map_or(0, |placed| placed.end);
+                prop_assert_eq!(end, built.body().len());
                 let charge = Charge::Places(slots.into());
                 spends(&charge, &[(&frame, &sets.wide)], built.charge());
             }

@@ -3,9 +3,8 @@
 use std::fmt;
 
 use types::channel::Slot;
-use types::frame::key_set::{self, KeySet};
-use types::frame::{self, Frame, Mask, View};
-use types::hash;
+use types::frame::key_set::KeySet;
+use types::frame::{self, Frame};
 
 use crate::Position;
 
@@ -50,7 +49,7 @@ pub enum Charge {
 pub(super) enum Cost {
     Whole,
     /// Boxed, so a session of the common case stays small.
-    Places(Box<Places>),
+    Places(Box<frame::Places>),
 }
 
 const _: () = assert!(
@@ -58,110 +57,21 @@ const _: () = assert!(
     "a `Cost` grows each session by more than one pointer"
 );
 
-#[derive(Debug)]
-pub(super) struct Places {
-    slots: Box<[Slot]>,
-    /// The places in each key set that the session charged, kept until it closes.
-    held: hash::Map<key_set::Key, Held>,
-}
-
-/// The places of a session in one key set.
-#[derive(Debug)]
-struct Held {
-    mask: Mask,
-    /// Each entry that a place names, with the first place that names it, by entry.
-    entries: Vec<(u32, u32)>,
-}
-
 impl Cost {
     pub(super) fn new(charge: Charge) -> Self {
         match charge {
             Charge::Whole => Self::Whole,
-            Charge::Places(slots) => Self::Places(Box::new(Places::new(slots))),
+            Charge::Places(slots) => Self::Places(Box::new(frame::Places::new(slots))),
         }
     }
 
     /// What `frame`, of key set `set` and [`Frame::charge`] `whole`, costs the
-    /// session. Time is O(m log(n/m)) for m places in `set` and n series in `frame`.
-    /// Allocates only for the first frame of each key set.
+    /// session. Time is as for [`frame::Places::charge`]. Allocates only for the
+    /// first frame of each key set.
     pub(super) fn charge(&mut self, frame: &Frame, set: &KeySet, whole: u64) -> u64 {
         match self {
             Self::Whole => whole,
-            Self::Places(places) => {
-                let (series, body_len) = places.size(frame, set);
-                frame::charge(series, body_len)
-            }
+            Self::Places(places) => places.charge(frame, set),
         }
     }
-}
-
-impl Places {
-    pub(super) fn new(slots: Box<[Slot]>) -> Self {
-        Self {
-            slots,
-            held: hash::Map::default(),
-        }
-    }
-
-    /// The series and the body length of the frame of `frame`'s series at the places.
-    pub(super) fn size(&mut self, frame: &Frame, set: &KeySet) -> (usize, usize) {
-        let held = self
-            .held
-            .entry(set.key())
-            .or_insert_with(|| Held::new(&self.slots, set));
-        // The body holds each series but the last in place order padded, then the last.
-        let (mut series, mut others) = (0, 0);
-        let mut last: Option<(u32, usize)> = None;
-        let mut entries = held.entries.iter().peekable();
-        View::new(frame, &held.mask)
-            .bounds()
-            .for_each(|(entry, bounds)| {
-                let entry = to_u32(entry);
-                // The mask adds the index of each group, which a place need not list.
-                while entries.next_if(|&&(held, _)| held < entry).is_some() {}
-                let Some(&(_, place)) = entries.next_if(|&&(held, _)| held == entry)
-                else {
-                    return;
-                };
-                series += 1;
-                let other = match last {
-                    Some((at, _)) if at > place => bounds.len(),
-                    _ => last
-                        .replace((place, bounds.len()))
-                        .map_or(0, |(_, len)| len),
-                };
-                others += padded(other);
-            });
-        (series, others + last.map_or(0, |(_, len)| len))
-    }
-}
-
-/// The bytes that a series of `len` bytes takes in a frame's body when another
-/// series follows it.
-fn padded(len: usize) -> usize {
-    frame::ends([((), len), ((), 0)])
-        .last()
-        .map_or(0, |((), end)| end)
-}
-
-impl Held {
-    fn new(slots: &[Slot], set: &KeySet) -> Self {
-        let mut entries: Vec<_> = slots
-            .iter()
-            .enumerate()
-            .filter_map(|(place, &slot)| Some((to_u32(set.find(slot)?), to_u32(place))))
-            .collect();
-        entries.sort_unstable();
-        entries.dedup_by_key(|&mut (entry, _)| entry);
-        Self {
-            mask: Mask::new(set, slots.iter().copied()),
-            entries,
-        }
-    }
-}
-
-/// An entry or a place as a `u32`, which halves the cache that a session's places take.
-fn to_u32(n: usize) -> u32 {
-    u32::try_from(n)
-        .expect("invariant: a key set's entries and an open's keys fit a u32")
 }
