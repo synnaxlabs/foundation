@@ -303,9 +303,12 @@ mod tests {
             drop(transport);
         });
         let at = vec![Address::Udp(address(&server))];
-        testing::transport(&client, CLIENT, move |transport, _| async move {
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let start = node.clock().now();
             let session = transport.dial(public(&SERVER), &at).await;
             let session = session.expect("a session");
+            // The dial ends in the first poll after the pause, not at 1.5 ms.
+            assert!(node.clock().now() - start >= spans(Span::MILLISECOND, 21));
             assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
