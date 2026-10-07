@@ -119,6 +119,9 @@ pub(super) struct Side {
     pub(super) drops: usize,
     /// This side stops: it runs no timer, sends nothing, and gets nothing.
     pub(super) silent: bool,
+    /// When `Some`, a handle on the buffer of each batch this side takes, so a test
+    /// sees whether anything still holds a view of it.
+    pub(super) kept: Option<Vec<Bytes>>,
 }
 
 impl Pair {
@@ -225,6 +228,9 @@ impl Pair {
             .find(|side| side.address == to && !side.silent);
         if let Some(side) = side {
             side.endpoint.receive(now, meta, bytes);
+            if let Some(kept) = &mut side.kept {
+                kept.push(mem::take(&mut side.endpoint.received).freeze());
+            }
         } else if let Some(foreign) = self.foreign.as_mut().filter(|_| to == FOREIGN) {
             foreign.receive(self.now, meta, bytes);
         }
@@ -242,6 +248,7 @@ impl Side {
             events: Vec::new(),
             drops: 0,
             silent: false,
+            kept: None,
         }
     }
 

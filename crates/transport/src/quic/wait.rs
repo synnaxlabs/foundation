@@ -17,14 +17,11 @@ pub(super) const RETRY: Span = Span::from_nanos(10 * Span::MILLISECOND.nanos());
 /// The reads that found no block in the shard's pool, in the order they take one:
 /// highest class first, then oldest first. A read tries for a block only in its
 /// turn, so a later read cannot take the block that an earlier one waits for.
-///
-/// A read that then waits for something else, such as room in its connection's
-/// receive budget, parks: it keeps its place but holds no turn.
 #[derive(Debug, Default)]
 pub(super) struct Queue {
     /// The reads that wait for a block.
     reads: BTreeMap<Place, Read>,
-    /// The place of each read that waits for a block or parked.
+    /// The place of each read that waits for a block.
     places: Map<stream::Key, Place>,
     tickets: u64,
     /// When the queue last went from empty to holding a read.
@@ -117,20 +114,8 @@ impl Queue {
         }
     }
 
-    /// Parks the read of `stream`, if it waits for a block: it keeps its place for
-    /// its next [`take`](Self::take), and the next read gets its turn now.
-    pub(super) fn park(&mut self, now: Monotonic, stream: stream::Key) {
-        // Each read that waits for bytes parks, so skip the hash when none waits.
-        if self.places.is_empty() {
-            return;
-        }
-        if let Some(&place) = self.places.get(&stream) {
-            self.remove(now, place);
-        }
-    }
-
-    /// Ends the wait of the read of `stream`, if it waits or parked. When it waited
-    /// first, the next read gets its turn now.
+    /// Ends the wait of the read of `stream`, if it waits. When it waited first, the
+    /// next read gets its turn now.
     pub(super) fn leave(&mut self, now: Monotonic, stream: stream::Key) {
         // Each read leaves, so skip the hash when none waits.
         if self.places.is_empty() {
@@ -317,38 +302,14 @@ mod tests {
     }
 
     #[test]
-    fn a_parked_read_passes_the_turn_on_and_keeps_its_place() {
-        let mut queue = Queue::default();
-        let (first, count) = waker();
-        let (next, next_count) = waker();
-        let (later, later_count) = waker();
-        queue.wait(at(0), stream(0, 0), Class::Complete, &first);
-        queue.wait(at(0), stream(1, 0), Class::Complete, &next);
-        queue.park(at(1), stream(0, 0));
-        assert_eq!([woken(&count), woken(&next_count)], [0, 1]);
-        assert!(queue.turn(stream(1, 0), Class::Complete));
-        queue.wait(at(1), stream(2, 0), Class::Complete, &later);
-        queue.park(at(2), stream(1, 0));
-        assert_eq!(woken(&later_count), 1);
-        assert!(queue.turn(stream(0, 0), Class::Complete));
-        assert!(queue.turn(stream(1, 0), Class::Complete));
-        assert!(!queue.turn(stream(2, 1), Class::Complete));
-        queue.wait(at(3), stream(0, 0), Class::Complete, &first);
-        assert!(!queue.turn(stream(1, 0), Class::Complete));
-        assert!(!queue.turn(stream(2, 0), Class::Complete));
-    }
-
-    #[test]
-    fn the_wait_time_stops_when_the_last_read_parks() {
+    fn the_wait_time_stops_when_the_last_read_leaves() {
         let mut queue = Queue::default();
         let (waker, _) = waker();
         queue.wait(at(0), stream(0, 0), Class::Complete, &waker);
-        queue.park(at(2), stream(0, 0));
-        queue.park(at(3), stream(0, 1));
+        queue.leave(at(2), stream(0, 0));
+        queue.leave(at(3), stream(0, 1));
         assert!(!queue.waiting());
         assert_eq!(queue.status(at(5)).waited, millis(2));
-        queue.leave(at(5), stream(0, 0));
-        assert!(queue.turn(stream(0, 1), Class::Complete));
     }
 
     #[test]

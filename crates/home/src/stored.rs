@@ -6,7 +6,7 @@ use buffer::Entry;
 use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 use types::time::Stamp;
 
 /// The buffer tag of a data entry.
@@ -156,14 +156,19 @@ pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
     })
 }
 
-/// The kind code, element code, and `n` of `data_type`.
-const fn codes(data_type: Type) -> (u8, u8, u32) {
+/// The kind code, element code, and `n` of `data_type`. The `n` of a matrix is
+/// `rows | columns << 16`.
+fn codes(data_type: Type) -> (u8, u8, u32) {
     match data_type {
         Type::Scalar(element) => (0, code(element), 0),
         Type::Array { element, len } => (1, code(element), len),
         Type::List { element, max } => (2, code(element), max),
         Type::String => (3, 0, 0),
         Type::Bytes => (4, 0, 0),
+        Type::Matrix {
+            element,
+            sides: Sides { rows, columns },
+        } => (5, code(element), u32::from(rows) | u32::from(columns) << 16),
     }
 }
 
@@ -183,6 +188,13 @@ fn data_type(descriptor: &[u8; DESCRIPTOR]) -> Type {
         },
         3 => Type::String,
         4 => Type::Bytes,
+        5 => Type::Matrix {
+            element: scalar(element),
+            sides: Sides {
+                rows: u16::from_le_bytes(field(descriptor, at::N)),
+                columns: u16::from_le_bytes(field(descriptor, at::N + 2)),
+            },
+        },
         _ => panic!("the stored body has an unknown kind {kind}"),
     }
 }
@@ -291,6 +303,13 @@ mod tests {
         let pool = create_pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
         joined(&body(&pool, &frame, &set).expect("room"))
+    }
+
+    fn matrix(element: Scalar, rows: u16, columns: u16) -> Type {
+        Type::Matrix {
+            element,
+            sides: Sides { rows, columns },
+        }
     }
 
     mod entry {
@@ -420,6 +439,8 @@ mod tests {
                     },
                     [1, 9, 3, 0, 0, 0],
                 ),
+                (matrix(Scalar::F32, 2, 3), [5, 9, 2, 0, 3, 0]),
+                (matrix(Scalar::U8, 0x0102, 0x0304), [5, 5, 2, 1, 4, 3]),
                 (
                     Type::List {
                         element: Scalar::U16,
@@ -568,10 +589,10 @@ mod tests {
             }
 
             #[test]
-            #[should_panic(expected = "the stored body has an unknown kind 5")]
+            #[should_panic(expected = "the stored body has an unknown kind 6")]
             fn panics_on_an_unknown_kind() {
                 let mut body = stored();
-                body[COUNT + at::KIND] = 5;
+                body[COUNT + at::KIND] = 6;
                 read(&body).for_each(drop);
             }
 
@@ -612,6 +633,9 @@ mod tests {
                 scalar().prop_map(Type::Scalar),
                 (scalar(), any::<u32>())
                     .prop_map(|(element, len)| Type::Array { element, len }),
+                (scalar(), any::<u16>(), any::<u16>()).prop_map(
+                    |(element, rows, columns)| matrix(element, rows, columns)
+                ),
                 (scalar(), any::<u32>())
                     .prop_map(|(element, max)| Type::List { element, max }),
                 Just(Type::String),

@@ -1,6 +1,6 @@
 //! The time to make the stored entry of an index frame and drop it, and to read each
 //! series of its body, for frames of 16, 1000, and 100,000 series of one sample: each
-//! an `f32`, or a mix of each kind of type.
+//! an `f32`, or a mix of scalars, an array, a list, a string, and bytes.
 
 use std::fmt;
 use std::sync::Arc;
