@@ -186,10 +186,10 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 90
     steps:
-      # A mutant can allocate in a loop until the host runs out of memory. The cgroup
-      # of the runner unit caps the job below the host's memory, and the unit's
-      # OOMPolicy=continue keeps the runner up, so only a test process dies (#803).
-      # Hosts whose template sets neither: #898.
+      # A mutant can allocate in a loop until the host runs out of memory. Each runner
+      # unit on the host has a cap, the caps leave 2 GiB of the host free, and the
+      # unit's OOMPolicy=continue keeps the runner up, so only a test process dies
+      # (#803). Hosts whose template sets none of this: #898.
       - name: Check the memory cap of the runner
         run: |
           c=$(cut -d: -f3 /proc/self/cgroup)
@@ -197,18 +197,21 @@ jobs:
           p=$(systemctl show -p OOMPolicy --value "$u")
           [ "$p" = continue ] ||
             { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
+          [ "$(cat "/sys/fs/cgroup$c/memory.max")" != max ] ||
+            { echo "::error::$u has no MemoryMax (#803, #898)."; exit 1; }
           total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-          d=/sys/fs/cgroup$c
-          while [ "$d" != /sys/fs/cgroup ]; do
-            m=$(cat "$d/memory.max" 2>/dev/null || echo max)
-            if [ "$m" != max ] && [ $((m / 1024)) -lt "$total" ]; then
-              echo "Memory cap $m at $d, OOMPolicy $p on $u"
-              exit 0
-            fi
-            d=${d%/*}
+          sum=0
+          for f in /sys/fs/cgroup/system.slice/actions.runner.*.service/memory.max; do
+            m=$(cat "$f")
+            [ "$m" != max ] ||
+              { echo "::error::${f%/*} has no MemoryMax (#803, #898)."; exit 1; }
+            sum=$((sum + m / 1024))
           done
-          echo "::error::No memory cap below $total KiB (#803, #898)."
-          exit 1
+          [ "$sum" -le $((total - 2097152)) ] || {
+            echo "::error::The runner caps take $sum KiB of $total KiB (#803)."
+            exit 1
+          }
+          echo "The runner caps take $sum KiB of $total KiB; $u has OOMPolicy $p"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
