@@ -146,6 +146,10 @@ Only the red-team sessions rent machines, within the test budget (`docs/decision
 - **A message is not a record.** Write the decision into the issue, the PR, or the docs
   first, then send the link.
 - Do not send a message to check if a session is alive.
+- **A relay of the person counts as the person.** When the coordinator or the monitor
+  posts the person's decision on an issue or PR from the factory account, it is the
+  person's own OK, approval, or waiver (also as box engineer). A builder acts on it at
+  once. The person never has to comment on GitHub.
 - **A stuck session tells the coordinator at once.** When a permission check refuses
   a call, or work waits on the person, send `coordinator` the refused command, the
   reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
