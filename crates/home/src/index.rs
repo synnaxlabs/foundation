@@ -62,9 +62,9 @@ impl Index {
     ///
     /// # Errors
     ///
-    /// In this order: a control refusal when `key` does not hold control,
-    /// [`Refusal::Codec`] with the error of `stamps`, and [`Refusal::Order`] when a
-    /// stamp breaks a rule.
+    /// In this order: [`Refusal::Waiting`], [`Refusal::Reserved`], or
+    /// [`Refusal::Expired`] when `key` does not hold control, [`Refusal::Codec`] with
+    /// the error of `stamps`, and [`Refusal::Order`] when a stamp breaks a rule.
     ///
     /// # Panics
     ///
