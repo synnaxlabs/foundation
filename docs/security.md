@@ -63,6 +63,13 @@ state on `main`.
   it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
+- `types::hash` maps hash with no key (R16-7), so a peer that chooses keys freely can
+  make them collide. A peer must use its QUIC stream IDs in order, and `streams_max`
+  limits how many are open in each session, so a lookup in a stream map of one session
+  costs at most that many compares. Open: #1506 (the map of reads that wait for a block
+  holds the streams of each session of a carrier, so that bound does not hold for it). A
+  map keyed by a value that a peer chooses freely needs the keyed hasher of R16-7, which
+  is not built.
 - A key of small order needs no private key. `types::node::PublicKey::new` refuses
   each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
   `types`; the TLS check uses it.
