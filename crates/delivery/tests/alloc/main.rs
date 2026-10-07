@@ -10,6 +10,7 @@ use delivery::{Position, Reader, Readers, Start, complete, latest};
 use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
+use types::time::Stamp;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -133,6 +134,7 @@ fn complete(frame: &impl Fn() -> Frame) {
         assert_eq!(readers.ack(closed, position), Ok(()), "a closed key acks");
         assert!(readers.take(closed.into()).is_none(), "a closed key takes");
         readers.close(closed.into());
+        readers.close_named(closed, Stamp::from_nanos(0));
     });
     assert_eq!(allocations, 0, "an ack or a call on a closed key allocated");
     assert_eq!(

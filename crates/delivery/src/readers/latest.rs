@@ -61,22 +61,22 @@ impl Readers {
     /// Starts an unnamed latest session, which gets the index's newest live frame, if
     /// any, at once. A latest session holds nothing and writes no record.
     pub fn open_latest(&mut self) -> Opened {
-        self.push_latest(None, None)
+        self.push_latest(None)
     }
 
     /// Starts a latest session for `name`, as [`Readers::open_latest`] does. The
     /// name's open session in either mode is taken over: a complete one closes at
     /// `now`, as after [`Readers::close_named`].
     pub fn open_named_latest(&mut self, name: Name, now: Stamp) -> Opened {
-        let replaced = self.close_reader(&name, now);
-        self.push_latest(Some(name), replaced)
+        let replaced = self.replace(&name, now);
+        Opened {
+            replaced,
+            ..self.push_latest(Some(name))
+        }
     }
 
-    fn push_latest(
-        &mut self,
-        name: Option<Name>,
-        replaced: Option<super::Key>,
-    ) -> Opened {
+    /// Starts a latest session that replaces none.
+    fn push_latest(&mut self, name: Option<Name>) -> Opened {
         let key = Key(self.next_latest);
         self.next_latest += 1;
         let woken = self.newest.is_some();
@@ -89,7 +89,7 @@ impl Readers {
         self.woken_latest.reserve(self.latest.len());
         Opened {
             key,
-            replaced,
+            replaced: None,
             woken,
         }
     }

@@ -388,12 +388,12 @@ impl Readers {
     /// If this `Readers` never gave `key`, or the session is open and is unnamed.
     pub fn close_named(&mut self, key: complete::Key, now: Stamp) {
         if let Some(i) = self.find(key) {
-            self.close_complete(i, now);
+            self.end_named(i, now);
         }
     }
 
     /// Ends the named complete session at `i` at `now`. Its reader holds from `now`.
-    fn close_complete(&mut self, i: usize, now: Stamp) {
+    fn end_named(&mut self, i: usize, now: Stamp) {
         let session = self.end(i);
         let Reader::Named { name, hold } = session.reader else {
             panic!(
@@ -479,12 +479,12 @@ impl Readers {
     }
 
     /// Closes the named reader's open session in either mode at `now`. Returns it.
-    fn close_reader(&mut self, name: &Name, now: Stamp) -> Option<Key> {
+    fn replace(&mut self, name: &Name, now: Stamp) -> Option<Key> {
         let Some(i) = self.named(name) else {
             return self.remove_latest(name).map(Key::from);
         };
         let key = self.complete[i].key;
-        self.close_complete(i, now);
+        self.end_named(i, now);
         Some(key.into())
     }
 
@@ -1784,6 +1784,17 @@ pub(super) mod tests {
             let later = opened(&mut readers, 0, 10);
             assert_eq!(released(&mut readers, 1), []);
             assert_eq!(taken(&mut readers, later), []);
+        }
+
+        #[test]
+        fn drops_the_queued_frames_when_the_last_named_session_closes() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.queue(&frames.frame(1), 0..1);
+            readers.close_named(key, at(0));
+            assert!(frames.spare());
+            assert!(!readers.pending());
         }
 
         #[test]
