@@ -66,6 +66,14 @@ fn credit_kind(credit: Credit) -> u8 {
     out[0]
 }
 
+/// Whether `error` says only that the bytes of a message are no open and no credit.
+fn malformed(error: Error) -> bool {
+    matches!(
+        error,
+        Error::Empty | Error::Kind { .. } | Error::Length { .. } | Error::Channels
+    )
+}
+
 /// Whether a home that must take `next` refuses `message` with `error`. Only one
 /// error is correct.
 fn refused(next: Next, message: &[u8], error: Error) -> bool {
@@ -76,7 +84,7 @@ fn refused(next: Next, message: &[u8], error: Error) -> bool {
                 error == Error::Unopened { kind }
             }
             Ok(_) => false,
-            Err(malformed) => error == malformed,
+            Err(other) => malformed(other) && error == other,
         },
         Next::Keys(run) => run.refused(message, error),
         Next::Credit => match alone(message) {
@@ -85,7 +93,7 @@ fn refused(next: Next, message: &[u8], error: Error) -> bool {
                 error == Error::Reopen { kind }
             }
             Ok(_) => false,
-            Err(malformed) => error == malformed,
+            Err(other) => malformed(other) && error == other,
         },
     }
 }

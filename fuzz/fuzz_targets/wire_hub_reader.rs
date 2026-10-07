@@ -59,6 +59,18 @@ fn kind(reply: Reply) -> u8 {
     out[0]
 }
 
+/// Whether `error` says only that the bytes of a message are no reply.
+fn malformed(error: Error) -> bool {
+    matches!(
+        error,
+        Error::Empty
+            | Error::Kind { .. }
+            | Error::Length { .. }
+            | Error::Series
+            | Error::Path { .. }
+    )
+}
+
 /// Whether a reader of `places` places that must take `next` refuses `message` with
 /// `error`. Only one error is correct.
 fn refused(next: Next, places: u32, message: &[u8], error: Error) -> bool {
@@ -67,7 +79,7 @@ fn refused(next: Next, places: u32, message: &[u8], error: Error) -> bool {
         Next::Opened => match reply(message) {
             Ok(Reply::Opened) => false,
             Ok(head) => error == Error::Unopened { kind: kind(head) },
-            Err(malformed) => error == malformed,
+            Err(other) => malformed(other) && error == other,
         },
         Next::Head => match reply(message) {
             Ok(Reply::Opened) => {
@@ -77,7 +89,7 @@ fn refused(next: Next, places: u32, message: &[u8], error: Error) -> bool {
             Ok(Reply::Head(Head { series, .. })) => {
                 series > places && error == Error::Places { series, places }
             }
-            Err(malformed) => error == malformed,
+            Err(other) => malformed(other) && error == other,
         },
         Next::Ends(run) => run.refused(message, error),
         Next::Body { .. } if len == 0 => error == Error::Empty,
@@ -104,7 +116,7 @@ fn read(bytes: &[u8]) {
                 Next::Head
             }
             (Next::Head, Ok(FromHome::Head(head))) => {
-                let mut out = [0; 18];
+                let mut out = vec![0; Reply::Head(head).encoded_len()];
                 Reply::Head(head).encode(&mut out);
                 assert_eq!(out, message, "the head changed");
                 assert!(head.series <= places, "a head has more series than places");
