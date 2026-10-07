@@ -84,9 +84,8 @@ impl Ready {
     /// claim: this node's entry in the hard proof and in each message's proof, each
     /// grant it sends, and the votes and the signature of each change it wrote, in
     /// `entries`, in `committed`, and in each append. Another node's grant or change
-    /// keeps the signature it came with: a grant has one when the caller checked its
-    /// message (see [`Message::claims`]), and a change when the caller's entry form
-    /// holds one.
+    /// keeps the signature it came with, so it has one when the caller checked its
+    /// message (see [`Message::claims`]).
     pub fn sign(&mut self, mut sign: impl FnMut(&Claim<'_>) -> Signature) {
         if let Some(hard) = &mut self.hard
             && let Some(proof) = &mut hard.proof

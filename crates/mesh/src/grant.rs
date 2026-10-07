@@ -40,10 +40,7 @@ impl Signer {
     /// # Panics
     ///
     /// When a grant or a change of another node has no signature: the caller stepped
-    /// a message that did not pass [`check`], or an entry that [`decode`] did not
-    /// give.
-    ///
-    /// [`decode`]: crate::entry::decode
+    /// a message that did not pass [`check`].
     pub(crate) fn sign(&self, ready: &mut Ready) {
         ready.sign(|claim| {
             assert_eq!(
@@ -392,6 +389,52 @@ mod tests {
         );
         let reply = granted(3, Grant::Vote, 1);
         assert_eq!(check(&reply, &members(&[1, 2])), refused);
+    }
+
+    // An append of the change of leader 1 at index 2 of `TERM`, proven by 1.
+    fn change_append() -> Message {
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: vec![raft::Entry {
+                at: written(),
+                data: Data::Voters(signed_change()),
+            }],
+            commit: 0,
+        };
+        common::proven(1, 2, append)
+    }
+
+    fn change_of(message: &mut Message) -> &mut Change {
+        let Body::Append { entries, .. } = &mut message.body else {
+            unreachable!()
+        };
+        let Data::Voters(change) = &mut entries[0].data else {
+            unreachable!()
+        };
+        change
+    }
+
+    #[test]
+    fn check_refuses_a_forged_vote_or_signature_of_a_change_an_append_carries() {
+        let members = members(&[1, 2, 3]);
+        assert_eq!(check(&change_append(), &members), Ok(()));
+        let mut zeroed = change_append();
+        change_of(&mut zeroed).signature = Some(Signature([0; 64]));
+        let forged = Err(Error::Forged { signer: key(1) });
+        assert_eq!(check(&zeroed, &members), forged);
+        let mut vote = change_append();
+        let votes = &mut change_of(&mut vote).votes.voters;
+        *votes.get_mut(&key(2)).unwrap() = Some(Signature([0; 64]));
+        let forged = Err(Error::Forged { signer: key(2) });
+        assert_eq!(check(&vote, &members), forged);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: decode gives each claim a signature")]
+    fn check_panics_on_an_unsigned_change_an_append_carries() {
+        let mut message = change_append();
+        change_of(&mut message).signature = None;
+        check(&message, &members(&[1, 2, 3])).unwrap();
     }
 
     #[test]

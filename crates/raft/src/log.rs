@@ -14,6 +14,17 @@ pub struct Entry {
 }
 
 impl Entry {
+    // Each claim a change carries, with its signature; nothing for other data.
+    pub(crate) fn claims(
+        &self,
+    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        let change = match &self.data {
+            Data::Voters(change) => Some(change),
+            Data::Empty | Data::Bytes(_) => None,
+        };
+        change.into_iter().flat_map(|change| change.claims(self.at))
+    }
+
     // Gives each `None` of a change the signature `sign` makes for its claim.
     pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim<'_>) -> Signature) {
         match &mut self.data {
@@ -50,6 +61,21 @@ pub struct Change {
 }
 
 impl Change {
+    // Each vote in the term of `at`, in rising key order, then the leader's change.
+    pub(crate) fn claims(
+        &self,
+        at: Position,
+    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        let change = Claim::Change {
+            leader: self.votes.candidate,
+            at,
+            voters: &self.voters,
+        };
+        self.votes
+            .claims(at.term)
+            .chain(std::iter::once((change, self.signature)))
+    }
+
     // Gives each `None` the signature `sign` makes for its claim: a vote in the
     // term of `at`, then the leader's signature of the change at `at`.
     pub(crate) fn sign(

@@ -259,7 +259,7 @@ impl Network {
     }
 
     /// The stand-in signature of `claim`: its fields themselves, so a check can
-    /// rebuild it. A change carries a digest of its voters.
+    /// rebuild it. A change carries a digest of its voter sets, each with its count.
     pub(crate) fn signature(claim: &Claim<'_>) -> Signature {
         let mut bytes = [0; 64];
         match *claim {
@@ -282,12 +282,11 @@ impl Network {
                 bytes[1..9].copy_from_slice(&at.term.0.to_le_bytes());
                 bytes[9..17].copy_from_slice(&at.index.to_le_bytes());
                 bytes[17..33].copy_from_slice(&leader.as_u128().to_le_bytes());
-                let keys: Vec<u8> = voters
-                    .incoming
-                    .iter()
-                    .chain(&voters.outgoing)
-                    .flat_map(|key| key.as_u128().to_le_bytes())
-                    .collect();
+                let mut keys = Vec::new();
+                for set in [&voters.incoming, &voters.outgoing] {
+                    keys.extend(u64::try_from(set.len()).unwrap().to_le_bytes());
+                    keys.extend(set.iter().flat_map(|key| key.as_u128().to_le_bytes()));
+                }
                 bytes[33..].copy_from_slice(&Digest::of(&keys).0[..31]);
             }
         }
@@ -694,44 +693,23 @@ impl Network {
 
     // Each signature a node sends is the one its claim's signer made: a signature
     // moved to another term, grant, candidate, or voter fails. Each change an append
-    // carries is signed by its leader, with the votes of its term signed.
+    // carries holds votes, with each vote and the change signed.
     fn check_signatures(at: usize, message: &Message) {
         for (claim, signature) in message.claims() {
-            Self::check_signature(at, &claim, signature);
+            assert_eq!(
+                signature,
+                Some(Self::signature(&claim)),
+                "node {at} carries a wrong signature of {claim:?}"
+            );
         }
         let Body::Append { entries, .. } = &message.body else {
             return;
         };
         for entry in entries {
-            let Data::Voters(change) = &entry.data else {
-                continue;
-            };
-            let leader = change.votes.candidate;
-            assert_eq!(change.votes.grant, Grant::Vote, "node {at} sent {entry:?}");
-            for (&voter, &signature) in &change.votes.voters {
-                let claim = Claim::Grant {
-                    voter,
-                    grant: Grant::Vote,
-                    term: entry.at.term,
-                    candidate: leader,
-                };
-                Self::check_signature(at, &claim, signature);
+            if let Data::Voters(change) = &entry.data {
+                assert_eq!(change.votes.grant, Grant::Vote, "node {at} sent {entry:?}");
             }
-            let claim = Claim::Change {
-                leader,
-                at: entry.at,
-                voters: &change.voters,
-            };
-            Self::check_signature(at, &claim, change.signature);
         }
-    }
-
-    fn check_signature(at: usize, claim: &Claim<'_>, signature: Option<Signature>) {
-        assert_eq!(
-            signature,
-            Some(Self::signature(claim)),
-            "node {at} carries a wrong signature of {claim:?}"
-        );
     }
 
     // A vote goes only to a candidate whose log is at least as new as the voter's.

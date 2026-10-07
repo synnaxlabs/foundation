@@ -1311,9 +1311,8 @@ How to read this record:
   (in `entries`, in `committed`, and in each append), before the write and the
   sends. The caller checks each pair that `Message::claims` gives before `step` and
   refuses a `None`: `step` keeps each signature as it came, so an unchecked `None`
-  of another voter reaches `Ready::sign`. Until the chain (#881), `Message::claims`
-  gives grants only; a change of another node has a signature because the entry
-  byte form holds one (MESH LOG).
+  of another voter reaches `Ready::sign`. `Message::claims` also gives each claim
+  of a change an append carries: its votes in the entry's term, then the change.
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;

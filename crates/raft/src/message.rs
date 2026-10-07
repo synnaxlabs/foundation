@@ -99,6 +99,22 @@ pub struct Proof {
 }
 
 impl Proof {
+    // Each entry's grant in `term`, in rising key order, with its signature.
+    pub(crate) fn claims(
+        &self,
+        term: Term,
+    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        self.voters.iter().map(move |(&voter, &signature)| {
+            let claim = Claim::Grant {
+                voter,
+                grant: self.grant,
+                term,
+                candidate: self.candidate,
+            };
+            (claim, signature)
+        })
+    }
+
     // Gives each entry with no signature the signature `sign` makes for its claim.
     pub(crate) fn sign(
         &mut self,
@@ -119,27 +135,19 @@ impl Proof {
 }
 
 impl Message {
-    /// Each grant the message carries, with its signature: the entries of its proof
-    /// in rising key order, then the sender's grant when the body grants. The caller
-    /// checks each signature against its voter's key before `step`, and refuses a
-    /// `None`: `step` keeps each signature as it came.
+    /// Each claim the message carries, with its signature: the entries of its proof
+    /// in rising key order, then, for each change an append carries, its votes in
+    /// the entry's term and the leader's change, then the sender's grant when the
+    /// body grants. The caller checks each signature against its signer's key before
+    /// `step`, and refuses a `None`: `step` keeps each signature as it came.
     pub fn claims(&self) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> + '_ {
-        let proof = self.proof.iter().flat_map(|proof| {
-            proof.voters.iter().map(|(&voter, &signature)| {
-                let claim = Claim::Grant {
-                    voter,
-                    grant: proof.grant,
-                    term: self.term,
-                    candidate: proof.candidate,
-                };
-                (claim, signature)
-            })
-        });
+        let proof = self.proof.iter().flat_map(|proof| proof.claims(self.term));
+        let changes = self.body.entries().iter().flat_map(Entry::claims);
         let granted = self
             .body
             .granted()
             .map(|(grant, signature)| (self.claim(grant), signature));
-        proof.chain(granted)
+        proof.chain(changes).chain(granted)
     }
 
     // Gives each grant with no signature, and each `None` of a change it carries,
@@ -234,6 +242,21 @@ impl Body {
     }
 
     /// What this body grants, with its signature: `None` unless it grants.
+    // The entries an append carries; none for another body.
+    pub(crate) fn entries(&self) -> &[Entry] {
+        match self {
+            Self::Append { entries, .. } => entries,
+            Self::PreVote { .. }
+            | Self::PreVoteReply { .. }
+            | Self::Vote { .. }
+            | Self::VoteReply { .. }
+            | Self::Heartbeat { .. }
+            | Self::HeartbeatReply
+            | Self::AppendReply { .. }
+            | Self::AppendReject { .. } => &[],
+        }
+    }
+
     pub(crate) fn granted(&self) -> Option<(Grant, Option<Signature>)> {
         match *self {
             Self::PreVoteReply {
