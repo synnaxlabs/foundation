@@ -1,12 +1,13 @@
-//! The cost of a `stream::Sender::send` on a session between two sim nodes. Run with
-//! `cargo bench -p transport --bench send`. A figure is per timed send over a round,
-//! and some sends in a round cost more than others.
+//! The cost of a `stream::Sender::send`, and of a `try_send`, on a session between two
+//! sim nodes. Run with `cargo bench -p transport --bench send`. A figure is per timed
+//! send over a round, and some sends in a round cost more than others.
 //!
-//! The lines up to `8 complete 1 KiB` time a send that is ready on its first poll.
-//! Each round fills its blocks, then times one poll of each send: a burst of 64 sends
-//! into streams the peer has drained. A sim sleep between rounds lets the peer read
-//! and acknowledge. A send that waits on its first poll panics, so no number holds a
-//! wait.
+//! The lines up to `try complete 1 KiB` time a send that is ready on its first poll,
+//! or a `try_send` that takes its message. Each round fills its blocks, then times one
+//! poll of each send, or one `try_send` of each block: a burst of 64 sends into
+//! streams the peer has drained. A sim sleep between rounds lets the peer read and
+//! acknowledge. A send that waits on its first poll, or a `try_send` that gives its
+//! message back, panics, so no number holds a wait.
 //!
 //! The `waiting` lines send a round on their streams at once, over a session whose
 //! peer window holds a quarter of a round, so the sends wait for the QUIC window and
@@ -101,9 +102,11 @@ enum Load {
     Control,
     /// One stream per class, sent on in turn.
     Streams(&'static [Class]),
+    /// As `Streams`, with `try_send`.
+    TryStreams(&'static [Class]),
 }
 
-const SCENARIOS: [Scenario; 5] = [
+const SCENARIOS: [Scenario; 7] = [
     Scenario {
         name: "control 1 KiB",
         load: Load::Control,
@@ -127,6 +130,16 @@ const SCENARIOS: [Scenario; 5] = [
     Scenario {
         name: "8 complete 1 KiB",
         load: Load::Streams(&[Class::Complete; 8]),
+        bytes: 1024,
+    },
+    Scenario {
+        name: "try complete 64 B",
+        load: Load::TryStreams(&[Class::Complete]),
+        bytes: 64,
+    },
+    Scenario {
+        name: "try complete 1 KiB",
+        load: Load::TryStreams(&[Class::Complete]),
         bytes: 1024,
     },
 ];
@@ -286,6 +299,7 @@ async fn measure(
         let (span, counted) = ALLOCATOR.count(|| match scenario.load {
             Load::Control => poll_control(clock, &waker, blocks, &mut held),
             Load::Streams(_) => poll_sends(senders, blocks),
+            Load::TryStreams(_) => try_sends(senders, blocks),
         });
         held.clear();
         if round >= WARMUP {
@@ -326,6 +340,28 @@ fn poll_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
     nanos(Instant::now().duration_since(start))
 }
 
+/// Calls `try_send` with each block once, on `senders` in turn, and gives the
+/// nanoseconds it took.
+///
+/// # Panics
+///
+/// When a `try_send` gives its block back or fails.
+#[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
+fn try_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
+    let mut blocks = blocks.into_iter();
+    let start = Instant::now();
+    while blocks.len() > 0 {
+        for (sender, block) in senders.iter_mut().zip(&mut blocks) {
+            match sender.try_send(block) {
+                Ok(None) => {}
+                Ok(Some(_)) => panic!("a try_send gave its block back: raise PAUSE"),
+                Err(error) => panic!("the try_send failed: {error}"),
+            }
+        }
+    }
+    nanos(Instant::now().duration_since(start))
+}
+
 /// The loop of [`poll_sends`] with no send: per block, it polls a ready future,
 /// reads `clock`, wakes `waker`, and moves the block into `held`, so its drop is not
 /// timed. Gives the nanoseconds it took.
@@ -353,7 +389,7 @@ fn poll_control(
 async fn open(session: &Session, load: Load) -> Vec<Sender> {
     let classes = match load {
         Load::Control => &[][..],
-        Load::Streams(classes) => classes,
+        Load::Streams(classes) | Load::TryStreams(classes) => classes,
     };
     let mut senders = Vec::with_capacity(classes.len());
     for &class in classes {
