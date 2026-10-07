@@ -43,6 +43,11 @@ pub(crate) enum Error {
     Unsynced,
     /// A join request names more than 64 status channels.
     Status(status::Many),
+    /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
+    /// write of the log, the group takes no proposal and no message until the write
+    /// ends. For the answer to a forwarded proposal, the group did not see the
+    /// proposal.
+    Pool(block::Error),
     /// The group stopped.
     Stopped(Stopped),
 }
@@ -78,6 +83,9 @@ impl fmt::Display for Error {
                  epoch, so it stamps no join",
             ),
             Self::Status(many) => many.fmt(f),
+            Self::Pool(cause) => {
+                write!(f, "the pool has no block for the mesh now: {cause}")
+            }
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
         }
     }
