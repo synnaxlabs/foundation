@@ -52,9 +52,6 @@ proptest! {
         let configuration = network.nodes[leader].voters().clone();
         prop_assert!(configuration.outgoing.is_empty(), "{configuration:?}");
         for &node in &voters {
-            if network.behind(node, leader) {
-                continue;
-            }
             prop_assert_eq!(network.nodes[node].voters(), &configuration);
             prop_assert!(network.disks[node].applied >= at.index, "node {node}");
             let applied = usize::try_from(network.disks[node].applied).unwrap();

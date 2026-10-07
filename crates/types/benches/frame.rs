@@ -93,8 +93,18 @@ fn cases() -> Vec<Case> {
         ),
         case(
             "100k of 100k in one group",
-            wide,
+            Arc::clone(&wide),
             (0..100_000).map(|entry| (entry, 8)).collect(),
+        ),
+        case(
+            "100k of 100k in one group, 1 byte each",
+            Arc::clone(&wide),
+            (0..100_000).map(|entry| (entry, 1)).collect(),
+        ),
+        case(
+            "100k of 100k in one group, 12 bytes each",
+            Arc::clone(&wide),
+            (0..100_000).map(|entry| (entry, 12)).collect(),
         ),
         case(
             "100k of 100k in one group, index last",

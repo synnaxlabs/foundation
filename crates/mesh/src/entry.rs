@@ -3,12 +3,9 @@
 //! An entry has one byte form: [`decode`] takes only what [`encode`] gives. A change
 //! is signed before it is encoded, so [`decode`] gives each change its signature.
 
-use raft::{Change, Data, Entry, Voters};
+use raft::{Data, Entry};
 
-use crate::bytes::{
-    put_keys, put_position, put_proof, put_signature, take, take_keys, take_position,
-    take_proof, take_signature,
-};
+use crate::bytes::{put_change, put_position, take, take_change, take_position};
 
 const EMPTY: u8 = 0;
 const BYTES: u8 = 1;
@@ -18,7 +15,7 @@ const VOTERS: u8 = 2;
 ///
 /// # Panics
 ///
-/// When a change has no signature, as [`put_signature`].
+/// When a change has no signature, as [`put_change`].
 pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
     put_position(entry.at, out);
     match &entry.data {
@@ -30,10 +27,7 @@ pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
         }
         Data::Voters(change) => {
             out.push(VOTERS);
-            put_keys(&change.voters.incoming, out);
-            put_keys(&change.voters.outgoing, out);
-            put_proof(&change.votes, out);
-            put_signature(change.signature, out);
+            put_change(change, out);
         }
     }
 }
@@ -50,19 +44,7 @@ pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Entry> {
             *bytes = rest;
             Data::Bytes(data.to_vec())
         }
-        VOTERS => {
-            let voters = Voters {
-                incoming: take_keys(bytes)?,
-                outgoing: take_keys(bytes)?,
-            };
-            let proof = take_proof(bytes)?;
-            let signature = Some(take_signature(bytes)?);
-            Data::Voters(Change {
-                voters,
-                votes: proof,
-                signature,
-            })
-        }
+        VOTERS => Data::Voters(take_change(bytes)?),
         _ => return None,
     };
     Some(Entry { at, data })
@@ -74,7 +56,7 @@ fn wide(len: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use raft::{Grant, Position, Proof, Signature, Term};
+    use raft::{Change, Grant, Position, Proof, Signature, Term, Voters};
 
     use super::*;
     use crate::common::key;

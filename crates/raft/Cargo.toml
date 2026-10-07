@@ -9,6 +9,8 @@ publish.workspace = true
 types = { path = "../types" }
 
 [dev-dependencies]
+counting = { path = "../counting" }
+divan.workspace = true
 proptest.workspace = true
 
 [[test]]
@@ -17,3 +19,11 @@ path = "../../oracles/conformance/raft/main.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "alloc"
+harness = false
+
+[[bench]]
+name = "chain"
+harness = false
