@@ -56,8 +56,7 @@ pub(super) enum Cost {
 #[derive(Debug)]
 pub(super) struct Places {
     slots: Box<[Slot]>,
-    /// The places in each key set charged. The node builds key sets only from the
-    /// spec, which bounds them.
+    /// The places in each key set that the session charged, kept until it closes.
     held: hash::Map<key_set::Key, Held>,
 }
 
@@ -113,7 +112,7 @@ impl Places {
             .bounds()
             .for_each(|(entry, bounds)| {
                 let entry = to_u32(entry);
-                // The mask adds the index of each group, which no place may list.
+                // The mask adds the index of each group, which a place need not list.
                 while entries.next_if(|&&(held, _)| held < entry).is_some() {}
                 let Some(&(_, place)) = entries.next_if(|&&(held, _)| held == entry)
                 else {

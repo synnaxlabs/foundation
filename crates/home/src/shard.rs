@@ -3064,13 +3064,17 @@ mod tests {
                 let places = Charge::Places([Slot::new(0)].into());
                 let session = shard.open_complete(Slot::new(0), index + 1, places);
                 let reader = reader::Key::from(session);
+                let places = Charge::Places([Slot::new(1), Slot::new(0)].into());
+                let data = shard.open_complete(Slot::new(0), 2 * index + 1, places);
                 for n in 1..4 {
                     write(&test, &mut shard, a, &stamps(n));
                 }
                 shard.committed().await.expect("the commit ends");
-                assert_eq!(woken(&mut shard), [probe, reader]);
+                assert_eq!(woken(&mut shard), [probe, reader, data.into()]);
                 assert_eq!(iter::from_fn(|| shard.take(reader)).count(), 2);
                 assert!(shard.behind(session));
+                assert_eq!(iter::from_fn(|| shard.take(data.into())).count(), 2);
+                assert!(shard.behind(data));
             });
         }
 

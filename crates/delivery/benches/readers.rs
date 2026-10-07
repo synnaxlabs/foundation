@@ -133,6 +133,65 @@ fn release_places(bencher: Bencher<'_, '_>, places: usize) {
     });
 }
 
+/// Two live frames, of two key sets of about `channels` channels, to one recording
+/// reader that keeps up and pays for a remote frame of one place in both.
+#[divan::bench(args = [16, CHANNELS])]
+fn release_places_alternating(bencher: Bencher<'_, '_>, channels: usize) {
+    let f64 = Type::Scalar(Scalar::F64);
+    let mut interner = Interner::new();
+    let data = |extra: usize| -> Vec<_> {
+        (2..=channels + extra)
+            .map(|n| {
+                (
+                    channel::Key::from_u128(u128::try_from(n).expect("few")),
+                    f64,
+                )
+            })
+            .collect()
+    };
+    let (da, db) = (data(0), data(1));
+    let a = interner.intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &da,
+    }]);
+    let b = interner.intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &db,
+    }]);
+    let config = block::Config { budget: 1 << 24 };
+    let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
+    let build = |set: &Arc<KeySet>| {
+        let lens: Vec<_> = (0..set.entries().len()).map(|entry| (entry, 8)).collect();
+        Draft::new(&pool, set, Form::Raw, &lens)
+            .expect("the pool holds the frame")
+            .freeze(Path::Live)
+    };
+    let (fa, fb) = (build(&a), build(&b));
+    let slot = a.entries()[channels - 1].slot;
+    let mut readers = Readers::new(0);
+    let start = Start::At(Position {
+        live: 0,
+        backfill: Some(0),
+    });
+    let key = readers
+        .open(
+            Reader::Unnamed,
+            start,
+            u64::MAX,
+            Charge::Places([slot].into()),
+        )
+        .key;
+    let mut seq = 0;
+    bencher.bench_local(|| {
+        readers.queue(&fa, &a, seq..seq + 1);
+        readers.queue(&fb, &b, seq + 1..seq + 2);
+        seq += 2;
+        divan::black_box(readers.release(seq));
+        divan::black_box(readers.take(key.into()));
+        divan::black_box(readers.take(key.into()));
+    });
+}
+
 #[divan::bench(args = [1, 16, 256])]
 fn floor(bencher: Bencher<'_, '_>, sessions: usize) {
     let (readers, _) = opened(sessions, 0);
