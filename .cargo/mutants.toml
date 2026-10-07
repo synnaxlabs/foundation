@@ -17,8 +17,10 @@ exclude_re = [
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes these lines.
-  'crates/transport/src/(datagram|stream)\.rs:',
-  'crates/transport/src/session\.rs:.*Session::(open|accept|datagrams)',
+  'crates/transport/src/datagram\.rs:',
+  'crates/transport/src/stream\.rs:.*Sender::(try_send|send_parts|try_send_parts)\b',
+  'crates/transport/src/stream\.rs:.*Receiver::recv_into\b',
+  'crates/transport/src/session\.rs:.*Session::datagrams\b',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.
   'crates/transport/src/tls\.rs:.*root_hint_subjects.*Vec::leak',
   # The boundary draw is a 64-bit hash against a multiple of 2^64. Equality needs a
