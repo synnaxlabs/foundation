@@ -3596,11 +3596,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083 and
   https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6043266054, the
   latter at 2026-10-07T17:32:11Z).
-  A const assertion in `block` checks the 16 bytes of a handle, so `block`, and each
-  crate that depends on it, builds only where a pointer is 8 bytes. So no crate maps a
-  `usize::MAX` of a narrower target to `u64::MAX` or adds a check of `usize::BITS`. A
-  32-bit target first needs a new handle, and the choice of targets is the person's
-  (CPU BASELINE). Decided by `laptop.architect` (2026-10-07T18:30:48Z):
+  Amended (2026-10-07, #1504): a const assertion in `block` checks the 16 bytes of a
+  handle, so `block`, and each crate that depends on it, builds only where a pointer is
+  8 bytes. So `frame::charge` maps no `usize::MAX` of a narrower target to `u64::MAX`,
+  and no crate that depends on `block` checks `usize::BITS`. A 32-bit target first
+  needs a new handle, and the choice of targets is the person's (CPU BASELINE);
+  `charge_of` in `types` changes with that handle. Decided by `laptop.architect`
+  (2026-10-07T18:30:48Z):
   https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6044276677
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
