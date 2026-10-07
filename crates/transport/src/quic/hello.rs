@@ -219,8 +219,8 @@ mod tests {
         (value | 0xc0 << 56).to_be_bytes()
     }
 
-    /// The fault that the `decode` doc gives for a hello of `pairs`, then one id
-    /// with no value when `cut`. A hello of at most 256 bytes.
+    /// The fault that the `decode` doc gives for a hello of `pairs`, then the start
+    /// of one more pair when `cut`. A hello of at most 256 bytes.
     fn doc_fault(pairs: &[(u64, u64)], cut: bool) -> Option<String> {
         let mut after = pairs.iter().zip(pairs.iter().skip(1));
         if let Some(((last, _), (id, _))) =
@@ -321,14 +321,18 @@ mod tests {
                 ),
                 0..6,
             ),
-            cut in any::<bool>(),
+            // A cut inside an id, after an id, or inside a value.
+            tail in prop_oneof![
+                Just(vec![]),
+                Just(vec![0x40]),
+                (0_u8..4).prop_map(|id| vec![id]),
+                (0_u8..4).prop_map(|id| vec![id, 0x40]),
+            ],
         ) {
             let mut bytes = encode(&pairs);
-            if cut {
-                bytes.push(0x03);
-            }
+            bytes.extend(&tail);
             let decoded = Hello::decode(&bytes).map_err(|fault| fault.0);
-            match doc_fault(&pairs, cut) {
+            match doc_fault(&pairs, !tail.is_empty()) {
                 Some(fault) => prop_assert_eq!(decoded, Err(fault)),
                 None => prop_assert!(decoded.is_ok()),
             }
