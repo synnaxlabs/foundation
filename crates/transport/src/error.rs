@@ -78,7 +78,10 @@ pub enum Error {
     },
     /// The socket under the session broke. Every session on it ends with this. Each
     /// later dial gets it, and so does each accept once it gave the sessions that
-    /// connected before the break.
+    /// connected before the break. In [`Error::Unreachable`], it is also the cause at
+    /// an address that this node has no route to, with
+    /// [`env::net::Error::Unreachable`]: port 0, an unspecified IP, or a kind of
+    /// address whose carrier this node does not run.
     Network {
         /// What the socket gave.
         error: env::net::Error,

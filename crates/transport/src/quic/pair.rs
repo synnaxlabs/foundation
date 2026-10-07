@@ -159,7 +159,8 @@ impl Pair {
     /// Starts a dial from the client to the server, which must prove `peer`.
     /// Nothing is sent yet.
     pub(super) fn dial(&mut self, peer: PublicKey) {
-        let key = self.client.endpoint.connect(self.now(), peer, SERVER);
+        let dialed = self.client.endpoint.connect(self.now(), peer, SERVER);
+        let key = dialed.expect("invariant: the server's address takes datagrams");
         self.client.key = Some(key);
     }
 

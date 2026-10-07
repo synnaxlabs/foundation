@@ -23,7 +23,8 @@ use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
 use noq_proto::{
-    ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
+    ConnectError, ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple,
+    SendDatagramError,
 };
 use types::node::PublicKey;
 use types::time::Monotonic;
@@ -141,28 +142,32 @@ impl Endpoint {
     /// Dials `remote` and expects it to prove `peer`. The dial ends in
     /// [`Event::Connected`] or [`Event::Closed`] for the key.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
+    /// [`env::net::Error::Unreachable`] when no datagram can go to `remote`: its port
+    /// is 0 or its IP is unspecified.
     pub(crate) fn connect(
         &mut self,
         now: Monotonic,
         peer: PublicKey,
         remote: SocketAddr,
-    ) -> connection::Key {
+    ) -> Result<connection::Key, env::net::Error> {
         let now = self.instant(now);
         let dial = self.settings.client(peer);
-        let (handle, inner) = self
-            .inner
-            .connect(now, dial, remote, SERVER_NAME)
-            .unwrap_or_else(|error| {
-                panic!("a dial fails only on its address: {error}")
-            });
+        let (handle, inner) = match self.inner.connect(now, dial, remote, SERVER_NAME) {
+            Ok(connection) => connection,
+            Err(ConnectError::InvalidRemoteAddress(remote)) => {
+                return Err(env::net::Error::Unreachable { remote });
+            }
+            Err(error) => {
+                panic!("invariant: a dial fails only on its address: {error}")
+            }
+        };
         let key = self.insert(handle, |key, streams| {
             Connection::dialed(key, inner, peer, streams)
         });
         self.drive(handle, now);
-        key
+        Ok(key)
     }
 
     /// Takes one received batch: `meta.len` bytes of `batch`, in datagrams of
@@ -855,17 +860,20 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(
-            expected = "a dial fails only on its address: invalid remote address: \
-                        127.0.0.1:0"
-        )]
-        fn to_port_zero_panics() {
+        fn to_port_zero_or_an_unspecified_ip_is_unreachable() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
-                let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-                endpoint.connect(Monotonic(0), server(), remote);
+                for remote in [
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433),
+                ] {
+                    let dialed = endpoint.connect(Monotonic(0), server(), remote);
+                    let error = env::net::Error::Unreachable { remote };
+                    assert_eq!(dialed, Err(error));
+                }
+                assert!(endpoint.drained());
             });
         }
     }
@@ -989,11 +997,13 @@ mod tests {
                 let mut endpoint =
                     Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
                 let mut buffer = Vec::new();
-                endpoint.connect(Monotonic(0), server(), pair::SERVER);
+                let dialed = endpoint.connect(Monotonic(0), server(), pair::SERVER);
+                dialed.expect("a dial");
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
                 let earliest = endpoint.deadline().expect("a deadline");
                 let later = pair::at(Duration::from_millis(500));
-                endpoint.connect(later, server(), pair::SERVER);
+                let dialed = endpoint.connect(later, server(), pair::SERVER);
+                dialed.expect("a dial");
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
             });
