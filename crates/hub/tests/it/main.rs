@@ -33,7 +33,7 @@ const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
 const BODY_MAX: usize = 1 << 16;
 /// The area and body max of a ring that takes a frame past the window of a reader.
-const WIDE_AREA: u64 = 1 << 24;
+const WIDE_AREA: u64 = 1 << 25;
 const WIDE_BODY_MAX: usize = 1 << 22;
 /// Samples per series of a frame whose charge is past the window of a reader.
 const PAST_WINDOW: i64 = 140_000;

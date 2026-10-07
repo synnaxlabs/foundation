@@ -342,7 +342,8 @@ impl Listener {
     /// # Errors
     ///
     /// [`Error::Io`] when the OS cannot accept one stream, for example `EMFILE` or
-    /// `ECONNABORTED`. The listener stays usable.
+    /// `ECONNABORTED`, and the listener stays usable; or when the listener is broken,
+    /// and each later accept gives the error too.
     ///
     /// # Panics
     ///

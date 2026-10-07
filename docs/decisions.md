@@ -408,21 +408,23 @@ How to read this record:
   blocks of one wrap skip must fit in the area. Four of the largest record less one
   block always hold them, and a smaller ring can refuse a live write under a steady
   load: with a largest record of four blocks, commits of 2, 4, 4, and 4 blocks get
-  `Full` on a ring of 13 or 14 blocks. `Layout::new` accepts two of the largest record
-  today, and #1276 sets the minimum to four before the trim turns on. That minimum is
-  for one record in each commit: on a ring of 16 blocks, a steady load of one record of
-  four blocks and one of two in each commit is refused at its third commit. A trim moves
-  the tail to the boundary after a record of any kind: a wrap record and a restart
-  record also end where a tail can go. Steady pressure in the ruling means a load whose
-  commits fit the area. The ring size for a real load is the sizing of `node` (SHARD
-  DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
+  `Full` on a ring of 13 or 14 blocks. So `Layout::new` refuses an area under four of
+  the largest record (#1276), and a ring file with a smaller area does not open. That
+  minimum is for one record in each commit: on a ring of 16 blocks, a steady load of one
+  record of four blocks and one of two in each commit is refused at its third commit. A
+  trim moves the tail to the boundary after a record of any kind: a wrap record and a
+  restart record also end where a tail can go. Steady pressure in the ruling means a
+  load whose commits fit the area. The ring size for a real load is the sizing of `node`
+  (SHARD DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
   (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557),
   the area that the bound needs (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034545693,
   2026-10-07T08:57:53Z, and with the skip in the `4c` case
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034791932,
-  2026-10-07T09:12:31Z), and the boundaries and the deferral of the minimum to #1276
-  (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
+  2026-10-07T09:12:31Z), and the boundaries and the minimum of `Layout::new`, built in
+  #1276 (#1222,
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998,
+  2026-10-07T08:16:51Z).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -561,12 +563,13 @@ How to read this record:
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
-  is the offset modulo the area length. The area is at least twice the largest
-  record, so a ring that holds only its restart record takes any record (#637). A
-  ring whose head reaches the end of the offsets is full for good. A body is at most
-  `u32::MAX` bytes and at least one block less the record header (4087 bytes): a
-  record takes whole blocks, so a smaller one saves no disk and only holds less per
-  commit.
+  is the offset modulo the area length. The area is at least four times the largest
+  record (#1276), so a ring that holds only its restart record takes any record (#637),
+  and, when each commit and each open trims, a steady load of one record in each commit
+  gets no `Full` (STORE TRIM). This supersedes the two times of #637. A ring whose head
+  reaches the end of the offsets is full for good. A body is at most `u32::MAX` bytes
+  and at least one block less the record header (4087 bytes): a record takes whole
+  blocks, so a smaller one saves no disk and only holds less per commit.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -3049,6 +3052,11 @@ How to read this record:
   the true bound in one round. Lost: a `&Name` label, whose parse gives its own length
   error with the wrong bound. Decided by the architect, #1109
   (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031559597).
+- **CHECK ORDER (2026-10-07)** `config::check` gives the same entries for each order
+  of the Documents, or problems in each order, so the meaning of a mesh's files does
+  not depend on the order that a tool reads them. The problems can differ. Decided by
+  architect-2 (#1444, 2026-10-07T17:08:05Z,
+  https://github.com/synnaxlabs/foundation/pull/1444#issuecomment-6042832407).
 
 ### 1.12 Access, identity, and secrets
 
@@ -3292,9 +3300,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1321
   "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
   ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
-  are open, so a set of keys that collide costs the peer many streams and a lookup at
-  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  are open, so a set of keys that collide costs the peer many streams and a lookup in a
+  map of one session at most that many compares. A map that holds the streams of many
+  sessions has no such bound (#1506). Decided by `laptop.architect`
+  (2026-10-07T14:37:40Z):
   https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
+  `laptop.architect` limited the bound to a map of one session and filed #1506
+  (2026-10-07T17:29:27Z):
+  https://github.com/synnaxlabs/foundation/pull/1493#issuecomment-6043218811
+  Supersedes: the bound for each map of 2026-10-07T14:37:40Z.
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
@@ -3444,6 +3458,22 @@ How to read this record:
   queue stays readable. A pulled serial adapter takes its buffer with it, so
   `Node::fail_serial` loses its unread bytes. Decided by `laptop.architect-2`, #1255
   (https://github.com/synnaxlabs/foundation/issues/1255#issuecomment-6033324472).
+  Amended (2026-10-07, #1473): `Node::fail_listener` makes a TCP listener fail until
+  it drops: each accept gives the streams already in its backlog, then `EIO`. A
+  connect after the fault is refused, and the streams it accepted still work. Decided
+  by `laptop.architect-2` at 2026-10-07T17:07:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042821949).
+  Amended (2026-10-07, #1532): a connect is refused when its SYN arrives after the
+  fault. A connect whose SYN the listener took, but not its ACK, before the fault
+  ends `Ok`, and its stream is reset when the RST of the fault arrives, so a write
+  before it is taken. An accept error of `env` leaves the listener usable, unless the
+  listener is broken: then each later accept fails too. Decided by
+  `laptop.architect-2` at 2026-10-07T18:01:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1532#issuecomment-6043781710),
+  with the connect sentences at 2026-10-07T18:05:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1532#issuecomment-6043854311).
+  Supersedes the connect sentence of
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042821949.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -3687,6 +3717,18 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242).
   Supersedes the `held` part of
   https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190.
+  A counting allocator runs code as `System` runs it, apart from its count: each
+  `GlobalAlloc` method calls the `System` method of the same name, and keeps the
+  trait's own body only when the allocator's contract needs it, with a comment that
+  names that contract. So `Bytes::realloc` calls `System.realloc` and changes `held` by
+  the difference of the two sizes in one atomic step, and `Allocator::realloc` keeps
+  the trait's own body, because the scan of a free reads the old block. A count that
+  no test can tell apart is not a reason to keep the trait's own body: under it, a
+  `realloc` that doubles 64 B to 1 MiB took 15.4 µs, not 1.6 µs (Apple M3 Max).
+  Decided by `laptop.architect` on 2026-10-07T17:59:58Z
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6043758919, #1536).
+  Supersedes the reason of 5d23e00e
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042860057).
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
