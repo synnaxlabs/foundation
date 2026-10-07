@@ -50,8 +50,8 @@ pub(crate) fn member(id: u8) -> Member {
     }
 }
 
-pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, Member> {
-    ids.iter().map(|&id| (key(id), member(id))).collect()
+pub(crate) fn members(ids: &[u8]) -> Vec<Member> {
+    ids.iter().map(|&id| member(id)).collect()
 }
 
 /// A pool of 4 MiB.

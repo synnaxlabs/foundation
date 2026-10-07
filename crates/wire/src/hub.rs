@@ -908,6 +908,31 @@ mod tests {
         }
 
         #[test]
+        fn takes_no_end_past_out_from_an_iterator_of_no_known_length() {
+            let mut ends = [(0, 1), (1, 2), (2, 3)].into_iter().filter(|_| true);
+            super::super::ends::encode(ends.by_ref(), &mut [0xaa; 8]);
+            assert_eq!(ends.collect::<Vec<_>>(), [(1, 2), (2, 3)]);
+        }
+
+        #[test]
+        #[should_panic(expected = "ends gave 1 of the 3 ends that out holds")]
+        fn panics_on_one_end_for_an_out_of_three() {
+            super::super::ends::encode([(0, 1)], &mut [0; 24]);
+        }
+
+        #[test]
+        #[should_panic(expected = "a message of a run holds at least one item")]
+        fn panics_on_an_empty_out_with_an_end() {
+            super::super::ends::encode([(0, 1)], &mut []);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 17 bytes, not a whole count of ends")]
+        fn panics_on_a_partial_end_after_two_ends() {
+            super::super::ends::encode([(0, 1), (1, 2)], &mut [0; 17]);
+        }
+
+        #[test]
         fn writes_a_run_split_into_two_messages_from_one_iterator() {
             let sent: Vec<_> = (0..400).map(|place| (place, (place + 1) * 8)).collect();
             let mut ends = sent.iter().copied();
