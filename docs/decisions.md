@@ -167,7 +167,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040351044, for the
   variants, and 2026-10-07T14:55:31Z,
   https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040630702, for the
-  scalar names and the `Lengths` fix.
+  scalar names and the `Lengths` fix, and 2026-10-07T15:17:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040868780, for a
+  scalar element with space around it as `Syntax`.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
