@@ -20,7 +20,7 @@ use types::time::Span;
 
 use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
-use crate::log::Log;
+use crate::log::{self, Log};
 use crate::region::{self, Change};
 
 /// The time of one `raft` tick.
@@ -42,7 +42,7 @@ pub(crate) struct Config {
     /// peer proves the key, and the key signs the member's grants.
     pub(crate) members: BTreeMap<node::Key, PublicKey>,
     /// The voters before the first entry of the log, the same at each open. Each is a
-    /// member. Empty for a node that joins.
+    /// member. A node with no voter takes no request until its log gives it some.
     pub(crate) voters: BTreeSet<node::Key>,
     /// The mesh's directory.
     pub(crate) files: Files,
@@ -53,15 +53,16 @@ pub(crate) struct Config {
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
     /// Gives the blocks of the log's reads and writes. A write that gets no block
-    /// stops the group.
+    /// waits: the group sends and applies nothing until a block is free.
     pub(crate) pool: Rc<Pool>,
 }
 
 /// One node's part in the group of a region. Clones share it. The group runs until
 /// it stops or each clone drops. It stays on the shard that opened it.
 ///
-/// The group's task ends soon after the last clone drops, and a write in progress
-/// ends first. Until then, a new open of the same directory gives [`Error::Log`].
+/// The group's task ends soon after the last clone drops. A write in progress ends
+/// first, and a write that waits for a block ends at the next tick. Until then, a new
+/// open of the same directory gives [`Error::Log`].
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
@@ -147,8 +148,7 @@ impl Mesh {
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
-    ///   voter of this node's configuration. A node with no configuration takes a
-    ///   request from each member.
+    ///   voter of this node's configuration.
     /// - [`Error::Grant`] when a grant in the message does not hold.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
@@ -168,9 +168,8 @@ impl Mesh {
             return Err(Error::Spoofed { from });
         }
         let Voters { incoming, outgoing } = group.raft.voters();
-        let joins = incoming.is_empty() && outgoing.is_empty();
         let voter = incoming.contains(&from) || outgoing.contains(&from);
-        if request(&message.body) && !voter && !joins {
+        if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
         grant::check(&message, &group.members)?;
@@ -420,7 +419,18 @@ async fn run(
         });
         let Some(mut ready) = next.await else { return };
         signer.sign(&mut ready);
-        let written = log.write(ready.hard.take(), &ready.entries).await;
+        // A full pool is a normal state, so the same write runs again at each tick.
+        let written = loop {
+            match log.write(ready.hard.clone(), &ready.entries).await {
+                Err(log::Error::Pool(_)) => {}
+                written => break written,
+            }
+            (&mut tick).await;
+            tick = clock.sleep(TICK);
+            if group.strong_count() == 0 {
+                return;
+            }
+        };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
         let Ready {
@@ -442,6 +452,7 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use std::io::IoSliceMut;
+    use std::iter;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::Path;
     use std::pin::pin;
@@ -454,7 +465,6 @@ mod tests {
 
     use super::*;
     use crate::common::{self, key, message, pool, private, proven, public};
-    use crate::log;
     use crate::message::Message;
     use crate::region::Malformed;
 
@@ -491,14 +501,14 @@ mod tests {
         SocketAddr::new(Ipv4Addr::new(10, 0, 0, id).into(), PORT)
     }
 
-    async fn open(
+    fn config(
         node: &sim::node::Node,
         tasks: &Tasks,
         id: u8,
         members: &[u8],
         voters: &[u8],
-    ) -> Result<Mesh, Error> {
-        let config = Config {
+    ) -> Config {
+        Config {
             key: key(id),
             private_key: private(id),
             members: common::members(members),
@@ -508,8 +518,31 @@ mod tests {
             entropy: node.entropy(),
             tasks: tasks.clone(),
             pool: pool(),
-        };
-        Mesh::open(config).await
+        }
+    }
+
+    async fn open(
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        id: u8,
+        members: &[u8],
+        voters: &[u8],
+    ) -> Result<Mesh, Error> {
+        Mesh::open(config(node, tasks, id, members, voters)).await
+    }
+
+    /// A pool of one page.
+    fn small_pool() -> Rc<Pool> {
+        let budget = block::Config { budget: 4096 };
+        let memory = block::Heap::new(budget.reservation());
+        Rc::new(Pool::new(budget, memory))
+    }
+
+    /// Takes each block that `pool` can give.
+    fn fill(pool: &Pool) -> Vec<block::Unique> {
+        let lens = [pool.largest(), 1];
+        let blocks = lens.map(|len| iter::from_fn(move || pool.alloc(len).ok()));
+        blocks.into_iter().flatten().collect()
     }
 
     /// Sends each message for `to` as one datagram.
@@ -847,13 +880,15 @@ mod tests {
         }
 
         #[test]
-        fn takes_a_request_from_a_member_when_the_node_has_no_voters() {
+        fn refuses_a_request_when_the_node_has_no_voters() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[]).await.unwrap();
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-                let reply = mesh.outgoing(key(2)).await.unwrap();
-                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+                let refused = Error::NotVoter { from: key(2) };
+                assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 2).await);
+                assert_eq!(term(&mesh), Term(0));
             });
         }
 
@@ -954,10 +989,8 @@ mod tests {
             });
         }
 
-        // A known defect (#1065): a node that joins knows no voter, so it cannot tell
-        // the leader from a member that lies.
         #[test]
-        fn a_member_that_is_not_a_voter_moves_a_node_that_joins_to_its_term() {
+        fn a_member_does_not_move_a_node_with_no_voters_to_its_term() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &[]).await.unwrap();
                 let proof = raft::Proof {
@@ -973,8 +1006,9 @@ mod tests {
                 };
                 common::signer(4).sign(&mut ready);
                 let lie = ready.messages.remove(0);
-                assert_eq!(mesh.receive(public(4), lie), Ok(()));
-                assert_eq!(term(&mesh), Term(u64::MAX));
+                let refused = Error::NotVoter { from: key(4) };
+                assert_eq!(mesh.receive(public(4), lie), Err(refused));
+                assert_eq!(term(&mesh), Term(0));
             });
         }
 
@@ -1058,6 +1092,70 @@ mod tests {
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             node.clock().sleep(TICK).await;
             assert_eq!(waiting.take(), Some(Err(stopped)));
+        });
+    }
+
+    #[test]
+    fn a_full_pool_holds_a_change_until_a_block_is_free() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            lead(&mesh, &node.clock(), home(1)).await;
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            let held = fill(&pool);
+            mesh.propose(home(2)).unwrap();
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+            assert_eq!(mesh.group.borrow().state.home(INDEX), Some(key(1)));
+            assert_eq!(mesh.group.borrow().running(), Ok(()));
+            drop(held);
+            assert_eq!(watch.next().await, Ok(Some(key(2))));
+        });
+    }
+
+    #[test]
+    fn a_full_pool_holds_a_message_until_a_block_is_free() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let held = fill(&pool);
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+            assert!(quiet(&mesh, 2).await);
+            drop(held);
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+        });
+    }
+
+    #[test]
+    fn a_dropped_mesh_frees_its_log_when_the_pool_is_full() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            lead(&mesh, &node.clock(), home(1)).await;
+            node.clock().sleep(TICK).await;
+            let _held = fill(&pool);
+            mesh.propose(home(2)).unwrap();
+            node.clock().sleep(TICK).await;
+            drop(mesh);
+            node.clock().sleep(TICK).await;
+            let again = open(&node, &tasks, 1, &[1], &[1]).await;
+            assert_eq!(again.err(), None);
         });
     }
 
@@ -1164,15 +1262,8 @@ mod tests {
     fn open_refuses_a_private_key_that_is_not_the_key_of_the_member() {
         solo(|node, tasks| async move {
             let config = Config {
-                key: key(1),
                 private_key: private(2),
-                members: common::members(&IDS),
-                voters: BTreeSet::new(),
-                files: node.files(),
-                clock: node.clock(),
-                entropy: node.entropy(),
-                tasks,
-                pool: pool(),
+                ..config(&node, &tasks, 1, &IDS, &[])
             };
             assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));

@@ -92,7 +92,8 @@ pub(crate) enum Stopped {
         /// Why its bytes are not a change.
         cause: Malformed,
     },
-    /// Each `Mesh` of the group dropped.
+    /// Each `Mesh` of the group dropped. Only `Watch::next` gives it: get a new watch
+    /// from the mesh that opens next.
     Dropped,
 }
 
