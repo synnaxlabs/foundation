@@ -7,24 +7,23 @@ publish.workspace = true
 
 [features]
 sim = [
+    "dep:bytes",
+    "dep:connector",
+    "connector/sim",
     "dep:env",
     "dep:http",
-    "dep:http-body",
-    "dep:hyper",
     "dep:influxdb-line-protocol",
-    "hyper/server",
 ]
 
 [dependencies]
+bytes = { workspace = true, optional = true }
+connector = { path = "../connector", optional = true }
 env = { path = "../env", optional = true }
 http = { workspace = true, optional = true }
-http-body = { workspace = true, optional = true }
-hyper = { workspace = true, optional = true }
 influxdb-line-protocol = { workspace = true, optional = true }
 types = { path = "../types" }
 
 [dev-dependencies]
-bytes.workspace = true
 connector = { path = "../connector" }
 proptest.workspace = true
 sim = { path = "../sim" }

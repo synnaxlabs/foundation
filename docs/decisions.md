@@ -2535,6 +2535,33 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033140752,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033409699,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033688614).
+  `connector_influx::sim::serve(listener, tasks, store, database)` is its HTTP front, on
+  `connector::http::sim::serve` (HTTP SIM SERVER). `POST /write?db=` (InfluxDB 1) and
+  `POST /api/v2/write?bucket=` (InfluxDB 2 and 3) give 204 when the store takes each
+  line, and 400 with the text of the store's error when it refuses one. A missing or
+  empty `db` or `bucket`, or on `/api/v2/write` a missing `org` and `orgID`, gives 400;
+  a `db` or `bucket` other than `database` gives 404, as InfluxDB gives for one that
+  does not exist. `precision` is `ns` only, and a missing or empty one is `ns`; another
+  gives 400, where InfluxDB scales it, because our writer writes nanoseconds only and a
+  wrong precision must fail loud. Another path gives 404, and another method on a write
+  path 405. It checks no token. `database` stays out of `Store`: the 404 is an answer of
+  the HTTP front. Decided by architect-2
+  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508).
+- **HTTP SIM SERVER (#1151)** `connector::http::sim::serve(listener, tasks, answer)`,
+  behind the `connector` cargo feature `sim`, off by default, is the one HTTP/1.1
+  server of the protocol simulators of HTTP connectors. It runs each stream on its own
+  task, with keep-alive, and gives `answer` each request with its whole body. It reads
+  no clock and sets no timeout. A request that breaks HTTP/1.1 gets 400 and one with a
+  `transfer-encoding` gets 501, and each ends its stream; a `content-encoding` other
+  than `identity` gets 415, as the simulators decode no body. It returns the listener's
+  error, so a test server that cannot accept fails loud. It parses heads with
+  `httparse`, frames bodies by `content-length`, and writes answers itself, because
+  `hyper`'s server reads OS wall time (`SystemTime::now()`) on each poll, with no
+  option to turn it off (hyper 1.12.0, `common/date.rs`). Lost: `hyper`'s server, for
+  that clock read; and a copy of the server in each kind crate. Decided by architect-2
+  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

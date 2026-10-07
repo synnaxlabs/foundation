@@ -1,81 +1,43 @@
 //! The write endpoints of InfluxDB over HTTP/1.1, in front of a [`Store`].
 
-use std::future::poll_fn;
-use std::io::{self, IoSlice};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 
-use env::net::{self, Listener, Tcp};
+use bytes::Bytes;
+use env::net::{self, Listener};
 use env::tasks::Tasks;
-use http::{Method, Request, Response, StatusCode, Uri};
-use http_body::Body as _;
-use hyper::body::Incoming;
-use hyper::rt::{Read, ReadBufCursor, Write};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
+use http::{Method, Request, Response, StatusCode};
 
 use super::Store;
 
-/// The most bytes one read copies into `hyper`'s buffer.
-const READ_MAX: usize = 8192;
-
 /// Answers InfluxDB write requests on each stream that `listener` accepts, and writes
-/// each body to `store`. Each stream runs on its own task of `tasks`, with HTTP/1.1
-/// keep-alive, until its client closes it or the shard ends. Dropping the future
-/// stops only the accepts. A stream that the listener fails to accept is lost, as on
-/// InfluxDB.
+/// each body to `store`, with the rules of [`connector::http::sim::serve`]. It runs
+/// until the listener fails, and returns that error.
 ///
 /// `POST /write?db=<db>` (InfluxDB 1) and `POST /api/v2/write?bucket=<bucket>`
 /// (InfluxDB 2 and 3) give 204 when the store takes each line, and 400 with the text
 /// of the store's error when it refuses one. The store still keeps each valid line,
-/// as InfluxDB does. A request with no `db` or `bucket`, or with a `precision` other
-/// than `ns`, gives 400 and stores nothing. Any other path gives 404, and another
-/// method on a write path gives 405. The store is one database: it does not key
-/// points by `db` or `bucket`, and it checks no token.
-#[expect(clippy::infinite_loop, reason = "it serves until the caller drops it")]
-pub async fn serve(mut listener: Listener, tasks: Tasks, store: Arc<Mutex<Store>>) {
-    loop {
-        let Ok(tcp) = poll_fn(|cx| listener.poll_accept(cx)).await else {
-            continue;
-        };
-        let store = Arc::clone(&store);
-        tasks.spawn(async move {
-            let service =
-                service_fn(move |request| answer(request, Arc::clone(&store)));
-            // The date would read the wall clock, which a simulation must not.
-            let served = http1::Builder::new()
-                .auto_date_header(false)
-                .half_close(true)
-                .serve_connection(Stream(tcp), service)
-                .await;
-            // `hyper` answers a request that breaks HTTP with 400 before it gives the
-            // error, and the client sees a stream that breaks.
-            drop(served);
-        });
-    }
-}
-
-async fn answer(
-    request: Request<Incoming>,
+/// as InfluxDB does. `database` is the one `db` and `bucket` that the store holds:
+/// another name gives 404. It compares names as the query writes them, with no
+/// percent-decoding. A request with no `db` or `bucket`, a write to
+/// `/api/v2/write` with no `org` or `orgID`, or a `precision` other than `ns` gives
+/// 400 and stores nothing; a missing or empty `precision` is `ns`. Any other path
+/// gives 404, and another method on a write path gives 405. It checks no token.
+pub async fn serve(
+    listener: Listener,
+    tasks: Tasks,
     store: Arc<Mutex<Store>>,
-) -> Result<Response<String>, hyper::Error> {
-    let (head, mut body) = request.into_parts();
-    let mut bytes = Vec::new();
-    while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
-        if let Ok(data) = frame?.into_data() {
-            bytes.extend_from_slice(&data);
-        }
-    }
-    Ok(route(&head.method, &head.uri, &bytes, &store))
+    database: String,
+) -> net::Error {
+    let answer = move |request: Request<Bytes>| route(&request, &store, &database);
+    connector::http::sim::serve(listener, tasks, answer).await
 }
 
 fn route(
-    method: &Method,
-    uri: &Uri,
-    body: &[u8],
+    request: &Request<Bytes>,
     store: &Mutex<Store>,
-) -> Response<String> {
+    name: &str,
+) -> Response<Bytes> {
+    let (method, uri) = (request.method(), request.uri());
     let database = match uri.path() {
         "/write" => "db",
         "/api/v2/write" => "bucket",
@@ -106,6 +68,13 @@ fn route(
             "no org or orgID in the query".into(),
         );
     }
+    let given = query(database).unwrap_or_default();
+    if given != name {
+        return reply(
+            StatusCode::NOT_FOUND,
+            format!("no {database} named {given:?}"),
+        );
+    }
     let precision = query("precision").unwrap_or_default();
     if !["", "ns"].contains(&precision) {
         return reply(
@@ -116,75 +85,17 @@ fn route(
     let written = store
         .lock()
         .expect("invariant: no panic under the store lock")
-        .write(body);
+        .write(request.body());
     match written {
         Ok(()) => reply(StatusCode::NO_CONTENT, String::new()),
         Err(error) => reply(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
 
-fn reply(status: StatusCode, text: String) -> Response<String> {
-    let mut response = Response::new(text);
+fn reply(status: StatusCode, text: String) -> Response<Bytes> {
+    let mut response = Response::new(Bytes::from(text));
     *response.status_mut() = status;
     response
-}
-
-/// A TCP stream that `hyper` reads and writes.
-struct Stream(Tcp);
-
-impl Read for Stream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        mut buf: ReadBufCursor<'_>,
-    ) -> Poll<io::Result<()>> {
-        let mut bytes = [0; READ_MAX];
-        let Some(bytes) = bytes.get_mut(..buf.remaining().min(READ_MAX)) else {
-            unreachable!("the length is at most READ_MAX")
-        };
-        self.get_mut().0.poll_read(cx, bytes).map(|read| {
-            let n = read.map_err(io)?;
-            buf.put_slice(bytes.get(..n).expect("a read fits its buffer"));
-            Ok(())
-        })
-    }
-}
-
-impl Write for Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.poll_write_vectored(cx, &[IoSlice::new(buf)])
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        self.get_mut().0.poll_write(cx, bufs).map_err(io)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        true
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.get_mut().0.poll_close(cx).map_err(io)
-    }
-}
-
-fn io(error: net::Error) -> io::Error {
-    io::Error::other(error)
 }
 
 #[cfg(test)]

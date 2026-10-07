@@ -1,6 +1,4 @@
-use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -8,11 +6,10 @@ use connector::http::{Client, Config};
 use env::net::tcp;
 use env::thread::Handle;
 use http::{Method, Request, StatusCode};
-use hyper::rt::Write as _;
 use sim::{Sim, node};
 use types::time::Span;
 
-use super::{Stream, serve};
+use super::serve;
 use crate::sim::Store;
 
 const PORT: u16 = 8086;
@@ -60,7 +57,9 @@ impl Network {
         let held = Arc::clone(&store);
         let handle = server
             .shards()
-            .start(shard("server"), move |tasks| serve(listener, tasks, held))
+            .start(shard("server"), move |tasks| async move {
+                drop(serve(listener, tasks, held, "edge".into()).await);
+            })
             .expect("the shard starts");
         Self {
             sim,
@@ -106,59 +105,6 @@ impl Network {
         self.handles.push(handle);
         self.sim.run_for(Span::MINUTE).expect("the run ends");
         std::mem::take(&mut *out.lock().expect("no panic under the lock"))
-    }
-
-    /// Writes `request` in one plain write of the adapter, closes the write side when
-    /// `half_closed`, and reads until the server ends the stream. Gives the bytes
-    /// written and the bytes read, or the read error.
-    fn exchange(
-        &mut self,
-        request: &'static [u8],
-        half_closed: bool,
-    ) -> (usize, Result<String, String>) {
-        let (net, remote) = (self.client.net(), self.remote);
-        let out = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&out);
-        let handle = self
-            .client
-            .shards()
-            .start(shard("client"), move |_| async move {
-                let config = tcp::Config {
-                    remote,
-                    options: OPTIONS,
-                };
-                let tcp = net.connect(&config).await.expect("the server listens");
-                let mut stream = Stream(tcp);
-                assert!(
-                    stream.is_write_vectored(),
-                    "hyper copies each body into its buffer unless the stream is vectored"
-                );
-                let written = poll_fn(|cx| Pin::new(&mut stream).poll_write(cx, request))
-                    .await
-                    .expect("the write works");
-                if half_closed {
-                    poll_fn(|cx| stream.0.poll_close(cx))
-                        .await
-                        .expect("the close works");
-                }
-                let mut read = Vec::new();
-                let mut bytes = [0; 1024];
-                let ended = loop {
-                    match poll_fn(|cx| stream.0.poll_read(cx, &mut bytes)).await {
-                        Ok(0) => break Ok(String::from_utf8(read).expect("UTF-8")),
-                        Ok(n) => read.extend_from_slice(bytes.get(..n).expect("fits")),
-                        Err(error) => break Err(error.to_string()),
-                    }
-                };
-                *slot.lock().expect("no panic under the lock") = Some((written, ended));
-            })
-            .expect("the shard starts");
-        self.handles.push(handle);
-        self.sim.run_for(Span::MINUTE).expect("the run ends");
-        out.lock()
-            .expect("no panic under the lock")
-            .take()
-            .expect("the exchange ends")
     }
 
     fn request(&self, method: Method, path: &str, body: &str) -> Request<Bytes> {
@@ -329,59 +275,18 @@ fn serves_a_second_stream_while_the_first_stays_open() {
 }
 
 #[test]
-fn writes_a_whole_plain_write_and_ends_the_stream_on_connection_close() {
-    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
-        content-length: 7\r\nconnection: close\r\n\r\nm v=1 1";
+fn answers_another_database_with_404_and_stores_nothing() {
     let mut network = Network::new();
+    let requests = vec![
+        network.post("/write?db=edge2", "m v=1 1"),
+        network.post("/api/v2/write?org=o&bucket=Edge", "m v=1 1"),
+    ];
     assert_eq!(
-        network.exchange(REQUEST, false),
-        (
-            REQUEST.len(),
-            Ok("HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n".into())
-        )
-    );
-    assert_eq!(network.times("m"), [1]);
-}
-
-#[test]
-fn answers_a_client_that_closes_its_write_side_after_the_request() {
-    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
-        content-length: 7\r\n\r\nm v=1 1";
-    let mut network = Network::new();
-    assert_eq!(
-        network.exchange(REQUEST, true),
-        (REQUEST.len(), Ok("HTTP/1.1 204 No Content\r\n\r\n".into()))
-    );
-    assert_eq!(network.times("m"), [1]);
-}
-
-#[test]
-fn stores_nothing_from_a_body_that_ends_early() {
-    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
-        content-length: 30\r\n\r\nm v=1 1\n";
-    let mut network = Network::new();
-    assert_eq!(
-        network.exchange(REQUEST, true),
-        (REQUEST.len(), Err("10.0.0.2:8086 reset the stream".into()))
+        network.send(vec![requests]),
+        [
+            answer(StatusCode::NOT_FOUND, "no db named \"edge2\""),
+            answer(StatusCode::NOT_FOUND, "no bucket named \"Edge\""),
+        ]
     );
     assert_eq!(network.times("m"), [0_i64; 0]);
-}
-
-#[test]
-fn answers_each_request_on_a_kept_alive_stream() {
-    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
-        content-length: 7\r\n\r\nm v=1 1\
-        POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
-        content-length: 7\r\nconnection: close\r\n\r\nm v=2 2";
-    let mut network = Network::new();
-    assert_eq!(
-        network.exchange(REQUEST, false),
-        (
-            REQUEST.len(),
-            Ok("HTTP/1.1 204 No Content\r\n\r\n\
-                HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n"
-                .into())
-        )
-    );
-    assert_eq!(network.times("m"), [1, 2]);
 }
