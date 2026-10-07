@@ -282,10 +282,11 @@ pub mod keys {
 }
 
 /// The run of ends after a head: the place of each series and the end of its bytes in
-/// the body. The body follows, as long as the last end. Each series starts at the end
-/// before it, rounded up to 8 bytes, with padding between. An end whose place the
-/// session does not have, that repeats a place of its frame, or that is below the start
-/// of its series, is not valid.
+/// the body. The body follows, as long as the last end, laid out as a frame of only
+/// these series: the first starts at 0, and each other at the end before it rounded up
+/// to a multiple of 8, with zeros between. An end whose place the session does not
+/// have, that repeats a place of its frame, or that is below the start of its series,
+/// is not valid, and so is padding that is not zeros.
 pub mod ends {
     use super::{Error, Writer, run};
 
