@@ -97,7 +97,8 @@ nothing checked again. So when round 1 led to fix commits:
 
 Review is done when the last round comment ends at the PR head and finds nothing, each
 round comment names each reviewer its round requires (round 1: the table; a later round:
-`reviewer`, and `breaker` unless its range changes only comments), the `Deferred:` line
+`reviewer`, `breaker` unless its range changes only comments, and `performance` with new
+numbers when its range changes code on a hot path), the `Deferred:` line
 of each round comment links the OK of each deferral in a risk crate, the
 `Public surface:` line of the last round comment links the architect's approval of each
 item, each finding of an architect review has its fix commit or a linked answer, and
