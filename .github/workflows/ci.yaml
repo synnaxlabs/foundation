@@ -193,25 +193,28 @@ jobs:
       - name: Check the memory cap of the runner
         run: |
           c=$(cut -d: -f3 /proc/self/cgroup)
-          u=${c##*/}
-          p=$(systemctl show -p OOMPolicy --value "$u")
-          [ "$p" = continue ] ||
-            { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
-          [ "$(cat "/sys/fs/cgroup$c/memory.max")" != max ] ||
-            { echo "::error::$u has no MemoryMax (#803, #898)."; exit 1; }
+          case $c in
+            /system.slice/actions.runner.*.service) ;;
+            *) echo "::error::The job runs in $c, in no runner unit (#898)."; exit 1 ;;
+          esac
           total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
           sum=0
-          for f in /sys/fs/cgroup/system.slice/actions.runner.*.service/memory.max; do
-            m=$(cat "$f")
-            [ "$m" != max ] ||
-              { echo "::error::${f%/*} has no MemoryMax (#803, #898)."; exit 1; }
+          # systemd reads each runner unit, also one that is stopped and has no cgroup.
+          for u in $(systemctl list-unit-files --plain --no-legend 'actions.runner.*' |
+            cut -d' ' -f1); do
+            p=$(systemctl show -p OOMPolicy --value "$u")
+            [ "$p" = continue ] ||
+              { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
+            m=$(systemctl show -p MemoryMax --value "$u")
+            [ "$m" != infinity ] ||
+              { echo "::error::$u has no MemoryMax (#803, #898)."; exit 1; }
             sum=$((sum + m / 1024))
           done
           [ "$sum" -le $((total - 2097152)) ] || {
             echo "::error::The runner caps take $sum KiB of $total KiB (#803)."
             exit 1
           }
-          echo "The runner caps take $sum KiB of $total KiB; $u has OOMPolicy $p"
+          echo "The runner caps take $sum KiB of $total KiB"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
