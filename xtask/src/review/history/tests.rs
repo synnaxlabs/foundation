@@ -445,6 +445,27 @@ fn a_merge_round_that_keeps_a_file_one_side_deleted_needs_the_breaker() {
 }
 
 #[test]
+fn a_conflict_counts_only_in_a_code_file() {
+    for (file, code) in [("Cargo.toml", true), ("Cargo.lock", true), ("a.md", false)] {
+        let (repo, _) = Repo::with_pr(&format!("merge-file-{file}"));
+        let end = repo.commit(file, "pr\n");
+        repo.advance_main(file, "main\n");
+        let merge = repo
+            .command()
+            .args(["merge", "--no-edit", "origin/main"])
+            .output()
+            .unwrap();
+        assert_eq!(merge.status.code(), Some(1), "{merge:?}");
+        std::fs::write(repo.dir.join(file), "pr\n").unwrap();
+        repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
+        let merge = repo.head();
+        let found =
+            code.then(|| format!("resolves a conflict in `{file}` in `{merge}`"));
+        assert_eq!(repo.code_change(&end, &merge), Ok(found), "{file}");
+    }
+}
+
+#[test]
 fn a_merge_of_a_main_made_of_merges_counts_by_its_resolution() {
     let (repo, end) = Repo::with_pr("merge-merges");
     for file in ["f.rs", "g.rs"] {
