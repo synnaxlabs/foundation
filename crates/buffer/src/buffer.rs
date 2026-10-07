@@ -607,26 +607,34 @@ async fn open_ring(
     layout: Layout,
 ) -> Result<(File, Header), Error> {
     let written = open_written(files, dir, pool, layout).await?;
-    let (file, blocks) = if let Some((file, blocks)) = written {
-        (file, Some(blocks))
+    let (file, blocks) = if let Some(written) = written {
+        written
     } else {
         files.create_dir(dir).await?;
         // A removed ring keeps its room until this sync, and the new ring needs it.
         files.sync_dir(dir).await?;
         let len = layout.file_len();
-        let ring = files.open(&dir.join("ring"), Mode::Create { len }).await?;
-        (ring, None)
+        let file = files.open(&dir.join("ring"), Mode::Create { len }).await?;
+        // Another open can make this ring, commit to it, and close in between.
+        let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
+        (file, blocks)
     };
     // An open that stopped after it made the ring may not have made it durable.
     if let Some(parent) = dir.parent() {
         files.sync_dir(parent).await?;
     }
     files.sync_dir(dir).await?;
-    let header = match blocks {
-        Some(blocks) => read_header(&file, blocks).await?,
-        None => create_header(&file, pool, entropy, layout).await?,
+    let header = if unwritten(&blocks) {
+        create_header(&file, pool, entropy, layout).await?
+    } else {
+        read_header(&file, blocks).await?
     };
     Ok((file, header))
+}
+
+/// True when `blocks`, the two header blocks of a ring file, hold no checkpoint.
+fn unwritten(blocks: &[u8]) -> bool {
+    blocks.iter().all(|&byte| byte == 0)
 }
 
 /// Opens the ring file in `dir` and reads its two header blocks. `None` when no file
@@ -655,7 +663,7 @@ async fn open_written(
             return Err(Error::Length { expected, found });
         }
         let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
-        if blocks.iter().any(|&byte| byte != 0) {
+        if !unwritten(&blocks) {
             return Ok(Some((file, blocks)));
         }
     }

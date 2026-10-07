@@ -1904,6 +1904,92 @@ fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
     }
 }
 
+/// Two opens at once of a ring that is not there, on a new node with `seed`. The
+/// first commits one entry with a commit span of 1 ns and drops its buffer. The second
+/// starts `gap` nanoseconds later and keeps its buffer. Then a kill and an open.
+/// Returns what the first commit gave, what the second open gave (the tail of the
+/// entry), and the tail after the kill.
+fn commit_and_close_during_another_open(
+    seed: u64,
+    gap: i64,
+) -> (Result<(), Error>, Result<Tail, Error>, Tail) {
+    let (mut sim, node) = one_node(seed);
+    let committed = Arc::new(Mutex::new(None));
+    let opened = Arc::new(Mutex::new(None));
+    let (own, shared) = (node.clone(), Arc::clone(&committed));
+    drop(on_node(&node, "first", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = Config {
+            commit: Span::from_nanos(1),
+            ..node_config(&own, tasks, DIR)
+        };
+        let gave = async {
+            let buffer = Buffer::open(config, &mut slots).await?;
+            let slot = slots.assign(key(1));
+            buffer
+                .append([entry(1, slot, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.map_err(Error::Files)
+        }
+        .await;
+        *shared.lock().expect("no panic") = Some(gave);
+        std::future::pending::<()>().await;
+    }));
+    let (own, shared) = (node.clone(), Arc::clone(&opened));
+    drop(on_node(&node, "second", move |tasks| async move {
+        own.clock().sleep(Span::from_nanos(gap)).await;
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&own, tasks, DIR), &mut slots).await;
+        let slot = slots.assign(key(1));
+        let gave = match &buffer {
+            Ok(buffer) => Ok(buffer.tail(slot, Path::Live)),
+            Err(error) => Err(error.clone()),
+        };
+        *shared.lock().expect("no panic") = Some(gave);
+        std::future::pending::<()>().await;
+        drop(buffer);
+    }));
+    sim.run_for(commits(4)).expect("the run goes on");
+    let committed = committed.lock().expect("no panic").take();
+    let opened = opened.lock().expect("no panic").take();
+    let committed = committed.expect("the first commit ends");
+    let opened = opened.expect("the second open ends");
+    sim.crash(&node, sim::Crash::Process);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens again");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    (committed, opened, recovered.expect("the last open ends"))
+}
+
+/// An open that finds no ring makes one later, with `Mode::Create`. Another open can
+/// make the ring, commit, and close in between. The later open then recovers the
+/// entry, and the entry stays.
+///
+/// The 6 runs hang on the delay of each file call. After a change that moves those
+/// delays, the later open of a run can get `Busy` and this fails: a search of the
+/// first 200,000 values of `seed` at these 3 gaps then finds such runs again.
+#[test]
+fn an_open_at_once_with_one_that_commits_and_closes_keeps_the_commit() {
+    let cases = [
+        (83_501, 100_000),
+        (4_232, 125_000),
+        (20_350, 125_000),
+        (21_616, 125_000),
+        (6_747, 150_000),
+        (30_651, 150_000),
+    ];
+    let kept = tail(3, Some(30));
+    for (seed, gap) in cases {
+        let found = commit_and_close_during_another_open(seed, gap);
+        let expected = (Ok(()), Ok(kept), kept);
+        assert_eq!(found, expected, "seed {seed}, gap {gap} ns");
+    }
+}
+
 /// Starts a new ring on a node with `seed`, appends one entry, and kills the
 /// process `cut` nanoseconds after a point at most 10 µs before the deadline of the
 /// first commit. Returns the sim, the node, and whether the commit had ended.
