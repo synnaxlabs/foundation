@@ -12,7 +12,8 @@ use crate::hash;
 /// listing of a slot. A slot after its first listing, or one that a frame's key set
 /// lacks, holds no series. Keeps what it learns of each key set it lays, until it is
 /// dropped, so only the first frame of a key set allocates: about 12 bytes for each
-/// place in that key set.
+/// place in that key set. A node builds key sets only from the spec, which bounds
+/// them.
 #[derive(Debug)]
 pub struct Places {
     slots: Box<[Slot]>,
