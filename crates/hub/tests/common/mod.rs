@@ -43,8 +43,9 @@ pub(crate) async fn shard(
         clock: node.clock(),
         tasks,
         entropy: node.entropy(),
-        // A commit takes 4 KiB of the ring, and nothing frees the ring until #160, so
-        // a run makes fewer than 1024 commits.
+        // A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
+        // nothing frees the ring until #160, so a run fills it at 1023 one-frame
+        // commits.
         layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
         commit: COMMIT,
     };
