@@ -72,6 +72,9 @@ again once to prove that the failure replays (r16 59).
 - **Test through the production path.** A component that passes its unit tests but
   fails when composed in `node` is broken. Production code never checks `cfg(test)`
   (r16 47).
+- **A test may check what another test checks.** "No defense in depth" in `CLAUDE.md`
+  is about guards in code. It is no reason to refuse an assertion, or the premise
+  check of a benchmark, because a unit test catches the same change.
 - **Assert through the public calls of the type.** A read of a private field, or a
   compare of the `Debug` string of the type under test, checks private state: a new
   field breaks the test while the behavior stays. Use one only with a written reason.
