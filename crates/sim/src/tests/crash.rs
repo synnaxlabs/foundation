@@ -630,6 +630,85 @@ fn the_digest_holds_the_state_that_a_crash_in_a_create_drew() {
     }
 }
 
+#[test]
+fn a_power_crash_in_a_create_that_fills_the_disk_leaves_no_file_with_bytes() {
+    let mut outcomes = BTreeSet::new();
+    for seed in 0..32 {
+        let (mut sim, node) = disk(seed);
+        crash_after(&mut sim, &node, Crash::Power, |node| async move {
+            until_crash(&node).await;
+            let mode = Mode::Create { len: 2 * MIB };
+            hang(node.files().open(Path::new("a"), mode)).await;
+        });
+        let outcome = sim
+            .run_on(&node, |node, _| async move {
+                let files = node.files();
+                let names = files.list(Path::new("")).await.unwrap();
+                (names, files.free().await.unwrap())
+            })
+            .unwrap();
+        outcomes.insert(outcome);
+    }
+    let made = vec![PathBuf::from("a")];
+    assert_eq!(outcomes, BTreeSet::from([(Vec::new(), MIB), (made, MIB)]));
+}
+
+/// Whether a crash by `crash` in a create open of `path`, after `before`, draws a
+/// state: its digest differs from that of a crash in a write open of `path`.
+fn draws<F, B>(seed: u64, crash: Crash, path: &'static str, before: B) -> bool
+where
+    B: FnOnce(node::Node) -> F + Copy + Send + 'static,
+    F: Future<Output = ()> + 'static,
+{
+    let digest = |mode| {
+        let (mut sim, node) = disk(seed);
+        crash_after(&mut sim, &node, crash, move |node| async move {
+            before(node.clone()).await;
+            until_crash(&node).await;
+            hang(node.files().open(Path::new(path), mode)).await;
+        });
+        sim.digest()
+    };
+    digest(Mode::Create { len: 1_024 }) != digest(Mode::Write)
+}
+
+#[test]
+fn a_crash_in_a_create_that_makes_no_file_draws_no_state() {
+    let nothing = |_: node::Node| async {};
+    let dir = |node: node::Node| async move {
+        node.files().create_dir(Path::new("d")).await.unwrap();
+    };
+    // Leaked, so the crash ends the open while `a` is still held.
+    let held = |node: node::Node| async move {
+        Box::leak(Box::new(create(&node, "a", 0).await));
+    };
+    for crash in [Crash::Process, Crash::Power] {
+        for seed in 0..8 {
+            let at = format!("{crash:?} {seed}");
+            assert!(draws(seed, crash, "a", nothing), "a: {at}");
+            assert!(!draws(seed, crash, "d", dir), "d: {at}");
+            assert!(!draws(seed, crash, "x/a", nothing), "x/a: {at}");
+            assert!(!draws(seed, crash, "a/", nothing), "a/: {at}");
+            assert!(!draws(seed, crash, "a", held), "held a: {at}");
+        }
+    }
+}
+
+#[test]
+fn a_create_over_a_held_file_with_no_bytes_is_busy() {
+    let (mut sim, node) = disk(0);
+    let opened = sim
+        .run_on(&node, |node, _| async move {
+            let held = create(&node, "a", 0).await;
+            let mode = Mode::Create { len: 1_024 };
+            let opened = node.files().open(Path::new("a"), mode).await;
+            drop(held);
+            opened.map(|file| file.len())
+        })
+        .unwrap();
+    assert_eq!(opened, Err(Error::Busy { path: "a".into() }));
+}
+
 /// The digest of a run in which the power is cut during [`write_in_flight`].
 fn cut(failed: bool) -> u64 {
     let (mut sim, node) = disk(0);

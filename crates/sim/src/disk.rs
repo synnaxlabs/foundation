@@ -53,6 +53,14 @@ pub(crate) struct Disk {
     inodes: BTreeMap<u64, Inode>,
 }
 
+/// What an open finds.
+enum Target<'a> {
+    /// The file `inode` at the path.
+    File(u64),
+    /// No entry: a create makes `name` in directory `dir` with `len` bytes.
+    New { dir: u64, name: &'a OsStr, len: u64 },
+}
+
 enum Inode {
     File(File),
     Dir(Dir),
@@ -174,15 +182,9 @@ impl Disk {
         path: &Path,
         mode: Mode,
     ) -> Result<(Handle, u64), Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
-            return Err(Cause::Code(DIRECTORY));
-        };
-        let dir = self.dir(parent)?;
-        let inode = match (self.dir_mut(dir).entries.get(*name).copied(), mode) {
-            (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
-            (Some(inode), _) => inode,
-            (None, Mode::Create { len }) => {
+        let inode = match self.target(path, mode)? {
+            Target::File(inode) => inode,
+            Target::New { dir, name, len } => {
                 self.take(len)?;
                 self.dir_mut(dir).entries.insert(name.into(), key);
                 let file = File {
@@ -197,16 +199,11 @@ impl Disk {
                 self.inodes.insert(key, Inode::File(file));
                 key
             }
-            (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
-        let file = self.named(inode, slashed)?;
         let writable = mode != Mode::Read;
-        if writable && file.writers > 0 {
-            return Err(Cause::Busy);
-        }
         // A crash between the create and the allocation leaves an empty file on `os`.
         if let Mode::Create { len } = mode
-            && file.len == 0
+            && self.file(inode).len == 0
         {
             if let Err(cause) = self.take(len) {
                 self.remove(path)?;
@@ -342,24 +339,42 @@ impl Disk {
         }
     }
 
-    /// Whether a [`Mode::Create`] open of `path` makes its file: `path` names no
-    /// entry in a directory, or a file with no bytes.
+    /// Whether a [`Mode::Create`] open of `path` makes its file when the disk has
+    /// room: the open succeeds, and finds no entry or a file with no bytes.
     pub(crate) fn makes(&self, path: &Path) -> bool {
-        let segments = segments(path);
-        let Some((name, parent)) = segments.split_last().filter(|_| !slashed(path))
-        else {
-            return false;
+        match self.target(path, Mode::Create { len: 0 }) {
+            Ok(Target::New { .. }) => true,
+            Ok(Target::File(inode)) => {
+                matches!(&self.inodes[&inode], Inode::File(file) if file.len == 0)
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// What an open of `path` by `mode` finds, with each fault it gives before it
+    /// takes space.
+    fn target<'a>(&self, path: &'a Path, mode: Mode) -> Result<Target<'a>, Cause> {
+        let (segments, slashed) = (segments(path), slashed(path));
+        let Some((name, parent)) = segments.split_last() else {
+            return Err(Cause::Code(DIRECTORY));
         };
-        let Ok(key) = self.dir(parent) else {
-            return false;
+        let dir = self.dir(parent)?;
+        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
+            unreachable!("invariant: inode {dir} is a directory");
         };
-        let Inode::Dir(dir) = &self.inodes[&key] else {
-            unreachable!("invariant: inode {key} is a directory");
+        let inode = match (entries.get(*name), mode) {
+            (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
+            (Some(&inode), _) => inode,
+            (None, Mode::Create { len }) => return Ok(Target::New { dir, name, len }),
+            (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
-        match dir.entries.get(*name).map(|inode| &self.inodes[inode]) {
-            None => true,
-            Some(Inode::File(file)) => file.len == 0,
-            Some(Inode::Dir(_)) => false,
+        match &self.inodes[&inode] {
+            Inode::File(_) if slashed => Err(Cause::Code(NOT_DIRECTORY)),
+            Inode::File(file) if mode != Mode::Read && file.writers > 0 => {
+                Err(Cause::Busy)
+            }
+            Inode::File(_) => Ok(Target::File(inode)),
+            Inode::Dir(_) => Err(Cause::Code(DIRECTORY)),
         }
     }
 
