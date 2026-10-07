@@ -225,14 +225,13 @@ impl Node {
     }
 
     /// Calls `task` with the node's hub on shard 0, once each shard has opened its
-    /// buffer, then runs its future. Shard 0 calls `task` with the hub after each task
-    /// given before it. So the code in its closure body runs in the order of the
-    /// calls; the futures that tasks give run in no set order. Does not wait. A node
-    /// that stops or fails before shard 0 calls a task drops it uncalled. A task runs
-    /// on shard 0's thread, so it may hold values that are not `Send`, such as
-    /// sessions; it sends its result back through a value it owns.
-    /// Its future runs until it completes or shard 0 ends, which drops it. A panic in
-    /// a task ends shard 0 and fails the node: [`Node::join`] gives
+    /// buffer and after each task given before it, then runs its future. So the code
+    /// in its closure body runs in the order of the calls; the futures that tasks give
+    /// run in no set order. Does not wait. A node that stops or fails before shard 0
+    /// calls a task drops it uncalled. A task runs on shard 0's thread, so it may hold
+    /// values that are not `Send`, such as sessions; it sends its result back through a
+    /// value it owns. Its future runs until it completes or shard 0 ends, which drops
+    /// it. A panic in a task ends shard 0 and fails the node: [`Node::join`] gives
     /// [`Error::Panicked`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
