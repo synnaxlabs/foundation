@@ -98,11 +98,9 @@ impl Addresses {
         if count > usize::from(ADDRESSES_MAX) {
             return Err(Invalid::Count { count });
         }
-        let scoped = list.iter().find(|address| {
-            let (Address::Udp(at) | Address::Tcp(at) | Address::Relay { at, .. }) =
-                **address;
-            matches!(at, SocketAddr::V6(at) if at.flowinfo() != 0 || at.scope_id() != 0)
-        });
+        let scoped = list
+            .iter()
+            .find(|&&address| flow_and_scope(address) != (0, 0));
         if let Some(&address) = scoped {
             return Err(Invalid::Scoped { address });
         }
@@ -165,12 +163,24 @@ impl fmt::Display for Invalid {
                     "a card holds {count} addresses, more than {ADDRESSES_MAX}"
                 )
             }
-            Self::Scoped { address } => write!(
-                f,
-                "the address {address:?} has IPv6 flow info or a scope, which mean \
-                 something only on the node that sets it"
-            ),
+            Self::Scoped { address } => {
+                let (flowinfo, scope_id) = flow_and_scope(*address);
+                write!(
+                    f,
+                    "the address {address:?} has IPv6 flow info {flowinfo} and scope \
+                     {scope_id}, which mean something only on the node that sets it"
+                )
+            }
         }
+    }
+}
+
+// The flow info and scope of an IPv6 address; 0 and 0 for IPv4.
+fn flow_and_scope(address: Address) -> (u32, u32) {
+    let (Address::Udp(at) | Address::Tcp(at) | Address::Relay { at, .. }) = address;
+    match at {
+        SocketAddr::V4(_) => (0, 0),
+        SocketAddr::V6(at) => (at.flowinfo(), at.scope_id()),
     }
 }
 
@@ -592,14 +602,16 @@ mod tests {
 
     #[test]
     fn invalid_says_what_is_wrong() {
-        let address = Address::Tcp("[fe80::1%3]:4100".parse().unwrap());
+        let mut at: SocketAddrV6 = "[fe80::1%3]:4100".parse().unwrap();
+        at.set_flowinfo(7);
+        let address = Address::Tcp(SocketAddr::V6(at));
         assert_eq!(
             Invalid::Count { count: 33 }.to_string(),
             "a card holds 33 addresses, more than 32"
         );
         assert_eq!(
             Invalid::Scoped { address }.to_string(),
-            "the address Tcp([fe80::1%3]:4100) has IPv6 flow info or a scope, which \
+            "the address Tcp([fe80::1%3]:4100) has IPv6 flow info 7 and scope 3, which \
              mean something only on the node that sets it"
         );
     }
