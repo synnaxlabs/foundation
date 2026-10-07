@@ -18,7 +18,6 @@ use types::authority::Authority;
 use types::name::Name;
 
 pub use gate::{Gate, Key, Permit};
-pub use lease::Lease;
 
 /// A writer as the gate sees it. The holder's value is what the home records and
 /// publishes.
