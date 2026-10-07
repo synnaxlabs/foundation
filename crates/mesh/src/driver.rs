@@ -404,8 +404,9 @@ impl Watch {
     ///
     /// # Errors
     ///
-    /// The cause, at once, on each call after the group stops or each [`Mesh`] of it
-    /// drops. A group that stopped keeps its cause when each [`Mesh`] drops.
+    /// [`Stopped`], the cause, at once, on each call after the group stops or each
+    /// [`Mesh`] of it drops. A group that stopped keeps its cause when each [`Mesh`]
+    /// drops.
     pub async fn next(&mut self) -> Result<Option<node::Key>, Stopped> {
         poll_fn(|cx| {
             if let Some(stopped) = self.stopped.get() {

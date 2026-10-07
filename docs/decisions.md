@@ -2179,8 +2179,9 @@ How to read this record:
   never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
   call gives `Error::Stopped` with the first cause. A watch gives the `Stopped` itself,
-  also after each `Mesh` drops. `member` has no error (#562): it gives the record that
-  the node holds, also after a stop (approved by the architect, 2026-10-07T08:07:48Z:
+  also after each `Mesh` drops (MESH SURFACE). `member` has no error (#562): it gives
+  the record that the node holds, also after a stop (approved by the architect,
+  2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
   group does not start again: the node opens the mesh again, and the open makes durable
   what it gives (MESH LOG). The task ends soon after the last `Mesh` drops, a write in
@@ -2207,22 +2208,23 @@ How to read this record:
   `Watch::next`, and `Mesh::member` (#562). `next` gives `Stopped`, which holds the
   cause types `log::Error` and `change::Unknown`, each public in its own module, so a
   caller can match the exact cause. `next` gives `Stopped` and not `Error`, because a
-  stop is the only error that it has: the type says what the call gives. The cause types
-  at the root (`mesh::LogError`) lost, because each name repeats its module. A `Stopped`
-  that holds a text for each cause lost, because a caller cannot match a text. The
-  surface holds types of other crates: `raft::Position`, `block::Error`, and
-  `env::files::Error`. A caller whose line of the crate map does not hold the crate of
-  such a type reads it only through `Display` and `Debug`. A caller that must match one
-  gets the crate in its line through an `interface` issue first. `mesh` does not
-  re-export such a type: a re-export makes each change to `raft` a change to the surface
-  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
-  index only. `Config`, `Mesh::open`, and `Mesh::serve` become public after the senders
-  (#1410), so until then no crate outside `mesh` opens a `Mesh`. `Error`,
-  `claim::Error`, and `region::Unfit` become public with them, because `open` and
-  `serve` give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the
-  module its new name. `Error` then adds `raft::Error`, `transport::Error`, and
-  `types::node::PublicKey` to the types of other crates. The calls that change the
-  region and the change records stay private. The surface is approved by the architect,
+  stop is the only error that it has: the type says what the call gives. `hub` holds
+  `Error::Mesh(mesh::Stopped)` for a read of a home. The cause types at the root
+  (`mesh::LogError`) lost, because each name repeats its module. A `Stopped` that holds
+  a text for each cause lost, because a caller cannot match a text. The surface holds
+  types of other crates: `raft::Position`, `block::Error`, `env::files::Error`, and
+  `types::node::PublicKey`, which the card of a `Member` holds. A caller whose line of
+  the crate map does not hold the crate of such a type reads it only through `Display`
+  and `Debug`. A caller that must match one gets the crate in its line through an
+  `interface` issue first. `mesh` does not re-export such a type: a re-export makes each
+  change to `raft` a change to the surface of `mesh`. The `Debug` text of a `Mesh` is
+  `Mesh { .. }`, and of a `Watch` is its index only. `Config`, `Mesh::open`, and
+  `Mesh::serve` become public after the senders (#1410), so until then no crate outside
+  `mesh` opens a `Mesh`. `Error`, `claim::Error`, and `region::Unfit` become public with
+  them, because `open` and `serve` give them. `claim::Error` is the `grant::Error` of
+  the rulings: #1460 gave the module its new name. `Error` then adds `raft::Error` and
+  `transport::Error` to the types of other crates. The calls that change the region and
+  the change records stay private. The surface is approved by the architect,
   2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
