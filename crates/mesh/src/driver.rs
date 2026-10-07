@@ -22,6 +22,7 @@ use crate::error::{Error, Stopped};
 use crate::grant::{self, Signer};
 use crate::log::{self, Log};
 use crate::member::Member;
+use crate::message::Message;
 use crate::region::{self, Change};
 
 /// The time of one `raft` tick.
@@ -151,6 +152,12 @@ impl Mesh {
 
     /// Gives the group `message`, which `peer` sent.
     ///
+    /// A [`Message::Propose`] gets its answer in the queue of its sender: the position
+    /// of the entry when this node leads, and the leader that this node knows when it
+    /// does not. The answer leaves before the entry is on disk, and a new leader can
+    /// replace the entry. Each member can send one, also one that is not a voter. An
+    /// answer that no call waits for changes nothing.
+    ///
     /// # Errors
     ///
     /// The group does not see a message that fails a check.
@@ -158,8 +165,8 @@ impl Mesh {
     /// - [`Error::Stopped`] when the group stopped.
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
-    /// - [`Error::NotVoter`] when the message is a request and its sender is not a
-    ///   voter of this node's configuration.
+    /// - [`Error::NotVoter`] when the message is a request of `raft` and its sender is
+    ///   not a voter of this node's configuration.
     /// - [`Error::Grant`] when a grant in the message does not hold.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
@@ -170,23 +177,47 @@ impl Mesh {
     pub(crate) fn receive(
         &self,
         peer: PublicKey,
-        message: raft::Message,
+        message: Message,
     ) -> Result<(), Error> {
         let mut group = self.group.borrow_mut();
         group.running()?;
-        let from = message.from;
+        let from = message.from();
         let public_key = |key| group.state.member(key).map(Member::public_key);
         if public_key(from) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
-        let Voters { incoming, outgoing } = group.raft.voters();
-        let voter = incoming.contains(&from) || outgoing.contains(&from);
-        if request(&message.body) && !voter {
-            return Err(Error::NotVoter { from });
+        match message {
+            Message::Raft(message) => {
+                let Voters { incoming, outgoing } = group.raft.voters();
+                let voter = incoming.contains(&from) || outgoing.contains(&from);
+                if request(&message.body) && !voter {
+                    return Err(Error::NotVoter { from });
+                }
+                grant::check(&message, public_key)?;
+                group.raft.step(message)?;
+                group.wake();
+            }
+            Message::Propose {
+                request, change, ..
+            } => {
+                let own = group.raft.key();
+                let answer = match group.propose(change) {
+                    Ok(at) => Message::Proposed {
+                        from: own,
+                        request,
+                        at,
+                    },
+                    Err(raft::Error::NotLeader { leader }) => Message::NotLeader {
+                        from: own,
+                        request,
+                        leader,
+                    },
+                    Err(error) => return Err(error.into()),
+                };
+                group.queues.entry(from).or_default().push(answer);
+            }
+            Message::Proposed { .. } | Message::NotLeader { .. } => {}
         }
-        grant::check(&message, public_key)?;
-        group.raft.step(message)?;
-        group.wake();
         Ok(())
     }
 
@@ -201,21 +232,18 @@ impl Mesh {
     pub(crate) fn propose(&self, change: Change) -> Result<Position, Error> {
         let mut group = self.group.borrow_mut();
         group.running()?;
-        let mut data = Vec::new();
-        change.encode(&mut data);
-        let at = group.raft.propose(data)?;
-        group.wake();
-        Ok(at)
+        Ok(group.propose(change)?)
     }
 
-    /// Waits for the next message for the member `to`. Each message is signed, and
-    /// what it relies on is on disk. A message that 64 newer ones follow is
-    /// dropped: `raft` sends again. One task at a time waits for one member.
+    /// Waits for the next message for the member `to`. Each message of `raft` is
+    /// signed, and what it relies on is on disk. A message that 64 newer ones follow
+    /// is dropped: `raft` sends again, and so does a node that got no answer. One task
+    /// at a time waits for one member.
     ///
     /// # Errors
     ///
     /// [`Error::Stopped`] when the group stopped.
-    pub(crate) async fn outgoing(&self, to: node::Key) -> Result<raft::Message, Error> {
+    pub(crate) async fn outgoing(&self, to: node::Key) -> Result<Message, Error> {
         poll_fn(|cx| {
             let mut group = self.group.borrow_mut();
             group.running()?;
@@ -314,10 +342,20 @@ impl Group {
         }
     }
 
+    // Proposes `change` on this node.
+    fn propose(&mut self, change: Change) -> Result<Position, raft::Error> {
+        let mut data = Vec::new();
+        change.encode(&mut data);
+        let at = self.raft.propose(data)?;
+        self.wake();
+        Ok(at)
+    }
+
     // Queues each message for its member.
     fn send(&mut self, messages: Vec<raft::Message>) {
         for message in messages {
-            self.queues.entry(message.to).or_default().push(message);
+            let queue = self.queues.entry(message.to).or_default();
+            queue.push(Message::Raft(message));
         }
     }
 
@@ -364,14 +402,14 @@ impl Drop for Group {
 // The messages that wait for one member.
 #[derive(Default)]
 struct Queue {
-    messages: VecDeque<raft::Message>,
+    messages: VecDeque<Message>,
     // The task that waits in `Mesh::outgoing`.
     waker: Option<Waker>,
 }
 
 impl Queue {
     // Adds `message`. A full queue drops its oldest message.
-    fn push(&mut self, message: raft::Message) {
+    fn push(&mut self, message: Message) {
         if self.messages.len() == QUEUE_MAX {
             self.messages.pop_front();
         }
@@ -474,12 +512,12 @@ mod tests {
     use block::testing::Scarce;
     use env::files::{self, Operation};
     use env::net::udp::{self, Meta, Transmit};
+    use proptest::prelude::*;
     use raft::{Answer, Hard, Term};
     use sim::{Crash, Sim, link};
 
     use super::*;
-    use crate::common::{self, key, message, pool, private, proven, public};
-    use crate::message::Message;
+    use crate::common::{self, key, pool, private, public};
     use crate::region::Malformed;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -501,6 +539,14 @@ mod tests {
 
     fn seconds(count: i64) -> Span {
         Span::from_nanos(count.checked_mul(Span::SECOND.nanos()).unwrap())
+    }
+
+    fn message(from: u8, to: u8, body: Body) -> Message {
+        Message::Raft(common::message(from, to, body))
+    }
+
+    fn proven(from: u8, to: u8, body: Body) -> Message {
+        Message::Raft(common::proven(from, to, body))
     }
 
     fn home(id: u8) -> Change {
@@ -562,8 +608,7 @@ mod tests {
     /// Sends each message for `to` as one datagram.
     async fn send(mesh: Mesh, mut sender: udp::Sender, to: u8) -> ! {
         loop {
-            let message = mesh.outgoing(key(to)).await.unwrap();
-            let contents = Message::Raft(message).encode();
+            let contents = mesh.outgoing(key(to)).await.unwrap().encode();
             let transmit = Transmit {
                 destination: address(to),
                 source: None,
@@ -592,8 +637,8 @@ mod tests {
             };
             let peer = public(source.octets()[3]);
             for datagram in bytes[..meta.len].chunks(meta.stride.max(1)) {
-                let Some(Message::Raft(message)) = Message::decode(datagram) else {
-                    panic!("{datagram:?} is not a raft message");
+                let Some(message) = Message::decode(datagram) else {
+                    panic!("{datagram:?} is not a message");
                 };
                 mesh.receive(peer, message).unwrap();
             }
@@ -945,11 +990,12 @@ mod tests {
         fn refuses_a_message_with_a_forged_grant() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-                let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                let mut heartbeat = common::proven(2, 1, Body::Heartbeat { commit: 0 });
                 let proof = heartbeat.proof.as_mut().unwrap();
                 proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
                 let forged = Error::Grant(grant::Error::Forged { voter: key(3) });
-                assert_eq!(mesh.receive(public(2), heartbeat), Err(forged.clone()));
+                let received = mesh.receive(public(2), Message::Raft(heartbeat));
+                assert_eq!(received, Err(forged.clone()));
                 assert_eq!(
                     forged.to_string(),
                     format!("the grant of voter {} is forged", key(3))
@@ -976,10 +1022,10 @@ mod tests {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
                 let forged = |leader| {
                     let mut heartbeat =
-                        proven(leader, 1, Body::Heartbeat { commit: 0 });
+                        common::proven(leader, 1, Body::Heartbeat { commit: 0 });
                     let proof = heartbeat.proof.as_mut().unwrap();
                     proof.voters.get_mut(&key(1)).unwrap().as_mut().unwrap().0[63] ^= 1;
-                    heartbeat
+                    Message::Raft(heartbeat)
                 };
                 let spoofed = Error::Spoofed { from: key(2) };
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
@@ -1013,9 +1059,10 @@ mod tests {
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(reply, message(1, 2, Body::AppendReply { last: 1 }));
-                let mut pre_vote = message(3, 1, Body::PreVote { last: at });
+                let mut pre_vote = common::message(3, 1, Body::PreVote { last: at });
                 pre_vote.term = Term(common::TERM.0 + 1);
-                assert_eq!(mesh.receive(public(3), pre_vote), Ok(()));
+                let received = mesh.receive(public(3), Message::Raft(pre_vote));
+                assert_eq!(received, Ok(()));
             });
         }
 
@@ -1028,17 +1075,124 @@ mod tests {
                     candidate: key(4),
                     voters: [(key(4), None)].into(),
                 };
-                let mut lie = message(4, 1, Body::Heartbeat { commit: 0 });
+                let mut lie = common::message(4, 1, Body::Heartbeat { commit: 0 });
                 (lie.term, lie.proof) = (Term(u64::MAX), Some(proof));
                 let mut ready = Ready {
                     messages: vec![lie],
                     ..Ready::default()
                 };
                 common::signer(4).sign(&mut ready);
-                let lie = ready.messages.remove(0);
+                let lie = Message::Raft(ready.messages.remove(0));
                 let refused = Error::NotVoter { from: key(4) };
                 assert_eq!(mesh.receive(public(4), lie), Err(refused));
                 assert_eq!(term(&mesh), Term(0));
+            });
+        }
+
+        #[test]
+        fn a_leader_proposes_the_change_of_a_member_and_answers_with_its_position() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                let first = lead(&mesh, &node.clock(), home(1)).await;
+                assert_eq!(watch.next().await, Ok(None));
+                assert_eq!(watch.next().await, Ok(Some(key(1))));
+                let propose = Message::Propose {
+                    from: key(2),
+                    request: 9,
+                    change: home(3),
+                };
+                assert_eq!(mesh.receive(public(2), propose), Ok(()));
+                let proposed = Message::Proposed {
+                    from: key(1),
+                    request: 9,
+                    at: Position {
+                        term: first.term,
+                        index: first.index + 1,
+                    },
+                };
+                assert_eq!(mesh.outgoing(key(2)).await, Ok(proposed));
+                assert_eq!(watch.next().await, Ok(Some(key(3))));
+            });
+        }
+
+        #[test]
+        fn a_node_that_does_not_lead_answers_with_the_leader_that_it_knows() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                let propose = |request| Message::Propose {
+                    from: key(3),
+                    request,
+                    change: home(3),
+                };
+                let not_leader = |request, leader| Message::NotLeader {
+                    from: key(1),
+                    request,
+                    leader,
+                };
+                assert_eq!(mesh.receive(public(3), propose(4)), Ok(()));
+                assert_eq!(mesh.outgoing(key(3)).await, Ok(not_leader(4, None)));
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                assert_eq!(mesh.receive(public(3), propose(5)), Ok(()));
+                let leader = Some(key(2));
+                assert_eq!(mesh.outgoing(key(3)).await, Ok(not_leader(5, leader)));
+                assert_eq!(watch.next().await, Ok(None));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 3).await);
+            });
+        }
+
+        #[test]
+        fn refuses_a_proposal_whose_peer_is_not_its_sender() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
+                let first = lead(&mesh, &node.clock(), home(1)).await;
+                let propose = |from| Message::Propose {
+                    from: key(from),
+                    request: 9,
+                    change: home(3),
+                };
+                let spoofed = Error::Spoofed { from: key(2) };
+                assert_eq!(mesh.receive(public(3), propose(2)), Err(spoofed));
+                let stranger = Error::Spoofed { from: key(9) };
+                assert_eq!(mesh.receive(public(9), propose(9)), Err(stranger));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 2).await);
+                assert!(quiet(&mesh, 3).await);
+                let next = Position {
+                    term: first.term,
+                    index: first.index + 1,
+                };
+                assert_eq!(mesh.propose(home(2)), Ok(next));
+            });
+        }
+
+        #[test]
+        fn takes_an_answer_that_no_call_waits_for() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let answers = |from| {
+                    let (from, request) = (key(from), 9);
+                    let at = Position::default();
+                    let leader = None;
+                    [
+                        Message::Proposed { from, request, at },
+                        Message::NotLeader {
+                            from,
+                            request,
+                            leader,
+                        },
+                    ]
+                };
+                for answer in answers(2) {
+                    let spoofed = Error::Spoofed { from: key(2) };
+                    assert_eq!(mesh.receive(public(3), answer.clone()), Err(spoofed));
+                    assert_eq!(mesh.receive(public(2), answer), Ok(()));
+                }
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 2).await);
             });
         }
 
@@ -1578,14 +1732,24 @@ mod tests {
         });
     }
 
-    #[test]
-    fn a_full_queue_drops_its_oldest_message() {
-        let mut queue = Queue::default();
-        let heartbeat = |commit| message(1, 2, Body::Heartbeat { commit });
-        (0..=64)
-            .map(heartbeat)
-            .for_each(|message| queue.push(message));
-        let expected: Vec<_> = (1..=64).map(heartbeat).collect();
-        assert_eq!(Vec::from(queue.messages), expected);
+    proptest! {
+        #[test]
+        fn a_queue_gives_its_newest_messages_in_the_order_that_it_took_them(
+            count in 0..200_u64,
+        ) {
+            let mut queue = Queue::default();
+            let nth = |request| match request % 2 {
+                0 => message(1, 2, Body::Heartbeat { commit: request }),
+                _ => Message::Proposed {
+                    from: key(1),
+                    request,
+                    at: Position::default(),
+                },
+            };
+            (0..count).map(nth).for_each(|message| queue.push(message));
+            let held = count.saturating_sub(64)..count;
+            let expected: Vec<_> = held.map(nth).collect();
+            prop_assert_eq!(Vec::from(queue.messages), expected);
+        }
     }
 }
