@@ -942,12 +942,14 @@ mod tests {
     enum Then {
         Send,
         Finish,
+        /// Drops a send that waits behind the rest, then finishes.
+        DropSend,
         Drop,
     }
 
     #[test]
     fn a_try_send_taken_in_part_goes_whole_before_a_later_send_a_finish_or_a_drop() {
-        for then in [Then::Send, Then::Finish, Then::Drop] {
+        for then in [Then::Send, Then::Finish, Then::DropSend, Then::Drop] {
             let counted = Arc::new(AtomicUsize::new(0));
             let read = Arc::clone(&counted);
             let (mut sim, ..) = testing::sessions(
@@ -963,6 +965,12 @@ mod tests {
                             sender.finish().expect("finished");
                         }
                         Then::Finish => sender.finish().expect("finished"),
+                        Then::DropSend => {
+                            let send = sender.send(side.block(b"c"));
+                            let waiting = poll_once(pin!(send)).await;
+                            assert_eq!(waiting, None, "the send waits");
+                            sender.finish().expect("finished");
+                        }
                         Then::Drop => {
                             // The peer drops a stream reset before its class byte came.
                             side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;

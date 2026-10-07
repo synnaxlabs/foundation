@@ -356,7 +356,7 @@ impl Half {
 ///
 /// [`Error::TooLarge`] when a message of `bytes` is over `bytes_max`, the peer's
 /// largest message.
-pub(crate) fn check_size(bytes: usize, bytes_max: usize) -> Result<(), Error> {
+pub(super) fn check_size(bytes: usize, bytes_max: usize) -> Result<(), Error> {
     if bytes > bytes_max {
         return Err(Error::TooLarge { bytes, bytes_max });
     }

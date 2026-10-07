@@ -474,8 +474,8 @@ impl Session {
         self.with(|endpoint, clock, slot, _| {
             let given = endpoint.try_write(clock.now(), sender, message)?;
             match &slot.end {
-                Some(error) if given.is_some() => Err(error.clone()),
-                _ => Ok(given),
+                Some(error) => Err(error.clone()),
+                None => Ok(given),
             }
         })
     }
