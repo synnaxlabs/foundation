@@ -134,15 +134,18 @@ USD a day for #1139. No other session holds AWS credentials. The person decided 
    the person.
 2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15):
    on-demand price per hour times count times lifetime, with the types, the issue, the
-   session that asked, and the end time. The sum of caps stays inside the limit. At
-   launch, it posts the instances.
+   session that asked, and the end time. The sum of caps stays inside each limit: the
+   total, the day, and the #1139 day. At launch, it posts the instances on #15, and
+   sends the asking session the address of each and how to reach it.
 3. Every instance has the tags `project=foundation-bench` (or `foundation-test`) and
    `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
    termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
    is at most 240 minutes.
-4. The asking session tells `laptop.monitor` on its issue when the run ends.
-   `laptop.monitor` then terminates the instances, checks that none of its tagged
-   instances still run, and posts the actual hours on the ledger.
+4. When the run ends, the asking session says so on its issue, then sends the link to
+   `laptop.monitor`. `laptop.monitor` then terminates the instances, checks that no
+   instance tagged `issue=<n>` still runs, and posts the actual hours on the ledger.
+5. For #1139, `laptop.monitor` runs the bench script of #1487 itself. Its spend watch
+   alerts on each instance that is not on #15.
 
 ## Messages
 
