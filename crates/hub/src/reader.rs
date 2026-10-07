@@ -14,7 +14,7 @@ use types::name::Name;
 
 use crate::State;
 
-/// The credit a complete reader has past the frames it took: a fixed window until
+/// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
 const WINDOW: u64 = 1 << 20;
 /// Frames that [`Reader::next`] gives in a row before it yields once.
@@ -24,9 +24,9 @@ const STREAK: u32 = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Each live frame, after the commit that holds it. A session that misses a frame
-    /// ends with [`Ended::Behind`] after the frames before it: it misses one when it
-    /// leaves a window of frames untaken, or when one commit holds more than a window
-    /// of frames.
+    /// ends with [`Ended::Behind`] after the frames before it: it misses one when the
+    /// frames it has not given back (the one it holds and those it has not taken)
+    /// reach a window, or when one commit holds more than a window of frames.
     Complete,
     /// The newest live frame, before its commit.
     Latest,
@@ -163,9 +163,8 @@ impl Reader {
 
     /// The next frame, as a view of the reader's channels. The view borrows the
     /// reader, so the frame stays in use, and spends the reader's credit, until the
-    /// first poll of the next call or the drop. After a run
-    /// of frames, it yields once, so a task that loops on it lets the shard's other
-    /// tasks run.
+    /// next call, not its first poll, or the drop. After a run of frames, it yields
+    /// once, so a task that loops on it lets the shard's other tasks run.
     ///
     /// # Errors
     ///
@@ -175,7 +174,11 @@ impl Reader {
         clippy::missing_panics_doc,
         reason = "the interner holds the key set of each frame a writer made"
     )]
-    pub async fn next(&mut self) -> Result<Received<'_>, Ended> {
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "it gives a future, which `Iterator::next` cannot"
+    )]
+    pub fn next(&mut self) -> impl Future<Output = Result<Received<'_>, Ended>> {
         if let Some(frame) = self.frame.take()
             && let Some(credit) = &mut self.credit
         {
@@ -183,48 +186,50 @@ impl Reader {
             let limit = credit.taken_bytes + WINDOW;
             self.state.borrow_mut().home.grant(credit.key, limit);
         }
-        let frame = poll_fn(|cx| {
-            let mut state = self.state.borrow_mut();
-            let state = &mut *state;
-            if self.streak == STREAK {
+        async move {
+            let frame = poll_fn(|cx| {
+                let mut state = self.state.borrow_mut();
+                let state = &mut *state;
+                if self.streak == STREAK {
+                    self.streak = 0;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                if let Some(frame) = state.home.take(self.key) {
+                    self.streak += 1;
+                    return Poll::Ready(Ok(frame));
+                }
+                if let Some(credit) = &self.credit
+                    && state.home.behind(credit.key)
+                {
+                    return Poll::Ready(Err(Ended::Behind));
+                }
+                if let Some(error) = &state.failed {
+                    return Poll::Ready(Err(Ended::Buffer(error.clone())));
+                }
                 self.streak = 0;
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            if let Some(frame) = state.home.take(self.key) {
-                self.streak += 1;
-                return Poll::Ready(Ok(frame));
-            }
-            if let Some(credit) = &self.credit
-                && state.home.behind(credit.key)
-            {
-                return Poll::Ready(Err(Ended::Behind));
-            }
-            if let Some(error) = &state.failed {
-                return Poll::Ready(Err(Ended::Buffer(error.clone())));
-            }
-            self.streak = 0;
-            state.wakers.insert(self.key, cx.waker().clone());
-            Poll::Pending
-        })
-        .await?;
-        let key = frame.key_set();
-        let (set, mask) = match self.mask.take() {
-            Some(mask) if mask.0.key() == key => self.mask.insert(mask),
-            _ => {
-                let snapshot = self.state.borrow().interner.snapshot();
-                let set = snapshot
-                    .get(key)
-                    .expect("invariant: a frame's key set is known");
-                let mask = Mask::new(set, self.slots.iter().copied());
-                self.mask.insert((Arc::clone(set), mask))
-            }
-        };
-        let frame = self.frame.insert(frame);
-        Ok(Received {
-            view: View::new(frame, mask),
-            set,
-        })
+                state.wakers.insert(self.key, cx.waker().clone());
+                Poll::Pending
+            })
+            .await?;
+            let key = frame.key_set();
+            let (set, mask) = match self.mask.take() {
+                Some(mask) if mask.0.key() == key => self.mask.insert(mask),
+                _ => {
+                    let snapshot = self.state.borrow().interner.snapshot();
+                    let set = snapshot
+                        .get(key)
+                        .expect("invariant: a frame's key set is known");
+                    let mask = Mask::new(set, self.slots.iter().copied());
+                    self.mask.insert((Arc::clone(set), mask))
+                }
+            };
+            let frame = self.frame.insert(frame);
+            Ok(Received {
+                view: View::new(frame, mask),
+                set,
+            })
+        }
     }
 }
 

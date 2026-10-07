@@ -613,10 +613,11 @@ How to read this record:
 - **HUB SESSIONS (#1133)** `hub::Reader::next` yields once after 128 frames in a row: it
   wakes its own task and returns `Pending`. So it yields under `sim` as under `os`, and
   `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does nothing
-  outside a Tokio runtime. A complete session that misses a frame (a window of untaken
-  frames, or a commit of more than a window) gets no later frame, as there is no
-  catch-up from the buffer yet. The director chose that `delivery` reports the miss and
-  wakes the session, and that `next` then ends with an error
+  outside a Tokio runtime. A complete session that misses a frame (the frames it has
+  not given back, held or untaken, reach a window, or a commit holds more than a
+  window) gets no later frame, as there is no catch-up from the buffer yet. The
+  director chose that `delivery` reports the miss and wakes the session, and that
+  `next` then ends with an error
   (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
   `delivery::Readers::release` also names a session that missed a frame and has none
   waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
@@ -632,8 +633,8 @@ How to read this record:
   latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
   does not count the commit task. `next` gives a `types::frame::View` of the reader's
   channels and their index (M2), never the frame. The view borrows the reader, which
-  releases the frame at the first poll of the next call, and grants credit for it
-  there (CREDIT RULES); a caller that keeps data copies it. A session that ends gives
+  releases the frame at the next call, not at its first poll, and grants credit for
+  it there (CREDIT RULES); a caller that keeps data copies it. A session that ends gives
   `reader::Ended`. `Hub::define` stands. A writer on a channel of a type the home does
   not write gets `writer::Error::Type` with the channel's name (HOME TYPE REFUSAL).
   Decided by the architect, #1133

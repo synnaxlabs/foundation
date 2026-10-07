@@ -528,7 +528,7 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
         for n in 0..400 {
             write_wide(&mut writer, now, n);
             bytes += taker.next().await.expect("a frame").view.charge();
-            // The take of the second frame grants credit for the first.
+            // The call that takes the second frame grants credit for the first.
             if n < 2 {
                 let charge = lagger.next().await.expect("a frame").view.charge();
                 if n == 0 {
@@ -598,6 +598,49 @@ fn releases_the_lent_frame_at_the_next_call() {
         let held = test.free();
         assert!(poll_once(reader.next()).is_pending());
         assert_eq!(test.free(), held + 1, "the lent frame is released");
+    });
+}
+
+#[test]
+fn keeps_a_complete_reader_that_called_next_before_a_commit_under_a_window() {
+    run_on(1, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write_samples(&mut writer, now, 80_000);
+        let first = reader.next().await.expect("a frame").view.charge();
+        assert!(first < WINDOW, "{first} bytes are under the window");
+        let a = {
+            let next = reader.next();
+            write_samples(&mut writer, now + 80_000, 50_000);
+            write_samples(&mut writer, now + 130_000, 1);
+            test.clock.sleep(SETTLE).await;
+            next.await.expect("a frame").view.charge()
+        };
+        assert!(
+            a + 4096 < WINDOW,
+            "{a} bytes and one sample are under the window"
+        );
+        let b = reader.next().await.map(|received| received.view.charge());
+        assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
+    });
+}
+
+#[test]
+fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
+    run(22, |test| async move {
+        let mut latest = test.reader(&["value"], Mode::Latest).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[0]);
+        latest.next().await.expect("a frame");
+        let mut next = pin!(latest.next());
+        assert!(poll_once(next.as_mut()).is_pending());
+        write(&mut writer, &[now + 1], &[1]);
+        test.clock.sleep(SETTLE).await;
+        let held = test.free();
+        assert!(poll_once(next.as_mut()).is_ready());
+        assert_eq!(test.free(), held, "the reader held no older frame");
     });
 }
 

@@ -490,9 +490,9 @@ impl Shard {
     /// below its credit: a frame spends its [`Frame::charge`]. The first such frame
     /// that finds the credit spent is a miss: the reader gets neither it nor a later
     /// frame, no grant changes that, and [`behind`](Self::behind) reports it. The home
-    /// does not read a missed frame back from disk yet. Close the reader and open a new one. The
-    /// new one starts at the live tail of its open, so the frames from the miss to
-    /// there reach neither reader.
+    /// does not read a missed frame back from disk yet. Close the reader and open a
+    /// new one. The new one starts at the live tail of its open, so the frames from
+    /// the miss to there reach neither reader.
     ///
     /// # Panics
     ///
