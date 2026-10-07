@@ -1813,7 +1813,14 @@ How to read this record:
   (reviewer,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042889435,
   2026-10-07T17:11:00Z). With the index, the same tick, its `ready` included, takes
-  0.33 µs (box1, Intel Xeon Platinum 8488C; `crates/raft/benches/chain.rs`).
+  0.33 µs (box1, Intel Xeon Platinum 8488C; `crates/raft/benches/chain.rs`). No
+  test fails when `links` goes back to a scan: a scan allocates no more than the
+  index, so no count sees it. The bench is the check until #715 gates it, and the
+  gate's CI job must run it (builder, #881,
+  https://github.com/synnaxlabs/foundation/issues/715#issuecomment-6044217325,
+  2026-10-07T18:27:12Z; accepted by the architect,
+  https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6044211313,
+  2026-10-07T18:26:50Z).
   The advisor required a proof on every message and on each refusal, signatures
   only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks
   the signatures (MESH LOG).
