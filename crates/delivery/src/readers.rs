@@ -743,7 +743,8 @@ pub(super) mod tests {
 
     /// Makes each call on the closed session `key`, and asserts that they do not
     /// change the floor, the deadline, or whether a frame is pending. The caller
-    /// checks its records and open sessions after it.
+    /// checks its records, open sessions, key counters, and queued end after it: only
+    /// an open or a panic of `queue` shows the last two.
     pub(super) fn dropped(readers: &mut Readers, key: Key) {
         let before = (readers.floor(), readers.deadline(), readers.pending());
         if let Key::Complete(key) = key {
@@ -1050,6 +1051,34 @@ pub(super) mod tests {
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+        }
+
+        /// Queues frame 1 of `frames` at seq 0..2 to a named and an unnamed session,
+        /// closes the named one at 1, and makes each late call on it.
+        fn closed_with_a_queue(frames: &Frames) -> Readers {
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            readers.queue(&frames.frame(1), 0..2);
+            readers.close_named(old, at(1));
+            dropped(&mut readers, old.into());
+            readers
+        }
+
+        #[test]
+        fn after_a_close_leaves_the_key_counters() {
+            let mut readers = closed_with_a_queue(&Frames::new(1));
+            let next = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
+            assert_eq!(next, complete::Key(2));
+            assert_eq!(readers.open_latest().key, latest::Key(0));
+        }
+
+        #[test]
+        #[should_panic(expected = "live frame at seq 1..2 queued after seq 2")]
+        fn after_a_close_keeps_the_end_of_the_queued_frames() {
+            let frames = Frames::new(2);
+            let mut readers = closed_with_a_queue(&frames);
+            readers.queue(&frames.frame(2), 1..2);
         }
 
         #[test]
@@ -2059,13 +2088,15 @@ pub(super) mod tests {
                 self.closed.retain(|_, (_, hold, at)| *at + *hold > now);
             }
 
+            /// Opens the next key, and returns it with the start position and the
+            /// session it replaces.
             fn open(
                 &mut self,
-                key: complete::Key,
                 name: Option<usize>,
                 hold: i64,
                 start: Start,
-            ) -> (Position, Option<Key>) {
+            ) -> (complete::Key, Position, Option<Key>) {
+                let key = complete::Key(self.given.last().map_or(0, |key| key.0 + 1));
                 let session = self
                     .open
                     .iter()
@@ -2100,7 +2131,7 @@ pub(super) mod tests {
                 };
                 self.open.insert(key, (name, position, hold));
                 self.given.insert(key);
-                (position, session.map(|(key, _)| Key::Complete(key)))
+                (key, position, session.map(|(key, _)| Key::Complete(key)))
             }
 
             fn ack(&mut self, key: complete::Key, to: Position) -> Result<(), Error> {
@@ -2255,8 +2286,11 @@ pub(super) mod tests {
                         Start::At(start)
                     };
                     let opened = readers.open(reader, start, 0);
-                    let expected = model.open(opened.key, name, hold, start);
-                    assert_eq!((opened.position, opened.replaced), expected);
+                    let expected = model.open(name, hold, start);
+                    assert_eq!(
+                        (opened.key, opened.position, opened.replaced),
+                        expected
+                    );
                 }
                 Input::Ack {
                     session,
@@ -2529,8 +2563,8 @@ pub(super) mod tests {
                 None => (Reader::Unnamed, Start::At(live(start))),
             };
             let opened = readers.open(reader, from, limit);
-            let expected = model.readers.open(opened.key, name, 10, from);
-            assert_eq!((opened.position, opened.replaced), expected);
+            let expected = model.readers.open(name, 10, from);
+            assert_eq!((opened.key, opened.position, opened.replaced), expected);
             if let Some(Key::Complete(replaced)) = opened.replaced {
                 model.open.remove(&replaced);
             }
