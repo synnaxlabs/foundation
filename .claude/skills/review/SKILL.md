@@ -15,7 +15,7 @@ cannot start, another session runs it, and the round comment names that session.
 
 Before each round, read this skill as it is on `main` (`git fetch origin main`, then
 `git show origin/main:.claude/skills/review/SKILL.md`), and follow that text. The copy
-on a PR branch can be older.
+on a PR branch can be older, and a rule in an open PR does not apply yet.
 
 ## Round 1
 
