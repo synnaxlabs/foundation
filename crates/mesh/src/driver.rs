@@ -251,7 +251,7 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
-        claim::check(&message, public_key)?;
+        claim::check(&group.raft, &message, public_key)?;
         group.raft.step(message)?;
         group.wake();
         Ok(())
@@ -2070,6 +2070,50 @@ mod tests {
                 let mut pre_vote = message(3, 1, Body::PreVote { last: at });
                 pre_vote.term = Term(common::TERM.0 + 1);
                 assert_eq!(mesh.receive(public(3), pre_vote), Ok(()));
+            });
+        }
+
+        // Node 1 was down while leader 2 moved the voters from 1, 2, 3 and 4 to 1, 2
+        // and 3 in the term before `TERM`, and nodes 2 and 3 then elected node 2 in
+        // `TERM`. The chain of the two entries proves the leader.
+        #[test]
+        fn takes_a_leader_that_the_chain_proves() {
+            solo(|node, tasks| async move {
+                let all = [1, 2, 3, 4];
+                let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
+                let link = |index, outgoing: &[u8]| {
+                    let at = Position {
+                        term: Term(common::TERM.0 - 1),
+                        index,
+                    };
+                    let voters = Voters {
+                        incoming: [1, 2, 3].map(key).into(),
+                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+                    };
+                    let Data::Voters(change) = common::change(2, at, voters).data
+                    else {
+                        unreachable!("a change is a voters entry");
+                    };
+                    raft::Link { at, change }
+                };
+                let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
+                let short = heartbeat.clone();
+                heartbeat.chain = vec![link(1, &all), link(2, &[])];
+                let mut forged = heartbeat.clone();
+                forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
+                let unproven = raft::Error::Unproven {
+                    term: common::TERM,
+                    from: key(2),
+                };
+                assert_eq!(mesh.receive(public(2), short), Err(Error::Raft(unproven)));
+                let claim = Error::Claim(claim::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(2), forged), Err(claim));
+                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                assert_eq!(term(&mesh), common::TERM);
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
         }
 
