@@ -70,6 +70,8 @@ struct Test {
     clock: Clock,
     mesh: clock::Reader,
     tasks: Tasks,
+    /// How many tasks of the hub have ended.
+    ended: Rc<Cell<usize>>,
     /// The node's mesh clock until [`Test::sync`] runs it.
     unsynced: Option<clock::Clock>,
     hub: Hub,
@@ -101,10 +103,14 @@ impl Test {
             clock: mesh.clone(),
             limits: LIMITS,
         });
+        let ended = Rc::new(Cell::new(0));
         let hub = Hub::new(hub::Config {
             home,
             interner,
-            tasks: tasks.clone(),
+            tasks: Tasks::new(Counted {
+                tasks: tasks.clone(),
+                ended: Rc::clone(&ended),
+            }),
         });
         for (key, channel, data_type, index) in CHANNELS {
             hub.define(Channel {
@@ -120,6 +126,7 @@ impl Test {
             pool,
             mesh,
             tasks,
+            ended,
             unsynced: Some(unsynced),
             hub,
         }
@@ -170,6 +177,22 @@ impl Test {
             len -= len.div_ceil(16);
         }
         blocks
+    }
+}
+
+/// Spawns on `tasks`, and counts in `ended` each task that completes.
+struct Counted {
+    tasks: Tasks,
+    ended: Rc<Cell<usize>>,
+}
+
+impl env::tasks::Driver for Counted {
+    fn spawn(&self, task: env::tasks::Task) {
+        let ended = Rc::clone(&self.ended);
+        self.tasks.spawn(async move {
+            task.await;
+            ended.set(ended.get() + 1);
+        });
     }
 }
 
@@ -460,6 +483,31 @@ fn gives_control_to_a_waiting_writer_when_a_writer_drops() {
         assert_eq!(write(&mut b, &[now], &[1]), [waiting]);
         drop(a);
         assert_eq!(write(&mut b, &[now + 1], &[2]), [applied(0)]);
+    });
+}
+
+/// The commit task does not hold the home, so the home and its buffer end with the
+/// hub and its sessions, and the task ends.
+#[test]
+fn drops_the_home_once_the_hub_and_each_session_drop() {
+    run(23, |test| async move {
+        let reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        write(&mut writer, &[test.now()], &[1]);
+        let Test {
+            pool,
+            clock,
+            hub,
+            ended,
+            ..
+        } = test;
+        drop(writer);
+        clock.sleep(SETTLE).await;
+        assert_eq!(ended.get(), 0, "the hub holds the home");
+        drop((hub, reader));
+        clock.sleep(SETTLE).await;
+        assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+        assert_eq!(ended.get(), 1, "the commit task ended");
     });
 }
 

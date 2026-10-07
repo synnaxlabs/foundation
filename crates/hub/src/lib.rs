@@ -71,7 +71,8 @@ struct State {
 
 impl Hub {
     /// A hub over `config.home` that knows no channel yet. Spawns a task on
-    /// `config.tasks` that runs until the shard stops.
+    /// `config.tasks`. The home drops once the hub, each clone, and each session
+    /// drop.
     #[must_use]
     pub fn new(config: Config) -> Self {
         let Config {
@@ -89,7 +90,7 @@ impl Hub {
             commit: commit::Signal::default(),
             failed: None,
         }));
-        tasks.spawn(commit::run(Rc::clone(&state)));
+        tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
     }
 
@@ -189,6 +190,15 @@ impl State {
         wakers.sort_unstable_by_key(|&(key, _)| key);
         for (_, waker) in wakers {
             waker.wake();
+        }
+    }
+}
+
+impl Drop for State {
+    /// Wakes the commit task, which then finds the state gone and ends.
+    fn drop(&mut self) {
+        if let Some(task) = self.commit.task.take() {
+            task.wake();
         }
     }
 }

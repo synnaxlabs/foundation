@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::future::poll_fn;
 use std::mem;
-use std::rc::Rc;
+use std::rc::Weak;
 use std::task::{Poll, Waker};
 
 /// How the sessions tell the commit task that a commit is due.
@@ -29,21 +29,27 @@ impl Signal {
 }
 
 /// Waits for each commit that holds frames for complete readers, then wakes them.
-/// After a failed commit, it keeps the error, wakes every reader, and ends.
-pub(crate) async fn run(state: Rc<RefCell<super::State>>) {
+/// After a failed commit, it keeps the error, wakes every reader, and ends. It holds
+/// `state` only during a poll, so it ends once the hub and each session drop.
+pub(crate) async fn run(state: Weak<RefCell<super::State>>) {
     loop {
         // A commit future resolves at once when nothing waits, so the task sleeps
         // until a session gives it an append to wait for.
         let commit = poll_fn(|cx| {
+            let Some(state) = state.upgrade() else {
+                return Poll::Ready(None);
+            };
             let mut state = state.borrow_mut();
             if mem::take(&mut state.commit.due) {
-                return Poll::Ready(state.home.committed());
+                return Poll::Ready(Some(state.home.committed()));
             }
             state.commit.task = Some(cx.waker().clone());
             Poll::Pending
         })
         .await;
+        let Some(commit) = commit else { return };
         let committed = commit.await;
+        let Some(state) = state.upgrade() else { return };
         let mut state = state.borrow_mut();
         match committed {
             Ok(()) => state.wake(),
