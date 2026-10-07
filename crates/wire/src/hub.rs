@@ -282,9 +282,10 @@ pub mod keys {
 }
 
 /// The run of ends after a head: the place of each series and the end of its bytes in
-/// the body. The body follows, as long as the last end. An end whose place the session
-/// does not have, that repeats a place of its frame, or that is below the end before
-/// it, is not valid.
+/// the body. The body follows, as long as the last end. Each series starts at the end
+/// before it, rounded up to 8 bytes, with padding between. An end whose place the
+/// session does not have, that repeats a place of its frame, or that is below the start
+/// of its series, is not valid.
 pub mod ends {
     use super::{Error, Writer, run};
 
@@ -799,13 +800,29 @@ mod tests {
 
         #[test]
         fn decodes_each_message_of_a_split_run() {
-            let sent: Vec<_> = (0..400).map(|place| (place, place + 1)).collect();
+            let sent: Vec<_> = (0..400).map(|place| (place, (place + 1) * 8)).collect();
             let run = encode_ends(&sent);
             let got: Vec<_> = run
                 .chunks(1472 / super::super::ends::LEN * super::super::ends::LEN)
                 .flat_map(|message| super::super::ends::decode(message).unwrap())
                 .collect();
             assert_eq!(got, sent);
+        }
+
+        #[test]
+        fn starts_each_series_on_8_bytes() {
+            let check = |ends: &[(u32, u32)], len: usize| {
+                let message = encode_ends(ends);
+                let ends = super::super::ends::decode(&message)
+                    .expect("the run has ends")
+                    .map(|(place, end)| (place, usize::try_from(end).expect("fits")));
+                types::frame::check(&vec![0; len], ends)
+            };
+            assert_eq!(check(&[(0, 3), (1, 13)], 13), Ok(()));
+            assert_eq!(
+                check(&[(0, 3), (1, 5)], 5),
+                Err(types::frame::BadEnd::Before { end: 5, start: 8 })
+            );
         }
 
         #[test]
