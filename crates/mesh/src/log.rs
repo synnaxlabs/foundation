@@ -868,6 +868,40 @@ mod tests {
         assert_eq!(lost, [], "(seed, hard that open gave, hard after a cut)");
     }
 
+    // A failed sync leaves its record in the cache, clean, and not on the disk.
+    #[test]
+    fn a_power_cut_keeps_what_an_open_after_a_failed_sync_gave() {
+        let mut lost = Vec::new();
+        for seed in 0..64 {
+            let (mut sim, node) = sim(seed);
+            let expected = sim
+                .run_on(&node, |node, _| async move {
+                    let (mut log, _) = open(&node).await.unwrap();
+                    log.write(Some(hard(1, Some(1))), &[bytes(1, 100)])
+                        .await
+                        .unwrap();
+                    node.fail_file(&file("log-0"), Operation::Sync);
+                    log.write(Some(hard(2, Some(1))), &[bytes(2, 100)])
+                        .await
+                        .unwrap_err();
+                    drop(log);
+                    let (mut log, mut opened) = open(&node).await.unwrap();
+                    let next = bytes(wide(opened.entries.len()) + 1, 100);
+                    opened.hard = hard(3, Some(1));
+                    opened.entries.push(next.clone());
+                    log.write(Some(opened.hard.clone()), &[next]).await.unwrap();
+                    opened
+                })
+                .unwrap();
+            sim.crash(&node, Crash::Power);
+            let kept = stored(&mut sim, &node).unwrap();
+            if kept != expected {
+                lost.push((seed, expected.entries.len(), kept.entries.len()));
+            }
+        }
+        assert_eq!(lost, [], "(seed, entries before the cut, entries after it)");
+    }
+
     // A failed open leaves the directory or `log-0` with no durable entry.
     #[test]
     fn a_write_after_a_failed_open_survives_a_power_cut() {
