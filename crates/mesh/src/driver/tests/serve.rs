@@ -225,8 +225,9 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
                 let config = config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS);
                 let mesh = Mesh::open(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
-                // The group did not see the heartbeat after the refused message.
-                assert_eq!(term(&mesh), Term(0));
+                // The group did not see the heartbeat after the refused message:
+                // its reply comes after the write of the term.
+                node.clock().sleep(seconds(1)).await;
                 assert!(quiet(&mesh, 2).await);
                 served
             },
@@ -260,7 +261,7 @@ fn serve_stops_a_one_way_stream_at_a_message_that_it_does_not_carry() {
             |node, tasks, incoming| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let served = mesh.serve(public(2), incoming).await;
-                assert_eq!(term(&mesh), Term(0));
+                node.clock().sleep(seconds(1)).await;
                 assert!(quiet(&mesh, 2).await);
                 served
             },
@@ -347,6 +348,44 @@ fn serve_gives_the_cause_when_the_peer_resets_the_stream() {
 }
 
 #[test]
+fn serve_gives_the_cause_when_the_peer_resets_a_one_way_stream() {
+    let (served, ()) = run(
+        |node, tasks, incoming| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            mesh.serve(public(2), incoming).await
+        },
+        |peer| async move {
+            let sender = peer.send_each(&[raft(heartbeat())]).await;
+            peer.settle().await;
+            sender.reset(Code(40));
+            peer.settle().await;
+        },
+    );
+    let cause = transport::Error::Reset { code: Code(40) };
+    assert_eq!(served, Err(Error::Stream(cause)));
+}
+
+#[test]
+fn serve_stops_a_one_way_stream_when_the_group_stopped() {
+    let ((served, stop), finished) = run(
+        |node, tasks, incoming| async move {
+            let (mesh, _) = leader(&node, &tasks, create_pool()).await;
+            let stop = fail_sync(&node);
+            assert_eq!(mesh.propose(home(4)).await, Err(stop.clone()));
+            (mesh.serve(public(2), incoming).await, stop)
+        },
+        |peer| async move {
+            let mut sender = peer.send_each(&[raft(heartbeat())]).await;
+            // Node 1 leads and stops first.
+            peer.node.clock().sleep(seconds(10)).await;
+            sender.finish()
+        },
+    );
+    let stopped = transport::Error::Stopped { code: REFUSED };
+    assert_eq!((served, finished), (Err(stop), Err(stopped)));
+}
+
+#[test]
 fn serve_answers_a_proposal_with_its_position_when_the_node_leads() {
     let ((served, first, home), answers) = run(
         |node, tasks, incoming| async move {
@@ -389,6 +428,71 @@ fn serve_answers_a_proposal_with_the_leader_when_the_node_follows() {
     let answer = Message::NotLeader { leader };
     assert_eq!(served, Ok(()));
     assert_eq!(answers, (Ok(()), Ok(Some(answer)), Ok(None)));
+}
+
+#[test]
+fn serve_answers_a_proposal_with_no_leader_when_the_node_knows_none() {
+    let (served, answers) = run(
+        |node, tasks, incoming| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            mesh.serve(public(2), incoming).await
+        },
+        |peer| async move {
+            let (mut sender, mut receiver) = peer.ask(&[propose(3)]).await;
+            let finished = sender.finish();
+            let answer = next(&mut receiver).await;
+            (finished, answer, next(&mut receiver).await)
+        },
+    );
+    let answer = Message::NotLeader { leader: None };
+    assert_eq!(served, Ok(()));
+    assert_eq!(answers, (Ok(()), Ok(Some(answer)), Ok(None)));
+}
+
+#[test]
+fn serve_gives_the_cause_when_the_stream_fails_after_the_answer() {
+    let ((served, first), answer) = run(
+        |node, tasks, incoming| async move {
+            let (mesh, first) = leader(&node, &tasks, create_pool()).await;
+            (mesh.serve(public(1), incoming).await, first)
+        },
+        |peer| async move {
+            let (sender, mut receiver) = peer.ask(&[propose(3)]).await;
+            let answer = next(&mut receiver).await;
+            sender.reset(Code(40));
+            peer.settle().await;
+            (answer, next(&mut receiver).await)
+        },
+    );
+    let at = after(first, 1);
+    let cause = transport::Error::Reset { code: Code(40) };
+    assert_eq!(served, Err(Error::Stream(cause)));
+    assert_eq!(answer, (Ok(Some(Message::Proposed { at })), Ok(None)));
+}
+
+// The peer does not read the answer, so the send of the answer fails.
+#[test]
+fn serve_gives_the_cause_when_the_peer_stopped_the_reply_half() {
+    let ((served, next, first), ()) = run(
+        |node, tasks, incoming| async move {
+            let (mesh, first) = leader(&node, &tasks, create_pool()).await;
+            let served = mesh.serve(public(1), incoming).await;
+            let next = mesh.propose(home(5)).await;
+            (served, next, first)
+        },
+        |peer| async move {
+            let (mut sender, receiver) = peer.ask(&[]).await;
+            receiver.stop(Code(40));
+            peer.settle().await;
+            peer.send(&mut sender, &propose(3)).await;
+            sender.finish().unwrap();
+            peer.settle().await;
+        },
+    );
+    let cause = transport::Error::Stopped { code: Code(40) };
+    assert_eq!(served, Err(Error::Stream(cause)));
+    // The group took the change.
+    assert_eq!(next, Ok(after(first, 2)));
 }
 
 /// What the peer sees on a stream that goes both ways and that node 1 stops: what

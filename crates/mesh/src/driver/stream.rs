@@ -16,7 +16,7 @@ const REFUSED: Code = Code(16);
 impl Mesh {
     /// Serves one stream that `peer` opened, after `node` read its header. It returns
     /// when the stream ends, or at the first message it refuses. A refused message
-    /// changes nothing, and the stream stops with the mesh code `REFUSED`.
+    /// changes nothing, and the stream stops with code 16.
     ///
     /// # Errors
     ///
@@ -40,7 +40,7 @@ impl Mesh {
             ..
         } = incoming;
         let served = match sender {
-            None => self.take(peer, &mut receiver).await,
+            None => self.deliver(peer, &mut receiver).await,
             Some(sender) => self.exchange(peer, &mut receiver, sender).await,
         };
         if let Some(code) = served.as_ref().err().and_then(code) {
@@ -50,7 +50,7 @@ impl Mesh {
     }
 
     /// Gives the group each `raft` message of a stream that only `peer` sends on.
-    async fn take(
+    async fn deliver(
         &self,
         peer: PublicKey,
         receiver: &mut Receiver,
