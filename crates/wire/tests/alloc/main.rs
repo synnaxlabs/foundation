@@ -106,4 +106,11 @@ fn ends(series: u32) {
     });
     assert_eq!(allocations, 0, "the decode of {series} ends allocated");
     assert_eq!(last, Some((series - 1, series)), "the last end round trips");
+    let body = vec![7; usize::try_from(series).expect("a u32 fits a usize")];
+    let (len, allocations) = ALLOCATOR.count(|| match reader.decode(&body) {
+        Ok(FromHome::Body { bytes, last: true }) => bytes.len(),
+        other => panic!("the body did not decode: {other:?}"),
+    });
+    assert_eq!(allocations, 0, "the body of {series} ends allocated");
+    assert_eq!(len, body.len(), "the body round trips");
 }

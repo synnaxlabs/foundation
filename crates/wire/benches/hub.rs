@@ -1,8 +1,14 @@
-//! The cost of the hub messages on a frame's path: a head and its ends.
+//! The cost of the hub messages on a frame's path: a head, its ends, its body, and a
+//! credit.
 
 use divan::Bencher;
-use types::frame::{Path, Range};
-use wire::hub::{FromHome, Head, Mode, Open, Reader, Reply, ends};
+use types::{
+    channel,
+    frame::{Path, Range},
+};
+use wire::hub::{
+    Credit, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply, ends, keys,
+};
 
 const SERIES: [u32; 4] = [1, 3, 1_000, 100_000];
 
@@ -45,28 +51,47 @@ fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
     });
 }
 
-/// Decodes a head and the run of its ends, in one message.
+/// Decodes the run of ends of a head, in one message.
 #[divan::bench(args = SERIES)]
 fn decode_ends(bencher: Bencher<'_, '_>, series: u32) {
     let run = run_of(series);
     let mut out = [0; 18];
     head(series).encode(&mut out);
     bencher
-        .with_inputs(|| opened(series))
-        .bench_local_refs(|reader| {
+        .with_inputs(|| {
+            let mut reader = opened(series);
+            reader.decode(&out).expect("the head decodes");
             reader
-                .decode(divan::black_box(&out))
-                .expect("the head decodes");
-            match reader.decode(divan::black_box(&run)) {
-                Ok(FromHome::Ends { ends, .. }) => {
-                    ends.fold(0_u64, |sum, (place, end)| {
-                        sum.wrapping_add(u64::from(place))
-                            .wrapping_add(u64::from(end))
-                    })
-                }
-                other => panic!("the ends did not decode: {other:?}"),
-            }
+        })
+        .bench_local_refs(|reader| match reader.decode(divan::black_box(&run)) {
+            Ok(FromHome::Ends { ends, .. }) => sum(ends),
+            other => panic!("the ends did not decode: {other:?}"),
         });
+}
+
+/// Decodes a frame on one reader: a head, its ends, and its body, one message each.
+#[divan::bench(args = SERIES)]
+fn decode_a_frame(bencher: Bencher<'_, '_>, series: u32) {
+    let run = run_of(series);
+    let body = vec![7; usize::try_from(series * 8).expect("a u32 fits a usize")];
+    let mut out = [0; 18];
+    head(series).encode(&mut out);
+    let mut reader = opened(series);
+    bencher.bench_local(|| {
+        reader
+            .decode(divan::black_box(&out))
+            .expect("the head decodes");
+        let sum = match reader.decode(divan::black_box(&run)) {
+            Ok(FromHome::Ends { ends, .. }) => sum(ends),
+            other => panic!("the ends did not decode: {other:?}"),
+        };
+        match reader.decode(divan::black_box(&body)) {
+            Ok(FromHome::Body { bytes, last: true }) => {
+                sum.wrapping_add(u64::from(bytes[0]))
+            }
+            other => panic!("the body did not decode: {other:?}"),
+        }
+    });
 }
 
 #[divan::bench]
@@ -81,4 +106,34 @@ fn encode_and_decode_a_head(bencher: Bencher<'_, '_>) {
                 other => panic!("the head did not decode: {other:?}"),
             }
         });
+}
+
+/// Decodes a credit on one home, after the open and its keys.
+#[divan::bench]
+fn decode_a_credit(bencher: Bencher<'_, '_>) {
+    let mut open = [0; 5];
+    Open {
+        mode: Mode::Latest,
+        channels: 1,
+    }
+    .encode(&mut open);
+    let mut key = [0; keys::LEN];
+    keys::encode(&[channel::Key::from_u128(1)], &mut key);
+    let mut credit = [0; Credit::LEN];
+    Credit { limit_bytes: 64 }.encode(&mut credit);
+    let mut home = Home::default();
+    for message in [open.as_slice(), &key] {
+        home.decode(message).expect("the open decodes");
+    }
+    bencher.bench_local(|| match home.decode(divan::black_box(&credit)) {
+        Ok(FromReader::Credit(credit)) => credit,
+        other => panic!("the credit did not decode: {other:?}"),
+    });
+}
+
+fn sum(ends: ends::Iter<'_>) -> u64 {
+    ends.fold(0, |sum, (place, end)| {
+        sum.wrapping_add(u64::from(place))
+            .wrapping_add(u64::from(end))
+    })
 }
