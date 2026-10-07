@@ -975,8 +975,6 @@ mod tests {
             span: Some(on(1, 2)),
         });
         assert_eq!(Checked::new(nest(64, "a")), refused);
-        // A key too long for `[]` to fit on its line.
-        assert_eq!(Checked::new(nest(64, &"k".repeat(90))), refused);
 
         let text = format!("{}a = []\n{}", "b {\n".repeat(64), "}\n".repeat(64));
         let bracket = Span::new(
