@@ -134,12 +134,15 @@ USD a day for #1139. No other session holds AWS credentials. The person decided 
    the person.
 2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15), with
    the types, the issue, and the session that asked. The cap is the price per hour
-   times count times the lifetime plus 10 minutes. The price is the on-demand price, or
-   for a spot instance its `MaxPrice` plus 0.03 USD for the disk and the address. The
-   sum of caps stays inside each limit: the total, the day, and the #1139 day. At
-   launch, it posts on #15 one line for each instance: the instance, type, issue,
-   session that asked, cap, and end time. It sends the asking session the address of
-   each and how to reach it.
+   times count times the lifetime plus 10 minutes. For a spot host the price is its
+   `MaxPrice` plus 0.03 USD an hour for its disk and public address, because AWS never
+   bills a spot host above its `MaxPrice`. For an on-demand host it is the on-demand
+   price (`laptop.monitor`,
+   https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042917805,
+   2026-10-07T17:12:22Z). The sum of caps stays inside each limit: the total, the day,
+   and the #1139 day. At launch, it posts on #15 one line for each instance: the
+   instance, type, issue, session that asked, cap, and end time. It sends the asking
+   session the address of each and how to reach it.
 3. Every instance has the tags `project=foundation-bench` (or `foundation-test`) and
    `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
    termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
