@@ -145,7 +145,8 @@ impl Mesh {
     }
 
     /// The member with `key` in this node's view of the region, or `None` when the
-    /// region has no such member.
+    /// region has no such member. It answers also after the group stops, from the view
+    /// at the stop.
     pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
     }
@@ -517,7 +518,9 @@ mod tests {
     use sim::{Crash, Sim, link};
 
     use super::*;
+    use crate::card;
     use crate::common::{self, key, pool, private, public};
+    use crate::message::Message;
     use crate::region::Malformed;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -1589,6 +1592,23 @@ mod tests {
             assert_eq!(watch.next().await, Err(stopped));
             assert_eq!(mesh.member(key(1)), Some(common::member(1)));
             assert_eq!(mesh.member(key(2)), None);
+        });
+    }
+
+    // `open` does not check that a card is signed for its key in `members` (#1259).
+    #[test]
+    fn open_takes_a_card_that_is_signed_for_another_key() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[1, 2], &[1]);
+            config.members.insert(key(2), common::member(3));
+            let mesh = Mesh::open(config).await.unwrap();
+            let given = mesh.member(key(2)).unwrap();
+            assert_eq!(given, common::member(3));
+            let card = given.card.card().clone();
+            assert_eq!(
+                card::Signed::check(key(2), card, *given.card.signature()).err(),
+                Some(card::Forged { node: key(2) }),
+            );
         });
     }
 
