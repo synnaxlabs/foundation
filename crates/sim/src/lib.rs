@@ -160,7 +160,8 @@ impl Sim {
     }
 
     /// Makes each lookup of `host` that starts from now on, on any node, go as
-    /// `config` says. A name that no call gave has no address.
+    /// `config` says. As in DNS, a name matches in any ASCII case and with or
+    /// without one final dot. A name that no call gave has no address.
     ///
     /// ```
     /// let mut sim = sim::Sim::new(sim::Config::default());
@@ -172,13 +173,10 @@ impl Sim {
     ///
     /// # Panics
     ///
-    /// When `config.delay` is negative.
+    /// When `config.delay` is negative, or when `host` is an IP literal, which
+    /// [`env::net::Net::resolve`] gives with no lookup.
     pub fn name(&mut self, host: &str, config: name::Config) {
-        let delay = config.delay;
-        assert!(
-            delay >= Span::ZERO,
-            "the lookup of {host} takes a negative delay of {delay}"
-        );
+        config.check(host);
         lock(&self.shared).net().name(host, config);
     }
 
@@ -497,6 +495,9 @@ fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
 
 /// The Linux code for an I/O error (`EIO`).
 const EIO: i32 = 5;
+
+/// The Linux code for a failure that may pass (`EAGAIN`).
+const EAGAIN: i32 = 11;
 
 /// The most payloads that [`messages`] drops in one chain.
 const CHAIN: usize = 16;

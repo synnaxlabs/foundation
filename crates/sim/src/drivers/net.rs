@@ -11,6 +11,7 @@ use env::net::{Connect, Error, Resolve, listener, tcp};
 use types::time::Monotonic;
 
 use super::{Node, Owner};
+use crate::EAGAIN;
 use crate::name::{self, Answer};
 use crate::net::tcp::{Pair, Tcp};
 use crate::net::udp::Bound;
@@ -18,8 +19,6 @@ use crate::state::lock;
 
 const DELAYED: &str = "sim does not simulate delayed TCP sends yet";
 const NO_NODE: &str = "sim does not simulate TCP to an address with no node yet";
-/// The Linux errno of a lookup that no name server answers.
-const EAGAIN: i32 = 11;
 
 impl Node {
     /// Runs `call` on the TCP sockets with the true time now. Drops the wakers that
@@ -88,10 +87,14 @@ impl env::net::Driver for Node {
     }
 
     fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Resolve<'a> {
+        self.running("a lookup");
         let name::Config { answer, delay } = lock(&self.shared).net().lookup(host);
         let clock = env::clock::Clock::new(self.clone());
         Box::pin(async move {
-            clock.sleep(delay).await;
+            let Some(end) = clock.now().checked_add(delay) else {
+                return std::future::pending().await;
+            };
+            clock.sleep_until(end).await;
             match answer {
                 Answer::Addresses(ips) if ips.is_empty() => Err(Error::NotFound {
                     host: host.to_owned(),

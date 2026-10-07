@@ -149,12 +149,12 @@ impl Network {
 
     /// Makes each lookup of `host` from now on go as `config` says.
     pub(crate) fn name(&mut self, host: &str, config: name::Config) {
-        self.names.insert(host.to_owned(), config);
+        self.names.insert(key(host), config);
     }
 
     /// How a lookup of `host` that starts now goes.
     pub(crate) fn lookup(&self, host: &str) -> name::Config {
-        self.names.get(host).cloned().unwrap_or_default()
+        self.names.get(&key(host)).cloned().unwrap_or_default()
     }
 
     /// Sets the link from node `from` to node `to`.
@@ -225,4 +225,9 @@ impl Network {
     pub(crate) fn digest(&self) -> u64 {
         self.wire.digest()
     }
+}
+
+/// The key of `host` in the name table: its ASCII lowercase, with no final dot.
+fn key(host: &str) -> String {
+    host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
 }

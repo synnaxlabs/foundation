@@ -1,14 +1,16 @@
 //! Tests of the name lookups of a run through `env::net`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Waker};
 
 use env::net::Error as Net;
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
-use super::{millis, shard, sim};
+use super::{millis, pair, shard, sim};
 use crate::name::{Answer, Config};
-use crate::{Sim, node};
+use crate::{Sim, link, node};
 
 /// The answer to a lookup, and the time it took on the clock of its node.
 type Lookup = (Result<Vec<SocketAddr>, Net>, Span);
@@ -122,6 +124,88 @@ fn a_lookup_gives_the_answer_of_its_start() {
     sim.run().unwrap();
     assert_eq!(*answer.lock().unwrap(), Some(Ok(vec![at(v4(2))])));
     assert_eq!(lookup(&mut sim, &node), (Ok(vec![at(v4(3))]), Span::ZERO));
+}
+
+#[test]
+fn a_name_matches_in_any_ascii_case() {
+    let (mut sim, node) = one();
+    sim.name("Historian.LOCAL", addresses(vec![v4(2)]));
+    assert_eq!(lookup(&mut sim, &node), (Ok(vec![at(v4(2))]), Span::ZERO));
+}
+
+#[test]
+fn a_name_matches_with_or_without_a_final_dot() {
+    let (mut sim, node) = one();
+    sim.name("historian.local.", addresses(vec![v4(2)]));
+    assert_eq!(lookup(&mut sim, &node), (Ok(vec![at(v4(2))]), Span::ZERO));
+    sim.name(HOST, addresses(vec![v4(3)]));
+    let found = sim.run_on(&node, |node, _| async move {
+        node.net().resolve("historian.local.", 4433).await
+    });
+    assert_eq!(found, Ok(Ok(vec![at(v4(3))])));
+}
+
+#[test]
+fn each_node_gets_the_answer_through_a_partition() {
+    let cut = link::Config {
+        loss: 1.0,
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, cut);
+    let config = Config {
+        delay: millis(5),
+        ..addresses(vec![v4(2)])
+    };
+    sim.name(HOST, config);
+    for node in [&a, &b] {
+        assert_eq!(lookup(&mut sim, node), (Ok(vec![at(v4(2))]), millis(5)));
+    }
+}
+
+#[test]
+fn a_lookup_that_ends_past_the_clock_never_answers() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(u64::MAX / 2 + 10),
+        ..node::Config::default()
+    });
+    let config = Config {
+        delay: Span::from_nanos(i64::MAX),
+        ..addresses(vec![v4(2)])
+    };
+    sim.name(HOST, config);
+    let answer = Arc::new(Mutex::new(None));
+    let (slot, net) = (Arc::clone(&answer), node.net());
+    let start = node.shards().start(shard("lookup"), move |_| async move {
+        *slot.lock().unwrap() = Some(net.resolve(HOST, 4433).await);
+    });
+    drop(start.unwrap());
+    sim.run_for(millis(10)).unwrap();
+    assert_eq!(*answer.lock().unwrap(), None);
+}
+
+#[test]
+#[should_panic(expected = "10.0.0.2 is an IP literal, which no lookup reads")]
+fn a_name_that_is_an_ip_literal_panics() {
+    let (mut sim, _) = one();
+    sim.name("10.0.0.2", addresses(vec![v4(3)]));
+}
+
+#[test]
+#[should_panic(expected = "[fd00::2] is an IP literal, which no lookup reads")]
+fn a_name_that_is_an_ipv6_literal_in_brackets_panics() {
+    let (mut sim, _) = one();
+    sim.name("[fd00::2]", addresses(vec![v4(3)]));
+}
+
+#[test]
+#[should_panic(expected = "a lookup needs a thread that the sim started")]
+fn a_lookup_outside_the_sim_panics() {
+    let (_sim, node) = one();
+    let net = node.net();
+    let mut lookup = pin!(net.resolve(HOST, 4433));
+    let mut cx = Context::from_waker(Waker::noop());
+    drop(lookup.as_mut().poll(&mut cx));
 }
 
 #[test]

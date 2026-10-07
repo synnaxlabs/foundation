@@ -1,6 +1,6 @@
 //! The answers to the name lookups of a run.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use types::time::Span;
 
@@ -19,7 +19,8 @@ pub struct Config {
     /// What the lookup gives.
     pub answer: Answer,
     /// The time that the lookup takes on the clock of its node. Not negative. Zero,
-    /// the default, answers at the first poll.
+    /// the default, answers at the first poll. A lookup whose end is past the end of
+    /// the clock never answers.
     pub delay: Span,
 }
 
@@ -33,8 +34,27 @@ pub enum Answer {
     /// These addresses, in order, each with the port of the lookup. With none, the
     /// default, the lookup gives [`env::net::Error::NotFound`].
     Addresses(Vec<IpAddr>),
-    /// [`env::net::Error::Io`] with `EAGAIN` (11), as when no name server answers.
+    /// [`env::net::Error::Io`] with the Linux `EAGAIN` (11), as when no name server
+    /// answers.
     Failed,
+}
+
+impl Config {
+    /// Panics when the delay is negative, or when `host` is an IP literal, which
+    /// `env::net::Net::resolve` gives with no lookup.
+    pub(crate) fn check(&self, host: &str) {
+        let delay = self.delay;
+        assert!(
+            delay >= Span::ZERO,
+            "the lookup of {host} takes a negative delay of {delay}"
+        );
+        let bracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        let literal = match bracketed {
+            Some(v6) => v6.parse::<Ipv6Addr>().is_ok(),
+            None => host.parse::<IpAddr>().is_ok(),
+        };
+        assert!(!literal, "{host} is an IP literal, which no lookup reads");
+    }
 }
 
 impl Default for Answer {

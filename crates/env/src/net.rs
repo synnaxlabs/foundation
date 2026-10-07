@@ -11,7 +11,7 @@ pub mod udp;
 
 use std::fmt;
 use std::io::IoSlice;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -118,14 +118,18 @@ impl Net {
     }
 
     /// Gives one or more addresses of `host`, each with `port`, in the order that the
-    /// resolver gives them. A host that parses as an [`IpAddr`] gives that address
-    /// and does no lookup. Each call looks up again: `resolve` keeps no cache.
-    /// Dropping the future stops the wait, not the lookup.
+    /// resolver gives them. A host that parses as an [`IpAddr`], or an IPv6 address
+    /// in brackets as in a URI, gives that address and does no lookup. Each call
+    /// looks up again: `resolve` keeps no cache. Dropping the future stops the wait,
+    /// not the lookup.
     ///
     /// # Errors
     ///
-    /// [`Error::NotFound`] when the name has no address, and [`Error::Io`] for other
-    /// failures.
+    /// - [`Error::NotFound`] when the name has no address. A retry gives the same
+    ///   answer until the name changes.
+    /// - [`Error::Io`] when the lookup fails, for example when no name server
+    ///   answers. A retry may give an answer. The code differs between systems, so
+    ///   match the variant, not the code.
     ///
     /// ```
     /// use std::net::SocketAddr;
@@ -139,7 +143,12 @@ impl Net {
         host: &str,
         port: u16,
     ) -> Result<Vec<SocketAddr>, Error> {
-        if let Ok(ip) = host.parse::<IpAddr>() {
+        let bracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        let literal = match bracketed {
+            Some(v6) => v6.parse::<Ipv6Addr>().map(IpAddr::V6),
+            None => host.parse::<IpAddr>(),
+        };
+        if let Ok(ip) = literal {
             return Ok(vec![SocketAddr::new(ip, port)]);
         }
         self.0.resolve(host, port).await
@@ -647,6 +656,17 @@ mod tests {
         #[test]
         fn gives_an_ipv6_literal_with_no_lookup() {
             assert_eq!(resolve("fd00::2"), Ok(vec![address("[fd00::2]:4433")]));
+        }
+
+        #[test]
+        fn gives_an_ipv6_literal_in_brackets_with_no_lookup() {
+            assert_eq!(resolve("[fd00::2]"), Ok(vec![address("[fd00::2]:4433")]));
+        }
+
+        #[test]
+        fn looks_up_an_ipv4_literal_in_brackets_as_a_name() {
+            let host = "[10.0.0.2]".to_owned();
+            assert_eq!(resolve("[10.0.0.2]"), Err(Error::NotFound { host }));
         }
 
         #[test]
