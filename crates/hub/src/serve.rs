@@ -69,7 +69,8 @@ impl fmt::Display for Error {
             Self::OneWay => f.write_str("a hub session needs a two-way stream"),
             Self::Class(class) => write!(
                 f,
-                "the stream has class {class:?}, which is not the class of the open's mode"
+                "the stream has class {class:?}, which is not the class of the open's \
+                 mode"
             ),
             Self::ManyIndexes => {
                 f.write_str("the open names channels on more than one index")
