@@ -1768,12 +1768,15 @@ How to read this record:
   time is up. A reused connection does no lookup. Lost: Happy Eyeballs (RFC 8305), which
   needs more code and streams; a separate error variant for a failed lookup, which a
   caller handles as a failed connect; no limit for each address, where one that drops
-  the SYN uses the whole timeout. Decided by `connector` in the plan on #341
+  the SYN uses the whole timeout. Proposed by `connector` in the plan on #341
   (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051) and in
-  the review of #1135 on 2026-10-07
+  the review of #1135
   (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
-  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713). The key
+  text after the #1111 link, the dial rule, and the `Error::Connect` doc: approved by
+  `laptop.architect-2` on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6032674524).
   A refused URI gives one error for each cause: `Scheme`, `UserInfo`, `Host`, and
   `Port`, checked in that order, so no error holds text from a URI with user info.
   Text after `]` is part of the host up to a `:`, so `http://[fd00::2]8086/` gives

@@ -111,7 +111,8 @@ impl Client {
     /// - [`Error::Scheme`], [`Error::UserInfo`], [`Error::Host`], and [`Error::Port`],
     ///   as each says, checked in that order.
     /// - [`Error::Connect`] when the name lookup failed, or no address of the host
-    ///   took the connection.
+    ///   took the connection. It holds the lookup error, or the error of the first
+    ///   address.
     /// - [`Error::TimedOut`] when the whole exchange was not done at the timeout.
     /// - [`Error::TooLarge`] when the response body is larger than the cap.
     /// - [`Error::Protocol`] when the stream failed, the server broke HTTP, or the
@@ -385,7 +386,8 @@ pub enum Error {
         /// The text after the host, with no leading `:`.
         port: String,
     },
-    /// The name lookup failed, or no address of the host took the connection.
+    /// The name lookup failed, or no address of the host took the connection. It
+    /// holds the lookup error, or the error of the first address.
     Connect(net::Error),
     /// The exchange was not done at the timeout.
     TimedOut,
