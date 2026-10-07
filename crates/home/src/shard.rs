@@ -445,21 +445,23 @@ impl Shard {
         self.readers.grant(place, key.session, limit_bytes);
     }
 
-    /// Takes the next frame of the reader `key`, or `None` when none waits.
+    /// Takes the next frame of the reader `key`, or `None` when none waits or the
+    /// reader is closed.
     ///
     /// # Panics
     ///
-    /// If the reader is not open, or `key` is of another shard.
+    /// If `key` is of another shard.
     pub(crate) fn take(&mut self, key: reader::Key) -> Option<Frame> {
         self.readers.take(self.place(key.slot), key.session)
     }
 
     /// Closes the reader `key`. Its waiting frames do not go out, and
-    /// [`woken`](Self::woken) does not name it.
+    /// [`woken`](Self::woken) does not name it. A close of a closed reader changes
+    /// nothing.
     ///
     /// # Panics
     ///
-    /// If the reader is not open, or `key` is of another shard.
+    /// If `key` is of another shard.
     pub(crate) fn close_reader(&mut self, key: reader::Key) {
         let (_, mesh) = self.time();
         self.readers.close(self.place(key.slot), key.session, mesh);
@@ -705,6 +707,9 @@ mod tests {
     const BODY_MAX: usize = 4087;
     const POOL: usize = 1 << 21;
     const COMMIT: Span = Span::from_nanos(10_000_000);
+    const LEASE: Span = Span::from_nanos(1_000_000);
+    /// More than half of `LEASE`: one wait keeps a lease, and two end it.
+    const WAIT: Span = Span::from_nanos(600_000);
     /// Past the first commit interval, while its sync runs.
     const SYNC: Span = Span::from_nanos(10_001_000);
     const LIMITS: order::Limits = order::Limits {
@@ -819,6 +824,20 @@ mod tests {
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
             shard
+        }
+
+        /// A shard, a writer on it with a lease of `LEASE` that opened `WAIT` ago, and
+        /// the writer's key set.
+        async fn leased(&self) -> (Shard, writer::Key, Arc<KeySet>) {
+            let set = two_indexes();
+            let mut shard = self.shard(AREA).await;
+            let leased = Writer {
+                lease: Some(LEASE),
+                ..writer("a", 1, &set)
+            };
+            let key = shard.open_writer(leased).expect("synced");
+            self.clock.sleep(WAIT).await;
+            (shard, key, set)
         }
 
         /// A shard that carries `count` indexes with no data channels, at slots 0 to
@@ -1721,18 +1740,10 @@ mod tests {
     #[test]
     fn does_not_renew_the_lease_of_an_index_that_a_write_does_not_hold() {
         run(90, |test| async move {
-            let set = two_indexes();
-            let mut shard = test.shard(AREA).await;
-            let a = Writer {
-                lease: Some(Span::from_nanos(1_000_000)),
-                ..writer("a", 1, &set)
-            };
-            let a = shard.open_writer(a).expect("synced");
-            let wait = Span::from_nanos(600_000);
-            test.clock.sleep(wait).await;
+            let (mut shard, a, set) = test.leased().await;
             let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
-            test.clock.sleep(wait).await;
+            test.clock.sleep(WAIT).await;
             let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
                 shard.write(a, LIVE, second),
@@ -1744,18 +1755,10 @@ mod tests {
     #[test]
     fn does_not_renew_the_lease_of_an_index_before_the_one_that_a_write_holds() {
         run(93, |test| async move {
-            let set = two_indexes();
-            let mut shard = test.shard(AREA).await;
-            let a = Writer {
-                lease: Some(Span::from_nanos(1_000_000)),
-                ..writer("a", 1, &set)
-            };
-            let a = shard.open_writer(a).expect("synced");
-            let wait = Span::from_nanos(600_000);
-            test.clock.sleep(wait).await;
+            let (mut shard, a, set) = test.leased().await;
             let first = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(2, 0, 1)][..]));
-            test.clock.sleep(wait).await;
+            test.clock.sleep(WAIT).await;
             let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
                 shard.write(a, LIVE, second),
@@ -1765,22 +1768,26 @@ mod tests {
     }
 
     #[test]
+    fn renews_the_lease_for_an_applied_group_with_no_samples() {
+        run(94, |test| async move {
+            let (mut shard, a, set) = test.leased().await;
+            let empty = frame(&test.pool, &set, &[(2, &[])]);
+            assert_eq!(shard.write(a, LIVE, empty), Ok(&[applied(2, 0, 0)][..]));
+            test.clock.sleep(WAIT).await;
+            let next = frame(&test.pool, &set, &[(2, &[20])]);
+            assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    #[test]
     fn renews_the_lease_for_a_lost_group() {
         run(91, |test| async move {
-            let set = two_indexes();
-            let mut shard = test.shard(AREA).await;
-            let a = Writer {
-                lease: Some(Span::from_nanos(1_000_000)),
-                ..writer("a", 1, &set)
-            };
-            let a = shard.open_writer(a).expect("synced");
-            let wait = Span::from_nanos(600_000);
-            test.clock.sleep(wait).await;
+            let (mut shard, a, set) = test.leased().await;
             let live = frame(&test.pool, &set, &[(2, &[10])]);
             let blocks = test.fill();
             assert_eq!(shard.write(a, LIVE, live), Ok(&[lost(2, 0, 1)][..]));
             drop(blocks);
-            test.clock.sleep(wait).await;
+            test.clock.sleep(WAIT).await;
             let next = frame(&test.pool, &set, &[(2, &[20])]);
             assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(2, 1, 1)][..]));
         });
@@ -1789,23 +1796,29 @@ mod tests {
     #[test]
     fn does_not_renew_the_lease_for_a_backfill_frame_that_finds_no_room() {
         run(92, |test| async move {
-            let set = two_indexes();
-            let mut shard = test.shard(AREA).await;
-            let a = Writer {
-                lease: Some(Span::from_nanos(1_000_000)),
-                ..writer("a", 1, &set)
-            };
-            let a = shard.open_writer(a).expect("synced");
-            let wait = Span::from_nanos(600_000);
-            test.clock.sleep(wait).await;
+            let (mut shard, a, set) = test.leased().await;
             let first = frame(&test.pool, &set, &[(2, &[1])]);
             let blocks = test.fill();
             assert_eq!(shard.write(a, BACKFILL, first), Err(Error::Full));
             drop(blocks);
-            test.clock.sleep(wait).await;
+            test.clock.sleep(WAIT).await;
             let again = frame(&test.pool, &set, &[(2, &[1])]);
             let expired = refused(2, Refusal::Expired);
             assert_eq!(shard.write(a, BACKFILL, again), Ok(&[expired][..]));
+        });
+    }
+
+    #[test]
+    fn does_not_renew_the_lease_for_a_frame_too_large_for_one_write() {
+        run(95, |test| async move {
+            let (mut shard, a, set) = test.leased().await;
+            let stamps: Vec<i64> = (10..610).collect();
+            let large = frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
+            assert_eq!(shard.write(a, LIVE, large), Err(Error::Large));
+            test.clock.sleep(WAIT).await;
+            let next = frame(&test.pool, &set, &[(0, &[700]), (1, &[1])]);
+            let expired = refused(0, Refusal::Expired);
+            assert_eq!(shard.write(a, LIVE, next), Ok(&[expired][..]));
         });
     }
 
@@ -2369,6 +2382,27 @@ mod tests {
 
         fn seq(seq: u64, count: u32) -> Range {
             Range { seq, count }
+        }
+
+        #[test]
+        fn takes_nothing_from_a_closed_reader_and_closes_it_again() {
+            run(96, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let readers = [
+                    complete(&mut shard, Slot::new(0)),
+                    latest(&mut shard, Slot::new(0)),
+                ];
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                for reader in readers {
+                    close(&mut shard, reader);
+                    assert_eq!(taken(&mut shard, reader, 0), []);
+                    close(&mut shard, reader);
+                }
+                assert_eq!(woken(&mut shard), []);
+            });
         }
 
         #[test]

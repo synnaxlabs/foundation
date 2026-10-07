@@ -127,11 +127,11 @@ impl Set {
     }
 
     /// Takes the next frame of the reader `session` on the index at `place`, or `None`
-    /// when none waits.
+    /// when none waits or the reader is closed.
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the index never gave `session`.
     pub(crate) fn take(
         &mut self,
         place: usize,
@@ -141,11 +141,12 @@ impl Set {
     }
 
     /// Closes the reader `session` on the index at `place` at mesh time `now`. Its
-    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it.
+    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it. A
+    /// close of a closed reader changes nothing.
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the index never gave `session`.
     pub(crate) fn close(&mut self, place: usize, session: delivery::Key, now: Stamp) {
         let entry = &mut self.entries[place];
         entry.readers.close(session, now);
