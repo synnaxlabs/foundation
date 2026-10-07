@@ -1641,47 +1641,38 @@ How to read this record:
   power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
-  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
-  that a follower forwards to the leader, and its two answers (the position of the
-  entry, or "not the leader" with the leader the receiver knows). A forwarded proposal
-  and each answer name their sender (its `node::Key`, 16 bytes behind the kind byte), so
-  the peer check of MESH DRIVER covers each kind, and the leader knows the queue for its
-  answer. To find the sender from the public key of the peer lost: two members can hold
-  one key. `wire` does not carry them: the Rust SDK reuses `wire`, a client never opens
-  a mesh stream, and `wire` must not depend on `raft`. The encoding in `raft` lost:
-  `raft` cannot see the format version. A message has one byte form, and a decode takes
-  nothing else. The log (MESH LOG) and the messages share the byte form of an entry.
-  Decided by `consensus`, approved by the coordinator (#471).
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
+  proposal that a follower forwards to the leader, and its two answers (the position
+  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
+  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
+  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
+  format version. A message has one byte form, and a decode takes nothing else. The
+  log (MESH LOG) and the messages share the byte form of an entry. Decided by
+  `consensus`, approved by the coordinator (#471).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
   the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
   task and a writer task lost: they need a second waker. A tick is 100 ms, a heartbeat
   is 1 tick, and an election timeout is 10 ticks. A tick that comes due in a write is
-  lost, so the group's time only slows. `mesh` checks each message that it receives: the
-  peer holds the key of the member that the message names as its sender
-  (`Error::Spoofed`). Before each `step`, it then checks a `raft` message in this order:
-  a request comes from a voter of this node's configuration (`Error::NotVoter`), and
-  each grant holds (`Error::Grant`). So a node with a configuration refuses a leader
-  that is not a voter of that configuration, when a change that the node does not hold
-  made that leader a voter. The node does not get the log from that leader (a known
-  defect, #1096, that #1107 fixes). A node with no configuration takes no request. Only
-  a voter that an operator wiped is such a node (#881), because a node that joins opens
-  with the founding voters from its join answer (decided by the architect, #242:
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A leader
-  that gets a forwarded proposal from a member, also from one that is not a voter,
-  proposes it and queues the position for the sender. That answer leaves before the
-  entry is on disk: it is a hint, and the sender decides by the entry that it applies. A
-  node that does not lead answers "not the leader" with the leader that it knows. The
-  leader does not check the home: the node that forwards does. An answer that no call
-  waits for changes nothing. The messages for one member wait in a queue of 64 that
-  drops its oldest, because the sender sends again. A write that finds the pool full
-  (`block::Error::Exhausted`), or that the system refuses memory for (`Refused`), does
-  not stop the group, because each may succeed later (MEMORY BOUNDS): the task writes
-  the same `Ready` again at each tick, and until then no message leaves, nothing
-  applies, and the group gets no tick. Nothing bounds the proposals and the messages
-  that the group takes in that time, and a record that the pool can never hold waits
-  with no end (#1091). A pool whose budget holds no block (`TooLarge`) stops the group
-  (the `Refused` wait decided by the architect:
+  lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
+  this order: the peer holds the key of the member that the message names
+  (`Error::Spoofed`), a request comes from a voter of this node's configuration
+  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  configuration refuses a leader that is not a voter of that configuration, when a
+  change that the node does not hold made that leader a voter. The node does not get the
+  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
+  configuration takes no request. Only a voter that an operator wiped is such a node
+  (#881), because a node that joins opens with the founding voters from its join answer
+  (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
+  messages for one member wait in a queue of 64 that drops its oldest, because `raft`
+  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
+  system refuses memory for (`Refused`), does not stop the group, because each may
+  succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
+  and until then no message leaves, nothing applies, and the group gets no tick. Nothing
+  bounds the proposals and the messages that the group takes in that time, and a record
+  that the pool can never hold waits with no end (#1091). A pool whose budget holds no
+  block (`TooLarge`) stops the group (the `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with

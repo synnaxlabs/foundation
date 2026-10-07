@@ -36,8 +36,6 @@ pub(crate) enum Message {
     Raft(raft::Message),
     /// Asks the leader to propose `change`.
     Propose {
-        /// The sender.
-        from: node::Key,
         /// Pairs the answer with this message. The sender picks it.
         request: u64,
         /// The change.
@@ -45,8 +43,6 @@ pub(crate) enum Message {
     },
     /// Answers a [`Message::Propose`] that the receiver proposed.
     Proposed {
-        /// The sender.
-        from: node::Key,
         /// The `request` of the [`Message::Propose`].
         request: u64,
         /// The position of the entry. A new leader can replace it.
@@ -55,8 +51,6 @@ pub(crate) enum Message {
     /// Answers a [`Message::Propose`] that the receiver did not propose, because it
     /// does not lead.
     NotLeader {
-        /// The sender.
-        from: node::Key,
         /// The `request` of the [`Message::Propose`].
         request: u64,
         /// The leader that the receiver knows.
@@ -65,16 +59,6 @@ pub(crate) enum Message {
 }
 
 impl Message {
-    /// The node that the message names as its sender.
-    pub(crate) const fn from(&self) -> node::Key {
-        match self {
-            Self::Raft(message) => message.from,
-            Self::Propose { from, .. }
-            | Self::Proposed { from, .. }
-            | Self::NotLeader { from, .. } => *from,
-        }
-    }
-
     /// The byte form of the message.
     ///
     /// # Panics
@@ -91,29 +75,18 @@ impl Message {
                 put_optional_proof(message.proof.as_ref(), &mut out);
                 body(&message.body, &mut out);
             }
-            Self::Propose {
-                from,
-                request,
-                change,
-            } => {
+            Self::Propose { request, change } => {
                 out.push(PROPOSE);
-                put_key(*from, &mut out);
                 out.extend(request.to_le_bytes());
                 change.encode(&mut out);
             }
-            Self::Proposed { from, request, at } => {
+            Self::Proposed { request, at } => {
                 out.push(PROPOSED);
-                put_key(*from, &mut out);
                 out.extend(request.to_le_bytes());
                 put_position(*at, &mut out);
             }
-            Self::NotLeader {
-                from,
-                request,
-                leader,
-            } => {
+            Self::NotLeader { request, leader } => {
                 out.push(leader.map_or(NOT_LEADER, |_| NOT_LEADER_WITH_LEADER));
-                put_key(*from, &mut out);
                 out.extend(request.to_le_bytes());
                 if let Some(leader) = leader {
                     put_key(*leader, &mut out);
@@ -146,22 +119,15 @@ impl Message {
                 })
             }
             PROPOSE => {
-                let from = take_key(bytes)?;
                 let request = u64::from_le_bytes(take(bytes)?);
                 let change = Change::decode(std::mem::take(bytes)).ok()?;
-                Self::Propose {
-                    from,
-                    request,
-                    change,
-                }
+                Self::Propose { request, change }
             }
             PROPOSED => Self::Proposed {
-                from: take_key(bytes)?,
                 request: u64::from_le_bytes(take(bytes)?),
                 at: take_position(bytes)?,
             },
             kind @ (NOT_LEADER | NOT_LEADER_WITH_LEADER) => Self::NotLeader {
-                from: take_key(bytes)?,
                 request: u64::from_le_bytes(take(bytes)?),
                 leader: match kind {
                     NOT_LEADER => None,
@@ -391,28 +357,23 @@ mod tests {
                 proof,
             })
         });
-        let propose = (any::<u128>(), any::<u64>(), any::<u128>(), any::<u128>())
-            .prop_map(|(from, request, index, home)| Message::Propose {
-                from: node(from),
+        let propose = (any::<u64>(), any::<u128>(), any::<u128>()).prop_map(
+            |(request, index, home)| Message::Propose {
                 request,
                 change: Change::Home {
                     index: channel::Key::from_u128(index),
                     home: node(home),
                 },
-            });
-        let proposed = (any::<u128>(), any::<u64>(), a_position()).prop_map(
-            |(from, request, at)| Message::Proposed {
-                from: node(from),
-                request,
-                at,
             },
         );
-        let not_leader = (any::<u128>(), any::<u64>(), prop::option::of(any::<u128>()))
-            .prop_map(|(from, request, leader)| Message::NotLeader {
-                from: node(from),
+        let proposed = (any::<u64>(), a_position())
+            .prop_map(|(request, at)| Message::Proposed { request, at });
+        let not_leader = (any::<u64>(), prop::option::of(any::<u128>())).prop_map(
+            |(request, leader)| Message::NotLeader {
                 request,
                 leader: leader.map(node),
-            });
+            },
+        );
         prop_oneof![4 => raft, 1 => propose, 1 => proposed, 1 => not_leader]
     }
 
@@ -518,38 +479,34 @@ mod tests {
     #[test]
     fn a_proposal_and_its_answers_have_a_fixed_byte_form() {
         let propose = Message::Propose {
-            from: node(3),
             request: 9,
             change: Change::Home {
                 index: channel::Key::from_u128(7),
                 home: node(8),
             },
         };
-        let expected = [&[2][..], &key(3), &le(9), &[1], &key(7), &key(8)].concat();
+        let expected = [&[2][..], &le(9), &[1], &key(7), &key(8)].concat();
         assert_eq!(propose.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(propose));
         let proposed = Message::Proposed {
-            from: node(3),
             request: 9,
             at: at(2, 4),
         };
-        let expected = [&[3][..], &key(3), &le(9), &le(2), &le(4)].concat();
+        let expected = [&[3][..], &le(9), &le(2), &le(4)].concat();
         assert_eq!(proposed.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(proposed));
         let none = Message::NotLeader {
-            from: node(3),
             request: 9,
             leader: None,
         };
-        let expected = [&[4][..], &key(3), &le(9)].concat();
+        let expected = [&[4][..], &le(9)].concat();
         assert_eq!(none.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(none));
         let known = Message::NotLeader {
-            from: node(3),
             request: 9,
             leader: Some(node(7)),
         };
-        let expected = [&[5][..], &key(3), &le(9), &key(7)].concat();
+        let expected = [&[5][..], &le(9), &key(7)].concat();
         assert_eq!(known.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(known));
     }
