@@ -192,22 +192,29 @@ jobs:
       # (#803). Hosts whose template sets none of this: #898.
       - name: Check the memory cap of the runner
         run: |
+          set -o pipefail
           c=$(cut -d: -f3 /proc/self/cgroup)
           case $c in
             /system.slice/actions.runner.*.service) ;;
             *) echo "::error::The job runs in $c, in no runner unit (#898)."; exit 1 ;;
           esac
           total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-          sum=0
           # systemd reads each runner unit, also one that is stopped and has no cgroup.
-          for u in $(systemctl list-unit-files --plain --no-legend 'actions.runner.*' |
-            cut -d' ' -f1); do
+          units=$(systemctl list-unit-files --plain --no-legend 'actions.runner.*' |
+            cut -d' ' -f1)
+          grep -qxF "${c##*/}" <<< "$units" ||
+            { echo "::error::systemd lists no unit ${c##*/} (#898)."; exit 1; }
+          sum=0
+          for u in $units; do
             p=$(systemctl show -p OOMPolicy --value "$u")
             [ "$p" = continue ] ||
               { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
             m=$(systemctl show -p MemoryMax --value "$u")
             [ "$m" != infinity ] ||
               { echo "::error::$u has no MemoryMax (#803, #898)."; exit 1; }
+            # A longer cap is past any host, and the sum of such caps can wrap.
+            [ "${#m}" -le 15 ] ||
+              { echo "::error::$u has MemoryMax $m, past the host (#803)."; exit 1; }
             sum=$((sum + m / 1024))
           done
           [ "$sum" -le $((total - 2097152)) ] || {
