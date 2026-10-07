@@ -348,6 +348,34 @@ mod tests {
             assert!(readers.take(new.into()).is_none());
             assert!(readers.behind(new));
         }
+
+        #[test]
+        fn leaves_credit_holds_and_keys_after_a_late_call() {
+            let frames = Frames::new(4);
+            let mut readers = Readers::new(0);
+            let gone = complete(&mut readers, "b", live(0));
+            readers.close_named(gone, at(0));
+            let old = readers.open_named_latest(name("a"), at(0)).key;
+            let first = frames.frame(1);
+            let reader = Reader::Named {
+                name: name("a"),
+                hold: Span::from_nanos(10),
+            };
+            let limit = 2 * first.charge();
+            let new = readers.open(reader, Start::At(live(0)), limit).key;
+            readers.queue(&first, 0..1);
+            assert_eq!(readers.release(1), [new]);
+            dropped(&mut readers, old.into());
+            readers.queue(&frames.frame(2), 1..2);
+            readers.queue(&frames.frame(3), 2..3);
+            assert_eq!(readers.release(3), []);
+            assert!(readers.behind(new));
+            dropped(&mut readers, old.into());
+            assert_eq!(readers.open_latest().key, Key(1));
+            let next = complete(&mut readers, "c", live(3));
+            assert_eq!(next, complete::Key(2));
+            assert!(!readers.behind(next));
+        }
     }
 
     mod put {
