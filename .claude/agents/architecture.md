@@ -44,5 +44,8 @@ Check:
 - Shape decisions: read the PR's "Shape decisions" section. Challenge any choice where
   a rejected alternative is the better architecture.
 
+Start the report with the line `Public surface: none`, or each public item (its
+signature or doc) and crate dependency that the PR changes, with file and line.
+
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.
