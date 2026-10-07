@@ -136,7 +136,7 @@ impl Range {
     }
 }
 
-/// Why [`Draft::new`] or [`Layout::new`] refused a frame.
+/// Why [`Draft::new`], [`Layout::new`], or [`Layout::from_ends`] refused a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// An entry is past the end of the key set.
@@ -224,6 +224,17 @@ enum Sizes {
     Ends,
 }
 
+impl Sizes {
+    /// Where a series of `size` ends when it follows series bytes that end at `last`.
+    /// Saturates at `usize::MAX`.
+    fn end(self, last: usize, size: usize) -> usize {
+        match self {
+            Self::Lens => next_end(last, size),
+            Self::Ends => size,
+        }
+    }
+}
+
 impl<'a> Layout<'a> {
     /// Checks `series` for a frame of `set`: each present entry and the byte length
     /// of its series, in increasing entry order. Each data entry needs the index of
@@ -295,16 +306,11 @@ impl<'a> Layout<'a> {
                     *memo = index;
                 }
             }
-            bytes = match sizes {
-                Sizes::Lens => next_end(bytes, size),
-                Sizes::Ends => {
-                    let start = start_after(bytes);
-                    if size < start {
-                        return Err(Error::End(BadEnd::Before { end: size, start }));
-                    }
-                    size
-                }
-            };
+            let (start, end) = (padded(bytes), sizes.end(bytes, size));
+            if end < start {
+                return Err(Error::End(BadEnd::Before { end, start }));
+            }
+            bytes = end;
         }
         if let Some(error) = absent {
             return Err(error);
@@ -367,10 +373,7 @@ impl<'a> Layout<'a> {
         for (descriptor, &(entry, size)) in descriptors.iter_mut().zip(series) {
             let start = padded(end);
             body[end..start].fill(0);
-            end = match sizes {
-                Sizes::Lens => start + size,
-                Sizes::Ends => size,
-            };
+            end = sizes.end(end, size);
             put(descriptor, 0, &to_u32(entry).to_le_bytes());
             put(descriptor, 4, &to_u32(end).to_le_bytes());
         }
@@ -582,10 +585,7 @@ impl Frame {
 /// Gives `u64::MAX` for a frame that no pool holds, which passes every grant.
 #[must_use]
 pub fn charge(series: usize, body_len: usize) -> u64 {
-    let head = DESCRIPTOR
-        .saturating_mul(series)
-        .saturating_add(HEAD + RANGE);
-    charge_of(head.saturating_add(body_len))
+    charge_of(body_start(1, series).saturating_add(body_len))
 }
 
 /// The end of each series when series of the given lengths follow one another in a
@@ -740,13 +740,7 @@ fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
 /// Where a series of `len` bytes ends when it follows series bytes that end at
 /// `last`. Saturates at `usize::MAX`, which no pool holds.
 fn next_end(last: usize, len: usize) -> usize {
-    start_after(last).saturating_add(len)
-}
-
-/// [`padded`] for an end that no frame checked yet. Saturates at `usize::MAX`.
-fn start_after(last: usize) -> usize {
-    last.checked_next_multiple_of(SERIES_ALIGN)
-        .unwrap_or(usize::MAX)
+    padded(last).saturating_add(len)
 }
 
 /// The charge of a frame of `len` bytes (CREDIT RULES).
@@ -812,8 +806,12 @@ fn bounds(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, usize) {
 }
 
 /// Where a series that ends at `end` stops with its padding, and the next one starts.
+/// Saturates at `usize::MAX`.
 const fn padded(end: usize) -> usize {
-    end.next_multiple_of(SERIES_ALIGN)
+    match end.checked_next_multiple_of(SERIES_ALIGN) {
+        Some(start) => start,
+        None => usize::MAX,
+    }
 }
 
 fn get<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {

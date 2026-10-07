@@ -1,4 +1,5 @@
-//! Building and reading a frame or a view makes no heap allocation. This binary has
+//! Building and reading a frame or a view, and building a frame from the ends and
+//! series bytes that another node sends, make no heap allocation. This binary has
 //! no test harness: the count covers each thread, and a harness allocates on its own
 //! thread at any time.
 
@@ -6,7 +7,7 @@
 
 use types::channel::Key;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Mask, Path, Range, View};
+use types::frame::{self, Draft, Form, Layout, Mask, Path, Range, View};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -37,6 +38,7 @@ fn main() {
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     read_a_frame(&pool, &set);
     read_a_view(&pool, &set);
+    receive_a_frame(&pool, &set);
 }
 
 const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];
@@ -129,4 +131,27 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
         (32, 32, 16),
         "the views read both series, then the index"
     );
+}
+
+fn receive_a_frame(pool: &block::Pool, set: &KeySet) {
+    let lens = [(0, 3), (2, 16)];
+    let mut home = Draft::new(pool, set, Form::Raw, &lens).expect("the pool holds it");
+    home.series_mut(2).expect("entry 2 is present").fill(7);
+    let home = home.freeze(Path::Live);
+    let (received, allocations) = ALLOCATOR.count(|| {
+        let mut ends = [(0, 0); 2];
+        for (end, given) in ends.iter_mut().zip(frame::ends(lens)) {
+            *end = given;
+        }
+        let layout = Layout::from_ends(set, &ends).expect("the ends fit");
+        let charge = frame::charge(ends.len(), layout.body_len());
+        let mut draft = layout.draft(pool, Form::Raw).expect("the pool holds it");
+        draft.body_mut().copy_from_slice(&home.body());
+        draft.set_count(0, 1);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.charge(), charge, "both ends charge the frame alike");
+        frame.series(2) == Some([7; 16].as_slice())
+    });
+    assert_eq!(allocations, 0, "the receive allocated");
+    assert!(received, "the frame holds the bytes the home sent");
 }
