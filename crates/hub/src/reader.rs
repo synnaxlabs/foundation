@@ -141,7 +141,11 @@ impl Reader {
         slots.push(slot);
         let (key, credit) = match mode {
             Mode::Complete => {
-                let key = borrowed.home.open_complete(slot, WINDOW);
+                let key = borrowed.home.open_complete(
+                    slot,
+                    WINDOW,
+                    home::reader::complete::Charge::Whole,
+                );
                 let credit = Credit {
                     key,
                     taken_bytes: 0,

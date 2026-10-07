@@ -7,9 +7,12 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::sync::Arc;
+
 use delivery::{Position, Reader, Readers, Start, complete, latest};
+
 use types::channel;
-use types::frame::key_set::{Group, Interner};
+use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{Draft, Form, Frame, Path};
 use types::time::Stamp;
 
@@ -37,8 +40,8 @@ fn main() {
             .freeze(Path::Live)
     };
     latest(&frame);
-    complete(&frame);
-    missed(&frame);
+    complete(&frame, &set);
+    missed(&frame, &set);
 }
 
 fn latest(frame: &impl Fn() -> Frame) {
@@ -81,20 +84,20 @@ fn latest(frame: &impl Fn() -> Frame) {
     assert_eq!(allocations, 0, "a call on a closed latest key allocated");
 }
 
-fn complete(frame: &impl Fn() -> Frame) {
+fn complete(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     let mut readers = Readers::new(0);
     let mut keys: Vec<_> = (0..SESSIONS)
         .map(|_| open(&mut readers, 0, u64::MAX))
         .collect();
     let mut seq = 0;
     assert_eq!(
-        flow(&mut readers, &keys, frame, &mut seq),
+        flow(&mut readers, &keys, frame, set, &mut seq),
         SESSIONS,
         "the first release wakes all"
     );
     let (delivered, allocations) = ALLOCATOR.count(|| {
         (0..4)
-            .map(|_| flow(&mut readers, &keys, frame, &mut seq))
+            .map(|_| flow(&mut readers, &keys, frame, set, &mut seq))
             .sum::<usize>()
     });
     assert_eq!(allocations, 0, "the live path allocated");
@@ -107,7 +110,7 @@ fn complete(frame: &impl Fn() -> Frame) {
     keys.push(open(&mut readers, seq, u64::MAX));
     let (delivered, allocations) = ALLOCATOR.count(|| {
         (0..2)
-            .map(|_| flow(&mut readers, &keys, frame, &mut seq))
+            .map(|_| flow(&mut readers, &keys, frame, set, &mut seq))
             .sum::<usize>()
     });
     assert_eq!(allocations, 0, "the live path allocated after an open");
@@ -147,22 +150,24 @@ fn open(readers: &mut Readers, live: u64, limit_bytes: u64) -> complete::Key {
         live,
         backfill: None,
     });
-    readers.open(Reader::Unnamed, start, limit_bytes).key
+    readers
+        .open(Reader::Unnamed, start, limit_bytes, complete::Charge::Whole)
+        .key
 }
 
-fn missed(frame: &impl Fn() -> Frame) {
+fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     let mut readers = Readers::new(0);
     let warm = [open(&mut readers, 0, u64::MAX)];
     let mut seq = 0;
     for _ in 0..2 {
-        flow(&mut readers, &warm, frame, &mut seq);
+        flow(&mut readers, &warm, frame, set, &mut seq);
     }
     // A session of credit 1 takes the first frame and misses with one frame waiting.
     let keys: Vec<_> = (0..SESSIONS)
         .map(|i| open(&mut readers, seq, u64::from(i % 2 == 1)))
         .collect();
     let (woken, allocations) =
-        ALLOCATOR.count(|| flow(&mut readers, &warm, frame, &mut seq));
+        ALLOCATOR.count(|| flow(&mut readers, &warm, frame, set, &mut seq));
     assert_eq!(
         allocations, 0,
         "a release that wakes a missed session allocated"
@@ -184,6 +189,7 @@ fn flow(
     readers: &mut Readers,
     keys: &[complete::Key],
     frame: &impl Fn() -> Frame,
+    set: &Arc<KeySet>,
     seq: &mut u64,
 ) -> usize {
     let taken: usize = keys
@@ -191,7 +197,7 @@ fn flow(
         .map(|&key| std::iter::from_fn(|| readers.take(key.into())).count())
         .sum();
     for _ in 0..2 {
-        readers.queue(&frame(), *seq..*seq + 1);
+        readers.queue(&frame(), set, *seq..*seq + 1);
         *seq += 1;
     }
     taken + readers.release(*seq).len()
