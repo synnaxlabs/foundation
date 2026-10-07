@@ -3501,10 +3501,11 @@ How to read this record:
   Amended (2026-10-07, #1068): `block::footprint(len)` gives `usize::MAX` when `len`
   passes the largest payload, in place of a panic. No pool holds such a block, so
   every budget refuses it. `frame::charge` of ends from a hostile peer gives
-  `u64::MAX`, and `Layout::draft` refuses it with `block::Error::TooLarge { .. }` and
-  takes no block. A reader drafts before it spends, so a spend adds only a charge that
-  a pool holds, and a plain add never overflows. Lost: an exported largest payload with a new `Error` variant, a
-  second check of a limit that `block` owns; a saturating spend, a second guard.
+  `u64::MAX`, and `Layout::draft` refuses it with `block::Error::TooLarge { .. }`
+  (`frame::Error::Pool` at the reader) and takes no block. A reader drafts before it
+  spends, so a spend adds only a charge that a pool holds, and a plain add never
+  overflows. Lost: an exported largest payload with a new `Error` variant, a second
+  check of a limit that `block` owns; a saturating spend, a second guard.
   Decided by the architect, #1068
   (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156,
   corrected in

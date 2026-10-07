@@ -1915,6 +1915,10 @@ mod tests {
     fn charges_more_series_than_any_pool_holds_as_the_most_credit() {
         assert_eq!(super::charge(usize::MAX / 8 + 1, 0), u64::MAX);
         assert_eq!(super::charge(usize::MAX, 0), u64::MAX);
+    }
+
+    #[test]
+    fn charges_a_body_longer_than_any_pool_holds_as_the_most_credit() {
         assert_eq!(super::charge(1, usize::MAX), u64::MAX);
     }
 
