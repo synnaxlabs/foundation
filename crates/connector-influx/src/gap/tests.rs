@@ -87,12 +87,13 @@ fn writes_each_name_character_as_is() {
     gap.add(0..1);
     assert_eq!(
         written(&mut gap, 1, 7),
-        "m v=1 0\nfoundation_gaps,connector=my-influx_1,index=@edge.time-a_b count=1i 7\n"
+        "m v=1 0\nfoundation_gaps,connector=my-influx_1,index=@edge.time-a_b \
+         count=1i 7\n"
     );
 }
 
 #[test]
-#[should_panic(expected = "invariant: a gap range starts at or before its end, 5..3")]
+#[should_panic(expected = "invariant: a gap range is not reversed, got 5..3")]
 fn panics_on_a_reversed_range() {
     let mut gap = gap();
     let (start, end) = (5, 3);
@@ -105,6 +106,24 @@ fn panics_on_a_sample_inside_the_gap() {
     let mut gap = gap();
     gap.add(10..15);
     written(&mut gap, 14, 1_000);
+}
+
+#[test]
+#[should_panic(expected = "invariant: the sample after the gap 10..15 has seq 13")]
+fn panics_on_a_sample_inside_a_held_range_after_a_shorter_add() {
+    let mut gap = gap();
+    gap.add(10..15);
+    gap.add(10..12);
+    written(&mut gap, 13, 1_000);
+}
+
+#[test]
+#[should_panic(expected = "invariant: the sample after the gap 10..15 has seq 13")]
+fn panics_on_a_sample_inside_a_later_add() {
+    let mut gap = gap();
+    gap.add(10..12);
+    gap.add(13..15);
+    written(&mut gap, 13, 1_000);
 }
 
 #[test]

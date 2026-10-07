@@ -33,16 +33,18 @@ impl Gap {
     }
 
     /// Adds the trimmed samples with the seqs in `seqs`. A seq that the gap already
-    /// holds is held once, so a gap that the reader reports again counts once. An
-    /// empty range adds nothing.
+    /// holds is held once, so a gap that the reader reports again counts once. A
+    /// range with `start == end` adds nothing.
     ///
     /// # Panics
     ///
-    /// When `seqs` starts after its end.
+    /// When `seqs` is reversed: `start > end`.
     pub fn add(&mut self, seqs: Range<u64>) {
         assert!(
             seqs.start <= seqs.end,
-            "invariant: a gap range starts at or before its end, {seqs:?}"
+            "invariant: a gap range is not reversed, got {}..{}",
+            seqs.start,
+            seqs.end
         );
         if seqs.is_empty() {
             return;

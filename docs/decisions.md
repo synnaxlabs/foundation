@@ -1825,18 +1825,29 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
 - **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
   names one sample of an index (X31), and InfluxDB keys a point by measurement, tag
-  set, and time, so a resend stores each sample once. Each explicit gap is one line,
+  set, and time, so a resend stores each sample once. Each run of explicit gaps
+  before a sample is one line,
   `foundation_gaps,connector=<connector>,index=<index> count=<n>i <stamp>`: `<stamp>`
-  is the stamp of the first sample after the gap, and `count` is the number of seqs
+  is the stamp of the first sample after the gaps, and `count` is the number of seqs
   from the first trimmed seq up to that sample. The gap line goes in the request of
-  that sample, and the position is acked only after InfluxDB confirms it (B3). Gaps
-  in a row before one sample make one line. The count is signed, because InfluxDB 1
-  OSS refuses `u`. The measurement name is fixed, and the kind check (#1153) refuses
-  it as a data measurement. A gap line reads as the seqs
-  `[seq(stamp) - count, seq(stamp))`. After a lost confirmation, a trim, and a
-  resend, two gap lines can overlap, so the sum of `count` is an upper bound on the
-  loss. The exact loss is the union of the ranges minus the stored samples, and
-  `Lab::stored` computes it with `seq(stamp)` from its write record.
+  that sample, and the position is acked only after InfluxDB confirms it (B3). The
+  count is signed, because InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two
+  connectors that write one index to one database from replacing each other's gap
+  lines. Until a later sample comes, the connector keeps one gap per index. After a
+  restart the buffer reports the gap again (READER RULES), so a lost gap line is sent
+  again. The measurement name is fixed, and the kind check (#1153) refuses it as a
+  data measurement.
+  Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
+  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
+  `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
+  minus the stored seqs, as maximal runs. Each run is one gap: `after` is the count
+  of stored samples before the run, and the count is the run's length. A gap line
+  whose stamp is not in the write record, or whose range starts below the first
+  written seq, is a lab failure (panic), not data. The property test also asserts no
+  silent loss: each seq from the first written seq to the last stored seq is stored
+  or in a gap range. After a lost confirmation, a resend, and a later trim, gap lines
+  can overlap, so the sum of `count` in `foundation_gaps` is an upper bound on the
+  loss. The exact loss is the union of the ranges minus the stored samples.
   Lost: a seq field (about 20 bytes a line), a seq tag (one series per sample), a gap
   point in the data measurement (a field type conflict), a configurable gap
   measurement, and a `first=<seq>i` field on each gap line. That field puts a seq,
@@ -1847,7 +1858,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032215953,
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515,
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428,
-  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032802085).
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032802085), and
+  in the review of #1225
+  (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
+  https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
