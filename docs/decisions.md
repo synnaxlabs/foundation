@@ -2086,9 +2086,14 @@ How to read this record:
   stamp at every replay. A voter with no mesh time with a known error at or after the
   Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
   the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
-  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. That voter
-  makes each status key (UUIDv7, X27) from the stamp and its entropy, and the byte form
-  refuses a name twice. Decided by `laptop.architect`
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
+  region whose voters all have an unknown clock error admits no node by ticket, and the
+  operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
+  Windows node with a peer of known error. Decided by `laptop.director`
+  (2026-10-07T13:12:52Z):
+  https://github.com/synnaxlabs/foundation/issues/1397#issuecomment-6038688551. The
+  stamping voter makes each status key (UUIDv7, X27) from the stamp and its entropy,
+  and the byte form refuses a name twice. Decided by `laptop.architect`
   (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The voter
   that admits a join answers with the founding voters and their cards, and the node
