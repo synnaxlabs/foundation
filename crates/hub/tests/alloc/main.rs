@@ -1,8 +1,8 @@
 //! A write and `next` make no heap allocation once the hub has taken a few frames: for
 //! a complete reader when frames wait for it and when it waits for them, and for latest
-//! readers that the write wakes, also two writes in one commit. The commit task is not
-//! counted. This binary has no test harness: the count covers each thread, and a
-//! harness allocates on its own thread at any time.
+//! readers that the write wakes, also two writes in one commit and readers replaced.
+//! The commit task is not counted. This binary has no test harness: the count covers
+//! each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -181,6 +181,46 @@ async fn five_latest(
     }
 }
 
+/// Writes that each wake twelve latest readers from `now`, then one more after each
+/// reader is replaced by one that takes the newest frame at open.
+async fn replaced(
+    hub: &Hub,
+    node: &sim::node::Node,
+    writer: &mut Writer,
+    mut now: i64,
+) {
+    let mut latests = Vec::new();
+    for _ in 0..12 {
+        let latest = hub.reader(&[name("value")], Mode::Latest).await;
+        latests.push(latest.expect("opens"));
+    }
+    for latest in &mut latests {
+        read(latest);
+    }
+    // The wake after the commit takes the keys of the opens, so the warm writes size
+    // the keys to twelve.
+    node.clock().sleep(SETTLE).await;
+    for n in 0..2 * WARM {
+        let waited: u64 = latests.iter_mut().map(wait).sum();
+        let written = write(writer, now);
+        now += 1;
+        let taken: u64 = latests.iter_mut().map(read).sum();
+        node.clock().sleep(SETTLE).await;
+        if n >= WARM {
+            assert_eq!((waited, written, taken), (0, 0, 0), "twelve latest {n}");
+        }
+    }
+    for latest in &mut latests {
+        let replaced = hub.reader(&[name("value")], Mode::Latest).await;
+        *latest = replaced.expect("opens");
+        read(latest);
+    }
+    let waited: u64 = latests.iter_mut().map(wait).sum();
+    let written = write(writer, now);
+    let taken: u64 = latests.iter_mut().map(read).sum();
+    assert_eq!((waited, written, taken), (0, 0, 0), "replaced");
+}
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
@@ -236,7 +276,9 @@ fn main() {
                 assert_eq!((waited, written, taken, read), (0, 0, 0, 0), "latest {n}");
             }
         }
-        five_latest(&hub, &node, &mut writer, latest, now + WARM + COUNTED).await;
+        let now = now + WARM + COUNTED;
+        five_latest(&hub, &node, &mut writer, latest, now).await;
+        replaced(&hub, &node, &mut writer, now + 3 * (WARM + 2)).await;
     })
     .expect("the run ends");
 }

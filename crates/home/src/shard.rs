@@ -510,7 +510,8 @@ impl Shard {
     }
 
     /// Opens an unnamed latest reader on the index at `slot`. It gets the index's
-    /// newest live frame, before its commit.
+    /// newest live frame, before its commit. Take from it at once:
+    /// [`woken`](Self::woken) does not name it for a frame it can take at open.
     ///
     /// # Panics
     ///
@@ -2562,8 +2563,54 @@ mod tests {
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(2, 1)]);
                 let late = latest(&mut shard, Slot::new(0));
-                assert_eq!(woken(&mut shard), [late]);
+                assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, late, 0), [seq(2, 1)]);
+            });
+        }
+
+        /// A reader replaced by one that takes the newest frame at open is named
+        /// once, so the keys keep their capacity.
+        #[test]
+        fn names_a_reader_that_took_at_open_once() {
+            run(35, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let mut readers: Vec<_> =
+                    (0..4).map(|_| latest(&mut shard, Slot::new(0))).collect();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                let mut keys = Vec::new();
+                shard.woken(&mut keys);
+                assert_eq!(keys.len(), 4);
+                let capacity = keys.capacity();
+                for &reader in &readers {
+                    assert_eq!(taken(&mut shard, reader, 0).len(), 1);
+                }
+                close(&mut shard, readers[3]);
+                readers[3] = latest(&mut shard, Slot::new(0));
+                assert_eq!(taken(&mut shard, readers[3], 0).len(), 1);
+                write(&test, &mut shard, a, &[20]);
+                shard.woken(&mut keys);
+                readers.sort_unstable();
+                assert_eq!(keys, readers);
+                assert_eq!(keys.capacity(), capacity);
+            });
+        }
+
+        #[test]
+        fn replaces_the_keys_it_gave_in_the_last_call() {
+            run(36, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                let mut keys = Vec::new();
+                shard.woken(&mut keys);
+                assert_eq!(keys, [reader]);
+                shard.woken(&mut keys);
+                assert_eq!(keys, []);
             });
         }
 
