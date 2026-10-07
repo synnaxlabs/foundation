@@ -2389,10 +2389,10 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
             if let Some(place) = newer {
                 shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes());
             }
-            shard.tamper_block(unaligned, TAIL_AT, &(BLOCK + 1).to_le_bytes());
+            shard.tamper_block(unaligned, TAIL_AT, &u64::MAX.to_le_bytes());
             let (before, syncs) = (shard.memory.bytes(RING), shard.memory.syncs());
             let opened = shard.open(ring, &mut Slots::new()).await;
-            let refused = Err(Error::Unaligned { tail: BLOCK + 1 });
+            let refused = Err(Error::Unaligned { tail: u64::MAX });
             let expected = if taken { refused } else { Ok(()) };
             let case = format!("newer: {newer:?}, the block at {unaligned}");
             assert_eq!(opened.map(drop), expected, "{case}");
