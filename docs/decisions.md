@@ -2366,6 +2366,37 @@ How to read this record:
   can have stopped between the two. A put removes a file of another length at its name
   and writes the chunk. Decided in review round 1 of #1515 (2026-10-07T17:56:25Z):
   https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043700902.
+- **BLOB WIRE (#1227)** The blob protocol (protocol 4 of the header) runs on one stream
+  from a requester to the server that holds the store. After the header, the requester
+  sends gets and puts, and the server sends replies. Fields are little-endian. A get is
+  kind 1 and then one or more digests of 32 bytes; the message length gives the count,
+  so a get has no count field and no run state, and a requester with more digests than
+  one message holds sends more gets. A put is kind 2, the digest, and the length of the
+  chunk (`u32`), 37 bytes; its body follows. A reply is kind 1 (chunk: the digest and
+  the length, 37 bytes; its body follows), kind 2 (absent: the digest, 33 bytes), or
+  kind 3 (stored: the digest, 33 bytes). A body is the bytes of the chunk as stream
+  messages back to back with no prefix, each at most the peer's `message_bytes_max`, so
+  a chunk larger than one message goes in parts. No message of a body is empty, the body
+  starts a new message, and a chunk of 0 bytes has no body message. Each decoder
+  (`wire::blob::Server` for the requester's messages, `wire::blob::Requester` for the
+  server's) takes from its caller the most bytes a chunk may have, refuses a longer
+  chunk at its length field, and refuses a body message longer than the rest of the
+  body; `body` gives where in the chunk the next body message starts. The receiver, not
+  `wire`, checks the digest over the whole chunk. Stop codes: 16 `MISMATCH` (the bytes
+  do not hash to the digest), 17 `TOO_LARGE` (the chunk is longer than the largest block
+  of the node), 18 `FULL` (a put would leave the disk under the free floor of the
+  store). Each other break is `wire::header::MALFORMED`, and a stop ends each open
+  request of the stream. Order is a rule: the server answers requests in order, the
+  digests of a get in message order and a put after its body. The requester keeps a
+  queue of its open requests, and a reply that does not answer the oldest open request
+  is `MALFORMED`. Each reply names its digest. The check lives in `blob` (#1229), and
+  `wire` keeps no queue. The sides are `Requester` and `Server`, and the decoded
+  messages `FromRequester` and `FromServer`. Lost: a count field in the get (the length
+  gives it); a run state for the get as the hub keys have (a get is one message); a
+  length prefix on each body message (the stream frames it); a digest check in `wire`
+  (the decoder sees parts, and the receiver has the whole chunk). Decided by
+  `laptop.architect` (2026-10-07T20:43:10Z):
+  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
