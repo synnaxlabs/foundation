@@ -721,6 +721,23 @@ mod tests {
             assert_eq!(held.buffer.capacity(), 0);
         }
 
+        /// Each copy of a full list, not only the first two that `tests/chunks.rs`
+        /// pins, keeps the list at the bound.
+        #[test]
+        fn a_read_of_many_tiny_chunks_never_holds_more_than_chunks_max() {
+            // Private: no public call shows the count of chunks held.
+            let message: Vec<u8> = (0..=250).cycle().take(1 << 18).collect();
+            let bytes = Bytes::from(message.clone());
+            let mut held = Held::default();
+            for at in 0..message.len() {
+                held.push(message.len(), bytes.slice(at..=at));
+                assert!(held.chunks.len() <= CHUNKS_MAX, "after {at} bytes");
+            }
+            let mut block = vec![0; message.len()];
+            held.drain_into(&mut block);
+            assert_eq!(block, message);
+        }
+
         #[test]
         #[should_panic(expected = "the source gives at least one byte")]
         fn when_source_gives_no_bytes_it_panics() {
