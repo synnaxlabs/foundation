@@ -1044,8 +1044,8 @@ How to read this record:
   since a frame holds its index. The home checks each key as it arrives and never
   allocates by the peer's count. A head with more series than places, or an end with a
   place the session does not have or that is not above the place before it, is not
-  valid; the reader's `hub` checks this as the head and each end arrive, so it holds no
-  more ends than it has places. The ends and the body are in place order: the home
+  valid; `wire::hub::Reader` checks the head as it arrives and `types` checks the ends,
+  so the reader holds no more ends than it has places. The ends and the body are in place order: the home
   writes the series of each place it has, from 0, each from the frame's block as a
   slice, with ends it computes in that order. The first series starts at 0, and each
   other at the end before it rounded up to a multiple of 8. So the body is the series
@@ -1084,6 +1084,11 @@ How to read this record:
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
   `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
+  Amended (2026-10-07, #1196): the message order, the runs, and the head bound move
+  from `hub` to two stateful decoders in `wire`, `hub::Home` at the home and
+  `hub::Reader` at the reader's node, each with an exact error for each broken rule, so
+  `hub` checks no wire rule. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
