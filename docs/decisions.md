@@ -808,9 +808,11 @@ How to read this record:
   the architect
   (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). A
   waiting hub reader has given back every frame, as it grants at each `next` call, so
-  only the `delivery` tests reach the wake of a session that missed a frame with none
-  waiting; the #340 PR that makes the home's side of a remote reader adds its `sim`
-  test. The hub `sim` test is
+  no hub test reaches the wake of a session that missed a frame with none waiting. The
+  `delivery` tests and the home `sim` tests
+  `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` and
+  `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` reach it. The
+  hub `sim` test is
   `ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window`: one
   commit of more than a window wakes a waiting reader, which gets each frame before the
   miss, then `Ended::Behind`, with no hang. Decided by the architect

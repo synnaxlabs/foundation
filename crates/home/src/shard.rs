@@ -586,7 +586,8 @@ impl Shard {
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
     /// order and with the latest readers of an index first. Complete readers first get
     /// the live frames now on disk. A key is a hint: take from each until
-    /// [`take`](Self::take) gives `None`. A complete reader named for a miss
+    /// [`take`](Self::take) gives `None`, then check [`behind`](Self::behind) of a
+    /// complete reader before it waits: one named only for a miss
     /// ([`open_complete`](Self::open_complete)) has no frame to take. Call it after
     /// each write and each commit. When a commit ended since the last call, it reads
     /// each index with live frames queued for complete readers; else it reads none.
