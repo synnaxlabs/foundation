@@ -213,7 +213,9 @@ state on `main`.
   of the file, or, for the small body of #300, a `Layout` from the node's own
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
-- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Open on `main`:
+- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Its inputs
+  reach a record of three blocks, an entry table of three blocks, a tail that moved
+  as a trim moves it, a wrap record, and the end of the offsets. Open on `main`:
   #392 (three ways a ring loses data it reported durable or cannot open), #566 (a write
   of a dead process can land on a ring that a new process opened), #572 (`append` takes
   a record over the pool's largest block, and then each open fails), #657 (an open
@@ -303,7 +305,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
-| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
+| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
