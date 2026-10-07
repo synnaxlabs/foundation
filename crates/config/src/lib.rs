@@ -2,13 +2,16 @@
 //! kinds, and computes plans, explains, and exports.
 
 mod node_settings;
+mod placement;
+mod retention;
 
 use std::collections::{BTreeMap, btree_map};
 
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
-use types::name::Name;
+use spec::definition::Definition;
+use types::name::{Name, Selector};
 
 const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
 const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
@@ -18,18 +21,23 @@ const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
-/// The check of one kind of block.
-type Check = for<'a> fn(&mut Found<'a>, &'a Block);
+/// The check of one kind of block: its definition, or `None` after it reports why the
+/// block gives none.
+type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, by keyword, and its check.
-const KINDS: [(&str, Check); 1] = [("node_settings", node_settings::check)];
+const KINDS: [(&str, Check); 3] = [
+    ("node_settings", node_settings::check),
+    ("placement", placement::check),
+    ("retention", retention::check),
+];
 
 /// A checked definition and the label that names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entry {
     /// The definition, as the spec tree stores it.
-    pub definition: spec::definition::Definition,
+    pub definition: Definition,
     /// Where the label is.
     pub label_span: Option<Span>,
 }
@@ -40,9 +48,10 @@ pub struct Entry {
 /// # Errors
 ///
 /// Every problem in the Documents, in the order of `documents`, then in source order.
-/// A value that a reader or a definition refuses gives only its first problem. A
-/// definition is checked as a whole (a policy's budgets, for example) only when each
-/// of its attributes is known and reads, and the ones it needs are there.
+/// A problem with no span has no defined place in that order. A value that a reader
+/// or a definition refuses gives only its first problem. A definition is checked as a
+/// whole (a policy's budgets, for example) only when each of its attributes is known
+/// and reads, and the ones it needs are there.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found::default();
     for document in documents {
@@ -60,7 +69,19 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
                 .iter()
                 .find(|(keyword, _)| *keyword == &*block.keyword)
             {
-                Some((_, check_block)) => check_block(&mut found, block),
+                Some((_, check_block)) => {
+                    let key = found.key(block);
+                    let definition = check_block(&mut found, block);
+                    if let (Some((key, label_span)), Some(definition)) =
+                        (key, definition)
+                    {
+                        let entry = Entry {
+                            definition,
+                            label_span,
+                        };
+                        found.entries.insert(key, entry);
+                    }
+                }
                 None => found.diagnostics.push(Diagnostic::new(
                     UNKNOWN_BLOCK,
                     block.keyword_span,
@@ -260,6 +281,36 @@ impl<'a> Found<'a> {
         }
     }
 
+    /// The `select` attribute of a policy block, as [`Found::required`] reads it. The
+    /// fix is "Add a `select` attribute with the {selects}, such as "{example}"".
+    fn select(
+        &mut self,
+        block: &Block,
+        selects: &str,
+        example: &str,
+    ) -> Result<Selector, Reported> {
+        let fix = format!(
+            "Add a `select` attribute with the {selects}, such as \"{example}\""
+        );
+        self.required(block, "select", read::selector, fix)
+    }
+
+    /// The attribute `key` of `block` as `read` reads it. When the block has none, it
+    /// reports `config.missing-attribute` with `fix`.
+    fn required<T>(
+        &mut self,
+        block: &Block,
+        key: &str,
+        read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
+        fix: String,
+    ) -> Result<T, Reported> {
+        if let Some(value) = self.attribute(block, key, read)? {
+            return Ok(value);
+        }
+        self.missing(block, &[key], fix);
+        Err(Reported)
+    }
+
     /// Reports that `block` has none of the attributes `keys`.
     fn missing(&mut self, block: &Block, keys: &[&str], fix: String) {
         self.diagnostics.push(Diagnostic::new(
@@ -278,7 +329,6 @@ mod tests {
     use proptest::prelude::*;
     use spec::node_settings::Policy;
     use types::byte;
-    use types::name::Selector;
 
     use super::*;
 
@@ -458,7 +508,7 @@ mod tests {
                 "config.unknown-block",
                 at(0, 0),
                 "`nodes` is not a kind of block",
-                "Use `node_settings`, or remove the block",
+                "Use `node_settings`, `placement`, or `retention`, or remove the block",
             )])
         );
     }
@@ -874,6 +924,462 @@ mod tests {
                 documents[file as usize].blocks.push(block);
             }
             prop_assert_eq!(check(&documents), Ok(expected));
+        }
+    }
+
+    mod placements {
+        use spec::placement::{Nodes, Policy};
+
+        use super::*;
+
+        const NAME_FIX: &str = "Write a name such as \"site_a.node_1\"";
+
+        fn name(text: &str) -> Name {
+            text.parse().unwrap()
+        }
+
+        fn nodes(home: Option<&str>, standby: Option<&str>, copies: &[&str]) -> Nodes {
+            Nodes {
+                home: home.map(name),
+                standby: standby.map(name),
+                copies: copies.iter().map(|copy| name(copy)).collect(),
+            }
+        }
+
+        fn reference(text: &str) -> Kind {
+            Kind::Reference(name(text))
+        }
+
+        /// A list of names, each at its own one-byte span from `offset` in file 0.
+        fn list(offset: u32, items: &[Kind]) -> Kind {
+            let items = (offset..).zip(items).map(|(offset, kind)| Value {
+                kind: kind.clone(),
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        /// A `placement` block in file 0 at offset 0, labeled `edge`.
+        fn placement(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(
+                0,
+                0,
+                "placement",
+                &["edge"],
+                attributes,
+            )])]
+        }
+
+        /// The one entry of a placement labeled `edge` that selects `edge.*`.
+        fn placed(nodes: Nodes) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(selector(&["edge.*"]), nodes).unwrap();
+            let entry = Entry {
+                definition: spec::definition::Definition::Placement(policy),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@placement"), entry)])
+        }
+
+        #[test]
+        fn reads_a_home() {
+            let documents =
+                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
+            assert_eq!(
+                check(&documents),
+                Ok(placed(nodes(Some("edge"), None, &[])))
+            );
+        }
+
+        #[test]
+        fn reads_each_role_alone_from_a_string_or_a_reference() {
+            for node in [string("n_1"), reference("n_1")] {
+                let cases = [
+                    ("home", nodes(Some("n_1"), None, &[])),
+                    ("standby", nodes(None, Some("n_1"), &[])),
+                    ("copies", nodes(None, None, &["n_1"])),
+                ];
+                for (role, nodes) in cases {
+                    let documents = placement(&[
+                        ("select", string("edge.*")),
+                        (role, node.clone()),
+                    ]);
+                    assert_eq!(check(&documents), Ok(placed(nodes)), "{role}");
+                }
+            }
+        }
+
+        #[test]
+        fn reads_every_role() {
+            let copies = list(50, &[string("n_3"), reference("n_4")]);
+            let documents = placement(&[
+                ("select", string("edge.*")),
+                ("home", string("n_1")),
+                ("standby", reference("n_2")),
+                ("copies", copies),
+            ]);
+            let nodes = nodes(Some("n_1"), Some("n_2"), &["n_3", "n_4"]);
+            assert_eq!(check(&documents), Ok(placed(nodes)));
+        }
+
+        #[test]
+        fn refuses_a_placement_without_select() {
+            let documents = placement(&[("home", string("edge"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.missing-attribute",
+                    at(0, 0),
+                    "the `placement` block has no `select`",
+                    "Add a `select` attribute with the connectors and indexes that it \
+                     places, such as \"site_a.*\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_placement_that_names_no_node() {
+            let empty = list(50, &[]);
+            let cases = [
+                (vec![("select", string("edge.*"))], 0),
+                (vec![("select", string("edge.*")), ("copies", empty)], 13),
+            ];
+            for (attributes, offset) in cases {
+                assert_eq!(
+                    check(&placement(&attributes)),
+                    Err(vec![refused(
+                        "config.empty-placement",
+                        at(0, offset),
+                        "the `placement` block names no home, no standby, and no copy",
+                        "Name a `home`, a `standby`, or a node in `copies`",
+                    )]),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn reads_no_copies_next_to_a_home() {
+            let documents = placement(&[
+                ("select", string("edge.*")),
+                ("home", string("edge")),
+                ("copies", list(50, &[])),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Ok(placed(nodes(Some("edge"), None, &[])))
+            );
+        }
+
+        /// The `role-overlap` diagnostic for `node` at `span`.
+        fn overlap(node: &str, span: Option<Span>) -> Vec<Diagnostic> {
+            vec![refused(
+                "config.role-overlap",
+                span,
+                &format!("node {node} has more than one role in the placement"),
+                &format!("Keep {node} in one of `home`, `standby`, and `copies`"),
+            )]
+        }
+
+        #[test]
+        fn refuses_a_node_with_two_roles_at_its_last_value() {
+            let copies = || list(50, &[string("n_2"), string("n_1")]);
+            // After `select`, the value of role `i` is at offset `13 + 2i`.
+            let cases = [
+                (
+                    vec![("home", string("n_1")), ("standby", reference("n_1"))],
+                    15,
+                ),
+                (
+                    vec![("standby", string("n_1")), ("home", string("n_1"))],
+                    15,
+                ),
+                (vec![("home", string("n_1")), ("copies", copies())], 15),
+                (vec![("copies", copies()), ("home", string("n_1"))], 15),
+                (vec![("standby", string("n_1")), ("copies", copies())], 15),
+                (vec![("copies", copies()), ("standby", string("n_1"))], 15),
+                (
+                    vec![("copies", string("n_1")), ("standby", string("n_1"))],
+                    15,
+                ),
+                (
+                    vec![
+                        ("home", string("n_1")),
+                        ("copies", copies()),
+                        ("standby", string("n_1")),
+                    ],
+                    17,
+                ),
+            ];
+            for (roles, offset) in cases {
+                let mut attributes = vec![("select", string("edge.*"))];
+                attributes.extend(roles);
+                assert_eq!(
+                    check(&placement(&attributes)),
+                    Err(overlap("n_1", at(0, offset))),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn skips_a_later_value_that_does_not_name_the_node() {
+            let attributes = [
+                ("select", string("edge.*")),
+                ("home", string("n_1")),
+                ("standby", string("n_1")),
+                ("copies", list(50, &[string("n_3")])),
+            ];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(overlap("n_1", at(0, 15)))
+            );
+        }
+
+        #[test]
+        fn skips_a_later_home_or_standby_that_does_not_name_the_node() {
+            for (role, other) in [("standby", "home"), ("home", "standby")] {
+                let attributes = [
+                    ("select", string("edge.*")),
+                    (role, string("n_1")),
+                    ("copies", list(50, &[string("n_1")])),
+                    (other, string("n_9")),
+                ];
+                assert_eq!(
+                    check(&placement(&attributes)),
+                    Err(overlap("n_1", at(0, 15))),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn names_the_home_when_the_home_has_two_roles() {
+            let attributes = [
+                ("select", string("edge.*")),
+                ("home", string("n_1")),
+                ("standby", string("n_2")),
+                ("copies", list(50, &[string("n_2"), string("n_1")])),
+            ];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(overlap("n_1", at(0, 17)))
+            );
+        }
+
+        #[test]
+        fn refuses_a_node_value_that_is_not_a_name() {
+            let refused_name = |span, message: &str| {
+                Err(vec![refused("document.bad-name", span, message, NAME_FIX)])
+            };
+            let cases = [
+                (
+                    ("home", Kind::Integer(7)),
+                    refused_name(
+                        at(0, 13),
+                        "a name is a string or a reference, not an integer",
+                    ),
+                ),
+                (
+                    ("standby", Kind::Bool(true)),
+                    refused_name(
+                        at(0, 13),
+                        "a name is a string or a reference, not a bool",
+                    ),
+                ),
+                (
+                    ("copies", list(50, &[string("n_1"), Kind::Integer(7)])),
+                    refused_name(
+                        at(0, 51),
+                        "a name is a string or a reference, not an integer",
+                    ),
+                ),
+            ];
+            for (role, expected) in cases {
+                let attributes = [("select", string("edge.*")), role];
+                assert_eq!(check(&placement(&attributes)), expected, "{attributes:?}");
+            }
+        }
+
+        #[test]
+        fn refuses_a_name_that_name_refuses() {
+            let attributes = [("select", string("edge.*")), ("home", string("a..b"))];
+            let error = "a..b".parse::<Name>().unwrap_err();
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 13),
+                    &error.to_string(),
+                    error.fix(),
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_only_the_unknown_attribute_of_a_placement_with_no_node() {
+            let attributes = [("select", string("edge.*")), ("node", string("edge"))];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 12),
+                    "`node` is not an attribute of the `placement` block",
+                    "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement() {
+            let [mut documents] =
+                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![refused(
+                    "config.unknown-block",
+                    at(0, 50),
+                    "the `placement` block cannot hold the `inner` block",
+                    "Remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_that_a_placement_does_not_have() {
+            let attributes = [
+                ("select", string("edge.*")),
+                ("home", string("edge")),
+                ("node", string("edge")),
+            ];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 14),
+                    "`node` is not an attribute of the `placement` block",
+                    "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                )])
+            );
+        }
+    }
+
+    mod retentions {
+        use spec::retention::Policy;
+        use types::time;
+
+        use super::*;
+
+        /// A `retention` block in file 0 at offset 0, labeled `edge`.
+        fn retention(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(
+                0,
+                0,
+                "retention",
+                &["edge"],
+                attributes,
+            )])]
+        }
+
+        /// The one entry of a retention labeled `edge` that selects `edge.**`.
+        fn kept(keep: time::Span) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(selector(&["edge.**"]), keep).unwrap();
+            let entry = Entry {
+                definition: Definition::Retention(policy),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@retention"), entry)])
+        }
+
+        #[test]
+        fn reads_a_retention() {
+            let three_days = time::Span::from_nanos(3 * time::Span::DAY.nanos());
+            for (text, keep) in [("3d", three_days), ("0s", time::Span::ZERO)] {
+                let documents =
+                    retention(&[("select", string("edge.**")), ("keep", string(text))]);
+                assert_eq!(check(&documents), Ok(kept(keep)), "{text:?}");
+            }
+        }
+
+        #[test]
+        fn refuses_a_retention_without_select_or_keep() {
+            let select = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `retention` block has no `select`",
+                "Add a `select` attribute with the indexes that it caps, such as \
+                 \"site_a.**\"",
+            );
+            let keep = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `retention` block has no `keep`",
+                "Add a `keep` attribute with a span such as \"3d\"",
+            );
+            let cases = [
+                (vec![("keep", string("3d"))], vec![select.clone()]),
+                (vec![("select", string("edge.**"))], vec![keep.clone()]),
+                (vec![], vec![select, keep]),
+            ];
+            for (attributes, diagnostics) in cases {
+                assert_eq!(
+                    check(&retention(&attributes)),
+                    Err(diagnostics),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_negative_keep_at_its_value() {
+            let documents =
+                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.negative-span",
+                    at(0, 13),
+                    "a retention keeps -1s, which is below zero",
+                    "Write a keep time of zero or more",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_keep_that_is_not_a_span() {
+            let documents =
+                retention(&[("select", string("edge.**")), ("keep", string("3 days"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.bad-span",
+                    at(0, 13),
+                    "cannot read the span \"3 days\": a span is not a number and a \
+                     unit",
+                    "Write a span such as \"250us\", \"1.5s\", or \"3d\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_that_a_retention_does_not_have() {
+            let documents = retention(&[
+                ("select", string("edge.**")),
+                ("keep", string("3d")),
+                ("hold", string("1d")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 14),
+                    "`hold` is not an attribute of the `retention` block",
+                    "Use `select` or `keep`, or remove it",
+                )])
+            );
         }
     }
 }
