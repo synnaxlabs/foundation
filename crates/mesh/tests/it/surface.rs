@@ -161,6 +161,23 @@ fn open_panics_on_a_transport_that_proves_another_key() {
     });
 }
 
+// The transport proves the key of the member record, so only the private key of the
+// config is the other side of the check.
+#[test]
+#[should_panic(
+    expected = "invariant: the transport of a mesh proves the public half of its \
+                private key: it proves \
+                8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c, not \
+                ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1"
+)]
+fn open_panics_on_a_private_key_that_its_transport_does_not_prove() {
+    solo(|node, tasks| async move {
+        let mut config = create_config(&node, &tasks);
+        config.private_key = PrivateKey([3; 32]);
+        drop(Mesh::open(config).await);
+    });
+}
+
 #[test]
 fn a_region_with_two_records_of_one_node_does_not_open() {
     solo(|node, tasks| async move {

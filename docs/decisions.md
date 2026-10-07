@@ -1528,8 +1528,8 @@ How to read this record:
   dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
   NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
   `Transport::public_key` gives the key that the transport proves to each peer, so
-  `node` can check it against the key it loads. Decided by laptop.architect and
-  laptop.architect-2 (#1587, 2026-10-07 19:55 UTC):
+  `Mesh::open` can check it against the key of its config (MESH SURFACE). Decided by
+  laptop.architect and laptop.architect-2 (#1587, 2026-10-07 19:55 UTC):
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
