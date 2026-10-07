@@ -21,7 +21,9 @@ holds. A second-round report gives, after the summary, the `Hot path:` line that
 Check:
 
 - Does the code do what the decisions section says? Name each difference. Does each
-  rule that the PR adds to `docs/decisions.md` cite the comment that decided it?
+  rule that the PR adds to `docs/decisions.md` cite the comment that decided it, with
+  its UTC time, and say "Supersedes <link>" for each rule it replaces
+  (`docs/factory.md`, "GitHub is the record")?
 - Inputs at the edges: empty, maximum size, overflow, out of order, duplicate,
   concurrent, crash midway.
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
