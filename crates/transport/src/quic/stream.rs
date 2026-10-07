@@ -3440,6 +3440,24 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_over_32_bits_after_the_stream_dropped_before_its_message_breaks() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let bytes = [byte(Class::Complete)];
+            let id = raw(pair.client.connection(), Dir::Bi, &bytes, false);
+            pair.run(RUN);
+            let finished = pair.client.connection().send_stream(id).finish();
+            finished.expect("finished");
+            // The finish goes in its own packet, ahead of the stop.
+            pair.run(Duration::ZERO);
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            let stopped = pair.client.connection().recv_stream(id).stop(over);
+            stopped.expect("stopped");
+            assert_broken(&mut pair, true, "a stop code over 32 bits: 4294967296");
+        });
+    }
+
+    #[test]
     fn a_stop_after_only_the_class_byte_resets_the_reply() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
