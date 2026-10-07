@@ -1700,13 +1700,17 @@ How to read this record:
   is the host name in lower case and the port. `influx.` and `influx` are two keys,
   because a resolver may expand a name with no final dot. The client takes only `http`
   today; with TLS, the key also holds the scheme. A new connection looks up the host
-  through `env` and tries each address in order, as Go does: each address but the last
-  gets an equal share of the time left, and at least 2 s. A reused connection does no
-  lookup. Lost: Happy Eyeballs (RFC 8305), which needs more code and streams; a separate
-  error variant for a failed lookup, which a caller handles as a failed connect. Decided
-  by `connector` in the plan on #341
-  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051), after
-  the reviews of #1135.
+  through `env` and tries each address in order, as Go does: each address gets an equal
+  share of the time left to the deadline, and at least 2 s. An address whose share is
+  all the time left gets no limit of its own, and no later address gets a connect. A
+  reused connection does no lookup. Lost: Happy Eyeballs (RFC 8305), which needs more
+  code and streams; a separate error variant for a failed lookup, which a caller handles
+  as a failed connect; no limit for each address, where one that drops the SYN uses the
+  whole timeout. Decided by `connector` in the plan on #341
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051) and in
+  the review of #1135 on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a

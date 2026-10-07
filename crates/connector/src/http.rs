@@ -7,6 +7,7 @@ mod stream;
 use std::cell::Cell;
 use std::fmt;
 use std::future::poll_fn;
+use std::net::Ipv6Addr;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::Poll;
@@ -107,8 +108,9 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// - [`Error::Uri`] when the scheme is not `http`, or the URI has no host, a
-    ///   port that is not a 16-bit number, or user info.
+    /// - [`Error::Uri`] when the scheme is not `http`, the host is empty or a bad
+    ///   IPv6 address, the port is not a number from 1 to 65535, or the URI has user
+    ///   info.
     /// - [`Error::Connect`] when the name lookup failed, or no address of the host
     ///   took the connection.
     /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
@@ -205,8 +207,9 @@ impl Client {
     }
 
     /// Connects to the first address of `origin` that takes the stream. Each
-    /// address but the last gets a share of the time left to `deadline`. When none
-    /// takes it, gives the error of the first.
+    /// address gets a share of the time left to `deadline`, and the one whose share
+    /// is all of it gets no limit of its own. When none takes the stream, gives the
+    /// error of the first.
     async fn dial(
         &self,
         origin: &Origin,
@@ -221,8 +224,7 @@ impl Client {
             };
             let left = remotes.len() - i;
             let sleep = deadline
-                .filter(|_| left > 1)
-                .map(|deadline| share(self.clock.now(), deadline, left))
+                .and_then(|deadline| share(self.clock.now(), deadline, left))
                 .map(|end| self.clock.sleep_until(end));
             let connect = before(self.net.connect(&config), sleep).await;
             match connect.unwrap_or(Err(net::Error::TimedOut { remote })) {
@@ -256,13 +258,13 @@ async fn before<T>(
 }
 
 /// The end of a connect to the first of `left` addresses, as in Go: an equal share of
-/// the time from `now` to `deadline`, but at least [`ATTEMPT_MIN`] while that much
-/// is left.
-fn share(now: Monotonic, deadline: Monotonic, left: usize) -> Monotonic {
-    let remaining = (deadline - now).nanos().max(0);
+/// the time from `now` to `deadline`, but at least [`ATTEMPT_MIN`]. Gives `None` when
+/// the share is all the time left, so that no later address gets a connect.
+fn share(now: Monotonic, deadline: Monotonic, left: usize) -> Option<Monotonic> {
+    let remaining = (deadline - now).nanos();
     let left = i64::try_from(left).expect("invariant: a lookup gives few addresses");
-    let share = (remaining / left).max(ATTEMPT_MIN.nanos().min(remaining));
-    now + Span::from_nanos(share)
+    let share = (remaining / left).max(ATTEMPT_MIN.nanos());
+    (share < remaining).then(|| now + Span::from_nanos(share))
 }
 
 /// Where requests go: a host in ASCII lowercase, and a port.
@@ -287,17 +289,32 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
         return Err(fail());
     }
     let authority = uri.authority().ok_or_else(fail)?;
-    if authority.as_str().contains('@') || authority.host().is_empty() {
+    let host = authority.host();
+    let bracketed = host.strip_prefix('[').map(|h| h.strip_suffix(']'));
+    let host_valid = match bracketed {
+        Some(v6) => v6.is_some_and(|v6| v6.parse::<Ipv6Addr>().is_ok()),
+        None => !host.is_empty(),
+    };
+    if authority.as_str().contains('@') || !host_valid {
         return Err(fail());
     }
-    // `port_u16` also gives `None` for a port that does not fit in 16 bits.
-    let port = match authority.port_u16() {
-        Some(port) => port,
-        None if authority.as_str().len() <= authority.host().len() + 1 => 80,
-        None => return Err(fail()),
+    let digits = authority
+        .as_str()
+        .strip_prefix(host)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .unwrap_or("");
+    // `u16::from_str` takes a leading `+`, which is not a port.
+    let port = match digits {
+        "" => 80,
+        _ if !digits.bytes().all(|b| b.is_ascii_digit()) => return Err(fail()),
+        _ => digits
+            .parse()
+            .ok()
+            .filter(|&port| port != 0)
+            .ok_or_else(fail)?,
     };
     Ok(Origin {
-        host: authority.host().to_ascii_lowercase(),
+        host: host.to_ascii_lowercase(),
         port,
     })
 }
@@ -336,8 +353,8 @@ fn origin_form(parts: &mut http::request::Parts) {
 /// Why an exchange failed.
 #[derive(Debug)]
 pub enum Error {
-    /// The scheme is not `http`, or the URI has no host, a port that is not a
-    /// 16-bit number, or user info.
+    /// The scheme is not `http`, the host is empty or a bad IPv6 address, the port is
+    /// not a number from 1 to 65535, or the URI has user info.
     Uri {
         /// The URI of the request.
         uri: Uri,
@@ -371,7 +388,7 @@ impl fmt::Display for Error {
         match self {
             Self::Uri { uri } => write!(
                 f,
-                "{uri} is not an http URI with a host, a valid port, and no user info"
+                "{uri} is not an http URI with a valid host and port, and no user info"
             ),
             Self::Connect(error) => write!(f, "the connect failed: {error}"),
             Self::TimedOut => write!(f, "the exchange timed out"),

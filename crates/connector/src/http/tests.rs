@@ -490,6 +490,10 @@ fn refuses_a_uri_it_cannot_reach() {
         "http://:8086/",
         "http://10.0.0.2:65536/",
         "http://influx:99999999/",
+        "http://influx:+80/",
+        "http://influx:0/",
+        "http://[]/",
+        "http://[influx]/",
     ] {
         let error = network.send(get(uri)).expect_err("not reachable");
         assert!(
@@ -499,7 +503,7 @@ fn refuses_a_uri_it_cannot_reach() {
         assert_eq!(
             error.to_string(),
             format!(
-                "{uri} is not an http URI with a host, a valid port, and no user info"
+                "{uri} is not an http URI with a valid host and port, and no user info"
             )
         );
     }

@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use env::net;
@@ -6,7 +7,7 @@ use sim::name::{self, Answer};
 use sim::node;
 use types::time::Span;
 
-use super::common::{all_ok, ok};
+use super::common::{OK, all_ok, ok};
 use super::{Network, PORT, Step, TIMEOUT, get, text};
 use crate::http::Error;
 
@@ -263,4 +264,45 @@ fn sends_to_port_80_when_the_uri_has_no_port() {
     ]);
     all_ok(&outcomes);
     assert_eq!(log.lock().expect("no panic").requests, [0, 0, 0]);
+}
+
+#[test]
+fn sends_to_an_ipv6_literal_with_no_lookup() {
+    let mut network = Network::new(84);
+    let server = network.server.addresses()[1];
+    let log = network.serve_on(SocketAddr::new(server, PORT), ok);
+    let url = format!("http://{}/", SocketAddr::new(server, PORT));
+    all_ok(&network.run(vec![Step::Send(get(&url))]));
+    assert_eq!(log.lock().expect("no panic").requests, [0]);
+}
+
+#[test]
+fn makes_no_connect_once_the_timeout_ends() {
+    let mut network = Network::new(85);
+    let mut addresses: Vec<IpAddr> = (0..5).map(|_| network.silent()).collect();
+    addresses.extend((0..3).map(|_| network.deaf()));
+    network.name("influx", addresses, Span::ZERO);
+    let port = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&port);
+    network.serve(move |mut stream, _, _| {
+        *slot.lock().expect("no panic") = Some(stream.peer().port());
+        async move {
+            super::write(&mut stream, OK.as_bytes()).await;
+            Some(stream)
+        }
+    });
+    let url = network.url("/");
+    let outcomes = network.run(vec![
+        Step::Send(get(&format!("http://influx:{PORT}/"))),
+        Step::Send(get(&url)),
+    ]);
+    assert!(
+        matches!(outcomes[0], Err(Error::TimedOut)),
+        "{:?}",
+        outcomes[0]
+    );
+    all_ok(&outcomes[1..]);
+    // The client takes the next local port, from 49152, for each connect: one to
+    // each silent address, and none to the refusing ones.
+    assert_eq!(*port.lock().expect("no panic"), Some(49_152 + 5));
 }

@@ -1,6 +1,7 @@
 //! A server that answers each request, for the tests of sibling modules.
 
 use std::future::poll_fn;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -37,15 +38,25 @@ pub(super) struct Log {
 }
 
 impl Network {
-    /// Serves each stream on `port` until it ends. `answer` gets the index of each
-    /// request, counted over all streams.
+    /// Serves each stream on `port` of the server's IPv4 address until it ends.
+    /// `answer` gets the index of each request, counted over all streams.
     pub(super) fn serve_each(
         &mut self,
         port: u16,
         answer: impl Fn(usize) -> Reply + Send + Sync + 'static,
     ) -> Arc<Mutex<Log>> {
+        self.serve_on(self.remote_on(port), answer)
+    }
+
+    /// Serves each stream on `local`, an address of the server, as
+    /// [`Network::serve_each`] does.
+    pub(super) fn serve_on(
+        &mut self,
+        local: SocketAddr,
+        answer: impl Fn(usize) -> Reply + Send + Sync + 'static,
+    ) -> Arc<Mutex<Log>> {
         let listen = tcp::Listen {
-            local: self.remote_on(port),
+            local,
             backlog: 4,
             options: crate::http::OPTIONS,
         };
