@@ -2501,6 +2501,33 @@ pub(super) mod tests {
             ]
         }
 
+        /// Opens a session at `start` in both, unnamed or as the named reader `name`
+        /// that resumes, and checks where it starts.
+        fn open_live(
+            readers: &mut Readers,
+            model: &mut Flows,
+            start: u64,
+            name: Option<usize>,
+            limit: u64,
+        ) {
+            let (reader, from) = match name {
+                Some(name) => (named(NAMES[name], 10), resume(live(start))),
+                None => (Reader::Unnamed, Start::At(live(start))),
+            };
+            let opened = readers.open(reader, from, limit);
+            let stored = name.and_then(|name| model.take_over(name));
+            let position = stored.unwrap_or(start);
+            assert_eq!(opened.position, live(position));
+            let got = Got {
+                name,
+                position,
+                behind: model.behind(position),
+                limit,
+                ..Got::default()
+            };
+            model.open.insert(opened.key, got);
+        }
+
         /// Checks the live path against a model of the rules: a session gets each
         /// released frame with a sample at or past its position, in seq order, while it
         /// has credit, and none after the first it has no credit for. A session that
@@ -2522,22 +2549,7 @@ pub(super) mod tests {
                     Live::Open(back, name) => {
                         let start = (model.gone() + 4).saturating_sub(back);
                         let limit = limits.next().unwrap_or(0);
-                        let (reader, from) = match name {
-                            Some(name) => (named(NAMES[name], 10), resume(live(start))),
-                            None => (Reader::Unnamed, Start::At(live(start))),
-                        };
-                        let key = readers.open(reader, from, limit);
-                        let stored = name.and_then(|name| model.take_over(name));
-                        let position = stored.unwrap_or(start);
-                        assert_eq!(key.position, live(position));
-                        let got = Got {
-                            name,
-                            position,
-                            behind: model.behind(position),
-                            limit,
-                            ..Got::default()
-                        };
-                        model.open.insert(key.key, got);
+                        open_live(&mut readers, &mut model, start, name, limit);
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
