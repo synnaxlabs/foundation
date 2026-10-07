@@ -57,8 +57,9 @@ impl Open {
     ///
     /// # Panics
     ///
-    /// When `out` is not [`Open::encoded_len`] bytes.
+    /// When `channels` is 0, or `out` is not [`Open::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
+        assert!(self.channels > 0, "an open names at least one channel");
         let mut out = Writer::new(out, self.encoded_len());
         match self.mode {
             Mode::Latest => out.put(&[LATEST]),
@@ -245,9 +246,9 @@ pub mod keys {
     ///
     /// # Panics
     ///
-    /// When `out` is not 16 bytes for each key.
+    /// When `keys` is empty, or `out` is not 16 bytes for each key.
     pub fn encode(keys: &[channel::Key], out: &mut [u8]) {
-        let out = Writer::new(out, keys.len().saturating_mul(KEY));
+        let out = Writer::run(out, keys.len(), KEY);
         for (out, key) in out.0.as_chunks_mut::<KEY>().0.iter_mut().zip(keys) {
             *out = key.as_u128().to_le_bytes();
         }
@@ -281,9 +282,9 @@ pub mod ends {
     ///
     /// # Panics
     ///
-    /// When `out` is not 8 bytes for each end.
+    /// When `ends` is empty, or `out` is not 8 bytes for each end.
     pub fn encode(ends: impl ExactSizeIterator<Item = (u32, u32)>, out: &mut [u8]) {
-        let out = Writer::new(out, ends.len().saturating_mul(END));
+        let out = Writer::run(out, ends.len(), END);
         for (out, (place, end)) in out.0.as_chunks_mut::<END>().0.iter_mut().zip(ends) {
             let [p0, p1, p2, p3] = place.to_le_bytes();
             let [e0, e1, e2, e3] = end.to_le_bytes();
@@ -371,6 +372,12 @@ impl<'o> Writer<'o> {
             out.len()
         );
         Self(out)
+    }
+
+    /// A writer for one message of a run: `items` of `size` bytes each.
+    fn run(out: &'o mut [u8], items: usize, size: usize) -> Self {
+        assert!(items > 0, "a message of a run holds at least one item");
+        Self::new(out, items.saturating_mul(size))
     }
 
     fn put(&mut self, bytes: &[u8]) {
@@ -569,6 +576,16 @@ mod tests {
         }
 
         #[test]
+        #[should_panic(expected = "an open names at least one channel")]
+        fn panics_on_an_open_of_no_channel() {
+            let open = Open {
+                mode: Mode::Latest,
+                channels: 0,
+            };
+            open.encode(&mut [0; 5]);
+        }
+
+        #[test]
         #[should_panic(expected = "out has 4 bytes, and the message has 5")]
         fn panics_when_out_has_the_wrong_length() {
             let open = Open {
@@ -704,6 +721,12 @@ mod tests {
         }
 
         #[test]
+        #[should_panic(expected = "a message of a run holds at least one item")]
+        fn panics_on_no_key() {
+            super::super::keys::encode(&[], &mut []);
+        }
+
+        #[test]
         #[should_panic(expected = "out has 15 bytes, and the message has 16")]
         fn panics_when_out_has_the_wrong_length() {
             super::super::keys::encode(&[key(1)], &mut [0; 15]);
@@ -754,6 +777,12 @@ mod tests {
             for len in [1, 7, 9, 15, 17] {
                 assert_eq!(decode(&vec![0; len]), Err(Error::Length { len }));
             }
+        }
+
+        #[test]
+        #[should_panic(expected = "a message of a run holds at least one item")]
+        fn panics_on_no_end() {
+            super::super::ends::encode(iter::empty(), &mut []);
         }
 
         #[test]
