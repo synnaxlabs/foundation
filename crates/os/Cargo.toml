@@ -25,6 +25,12 @@ proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["rt", "time"] }
 
+# Needs `sudo`: only one CI step on a GitHub-hosted runner runs it.
+[[test]]
+name = "root"
+path = "tests/root/main.rs"
+test = false
+
 [[bench]]
 name = "now"
 harness = false
