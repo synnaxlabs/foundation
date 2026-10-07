@@ -1,3 +1,4 @@
+use document::encoding::Checked;
 use document::value::{Kind, Value};
 use document::{Attribute, Document, Map};
 use proptest::prelude::*;
@@ -283,7 +284,7 @@ fn name(text: &str) -> Name {
 }
 
 /// A config with one attribute per pair.
-fn config(pairs: &[(&str, i128)]) -> Document {
+fn config(pairs: &[(&str, i128)]) -> Checked {
     let attributes = pairs.iter().map(|&(key, n)| Attribute {
         key: key.into(),
         key_span: None,
@@ -292,15 +293,16 @@ fn config(pairs: &[(&str, i128)]) -> Document {
             span: None,
         },
     });
-    Document {
+    Checked::new(Document {
         attributes: Map::new(attributes.collect()).unwrap(),
         blocks: Vec::new(),
-    }
+    })
+    .unwrap()
 }
 
 fn connector() -> Definition {
     let config = config(&[("port", 502)]);
-    Definition::Connector(Connector::new(name("modbus"), name("gw_1"), config).unwrap())
+    Definition::Connector(Connector::new(name("modbus"), name("gw_1"), config))
 }
 
 fn length(bytes: &mut Vec<u8>, n: usize) {
@@ -336,7 +338,7 @@ fn region() -> Definition {
 
 #[test]
 fn writes_the_documented_connector_layout() {
-    let config = encoding::encode(&config(&[("port", 502)])).unwrap();
+    let config = config(&[("port", 502)]).encode();
     let expected = connector_bytes(b"modbus", b"gw_1", &config);
     assert_eq!(connector().encode(), expected);
     assert_eq!(Definition::decode(&expected), Ok(connector()));
@@ -351,7 +353,7 @@ fn writes_the_documented_region_layout_with_voters_in_order() {
 
 #[test]
 fn refuses_a_name_that_does_not_read() {
-    let config = encoding::encode(&Document::default()).unwrap();
+    let config = Checked::new(Document::default()).unwrap().encode();
     let bytes = connector_bytes(b"modbus", b"gw 1", &config);
     let error = Error::Name {
         at: 16,
@@ -389,7 +391,7 @@ fn refuses_a_config_that_is_not_a_document() {
         "the connector config at byte 36 does not read: the document has format \
          version 9, and this node reads only version 1. Upgrade the node"
     );
-    let mut config = encoding::encode(&Document::default()).unwrap();
+    let mut config = Checked::new(Document::default()).unwrap().encode();
     config.push(0);
     let bytes = connector_bytes(b"modbus", b"gw_1", &config);
     let at = config.len() - 1;
@@ -774,7 +776,7 @@ fn connector_strategy() -> impl Strategy<Value = Definition> {
             .iter()
             .map(|(k, &v)| (k.as_str(), i128::from(v)))
             .collect::<Vec<_>>();
-        Definition::Connector(Connector::new(kind, node, config(&pairs)).unwrap())
+        Definition::Connector(Connector::new(kind, node, config(&pairs)))
     })
 }
 

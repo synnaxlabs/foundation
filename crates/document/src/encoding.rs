@@ -1,5 +1,6 @@
-//! The canonical bytes of a document. Each document has exactly one encoding, with no
-//! spans, and `decode` refuses every byte string that `encode` cannot write.
+//! The canonical bytes of a document. Each [`Checked`] document has exactly one
+//! encoding, with no spans, and `decode` refuses every byte string that
+//! [`Checked::encode`] cannot write.
 //!
 //! Format, with every integer little-endian:
 //!
@@ -28,8 +29,8 @@ use crate::{Attribute, Block, Document, Label, Map, Span};
 
 const VERSION: u8 = 1;
 
-/// The deepest nesting that [`encode`] writes and [`decode`] reads. Each block body
-/// and each list, map, and call value is one level.
+/// The deepest nesting that a [`Checked`] document holds and [`decode`] reads. Each
+/// block body and each list, map, and call value is one level.
 pub const DEPTH_MAX: usize = 64;
 
 const FALSE: u8 = 0;
@@ -42,26 +43,47 @@ const LIST: u8 = 6;
 const MAP: u8 = 7;
 const CALL: u8 = 8;
 
-/// Writes the canonical bytes of `document`. Spans are not written.
-///
-/// # Errors
-///
-/// Returns [`TooDeep`] when `document` nests deeper than [`DEPTH_MAX`].
-pub fn encode(document: &Document) -> Result<Vec<u8>, TooDeep> {
-    check(document)?;
-    let mut writer = Writer { out: vec![VERSION] };
-    writer.body(document);
-    Ok(writer.out)
+/// A document that nests no deeper than [`DEPTH_MAX`], so it has an encoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checked(Document);
+
+impl Checked {
+    /// Checks the depth of `document`. It never recurses past [`DEPTH_MAX`] levels,
+    /// however deep `document` is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TooDeep`] at the first level past the limit, in the order that
+    /// [`Checked::encode`] writes: the attributes, then the blocks.
+    pub fn new(document: Document) -> Result<Self, TooDeep> {
+        check(&document)?;
+        Ok(Self(document))
+    }
+
+    /// The document.
+    #[must_use]
+    pub const fn document(&self) -> &Document {
+        &self.0
+    }
+
+    /// The document, to change it. A changed document needs [`Checked::new`] again.
+    #[must_use]
+    pub fn into_document(self) -> Document {
+        self.0
+    }
+
+    /// Writes the canonical bytes of the document. Spans are not written.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut writer = Writer { out: vec![VERSION] };
+        writer.body(&self.0);
+        writer.out
+    }
 }
 
-/// Checks that [`encode`] can write `document`: it nests no deeper than [`DEPTH_MAX`].
-/// It never recurses past [`DEPTH_MAX`] levels, however deep `document` is.
-///
-/// # Errors
-///
-/// Returns [`TooDeep`] at the first level past the limit, in the order that [`encode`]
-/// writes: the attributes, then the blocks.
-pub fn check(document: &Document) -> Result<(), TooDeep> {
+/// Checks that `document` nests no deeper than [`DEPTH_MAX`], without recursing past
+/// it.
+fn check(document: &Document) -> Result<(), TooDeep> {
     fn body(document: &Document, depth: usize) -> Result<(), TooDeep> {
         map(&document.attributes, depth)?;
         document.blocks.iter().try_for_each(|block| {
@@ -97,7 +119,7 @@ pub fn check(document: &Document) -> Result<(), TooDeep> {
 /// # Errors
 ///
 /// Returns an [`Error`] when `bytes` are not the encoding of a document.
-pub fn decode(bytes: &[u8]) -> Result<Document, Error> {
+pub fn decode(bytes: &[u8]) -> Result<Checked, Error> {
     let mut reader = Reader {
         rest: bytes,
         len: bytes.len(),
@@ -113,7 +135,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, Error> {
     if !reader.rest.is_empty() {
         return Err(Error::TrailingBytes { at: reader.at() });
     }
-    Ok(document)
+    Ok(Checked(document))
 }
 
 /// A document that nests deeper than [`DEPTH_MAX`], so it has no encoding.
@@ -524,7 +546,7 @@ mod tests {
         #[test]
         fn writes_the_version_and_an_empty_body() {
             let empty = [&[VERSION][..], &count(0), &count(0)].concat();
-            assert_eq!(encode(&Document::default()).unwrap(), empty);
+            assert_eq!(Checked::new(Document::default()).unwrap().encode(), empty);
         }
 
         #[test]
@@ -553,13 +575,15 @@ mod tests {
         proptest! {
             #[test]
             fn reads_back_as_the_same_document(document in document()) {
-                prop_assert_eq!(decode(&encode(&document).unwrap()).unwrap(), document);
+                let checked = Checked::new(document).unwrap();
+                prop_assert_eq!(decode(&checked.encode()), Ok(checked));
             }
 
             #[test]
             fn writes_equal_documents_as_equal_bytes(document in document()) {
-                let again = decode(&encode(&document).unwrap()).unwrap();
-                prop_assert_eq!(encode(&again).unwrap(), encode(&document).unwrap());
+                let checked = Checked::new(document).unwrap();
+                let again = decode(&checked.encode()).unwrap();
+                prop_assert_eq!(again.encode(), checked.encode());
             }
         }
     }
@@ -707,13 +731,12 @@ mod tests {
             if let (Some(&at), Some(&span)) =
                 (starts.get(DEPTH_MAX), spans.get(DEPTH_MAX))
             {
-                assert_eq!(check(&document), Err(TooDeep { span: Some(span) }));
-                assert_eq!(encode(&document), Err(TooDeep { span: Some(span) }));
+                assert_eq!(Checked::new(document), Err(TooDeep { span: Some(span) }));
                 assert_eq!(decode(&bytes), Err(Error::Depth { at }));
             } else {
-                assert_eq!(check(&document), Ok(()));
-                assert_eq!(encode(&document).unwrap(), bytes);
-                assert_eq!(decode(&bytes).unwrap(), document);
+                let checked = Checked::new(document).unwrap();
+                assert_eq!(checked.encode(), bytes);
+                assert_eq!(decode(&bytes), Ok(checked));
             }
         }
 
@@ -759,8 +782,7 @@ mod tests {
             let expected = Err(TooDeep {
                 span: Some(spans[DEPTH_MAX]),
             });
-            assert_eq!(check(&document), expected);
-            assert_eq!(encode(&document).map(drop), expected);
+            assert_eq!(Checked::new(document).map(drop), expected);
         }
 
         /// `document` with no spans.
@@ -789,7 +811,7 @@ mod tests {
             let expected = Err(TooDeep {
                 span: Some(spans[DEPTH_MAX]),
             });
-            assert_eq!(check(&siblings), expected, "blocks");
+            assert_eq!(Checked::new(siblings).map(drop), expected, "blocks");
 
             let (first, spans) = nested_document(&[Level::List; 65]);
             let mut second = attribute(unspanned(&first));
@@ -801,7 +823,7 @@ mod tests {
             let expected = Err(TooDeep {
                 span: Some(spans[DEPTH_MAX]),
             });
-            assert_eq!(check(&siblings), expected, "attributes");
+            assert_eq!(Checked::new(siblings).map(drop), expected, "attributes");
 
             let (first, spans) = nested_document(&[Level::List; 64]);
             let second = attribute(unspanned(&first)).value;
@@ -820,7 +842,7 @@ mod tests {
             let expected = Err(TooDeep {
                 span: Some(spans[63]),
             });
-            assert_eq!(check(&siblings), expected, "list items");
+            assert_eq!(Checked::new(siblings).map(drop), expected, "list items");
         }
 
         /// Drops `document` one level at a time. A plain drop recurses once per level.
@@ -853,11 +875,11 @@ mod tests {
                 let expected = Err(TooDeep {
                     span: Some(spans[DEPTH_MAX]),
                 });
+                // `Checked::new` would drop the refused document, and a plain drop
+                // recurses once per level.
                 let checked = check(&document);
-                // A wrong `check` lets the writer recurse to the bottom.
-                let encoded = checked.is_err().then(|| encode(&document).map(drop));
                 tear_down(document);
-                assert_eq!((checked, encoded), (expected, Some(expected)), "{level:?}");
+                assert_eq!(checked, expected, "{level:?}");
             }
         }
 
@@ -927,14 +949,14 @@ mod tests {
                 document in document(),
                 edits in prop::collection::vec(edit(), 1..4),
             ) {
-                let mut bytes = encode(&document).unwrap();
+                let mut bytes = Checked::new(document).unwrap().encode();
                 for edit in &edits {
                     if !bytes.is_empty() {
                         apply(&mut bytes, edit);
                     }
                 }
                 if let Ok(decoded) = decode(&bytes) {
-                    prop_assert_eq!(encode(&decoded).unwrap(), bytes);
+                    prop_assert_eq!(decoded.encode(), bytes);
                 }
             }
 
@@ -943,7 +965,7 @@ mod tests {
                 bytes in prop::collection::vec(any::<u8>(), 0..64),
             ) {
                 if let Ok(decoded) = decode(&bytes) {
-                    prop_assert_eq!(encode(&decoded).unwrap(), bytes);
+                    prop_assert_eq!(decoded.encode(), bytes);
                 }
             }
         }
