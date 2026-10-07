@@ -228,11 +228,13 @@ How to read this record:
 
 ### 1.3 Delivery
 
-- **B1 (as revised by S10)** The home keeps a disk buffer for indexes whose retention
-  keeps data. Data stays while a holding reader has not received it, within one disk
-  budget per node. When the disk is full, the oldest data goes first, readers get an
-  explicit gap, and the node warns early and names the reader that holds the buffer.
-  Group commit every few ms. Complete readers get frames only after they are on disk.
+- **B1 (as revised by S10)** The home keeps a disk buffer for each index. Data stays
+  while a holding reader has not received it, up to the index's retention (RETENTION),
+  within one disk budget per node. When the disk is full, the oldest data goes first,
+  readers get an explicit gap, and the node warns early and names the reader that holds
+  the buffer. Group commit every few ms. Complete readers get frames only after they are
+  on disk. Amended: per S10 (architect, #895,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160).
 - **S10 (reader)** A reader is a session, not a definition: `Reader { name:
   Option<String>, select: Selector, mode: complete or latest, from: now, oldest, seq,
   time, or resume, max_age, hold: Duration (default 0) }`. Only complete mode holds.
@@ -240,6 +242,17 @@ How to read this record:
   takes over. Out connectors carry reader settings in their config. Current readers and
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
+- **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps the holds
+  on the indexes it selects: past `keep` after its store time, `buffer` trims a sample,
+  also when a reader holds it. It keeps no history window. An index that no policy
+  selects has no time cap. `keep` is zero or more. At `0s` no hold keeps a sample after
+  its store time, so a reader that is behind gets a gap. Most specific wins as a whole
+  policy (X25), equal specificity is a plan error (S12), and a data channel takes its
+  index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", and a
+  size cap per index.
+  Ruling and answers:
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on
   each write (B7) is the only source, and a write with no label is live. The person
@@ -2194,8 +2207,8 @@ How to read this record:
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
-  calculation with its own index. Raw and reduced data live side by side through
-  retention.
+  calculation with its own index. Raw and reduced data live side by side, each index
+  under its own retention policy.
 - **SIM INFLUX (#1151)** `connector_influx::sim::Store` is a simulated InfluxDB, behind
   the cargo feature `sim`, off by default. It parses with `influxdb-line-protocol`,
   InfluxData's own parser, so it is independent of our writer. A point is named by its
@@ -2514,11 +2527,11 @@ How to read this record:
   region from the directory (K2 makes the layout a default only; r3 rejected a
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
   The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
-  `@node_settings`, `@compression` (compression section), `@placement` (S12), and
-  `@time`. No time keyword was on record (C6 shows `[[time]]`, and X36 replaced its
-  content), so the architect decided `time`. A connector has no segment: it is at its
-  own name, and its channels are its children (#758, 2.2, C8). A channel has no segment
-  either: it is at its own name (#756,
+  `@node_settings`, `@compression` (compression section), `@placement` (S12),
+  `@retention` (#895), and `@time`. No time keyword was on record (C6 shows `[[time]]`,
+  and X36 replaced its content), so the architect decided `time`. A connector has no
+  segment: it is at its own name, and its channels are its children (#758, 2.2, C8). A
+  channel has no segment either: it is at its own name (#756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
   check still applies to both names. A region record is at `<prefix>.@region` in the
   parent's tree (#758). This is not an exception to X2: the region that holds the record
@@ -3232,7 +3245,7 @@ Storage classes used in the table:
 | Region | Files: `region "<prefix>" { voters }`. The parent's spec holds the delegation record `{ prefix, epoch, initial voters }`; the region's own Raft config holds current voters (X3) | Parent voters create, remove, or force takeover; the region changes its own voters | `mesh`, `plan`, every node | `spec` (definition), `mesh` (groups) |
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
 | Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
-| Retention policy | Spec; selects indexes | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
+| Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
 | Placement policy | Spec; selects connectors and indexes: `{ select, home, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
 | Compression policy | Spec; selects indexes; `mode` auto, raw, or max. The actual codec is a 1-byte tag per vector in the encoded bytes | Files | `codec` at the encoder (the home, or the writer's `hub`) | `spec`, `codec` |
