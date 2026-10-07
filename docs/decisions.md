@@ -1466,7 +1466,8 @@ How to read this record:
   does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
   node or a voter that is not a member (`Error::NotMember`), and a private key that is
   not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
-  decided by the architect (#471).
+  decided by the architect (#471):
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
