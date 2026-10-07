@@ -233,7 +233,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If an index of the key set is not carried.
+    /// If an index of the key set is not carried, in a call that gives no error.
     pub(crate) fn open_writer(
         &mut self,
         writer: Writer,
@@ -300,8 +300,9 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the writer is not open, `key` is of another shard, or the frame is not of
-    /// the writer's key set.
+    /// If the writer is not open or `key` is of another shard, before any error. If
+    /// the frame is not of the writer's key set, unless it is labeled resend: the
+    /// shard does not read a resend frame.
     pub(crate) fn write(
         &mut self,
         key: writer::Key,
@@ -405,7 +406,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the shard does not carry `slot`.
+    /// If the shard does not carry `slot`, in a call that gives no error.
     pub(crate) fn open_complete(
         &mut self,
         slot: Slot,
@@ -430,7 +431,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the shard does not carry `slot`.
+    /// If the shard does not carry `slot`, in a call that gives no error.
     pub(crate) fn open_latest(&mut self, slot: Slot) -> Result<reader::Key, Error> {
         let mesh = self.synced().ok_or(Error::Unsynced)?;
         let session = self.readers.open_latest(self.place(slot), mesh).into();
@@ -2701,6 +2702,27 @@ mod tests {
                 })
             );
         }
+
+        #[test]
+        fn panics_at_the_close_of_a_reader_of_an_index_it_does_not_carry() {
+            let (mut sim, _handle) = start(80, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let reader = latest(&mut shard, Slot::new(2));
+                let other = reader::Key {
+                    slot: Slot::new(3),
+                    ..reader
+                };
+                shard.close_reader(other);
+            });
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: DIR.into(),
+                    message: "the shard does not carry the index at Slot(3)".into(),
+                    seed: 80,
+                })
+            );
+        }
     }
 
     #[test]
@@ -2807,6 +2829,8 @@ mod tests {
                 mesh,
                 limits: LIMITS,
             });
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
             let zero = Writer {
                 lease: Some(Span::ZERO),
                 ..writer("a", 1, &two_indexes())
@@ -2815,8 +2839,8 @@ mod tests {
         });
     }
 
-    /// Runs `call` with a shard and a key that shard 1 gave for the number of an
-    /// open writer, and gives the panic of the run.
+    /// Runs `call` with a shard and a key that shard 2 gave for the number of its
+    /// second open writer, and gives the panic of the run.
     fn with_a_key_of_another_shard(
         seed: u64,
         call: impl FnOnce(&Test, &mut Shard, writer::Key) + Send + 'static,
@@ -2824,8 +2848,9 @@ mod tests {
         let (mut sim, _handle) = start(seed, move |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let other = writer::Key { shard: 1, ..a };
+            shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let other = writer::Key { shard: 2, ..b };
             call(&test, &mut shard, other);
         });
         sim.run()
@@ -2842,7 +2867,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 0 is of shard 1, not shard 0".into(),
+                message: "writer 1 is of shard 2, not shard 0".into(),
                 seed: 73,
             })
         );
@@ -2857,7 +2882,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 0 is of shard 1, not shard 0".into(),
+                message: "writer 1 is of shard 2, not shard 0".into(),
                 seed: 74,
             })
         );
@@ -2874,7 +2899,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 0 is of shard 1, not shard 0".into(),
+                message: "writer 1 is of shard 2, not shard 0".into(),
                 seed: 75,
             })
         );
@@ -2912,8 +2937,8 @@ mod tests {
         });
     }
 
-    /// Runs `call` with a shard and the key of a writer it closed, and gives the
-    /// panic of the run.
+    /// Runs `call` with a shard and the key of the second writer it opened, now
+    /// closed, and gives the panic of the run.
     fn with_a_closed_writer(
         seed: u64,
         call: impl FnOnce(&Test, &mut Shard, writer::Key) + Send + 'static,
@@ -2921,9 +2946,10 @@ mod tests {
         let (mut sim, _handle) = start(seed, move |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            shard.close_writer(a);
-            call(&test, &mut shard, a);
+            shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            shard.close_writer(b);
+            call(&test, &mut shard, b);
         });
         sim.run()
     }
@@ -2939,10 +2965,72 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 0 is not open".into(),
+                message: "writer 1 is not open".into(),
                 seed: 77,
             })
         );
+    }
+
+    #[test]
+    fn panics_on_a_resend_write_with_a_closed_writer() {
+        let ran = with_a_closed_writer(81, |test, shard, closed| {
+            let set = two_indexes();
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            drop(shard.write(closed, Label::Resend, write));
+        });
+        assert_eq!(
+            ran,
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "writer 1 is not open".into(),
+                seed: 81,
+            })
+        );
+    }
+
+    /// Writes a frame of a second key set with `label`, expects [`Error::Resend`],
+    /// and gives the run.
+    fn write_of_another_key_set(seed: u64, label: Label) -> Result<(), sim::Error> {
+        let (mut sim, _handle) = start(seed, move |test| async move {
+            let mut interner = interner();
+            let group = Group {
+                index: key(Slot::new(2)),
+                data: &[],
+            };
+            let set = interner.intern(&[group]);
+            let data = [(key(Slot::new(1)), Type::Scalar(Scalar::I64))];
+            let other = interner.intern(&[
+                Group {
+                    index: key(Slot::new(0)),
+                    data: &data,
+                },
+                group,
+            ]);
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let write = frame(&test.pool, &other, &[(2, &[10])]);
+            assert_eq!(shard.write(a, label, write), Err(Error::Resend));
+        });
+        sim.run()
+    }
+
+    #[test]
+    fn panics_on_a_write_of_a_frame_of_another_key_set() {
+        assert_eq!(
+            write_of_another_key_set(82, LIVE),
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "assertion `left == right` failed: the frame is of key set \
+                          1, not of key set 0\n  left: Key(1)\n right: Key(0)"
+                    .into(),
+                seed: 82,
+            })
+        );
+    }
+
+    #[test]
+    fn refuses_a_resend_frame_before_it_reads_the_frame() {
+        assert_eq!(write_of_another_key_set(83, Label::Resend), Ok(()));
     }
 
     #[test]
@@ -2954,7 +3042,7 @@ mod tests {
             ran,
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "writer 0 is not open".into(),
+                message: "writer 1 is not open".into(),
                 seed: 78,
             })
         );
