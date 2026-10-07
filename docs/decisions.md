@@ -1872,10 +1872,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
   `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
-  stops when a write of the log fails, when a committed entry is not a change that this
-  build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
-  the first cause, and a watch gives it also after each `Mesh` drops. `member` has no
-  error (#562): it gives the record that the node holds, also after a stop (approved by
+  stops when a write of the log fails, when a committed change has 0 bytes or a kind
+  that this build does not know, or when each `Mesh` drops: this build cannot judge
+  such an entry, and a newer build can. An entry with no change (the first entry of a
+  leader) is not a change of 0 bytes. A committed entry of a known kind whose body
+  does not decode is `Refused::Body` on every node, and the group goes on, so one voter
+  that proposes bad bytes cannot halt the region. So a change to the body or to a cap of
+  a known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
+  only after the format flag (C9d) allows it; a node of an older build stops at it and
+  never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
+  call gives `Error::Stopped` with the first cause, and a watch gives it also after each
+  `Mesh` drops. `member` has no error (#562): it gives the record that the node holds,
+  also after a stop (approved by
   the architect, 2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
   group does not start again: the node opens the mesh again, and the open makes durable
@@ -1891,7 +1900,8 @@ How to read this record:
   check them again (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
   reverses the map of the ruling below). The key of a member is the key that its card's
-  signature covers, and `open` refuses two members with one key (`Error::Duplicate`).
+  signature covers, and `open` refuses a member that the region cannot hold, or two
+  members with one key (`Error::Member`, with the `region::Unfit`).
   The signature does not show that the node owns its public key. The admission does, and
   `Join` (#336) refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
@@ -1989,7 +1999,12 @@ How to read this record:
   A `card::Signed` holds the `node::Key` that its signature covers (`Signed::key`): the
   key cannot come from the public key, which can rotate, so the signed card is its one
   place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
-  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). The
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). A
+  `Signed` comes only from `sign` or from `Unchecked::check`. `Signed::decode`
+  (crate-private) checks the signature and gives `None` when it does not hold; a change
+  record holds an `Unchecked` card, which each node checks at apply. Approved by
+  `laptop.architect` (2026-10-07T11:17:10Z):
+  https://github.com/synnaxlabs/foundation/pull/1323#issuecomment-6036785467. The
   field is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
   (`Stamp`) with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302). Decided
@@ -2003,17 +2018,58 @@ How to read this record:
   `Options` (prefix, reusable, expiry, ephemeral), and the use count. `Record::admit`
   refuses, in this order, a forged admission, a name outside the prefix, a join at or
   after the expiry, and a second use of a single-use ticket, and counts a use only when
-  all checks pass, so a refused join never uses up a ticket. The ephemeral expiry of a
-  `Member` comes from its ticket, because the admin decides what a ticket admits
-  (BQ11a) and the joining node is outside input. Lost: a bearer secret in the `Join`,
-  which every member could replay and which binds to no card. Decided by
-  `laptop.architect` (2026-10-07T09:27:39Z):
+  all checks pass, so a refused join never uses up a ticket. The expiry is the first
+  mesh time at which the ticket admits no node, so the `Expired` text is "ticket
+  {public_key} expired at {expiry}, and the join is at {at}". The text and the admit
+  order approved by `laptop.architect` (2026-10-07T11:03:29Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6036571225. The
+  ephemeral expiry of a `Member` comes from its ticket, because the admin decides what
+  a ticket admits (BQ11a) and the joining node is outside input. Lost: a bearer secret
+  in the `Join`, which every member could replay and which binds to no card. Decided
+  by `laptop.architect` (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. A
   `ticket::Voter` holds only the node key, the public key to pin, and the addresses,
   not a signed card: the ticket is the trust root, so a voter's signature over its own
   card checks nothing that the ticket does not give. The ticket's text form can reuse
   the byte form of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:14:01Z):
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302.
+  A `Ticket` change (kind 3) records a ticket's public key and `Options`. Apply refuses
+  a second record for one public key and a prefix that is not under the region's prefix;
+  the signature of the admin who made the ticket waits for #1213. A `Join` change (kind
+  2) carries the ticket's public key, a `Stamp` (the later edge of the admitting
+  voter's mesh time interval; a voter with no mesh time proposes no `Join`), the node
+  key, the card and its signature, the admission, and the status keys, which the voter
+  assigns (UUIDv7). Apply refuses, in this order, a forged card, a reserved name (A3), a
+  name outside the region, a status channel `<name>.<status>` that is longer than a
+  name can be or reserved, a key that is already a member, a name that a member holds,
+  a status key that a member holds or that the join repeats (A4), an unknown ticket,
+  and each refusal of `Record::admit`. So no refusal counts a use. A member's names are
+  its card name and each `<name>.<status>`, and two names are equal when they differ
+  only in ASCII case (A3, X27), so each full name maps to at most one member. Region
+  state cannot see the keys of the spec, so the status key check covers members only.
+  The name and key checks are one function, which `State::new` also runs on the
+  founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. A member
+  and a `Join` hold at most 64 status entries, as the 32 of `Addresses`. Decided by
+  `laptop.architect` (2026-10-07T10:44:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
+  `mesh::status::Status` holds the cap of 64: `Status::new` refuses more (`Many`), and
+  the decode refuses more before it reads an entry. So each `Member` that `encode`
+  writes decodes, and `region::Unfit` has no count check. Lost: `Unfit::Many` in the
+  member checks, which covers only where they run. Decided by `laptop.architect`
+  (2026-10-07T11:11:49Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036702954. A
+  refused change is a no-op on every node, so a forged card in the log cannot stop a
+  node. A `Join` holds a `card::Unchecked`, not a `card::Signed`: it has the byte form
+  of a signed card, decode keeps a join whose signature does not hold, and apply refuses
+  it as `Forged`. Each number in a change is little endian; a `Ticket` is the public
+  key, the prefix behind a length byte, a reusable byte (0 or 1), the expiry (8 bytes),
+  and the ephemeral span behind a presence byte. Decided by
+  `laptop.architect` (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
+  The reserved name check is region state, not a ticket check, because "no member name
+  is reserved" holds for every member, like "no key twice". Decided by
+  `laptop.architect` (2026-10-07T10:14:51Z):
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035813123.
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
