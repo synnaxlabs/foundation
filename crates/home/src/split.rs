@@ -422,7 +422,11 @@ fn series(draft: &mut Draft, entry: usize) -> &[u8] {
 const fn written(data_type: Type) -> Option<Scalar> {
     match data_type {
         Type::Scalar(scalar) => Some(scalar),
-        Type::Array { .. } | Type::List { .. } | Type::String | Type::Bytes => None,
+        Type::Array { .. }
+        | Type::Matrix { .. }
+        | Type::List { .. }
+        | Type::String
+        | Type::Bytes => None,
     }
 }
 
@@ -1373,6 +1377,13 @@ mod tests {
             let element = Scalar::F32;
             let types = [
                 Type::Array { element, len: 3 },
+                Type::Matrix {
+                    element,
+                    sides: types::sample::Sides {
+                        rows: 2,
+                        columns: 3,
+                    },
+                },
                 Type::List { element, max: 3 },
                 Type::String,
                 Type::Bytes,
