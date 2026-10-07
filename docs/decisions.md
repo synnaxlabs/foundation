@@ -3084,7 +3084,8 @@ How to read this record:
   sessions has no such bound (#1506). Decided by `laptop.architect`
   (2026-10-07T14:37:40Z):
   https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
-  The bound is for one session by `laptop.architect` (2026-10-07T17:29:27Z):
+  The bound for one session and #1506 decided by `laptop.architect`
+  (2026-10-07T17:29:27Z), which supersedes the bound for each map in the comment above:
   https://github.com/synnaxlabs/foundation/pull/1493#issuecomment-6043218811
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
