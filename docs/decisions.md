@@ -546,7 +546,12 @@ How to read this record:
   reader); within 2x at 100k channels; latest-mode p99 under 250 us over one encrypted
   LAN hop; under 4 bytes per sample for typical sensor data, timestamps included;
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
-  the dedicated machine blocks a merge.
+  the dedicated machine needs a written judgment before merge. The judgment states how
+  often the path runs (per sample, frame, session, or start), its absolute cost against
+  the P1 budget, the noise of the machine, and what the change buys. The code owner
+  accepts or rejects it on those facts. The person decided on 2026-10-06 (#1047): "we
+  need to make sure that we semantically understand benchmarks. A regression of 11% can
+  be ok in the right contexts". Supersedes: a regression over 5% blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
@@ -1871,8 +1876,8 @@ How to read this record:
   (amended by MILESTONES: builders file the issues on the milestone path); one agent per
   task in its own worktree; machine gates (build, lints, layer and stand-alone checks,
   unit and property tests, thousands of simulation runs, short fuzz, the 5% benchmark
-  gate, mutation testing on the diff); fresh adversarial reviewers (amended by REVIEW
-  TIERS); the merge queue (amended by MERGE QUEUE).
+  check (P1), mutation testing on the diff); fresh adversarial reviewers (amended by
+  REVIEW TIERS); the merge queue (amended by MERGE QUEUE).
 - **C9c** Oracles are enforced by visibility. A script writes an oracle section at the
   top of each PR summary and flags weakening. Each flagged change gets its own
   adversarial reviewer. PRs merge through the merge queue (MERGE QUEUE). Supersedes: T2
@@ -1880,8 +1885,8 @@ How to read this record:
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
 - **R16-1 (2026-10-04)** Release builds keep integer overflow checks
   (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
-  `wrapping_*`. The 5% gate measures the cost. Decided by the advisor under the
-  quality delegation.
+  `wrapping_*`. The P1 benchmark check measures the cost. Decided by the advisor under
+  the quality delegation.
 - **R16-2 (2026-10-04)** Release builds set `panic = "abort"`. A broken invariant
   crashes the node, and crash recovery restarts it. Tests keep unwinding. Confirmed by
   the person on 2026-10-04.
@@ -1965,7 +1970,7 @@ How to read this record:
   coverage-guided fuzzing of every decoder of outside input, short per merge and
   continuous nightly, crashes kept as regression inputs; (3) deterministic simulation of
   a whole mesh, thousands of runs per merge and millions nightly; (4) unit benchmarks
-  and (5) component benchmarks on the dedicated machine with the 5% gate; (6) end-to-end
+  and (5) component benchmarks on the dedicated machine with a 5% check; (6) end-to-end
   performance against P1 on shared infrastructure, nightly and per release; (7) a
   protocol simulator per connector on every merge; (8) Synnax HITL runners with real NI,
   LabJack, and PLC hardware, nightly and per release. Mutation testing runs on the diff
@@ -1973,12 +1978,13 @@ How to read this record:
 - **T2** Oracles are person-owned: simulation invariants, P1 targets and baselines,
   conformance suites, fuzz inputs (agents add, never remove). Agents write most tests.
 - **BENCH BASELINES (2026-10-06)** The committed baselines and the CI bench job with
-  the 5% gate come with #715. Until then, a PR that touches a hot path gives its
+  the 5% check (P1) come with #715. Until then, a PR that touches a hot path gives its
   benchmark results, with the machine named. When a result is near 5%, the
-  coordinator runs it again on a quiet Linux host. Once a day, the coordinator runs
-  the hot-path benchmarks on a quiet Linux host against a fixed commit, which finds a
-  slowdown that no PR expected. Patch; #715 is the long-term fix. The person decided
-  on 2026-10-06 ("I am ok with deferring #715").
+  coordinator runs it again on a quiet Linux host; a result still over 5% needs the P1
+  judgment. Once a day, the coordinator runs the hot-path benchmarks on a quiet Linux
+  host against a fixed commit, which finds a slowdown that no PR expected. Patch; #715
+  is the long-term fix. The person decided on 2026-10-06 ("I am ok with deferring
+  #715").
 - **CANONICAL LIBRARY RULE (testing part)** Protocol simulators and HITL test C-backed
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
