@@ -2,8 +2,9 @@
 //! `cargo bench -p hub --bench reader`.
 //!
 //! Each round writes `FRAMES` frames of one sample on an index and one data channel,
-//! and times four lines, each per frame of the round:
+//! and times five lines, each per frame of the round:
 //!
+//! - `timer`: an empty closure, the floor of each line's figure.
 //! - `write`, the control: one `Writer::write` of a frame whose draft is ready.
 //! - `latest next`: one poll of a latest reader's `next` right after each write, which
 //!   gives that frame before its commit.
@@ -54,7 +55,13 @@ const LIMITS: home::order::Limits = home::order::Limits {
     earliest: Stamp::from_nanos(1),
     ahead: Span::from_nanos(1_000_000_000),
 };
-const LINES: [&str; 4] = ["write", "latest next", "complete next", "complete wait"];
+const LINES: [&str; 5] = [
+    "timer",
+    "write",
+    "latest next",
+    "complete next",
+    "complete wait",
+];
 
 fn main() {
     let mut sim = sim::Sim::new(sim::Config::default());
@@ -66,8 +73,8 @@ fn main() {
 /// For each line, the ns per frame of each timed round, and the allocations of all
 /// timed rounds.
 struct Measured {
-    nanos: [Vec<u64>; 4],
-    allocations: [u64; 4],
+    nanos: [Vec<u64>; LINES.len()],
+    allocations: [u64; LINES.len()],
 }
 
 async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> Measured {
@@ -78,10 +85,10 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> Measured {
     let mut complete = hub.reader(&channels, Mode::Complete).await.expect("opens");
     let mut measured = Measured {
         nanos: Default::default(),
-        allocations: [0; 4],
+        allocations: [0; LINES.len()],
     };
     for round in 0..WARMUP + ROUNDS {
-        let (mut nanos, mut allocations) = ([0; 4], [0; 4]);
+        let (mut nanos, mut allocations) = ([0; LINES.len()], [0; LINES.len()]);
         let mut add = |line: usize, (span, counted): (u64, u64)| {
             nanos[line] += span;
             allocations[line] += counted;
@@ -89,16 +96,17 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> Measured {
         let now = now(&mesh);
         for n in 0..FRAMES {
             let draft = draft(&writer, now + i64::try_from(n).expect("few"));
-            add(0, timed(|| write(&mut writer, draft)));
-            add(1, take(&mut latest));
+            add(0, timed(|| ()));
+            add(1, timed(|| write(&mut writer, draft)));
+            add(2, take(&mut latest));
         }
         node.clock().sleep(SETTLE).await;
         for _ in 0..FRAMES {
-            add(2, take(&mut complete));
+            add(3, take(&mut complete));
         }
         for _ in 0..FRAMES {
             add(
-                3,
+                4,
                 timed(|| assert!(!poll(&mut complete), "the reader has no frame left")),
             );
         }
