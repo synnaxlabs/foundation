@@ -242,7 +242,7 @@ fn refuses_a_precision_other_than_nanoseconds_and_stores_nothing() {
     let mut network = Network::new();
     let requests = vec![
         network.post("/write?db=edge&precision=ms", "m v=1 1"),
-        network.post("/api/v2/write?bucket=edge&precision=n", "m v=1 1"),
+        network.post("/api/v2/write?org=o&bucket=edge&precision=n", "m v=1 1"),
     ];
     assert_eq!(
         network.send(vec![requests]),
@@ -257,6 +257,35 @@ fn refuses_a_precision_other_than_nanoseconds_and_stores_nothing() {
             ),
         ]
     );
+    assert_eq!(network.times("m"), [0_i64; 0]);
+}
+
+#[test]
+fn takes_an_empty_or_missing_precision_as_nanoseconds() {
+    let mut network = Network::new();
+    let requests = vec![
+        network.post("/write?db=edge&precision=", "m v=1 1"),
+        network.post("/api/v2/write?orgID=a1&bucket=edge", "m v=2 2"),
+    ];
+    assert_eq!(
+        network.send(vec![requests]),
+        [
+            answer(StatusCode::NO_CONTENT, ""),
+            answer(StatusCode::NO_CONTENT, ""),
+        ]
+    );
+    assert_eq!(network.times("m"), [1, 2]);
+}
+
+#[test]
+fn refuses_a_v2_write_with_no_organization_and_stores_nothing() {
+    let mut network = Network::new();
+    let requests = vec![
+        network.post("/api/v2/write?bucket=edge", "m v=1 1"),
+        network.post("/api/v2/write?bucket=edge&org=&orgID=", "m v=1 1"),
+    ];
+    let org = answer(StatusCode::BAD_REQUEST, "no org or orgID in the query");
+    assert_eq!(network.send(vec![requests]), [org.clone(), org]);
     assert_eq!(network.times("m"), [0_i64; 0]);
 }
 

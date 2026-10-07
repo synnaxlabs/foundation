@@ -93,13 +93,21 @@ fn route(
             .split('&')
             .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
     };
-    if query(database).is_none_or(str::is_empty) {
+    let named = |key| query(key).is_some_and(|value| !value.is_empty());
+    if !named(database) {
         return reply(
             StatusCode::BAD_REQUEST,
             format!("no {database} in the query"),
         );
     }
-    if let Some(precision) = query("precision").filter(|&precision| precision != "ns") {
+    if database == "bucket" && !named("org") && !named("orgID") {
+        return reply(
+            StatusCode::BAD_REQUEST,
+            "no org or orgID in the query".into(),
+        );
+    }
+    let precision = query("precision").unwrap_or_default();
+    if !["", "ns"].contains(&precision) {
         return reply(
             StatusCode::BAD_REQUEST,
             format!("the store takes precision ns only, not {precision:?}"),
