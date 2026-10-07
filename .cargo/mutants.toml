@@ -11,6 +11,12 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # Calls the GitHub API. The review workflow runs it on each PR: a round with findings
+  # shows that it fails.
+  'xtask/src/review\.rs:.*(replace run ->| in run$)',
+  # Calls the GitHub API. The review workflow runs it on each PR: with no PR record,
+  # the status is `error`.
+  'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and

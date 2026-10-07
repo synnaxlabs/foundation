@@ -87,6 +87,33 @@ with two lines for a person who has not read the code:
 
 A reviewer that did not write the PR gives both. An author never rates its own PR.
 
+## Round comment
+
+The required check `review` (`cargo xtask review`) reads only comments by
+`synnax-foundation-factory[bot]`, and parses this text. Write each round comment so:
+
+```
+Quality: <n>/10
+<summary>
+
+## Review round <n>
+
+Reviewers: reviewer, architecture, breaker
+Range: `<from>..<head sha>`
+Findings: <count, or none>
+
+<the findings, most severe first>
+```
+
+`Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
+skips `breaker` adds the line
+``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
+range of the last round: each `.rs` line it adds or removes, trimmed, must be empty or
+start with `//`, and it must change no `Cargo.toml` or `Cargo.lock` line. A moved file
+counts as each of its lines removed and added. A head that is the range end plus clean
+merges of the base needs no new round. A red-team PR labeled `oracle` also needs the
+director's verdict with the line ``Director: approved at `<sha>` `` at the head.
+
 ## Second round
 
 In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that
