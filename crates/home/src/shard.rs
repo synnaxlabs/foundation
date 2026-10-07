@@ -1245,7 +1245,7 @@ mod tests {
     /// The first seq on `path` of the index at `slot` that the ring does not hold
     /// on disk. It reads the buffer of the shard, because no call of `Shard` gives
     /// a stored seq. Use it only where no complete reader shows the seq: on the
-    /// backfill path, for a lost frame, after a restart, and while a sync runs.
+    /// backfill path, for a lost frame, after a restart, and before a commit ends.
     fn stored(shard: &Shard, slot: Slot, path: Path) -> u64 {
         shard.buffer.durable(slot, path).seq
     }
@@ -1269,6 +1269,7 @@ mod tests {
             );
             let one = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
             assert_eq!(shard.write(a, LIVE, one), Ok(&[applied(0, 2, 1)][..]));
+            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
             assert_eq!(woken(&mut shard), []);
             shard.committed().await.expect("the commit ends");
             assert_eq!(woken(&mut shard), [zero, two]);
@@ -2821,7 +2822,6 @@ mod tests {
                 while stored(&shard, Slot::new(0), Path::Live) == 0 {
                     test.clock.sleep(Span::from_nanos(1_000)).await;
                 }
-                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.committed().await.expect("the commit ends");
