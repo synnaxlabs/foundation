@@ -32,6 +32,10 @@ Never read the whole decisions file: read only the section that an issue names.
   issue: admit that issue first, and `send` its link to the blocked builder only when it
   merges or changes.
 - **Order.** On the path, the riskiest unknowns come first.
+- **Balance.** Every builder works on any crate, and no builder sits idle while the
+  path has work. Keep at least one `ready` issue per idle builder. When builders on
+  several accounts are idle, run `~/.factory/bin/factory-budget` and send the next
+  issue to an idle builder on the account with the most headroom.
 - **Map.** Keep the Workstreams table in `docs/factory.md` current. A crate that no
   machine owns goes to the machine that first needs it on the path, in a PR.
 

@@ -328,6 +328,15 @@ fn a_new_ring_keeps_its_layout_across_opens() {
 }
 
 #[test]
+fn pool_is_the_pool_of_the_config() {
+    run(1, Memory::default(), |shard| async move {
+        let layout = layout(AREA, BODY_MAX);
+        let buffer = shard.open(layout, &mut Slots::new()).await.expect("opens");
+        assert!(std::ptr::eq(buffer.pool(), Rc::as_ptr(&shard.pool)));
+    });
+}
+
+#[test]
 fn entries_are_durable_at_committed_and_recovered_at_open() {
     run(2, Memory::default(), |shard| async move {
         let mut slots = Slots::new();

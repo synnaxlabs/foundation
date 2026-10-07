@@ -77,7 +77,7 @@ impl Index {
         now: Monotonic,
         mesh: Stamp,
     ) -> Result<Accepted, Refusal> {
-        let permit = self.gate.check(key, now).map_err(Refusal::control)?;
+        let permit = self.gate.check(key, now)?;
         let mut stamps = stamps?;
         // A codec error comes first, so the vectors after an order error still decode.
         let mut order = Ok(self.order.check(path, mesh));
@@ -118,7 +118,8 @@ impl Index {
 mod tests {
     use std::sync::Arc;
 
-    use control::{Lease, Writer};
+    use control::Writer;
+    use control::lease::Lease;
     use types::authority::Authority;
     use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};

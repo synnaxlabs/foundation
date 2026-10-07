@@ -67,27 +67,17 @@ impl fmt::Display for Error {
             Self::Unsynced => f.write_str(
                 "the node has no mesh time yet: open the writer again later",
             ),
-            Self::Lease { span } => control::Error::Lease { span }.fmt(f),
+            Self::Lease { span } => control::lease::Error { span }.fmt(f),
         }
     }
 }
 
 impl std::error::Error for Error {}
 
-/// The control lease of `span`.
-///
-/// # Errors
-///
-/// [`Error::Lease`] when `span` is not longer than zero.
-pub(crate) fn lease(span: Span) -> Result<control::Lease, Error> {
-    control::Lease::new(span).map_err(|error| match error {
-        control::Error::Lease { span } => Error::Lease { span },
-        control::Error::Waiting
-        | control::Error::Reserved
-        | control::Error::Expired => {
-            panic!("invariant: a lease gives only its own error, got {error}")
-        }
-    })
+impl From<control::lease::Error> for Error {
+    fn from(error: control::lease::Error) -> Self {
+        Self::Lease { span: error.span }
+    }
 }
 
 #[cfg(test)]
@@ -109,11 +99,13 @@ mod tests {
     }
 
     #[test]
-    fn makes_a_lease_only_of_a_span_longer_than_zero() {
-        let span = Span::from_nanos(1);
+    fn keeps_the_span_of_a_lease_error() {
+        let span = Span::from_nanos(-3);
 
-        assert_eq!(lease(span).map(control::Lease::span), Ok(span));
-        assert_eq!(lease(Span::ZERO), Err(Error::Lease { span: Span::ZERO }));
+        assert_eq!(
+            Error::from(control::lease::Error { span }),
+            Error::Lease { span }
+        );
     }
 
     #[test]

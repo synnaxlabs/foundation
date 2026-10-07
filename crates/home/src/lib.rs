@@ -58,20 +58,12 @@ enum Refusal {
     },
 }
 
-impl Refusal {
-    /// The refusal of a write that the gate refused with `error`.
-    ///
-    /// # Panics
-    ///
-    /// For [`control::Error::Lease`], which no write gives.
-    fn control(error: control::Error) -> Self {
+impl From<control::Error> for Refusal {
+    fn from(error: control::Error) -> Self {
         match error {
             control::Error::Waiting => Self::Waiting,
             control::Error::Reserved => Self::Reserved,
             control::Error::Expired => Self::Expired,
-            control::Error::Lease { .. } => {
-                panic!("invariant: a write makes no lease, got {error}")
-            }
         }
     }
 }
@@ -100,7 +92,6 @@ impl std::error::Error for Refusal {}
 #[cfg(test)]
 mod tests {
     use types::channel::Slot;
-    use types::time::Span;
 
     use super::*;
     use crate::common::key;
@@ -141,15 +132,8 @@ mod tests {
                 "control lease ran out: reopen the writer to take control",
             ),
         ] {
-            assert_eq!(Refusal::control(error), refusal);
+            assert_eq!(Refusal::from(error), refusal);
             assert_eq!(refusal.to_string(), message);
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "invariant: a write makes no lease, got control lease \
-                               must be longer than zero, got 0s")]
-    fn panics_on_a_lease_error_from_a_write() {
-        let _ = Refusal::control(control::Error::Lease { span: Span::ZERO });
     }
 }

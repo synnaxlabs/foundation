@@ -27,7 +27,7 @@ fn main() {
     let first = Measurement::new(node.clock().now(), Span::HOUR, Span::MILLISECOND);
     let first = first.expect("at most 36500 days");
     clock.push(source, first);
-    let (interval, allocations) = ALLOCATOR.count(|| reader.now());
+    let (interval, allocations) = ALLOCATOR.count(|| reader.now().mesh);
     assert_eq!(allocations, 0, "the hot path allocated");
     assert_eq!(
         interval,
@@ -44,7 +44,7 @@ fn main() {
     );
 
     let os = clock.add();
-    let (interval, allocations) = ALLOCATOR.count(|| reader.now());
+    let (interval, allocations) = ALLOCATOR.count(|| reader.now().mesh);
     assert_eq!(allocations, 0, "the hot path allocated in holdover");
     assert_eq!(
         interval,
@@ -66,7 +66,7 @@ fn main() {
 
     clock.push(os, Measurement::unknown(node.clock().now(), Span::ZERO));
     clock.remove(source);
-    let (interval, allocations) = ALLOCATOR.count(|| reader.now());
+    let (interval, allocations) = ALLOCATOR.count(|| reader.now().mesh);
     assert_eq!(
         allocations, 0,
         "the hot path allocated with an unknown estimate"
