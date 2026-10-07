@@ -316,6 +316,8 @@ fn pull(
 mod tests {
     use std::collections::VecDeque;
     use std::slice;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use block::{Config, Heap, Pool};
     use proptest::prelude::*;
@@ -699,21 +701,51 @@ mod tests {
             assert_eq!(reader.held.buffer.capacity(), 0);
         }
 
+        /// A chunk that counts itself in `live` while it lives.
+        struct Counted {
+            bytes: Vec<u8>,
+            live: Arc<AtomicUsize>,
+        }
+
+        impl AsRef<[u8]> for Counted {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.live.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
         /// Each copy of a full list, not only the first two that `tests/chunks.rs`
         /// pins, keeps the list at the bound.
         #[test]
         fn a_read_of_many_tiny_chunks_never_holds_more_than_chunks_max() {
-            // Private: no public call shows the count of chunks held.
+            let pool = pool(1 << 20);
             let message: Vec<u8> = (0..=250).cycle().take(1 << 18).collect();
-            let bytes = Bytes::from(message.clone());
-            let mut held = Held::default();
-            for at in 0..message.len() {
-                held.push(message.len(), bytes.slice(at..=at));
-                assert!(held.chunks.len() <= CHUNKS_MAX, "after {at} bytes");
-            }
-            let mut block = vec![0; message.len()];
-            held.drain_into(&mut block);
-            assert_eq!(block, message);
+            let stream = encode(slice::from_ref(&message));
+            let live = Arc::new(AtomicUsize::new(0));
+            let (mut at, mut size) = (0, 0);
+            let source = |max: usize| {
+                assert!(live.load(Ordering::Relaxed) <= 64, "at byte {at}");
+                size = size % 3 + 1;
+                let end = at + size.min(max);
+                live.fetch_add(1, Ordering::Relaxed);
+                let bytes = stream[at..end].to_vec();
+                at = end;
+                let live = Arc::clone(&live);
+                Ok(Poll::Ready(Some(Bytes::from_owner(Counted {
+                    bytes,
+                    live,
+                }))))
+            };
+            let read = Reader::new(message.len())
+                .read(|_| true, |len| pool.alloc(len).ok(), source)
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
+            assert_eq!(read, Ok(Poll::Ready(Some(message))));
+            assert_eq!(live.load(Ordering::Relaxed), 0);
         }
 
         #[test]

@@ -1,6 +1,7 @@
 //! A message that waits for a block from the pool is held on the heap, outside the
-//! pool. When its stream resets or its session closes, the read that gives the error
-//! frees it, though the caller keeps the receiver. The count covers each thread, so
+//! pool, in one buffer made at its length. When its stream resets or its session
+//! closes, the read that gives the error frees it, though the caller keeps the
+//! receiver. The count covers each thread, so
 //! this binary has no test harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -27,8 +28,14 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 const CLIENT: PrivateKey = PrivateKey([1; 32]);
 const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
+/// A message that the read takes over many polls.
 const LEN: usize = 60_000;
-const MESSAGE_BYTES_MAX: usize = 1 << 16;
+/// A message longer than 64 packets of 1472 bytes, so that a read of it in one poll
+/// copies a full list of chunks.
+const LONG: usize = 100_000;
+const MESSAGE_BYTES_MAX: usize = 1 << 17;
+/// When the server first polls a long message, once it is whole and before the end.
+const WHOLE: Span = Span::from_nanos(250_000_000);
 /// When the client ends the stream or the session, after its send.
 const END: Span = Span::from_nanos(500_000_000);
 /// When the server reads the end, after the message waits for a block.
@@ -44,29 +51,41 @@ enum End {
 }
 
 fn main() {
-    for (end, error) in [
-        (End::Reset, Error::Reset { code: Code(0) }),
-        (End::Close, Error::PeerClosed { code: Code(7) }),
+    let reset = Error::Reset { code: Code(0) };
+    for (end, len, first, error) in [
+        (End::Reset, LEN, Span::ZERO, reset.clone()),
+        (
+            End::Close,
+            LEN,
+            Span::ZERO,
+            Error::PeerClosed { code: Code(7) },
+        ),
+        (End::Reset, LONG, WHOLE, reset),
     ] {
-        let (read, freed) = run(end);
-        assert_eq!(read, Some(error), "{end:?}: the read after the end");
+        let (read, freed) = run(end, len, first);
         assert_eq!(
-            freed, LEN,
-            "{end:?}: the read that gives the error frees the buffer of the message, \
-             made at its length"
+            read,
+            Some(error),
+            "{end:?}, {len} bytes: the read after the end"
+        );
+        assert_eq!(
+            freed, len,
+            "{end:?}, {len} bytes: the read that gives the error frees the buffer of \
+             the message, made at its length"
         );
     }
 }
 
-/// The error of the server's read after the client ends the stream in the way of
-/// `end`, and the heap bytes that read freed.
-fn run(end: End) -> (Option<Error>, usize) {
+/// The error of the server's read after the client sends a message of `len` bytes
+/// and ends the stream in the way of `end`, and the heap bytes that read freed. The
+/// server first polls `first` after the stream comes.
+fn run(end: End, len: usize, first: Span) -> (Option<Error>, usize) {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let at = SocketAddr::new(server.addresses()[0], PORT);
     let out = Arc::new(Mutex::new((None, 0)));
-    serve(&server, Arc::clone(&out));
+    serve(&server, len, first, Arc::clone(&out));
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
         let pool = Rc::clone(&config.pool);
@@ -79,7 +98,7 @@ fn run(end: End) -> (Option<Error>, usize) {
             .open_sender(Class::Complete)
             .await
             .expect("a stream");
-        sender.send(filled(&pool, LEN)).await.expect("sent");
+        sender.send(filled(&pool, len)).await.expect("sent");
         let clock = node.clock();
         clock.sleep(END).await;
         match end {
@@ -94,10 +113,16 @@ fn run(end: End) -> (Option<Error>, usize) {
     (out.0.clone(), out.1)
 }
 
-/// Starts the server on `node`. It fills its pool, lets the client's message wait for
-/// a block, and puts the error of its read after the end and the bytes that read
-/// freed in `out`.
-fn serve(node: &Node, out: Arc<Mutex<(Option<Error>, usize)>>) {
+/// Starts the server on `node`. It fills its pool for messages of `len` bytes, first
+/// polls `first` after the stream comes, lets the client's message wait for a block,
+/// and puts the error of its read after the end and the bytes that read freed in
+/// `out`.
+fn serve(
+    node: &Node,
+    len: usize,
+    first: Span,
+    out: Arc<Mutex<(Option<Error>, usize)>>,
+) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -105,11 +130,12 @@ fn serve(node: &Node, out: Arc<Mutex<(Option<Error>, usize)>>) {
     };
     let started = node.shards().start(shard, move |tasks| async move {
         let config = config(&own, tasks, SERVER);
-        let full = fill(&config.pool);
+        let full = fill(&config.pool, len);
         let transport = Transport::new(config, part(&own, PORT)).expect("a transport");
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         let clock = own.clock();
+        clock.sleep(first).await;
         let (read, freed) = {
             let mut recv = pin!(receiver.recv());
             while transport.status().waited == Span::ZERO {
@@ -137,10 +163,10 @@ async fn poll_once<F: Future + ?Sized>(mut future: Pin<&mut F>) -> Poll<F::Outpu
     poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
 }
 
-/// Takes every block of `pool` that holds a message of [`LEN`] bytes.
-fn fill(pool: &Pool) -> Vec<Unique> {
+/// Takes every block of `pool` that holds a message of `len` bytes.
+fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
     let mut full = Vec::new();
-    for len in [pool.largest(), LEN] {
+    for len in [pool.largest(), len] {
         while let Ok(block) = pool.alloc(len) {
             full.push(block);
         }
