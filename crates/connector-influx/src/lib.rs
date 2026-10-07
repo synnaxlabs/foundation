@@ -8,3 +8,5 @@
 )]
 
 pub mod line;
+#[cfg(feature = "sim")]
+pub mod sim;
