@@ -171,16 +171,12 @@ mod tests {
     }
 
     #[test]
-    fn a_signed_proof_passes() {
-        assert_eq!(check(&proven(), &members(&[1, 2, 3])), Ok(()));
-    }
-
-    #[test]
     fn a_signed_proof_of_each_voter_passes() {
         let members = members(&[1, 2, 3]);
         for leader in 1..=3 {
             let to = leader % 3 + 1;
             let message = common::proven(leader, to, Body::Heartbeat { commit: 0 });
+            assert_eq!((message.from, message.to), (key(leader), key(to)));
             assert_eq!(check(&message, &members), Ok(()), "leader {leader}");
         }
     }
