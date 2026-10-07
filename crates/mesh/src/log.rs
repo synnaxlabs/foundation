@@ -1379,6 +1379,54 @@ mod tests {
         }
     }
 
+    // No pool here holds the blocks of its last record at one time. The first has no
+    // room for blocks of `CHUNK` and of 16,384 bytes. The second has none for blocks of
+    // 8,192 and of 1,025 bytes: the least block for 1,025 bytes is 1,280. The third
+    // has none for the 16 blocks of its first record.
+    #[test]
+    fn a_write_holds_one_block_of_the_pool_at_a_time() {
+        let cases: [(usize, &[usize]); 3] = [
+            (82_000, &[81_920]),
+            (9472, &[9217]),
+            (1_000_000, &[984_040, 81_536]),
+        ];
+        for (budget, records) in cases {
+            let (mut sim, node) = sim(0);
+            let entries: Vec<Entry> = records
+                .iter()
+                .zip(1..)
+                .map(|(record, index)| bytes(index, record - 60))
+                .collect();
+            let expected = entries.clone();
+            let written = sim
+                .run_on(&node, move |node, _| async move {
+                    let new = || {
+                        let config = block::Config { budget };
+                        let memory = block::Heap::new(config.reservation());
+                        Rc::new(Pool::new(config, memory))
+                    };
+                    let files = node.files();
+                    let (mut log, _) =
+                        Log::open(files.clone(), DIR.into(), new()).await.unwrap();
+                    let mut written = Vec::new();
+                    for (entry, number) in entries.iter().zip(0..) {
+                        let entry = std::slice::from_ref(entry);
+                        written.push((
+                            encode(number, None, entry).len(),
+                            log.write(None, entry).await,
+                        ));
+                    }
+                    drop(log);
+                    let (_, stored) =
+                        Log::open(files, DIR.into(), new()).await.unwrap();
+                    (written, stored.entries)
+                })
+                .unwrap();
+            let each = records.iter().map(|&record| (record, Ok(()))).collect();
+            assert_eq!(written, (each, expected), "budget {budget}");
+        }
+    }
+
     #[test]
     fn opens_with_a_pool_whose_largest_block_is_one_sector() {
         let (mut sim, node) = sim(0);
