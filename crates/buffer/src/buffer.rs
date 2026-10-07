@@ -75,8 +75,8 @@ pub enum Error {
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
-    /// The ring file has another length than its header says, or it ends inside its
-    /// header blocks.
+    /// The ring file has another length than its header says, or it is not empty and
+    /// ends inside its header blocks.
     Length {
         /// The length the header says, or the length of a new ring.
         expected: u64,
@@ -603,14 +603,14 @@ async fn open_ring(
     entropy: &Entropy,
     layout: Layout,
 ) -> Result<(File, Header), Error> {
-    let path = dir.join("ring");
-    let written = open_written(files, &path, pool, layout).await?;
+    let written = open_written(files, dir, pool, layout).await?;
     let (file, blocks) = if let Some((file, blocks)) = written {
         (file, Some(blocks))
     } else {
         files.create_dir(dir).await?;
         let len = layout.file_len();
-        (files.open(&path, Mode::Create { len }).await?, None)
+        let ring = files.open(&dir.join("ring"), Mode::Create { len }).await?;
+        (ring, None)
     };
     // An open that stopped after it made the ring may not have made it durable.
     if let Some(parent) = dir.parent() {
@@ -624,20 +624,21 @@ async fn open_ring(
     Ok((file, header))
 }
 
-/// Opens the ring file at `path` and reads its two header blocks. `None` when no
-/// file with a checkpoint is there. A file that is empty, or whose header blocks are
-/// zero, holds no checkpoint: this removes it.
+/// Opens the ring file in `dir` and reads its two header blocks. `None` when no file
+/// with a checkpoint is there. A file that is empty, or whose header blocks are
+/// zero, holds no checkpoint: this removes it, and the removal is durable.
 ///
 /// # Errors
 ///
-/// [`Error::Length`] when the file ends inside its header blocks.
+/// [`Error::Length`] when the file is not empty and ends inside its header blocks.
 async fn open_written(
     files: &Files,
-    path: &path::Path,
+    dir: &path::Path,
     pool: &Pool,
     layout: Layout,
 ) -> Result<Option<(File, Unique)>, Error> {
-    let file = match files.open(path, Mode::Write).await {
+    let path = dir.join("ring");
+    let file = match files.open(&path, Mode::Write).await {
         Ok(file) => file,
         Err(files::Error::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -653,8 +654,11 @@ async fn open_written(
             return Ok(Some((file, blocks)));
         }
     }
+    // The handle stays through the remove, so no other open takes this file.
+    files.remove(&path).await?;
     file.close().await;
-    files.remove(path).await?;
+    // The disk gives the room of the file back only now, and the new ring needs it.
+    files.sync_dir(dir).await?;
     Ok(None)
 }
 

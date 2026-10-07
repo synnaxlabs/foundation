@@ -529,12 +529,16 @@ How to read this record:
   writes a record. A crash before that sync leaves such a file. An open removes it and
   makes the ring again with `Config::layout`, then syncs the directories and writes the
   first checkpoint, so a ring with no checkpoint takes the layout of the open and a ring
-  with one keeps its own (#1254). `Length` stays for a ring with a checkpoint whose
-  length does not fit its header, and for a file that ends inside its header blocks. A
-  crash at any point of the remake leaves a ring that the next open takes. Lost: fit the
-  layout to the length of the file (a ring whose size no config gave), and keep the file
-  when its length fits (two paths for one case). It does not wait for `File::resize`
-  (#1238). Decided by `laptop.architect` (2026-10-07T07:47:16Z):
+  with one keeps its own (#1254). The open holds its write handle of the old file
+  through the remove, so of two opens at once one gets `Busy`. It syncs the directory
+  after the remove and before the create, because a disk gives the room of a removed
+  file back only then: the remake needs room for the larger of the two files, not for
+  both. `Length` stays for a ring with a checkpoint whose length does not fit its
+  header, and for a file that is not empty and ends inside its header blocks. A crash at
+  any point of the remake leaves a ring that the next open takes, or no ring. Lost: fit
+  the layout to the length of the file (a ring whose size no config gave), and keep the
+  file when its length fits (two paths for one case). It does not wait for
+  `File::resize` (#1238). Decided by `laptop.architect` (2026-10-07T07:47:16Z):
   https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
