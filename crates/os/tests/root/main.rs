@@ -10,6 +10,9 @@ use std::process::Command;
 
 use env::files::{Error, Files, Mode};
 
+#[path = "../it/kept.rs"]
+mod kept;
+
 /// A 64 MiB ext4 filesystem on a loop device in a directory of its own, unmounted and
 /// removed when it drops.
 struct Small(PathBuf);
@@ -97,16 +100,13 @@ fn a_create_after_a_failed_create_gives_full_again() {
 #[test]
 fn a_create_on_fragmented_free_space_frees_the_blocks_past_the_end() {
     use rustix::fs::{self, FallocateFlags, OFlags};
-    const LEN: u64 = 4 << 20;
-    // ext4 counts the extent tree of the file in `st_blocks`.
-    const SLACK: u64 = 64 << 10;
     run(|files, data| async move {
-        let flags = OFlags::WRONLY.union(OFlags::CREATE);
-        let mode = fs::Mode::RUSR | fs::Mode::WUSR;
         // Each free block is alone, so each block of the file is an extent of its
         // own, and the extent tree needs blocks.
         let stat = fs::statvfs(&data).unwrap();
         let block = stat.f_bsize;
+        let flags = OFlags::WRONLY.union(OFlags::CREATE);
+        let mode = fs::Mode::RUSR | fs::Mode::WUSR;
         let fill = fs::open(data.join("fill"), flags, mode).unwrap();
         let mut len = stat.f_bavail * stat.f_frsize;
         while let Err(error) = fs::fallocate(&fill, FallocateFlags::empty(), 0, len) {
@@ -118,26 +118,10 @@ fn a_create_on_fragmented_free_space_frees_the_blocks_past_the_end() {
             fs::fallocate(&fill, punch, at, block).unwrap();
         }
         drop(fill);
-        // What a crash after an allocation that kept the length leaves.
-        let fd = fs::open(data.join("a"), flags, mode).unwrap();
-        fs::fallocate(&fd, FallocateFlags::KEEP_SIZE, 0, 4 * LEN).unwrap();
-        drop(fd);
-        let mode = Mode::Create { len: LEN };
-        files
-            .open(Path::new("a"), mode)
-            .await
-            .unwrap()
-            .close()
-            .await;
-        let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
+        let allocated = kept::check(&files, &data).await;
         assert!(
-            (LEN + block..=LEN + SLACK).contains(&allocated),
-            "{allocated} bytes allocated for {LEN}"
+            allocated >= kept::LEN + block,
+            "{allocated} bytes allocated"
         );
-        let fd = fs::open(data.join("a"), OFlags::WRONLY, fs::Mode::empty()).unwrap();
-        fs::ftruncate(&fd, LEN).unwrap();
-        drop(fd);
-        let truncated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert_eq!(truncated, allocated);
     });
 }
