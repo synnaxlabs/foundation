@@ -283,8 +283,8 @@ impl Woken {
         }
     }
 
-    /// Writes frame `n` and waits for its commit. Returns the keys that the next
-    /// `woken` gives and the allocations it made.
+    /// Writes frame `n`, waits for its commit, and calls `woken`. Returns the number
+    /// of keys it gave and the allocations it made.
     async fn commit(&mut self, n: i64) -> (usize, u64) {
         let (time, value) = (self.time, self.value);
         let mut draft = Draft::new(
