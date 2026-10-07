@@ -6,6 +6,17 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+block = { path = "../block" }
+env = { path = "../env" }
+home = { path = "../home" }
+tokio = { workspace = true, features = ["rt"] }
+types = { path = "../types" }
+
+[dev-dependencies]
+buffer = { path = "../buffer" }
+clock = { path = "../clock" }
+codec = { path = "../codec" }
+sim = { path = "../sim" }
 
 [lints]
 workspace = true
