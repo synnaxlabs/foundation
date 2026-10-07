@@ -1927,10 +1927,26 @@ How to read this record:
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
   system refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
-  and until then no message leaves, nothing applies, and the group gets no tick. Nothing
-  bounds the proposals and the messages that the group takes in that time (#1091). A
-  write holds one block of the pool at a time (MESH LOG), so no record is too large for
-  a pool that opens, and a write does not wait for a block of its own (decided by the
+  and until then no message leaves, nothing applies, and the group gets no tick. From
+  the write that finds no block until the write ends, `propose` and `receive` give
+  `Error::Pool` with the cause of the wait, so the group takes no proposal and no
+  message, and what `raft` holds does not grow. A forwarded proposal that gets it did
+  not reach the group. A leader that waits sends no heartbeat, so the other voters elect
+  a new leader. A follower that waits answers no message and falls behind until its
+  write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
+  of the variant decided by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
+  of the two cases by the architect, 2026-10-07T12:08:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
+  checks the wait before each other check of a message or of a forwarded proposal, so
+  each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
+  other order lost: it gives the exact refusal, but the group drops each of them in a
+  wait in both orders, and a node that is short of memory then also pays for the
+  signature checks (decided by the architect, 2026-10-07T12:31:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037964937). A write
+  holds one block of the pool at a time (MESH LOG), so no record is too large for a
+  pool that opens, and a write does not wait for a block of its own (decided by the
   architect, 2026-10-07T08:42:04Z:
   https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A free
   block of a size with a block in use keeps its budget (#291), so a write can wait while
