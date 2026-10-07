@@ -5,6 +5,7 @@
 
 mod memory;
 
+use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
@@ -1320,21 +1321,6 @@ fn an_entry_past_the_last_seq_is_a_broken_invariant() {
 }
 
 #[test]
-fn a_zeroed_file_of_another_length_is_not_made_into_a_ring() {
-    run(10, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA + BLOCK).await;
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(
-            opened.map(drop),
-            Err(Error::Length {
-                expected: AREA_START + AREA,
-                found: AREA_START + AREA + BLOCK,
-            })
-        );
-    });
-}
-
-#[test]
 fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
     run(107, Memory::default(), |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
@@ -1604,6 +1590,113 @@ fn a_kill_during_the_first_open_keeps_the_commits_of_the_next() {
         );
         ended
     });
+}
+
+/// Makes a durable ring file of `len` zero bytes on `node`, as an open that stops
+/// before its first checkpoint leaves it.
+fn create_unwritten(sim: &mut sim::Sim, node: &sim::node::Node, len: u64) {
+    let made = sim.run_on(node, move |node, _| async move {
+        let (files, dir) = (node.files(), FilePath::new(DIR));
+        files.create_dir(dir).await.expect("makes the directory");
+        let ring = files.open(FilePath::new(RING), Mode::Create { len }).await;
+        drop(ring.expect("makes the file"));
+        let root = files.sync_dir(FilePath::new("")).await;
+        root.expect("syncs the data directory");
+        files.sync_dir(dir).await.expect("syncs the directory");
+    });
+    made.expect("the file is made");
+}
+
+/// What the ring file holds before an open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Found {
+    /// No file.
+    Absent,
+    /// A file of this length with no checkpoint.
+    Unwritten(u64),
+    /// A file with a checkpoint.
+    Written,
+}
+
+/// Opens the ring on `node` with `layout`. Returns what the file held before the
+/// open, what the open gave, and the length of the file after it.
+fn open_with(
+    sim: &mut sim::Sim,
+    node: &sim::node::Node,
+    layout: Layout,
+) -> (Found, Result<Layout, Error>, u64) {
+    let found = sim.run_on(node, move |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let (files, pool) = (node.files(), Rc::clone(&config.pool));
+        let found = match files.open(FilePath::new(RING), Mode::Read).await {
+            Ok(file) if file.len() < AREA_START => Found::Unwritten(file.len()),
+            Ok(file) => {
+                let blocks = pool.alloc(to_usize(AREA_START)).expect("a block");
+                let blocks = file.read_at(0, blocks).await.expect("reads");
+                let mut blocks = blocks.chunks(to_usize(BLOCK));
+                if blocks.any(|block| block.starts_with(b"FNDNRING")) {
+                    Found::Written
+                } else {
+                    Found::Unwritten(file.len())
+                }
+            }
+            Err(FileError::NotFound { .. }) => Found::Absent,
+            Err(error) => panic!("the ring file does not open: {error}"),
+        };
+        let config = Config { layout, ..config };
+        let buffer = Buffer::open(config, &mut Slots::new()).await;
+        let opened = buffer.map(|buffer| buffer.layout());
+        let file = files.open(FilePath::new(RING), Mode::Read).await;
+        (found, opened, file.expect("the ring is there").len())
+    });
+    found.expect("the open ends")
+}
+
+/// An open that stops before its first checkpoint leaves a ring file with no
+/// header, or an empty one. The next open makes the ring again with its layout.
+#[test]
+fn a_ring_with_no_checkpoint_takes_the_layout_of_the_open() {
+    let other = layout(2 * AREA, 2 * BODY_MAX);
+    for len in [0, AREA_START, AREA_START + AREA, AREA_START + AREA + BLOCK] {
+        let (mut sim, node) = one_node(10);
+        create_unwritten(&mut sim, &node, len);
+        let found = open_with(&mut sim, &node, other);
+        let made = (Found::Unwritten(len), Ok(other), AREA_START + 2 * AREA);
+        assert_eq!(found, made);
+    }
+}
+
+/// An open makes a ring with no checkpoint again. A crash at any point of it leaves
+/// a ring that opens: with the layout of its checkpoint when it has one, or else
+/// with the layout of that open. The cuts leave each state that the remake goes
+/// through. A power cut never leaves the directory with no ring.
+#[test]
+fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
+    let (old, new) = (layout(2 * AREA, BODY_MAX), layout(AREA, BODY_MAX));
+    let lens = [old, new].map(|layout| AREA_START + layout.area());
+    for crash in [sim::Crash::Process, sim::Crash::Power] {
+        let mut left = BTreeSet::new();
+        each_cut(0..8, 5_000, |seed, cut| {
+            let mut ended = false;
+            for layout in [old, new] {
+                let (mut sim, node) = one_node(seed);
+                create_unwritten(&mut sim, &node, lens[0]);
+                ended = cut_an_open(&mut sim, &node, cut, crash);
+                let (found, opened, len) = open_with(&mut sim, &node, layout);
+                let at = format!("seed {seed}, {crash:?} at {cut} ns, {layout:?}");
+                assert!(found == Found::Written || !ended, "{at}");
+                let expected = if found == Found::Written { new } else { layout };
+                assert_eq!(opened, Ok(expected), "{at}");
+                assert_eq!(len, AREA_START + expected.area(), "{at}");
+                left.insert(found);
+            }
+            ended
+        });
+        let zero = lens.map(Found::Unwritten);
+        let absent = (crash == sim::Crash::Process).then_some(Found::Absent);
+        let all = absent.into_iter().chain(zero).chain([Found::Written]);
+        assert_eq!(left, all.collect(), "{crash:?}");
+    }
 }
 
 /// Starts a new ring on a node with `seed`, appends one entry, and kills the

@@ -522,8 +522,19 @@ How to read this record:
   `body_max` comes from a constant of `node`, never a config value; if it ever does,
   the panic becomes an error first. Decided by the architect on #1166:
   https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
-  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
-  and a random chain value.
+  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0 and
+  a random chain value. A ring file with no checkpoint (an empty file, or two zero
+  header blocks) holds no record, because an open syncs the first checkpoint before it
+  writes a record. A crash before that sync leaves such a file. An open removes it and
+  makes the ring again with `Config::layout`, then syncs the directories and writes the
+  first checkpoint, so a ring with no checkpoint takes the layout of the open and a ring
+  with one keeps its own (#1254). `Length` stays for a ring with a checkpoint whose
+  length does not fit its header, and for a file that ends inside its header blocks. A
+  crash at any point of the remake leaves a ring that the next open takes. Lost: fit the
+  layout to the length of the file (a ring whose size no config gave), and keep the file
+  when its length fits (two paths for one case). It does not wait for `File::resize`
+  (#1238). Decided by `laptop.architect`:
+  https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
