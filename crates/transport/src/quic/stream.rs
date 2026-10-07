@@ -651,6 +651,9 @@ impl Sending {
         let pushed = self.push(inner, half);
         if pushed.is_ready() {
             self.end_after(half, first);
+        } else if self.first() != Some(half.key) {
+            // noq-proto wakes `half` when it takes more, but no other stream.
+            self.wake(first);
         }
         pushed
     }
@@ -4262,6 +4265,94 @@ mod tests {
                 stream: sender.key(),
             };
             assert_eq!(events(&pair.client).split_off(seen), [&woken]);
+        });
+    }
+
+    /// Writes each sender of `senders` that `Event::Writable` names after event
+    /// `seen` on the client, with no new message, until no new event names one.
+    fn answer(pair: &mut Pair, senders: &[&Sender], mut seen: usize) {
+        while seen < pair.client.events.len() {
+            let (_, event) = &pair.client.events[seen];
+            seen += 1;
+            let &Event::Writable { stream } = event else {
+                continue;
+            };
+            let sender = senders.iter().find(|sender| sender.key() == stream);
+            let now = pair.now();
+            if let Some(sender) = sender {
+                let written = pair.client.endpoint.write(now, sender, &mut None);
+                assert!(written.is_ok(), "{written:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_after_a_write_that_turns_the_order_leaves_the_new_first_sender_awake() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut filler = open_sender(&mut pair, Class::Complete);
+            let latest = open_sender(&mut pair, Class::Latest);
+            let first = open_sender(&mut pair, Class::Complete);
+            let second = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            let small: Vec<_> = (0..120).map(|_| shard.block(&[1; 1024])).collect();
+            write(&mut pair.client, now, &mut filler, &small);
+            pair.run(RUN);
+            let senders = [&latest, &first, &second];
+            let messages = [(2, 40_000), (3, 50_000), (4, 40_000)];
+            for (sender, (byte, len)) in senders.iter().zip(messages) {
+                let message = Some(shard.block(&vec![byte; len]));
+                let written = pair.client.endpoint.write(now, sender, &mut { message });
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            pair.run(RUN);
+            let server = key(&pair.server);
+            let mut incoming: Vec<_> =
+                iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+            let at = |incoming: &[Incoming], id: StreamId| {
+                incoming
+                    .iter()
+                    .position(|i| i.receiver.key().id == id)
+                    .expect("there")
+            };
+            let fill = at(&incoming, filler.key().id);
+            // Steps of credit. `latest` takes the first and puts `Complete` first.
+            // `first` and `second` take the rest, and the last step turns the order
+            // back while `second` still holds part of its message.
+            for _ in 0..5 {
+                let now = pair.now();
+                for _ in 0..20 {
+                    let read =
+                        next(&mut pair.server, now, &mut incoming[fill].receiver);
+                    assert_eq!(read, Ok(Poll::Ready(Some(vec![1; 1024]))));
+                }
+                let seen = pair.client.events.len();
+                pair.run(RUN);
+                answer(&mut pair, &senders, seen);
+            }
+            {
+                let key = key(&pair.client);
+                let connection =
+                    crate::quic::find(&mut pair.client.endpoint.connections, key);
+                let sending = &connection.expect("a connection").streams.sending;
+                assert_eq!(sending.first(), Some(latest.key()));
+            }
+            assert!(half(&mut pair.client, &latest).holds());
+            assert!(half(&mut pair.client, &second).holds());
+            let now = pair.now();
+            pair.client.endpoint.reset(now, second, Code(7));
+            let mut got = Vec::new();
+            for _ in 0..20 {
+                let seen = pair.client.events.len();
+                pair.run(RUN);
+                answer(&mut pair, &[&latest, &first], seen);
+                let now = pair.now();
+                drain(&mut pair.server, now, &mut incoming[fill].receiver);
+                let at = at(&incoming, latest.key().id);
+                got.extend(drain(&mut pair.server, now, &mut incoming[at].receiver).0);
+            }
+            let lens: Vec<_> = got.iter().map(Vec::len).collect();
+            assert_eq!(lens, [40_000], "the server got these messages of `latest`");
         });
     }
 
