@@ -223,16 +223,34 @@ mod stored {
     #[test]
     fn reads_only_the_gap_lines_of_its_index() {
         let other = format!(
-            "foundation_gaps,connector=influx,index=other,path=live count=1i {}\n",
-            stamp(FIRST + 1)
+            "foundation_gaps,connector=influx,index=other,path=live count=2i {}\n",
+            stamp(FIRST + 3)
         );
+        let body = samples(FIRST..FIRST + 1) + &samples(FIRST + 3..FIRST + 4) + &other;
         assert_eq!(
-            check(&(samples(FIRST..FIRST + 2) + &other)),
+            check(&body),
             Received {
                 samples: 2,
-                seqs: Some(FIRST..FIRST + 2),
-                contiguous: true,
+                seqs: Some(FIRST..FIRST + 4),
+                contiguous: false,
                 gaps: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn gives_no_gap_for_a_range_that_starts_at_the_next_stored_seq() {
+        let body = samples(FIRST..FIRST + 1)
+            + &samples(FIRST + 2..FIRST + 3)
+            + &gap_line(FIRST + 4, 2)
+            + &samples(FIRST + 4..FIRST + 5);
+        assert_eq!(
+            check(&body),
+            Received {
+                samples: 3,
+                seqs: Some(FIRST..FIRST + 5),
+                contiguous: false,
+                gaps: vec![Gap { after: 2, count: 1 }],
             }
         );
     }
@@ -257,10 +275,18 @@ mod stored {
 
     #[test]
     #[should_panic(
-        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Float(0.5)}, not one float that is a whole number below 100"
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Float(0.5)}, not one float that is a whole number in +0..100"
     )]
     fn panics_on_a_value_that_is_not_a_whole_number() {
         check("edge.value value=0.5 1000\n");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: edge.value at 1000 holds {\"value\": Float(-0.0)}, not one float that is a whole number in +0..100"
+    )]
+    fn panics_on_a_negative_zero() {
+        check("edge.value value=-0 1000\n");
     }
 
     #[test]
@@ -341,6 +367,14 @@ mod stored {
     )]
     fn panics_on_a_zero_count() {
         check(&gap_line(FIRST + 3, 0));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the store holds what the lab did not write: a gap line at 1030 has the fields {\"count\": Integer(-1)}"
+    )]
+    fn panics_on_a_negative_count() {
+        check(&(gap_line(FIRST + 3, -1) + &samples(FIRST + 3..FIRST + 4)));
     }
 
     #[test]

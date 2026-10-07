@@ -109,8 +109,8 @@ impl Reader<'_> {
         };
         let Some(k) = k else {
             panic!(
-                "the store holds what the lab did not write: {} at {} holds {fields:?}, \
-                 not one float that is a whole number below {count}",
+                "the store holds what the lab did not write: {} at {} holds \
+                 {fields:?}, not one float that is a whole number in +0..{count}",
                 self.measurement,
                 stamp.nanos()
             );

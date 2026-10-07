@@ -2353,12 +2353,17 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
   https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
   Data points in the lab: sample `k` of one `Lab::write`, from 0, has the value
-  `k as f64`, which is exact below 2^53. `Lab::stored` accepts a data point only
-  when its fields are one float with the value of the sample at its stamp. Until
-  #341 names the field key of a data line, the field may have any key; the #341 PR
-  that names the key changes the check to that key. Decided by the architect
-  (`laptop.architect-2`), #1151
-  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938).
+  `k as f64`, which is exact below 2^53. `Lab::stored` takes a data point's seq from
+  its value: `written.start + k`. It accepts a data point only when its fields are
+  one float that is a whole number `k` in `+0..count`, where `count` is the number
+  of written samples. Until #341 names the field key of a data line, the field may
+  have any key; the #341 PR that names the key changes the check to that key.
+  Decided by the architect (`laptop.architect-2`), #1151, on 2026-10-07T14:07:11Z
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938)
+  and 2026-10-07T14:22:17Z
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039993275).
+  The second supersedes the Q2 check of the first, which compared each value with
+  `seq - written.start`.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
