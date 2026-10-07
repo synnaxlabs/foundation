@@ -2269,6 +2269,63 @@ mod tests {
             });
         }
 
+        // The test clears the joins that `sync` took. A later sync that decodes an
+        // entry again gives the key back, so the key shows each second decode.
+        #[test]
+        fn a_sync_decodes_no_entry_that_an_earlier_sync_took() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = append(common::TERM, changes(&[home(1), join(4)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, joined)), Ok(()));
+                mesh.group.borrow_mut().unapplied.clear();
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let next = Body::Append {
+                    prev: at(2),
+                    entries: vec![Entry {
+                        at: at(3),
+                        data: changes(&[home(1)]).remove(0),
+                    }],
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, next)), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_an_unwritten_join_above_an_unwritten_entry_removes_its_key()
+         {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = append(common::TERM, changes(&[home(1), join(4)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, joined)), Ok(()));
+                let replace = Body::Append {
+                    prev: Position {
+                        term: common::TERM,
+                        index: 1,
+                    },
+                    entries: vec![Entry {
+                        at: Position {
+                            term: later(),
+                            index: 2,
+                        },
+                        data: changes(&[home(1)]).remove(0),
+                    }],
+                    commit: 0,
+                };
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
         #[test]
         fn a_join_that_this_leader_proposes_gives_a_key_before_the_write() {
             solo(|node, tasks| async move {
