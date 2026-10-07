@@ -289,6 +289,34 @@ fn reads_a_name_that_git_quotes() {
 }
 
 #[test]
+fn a_move_does_not_hide_a_removed_line_of_code() {
+    let (repo, _) = Repo::with_pr("rename");
+    let comments = "// c\n".repeat(10);
+    let from = repo.commit("a.rs", &format!("{comments}fn a() {{}}\n"));
+    repo.git(&["rm", "--quiet", "a.rs"]);
+    let end = repo.commit("b.rs", &comments);
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `a.rs:11`".to_string()))
+    );
+}
+
+#[test]
+fn a_diff_driver_config_does_not_hide_code() {
+    for config in [["diff.x.textconv", "true"], ["diff.external", "true"]] {
+        let (repo, _) = Repo::with_pr("driver");
+        repo.git(&["config", config[0], config[1]]);
+        let from = repo.commit(".gitattributes", "*.rs diff=x\n");
+        let code = repo.commit("a.rs", "fn a() {}\n");
+        assert_eq!(
+            repo.code_change(&from, &code),
+            Ok(Some("changes code at `a.rs:1`".to_string())),
+            "{config:?}"
+        );
+    }
+}
+
+#[test]
 fn a_colored_diff_config_does_not_hide_code() {
     let (repo, from) = Repo::with_pr("color");
     repo.git(&["config", "color.diff", "always"]);
@@ -298,6 +326,47 @@ fn a_colored_diff_config_does_not_hide_code() {
     assert_eq!(
         repo.code_change(&from, &code),
         Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn an_inter_hunk_context_config_keeps_the_line_number() {
+    let (repo, _) = Repo::with_pr("context");
+    repo.git(&["config", "diff.interHunkContext", "10"]);
+    let from = repo.commit("a.rs", "// a\nfn keep() {}\n// b\n");
+    let end = repo.commit("a.rs", "// A\nfn keep() {}\n// b\nfn c() {}\n");
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `a.rs:4`".to_string()))
+    );
+}
+
+#[test]
+fn reads_only_the_file_that_a_directory_of_the_same_name_replaces() {
+    let (repo, _) = Repo::with_pr("dir");
+    let from = repo.commit("x.rs", "// a\n");
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    std::fs::create_dir(repo.dir.join("x.rs")).unwrap();
+    let docs = repo.commit("x.rs/b.rs", "// b\n");
+    assert_eq!(repo.code_change(&from, &docs), Ok(None));
+    let code = repo.commit("x.rs/b.rs", "fn b() {}\n");
+    assert_eq!(
+        repo.code_change(&from, &code),
+        Ok(Some("changes code at `x.rs/b.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_decomposed_name_does_not_hide_code() {
+    let (repo, _) = Repo::with_pr("nfd");
+    repo.git(&["config", "core.precomposeUnicode", "false"]);
+    let name = "cafe\u{301}.rs";
+    let from = repo.commit(name, "fn a() {}\n");
+    let end = repo.commit(name, "fn b() {}\n");
+    repo.git(&["config", "core.precomposeUnicode", "true"]);
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some(format!("changes code at `{name}:1`")))
     );
 }
 

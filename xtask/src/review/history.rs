@@ -68,7 +68,6 @@ impl<'a> History<'a> {
         };
         let paths = self.output(&[
             "diff",
-            "--no-ext-diff",
             "--no-renames",
             "--name-only",
             "-z",
@@ -101,15 +100,18 @@ impl<'a> History<'a> {
         end: &str,
         path: &str,
     ) -> Result<Option<u32>, String> {
-        // Only the hunks are read: git quotes or pads the paths in the headers.
+        // Only the hunks are read: git quotes or pads the paths in the headers. Git on
+        // macOS changes a decomposed path in its arguments, unless told not to.
         let diff = self.git(&[
+            "-c",
+            "core.precomposeUnicode=false",
             "diff",
             "--no-ext-diff",
             "--no-textconv",
             "--no-color",
-            "--no-renames",
             "--text",
             "--unified=0",
+            "--inter-hunk-context=0",
             from,
             end,
             "--",
@@ -118,8 +120,12 @@ impl<'a> History<'a> {
         let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
         let (mut old, mut new) = (0, 0);
         let mut hunk = false;
-        for line in diff.lines() {
-            if let Some(header) = line.strip_prefix("@@ ") {
+        // The path also matches the files under a directory of that name, each in a
+        // section after the first.
+        for line in diff.lines().skip(1) {
+            if line.starts_with("diff ") {
+                break;
+            } else if let Some(header) = line.strip_prefix("@@ ") {
                 hunk = true;
                 (old, new) = starts(header)
                     .ok_or_else(|| format!("git diff: a bad hunk header `{line}`"))?;

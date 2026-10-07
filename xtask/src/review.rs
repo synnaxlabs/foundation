@@ -51,8 +51,8 @@ struct Round {
 /// A round comment that does not parse.
 #[derive(Debug)]
 struct Malformed {
-    /// It has a round number and a `Reviewers:`, `Range:`, or `Findings:` line, so it
-    /// is in the fixed format: not an older round or a quote of the format.
+    /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is in the fixed
+    /// format, not an older one.
     fixed: bool,
     problem: String,
 }
@@ -228,12 +228,6 @@ fn round(body: &str) -> Option<Result<Round, Malformed>> {
     let lines = lines
         .skip_while(|l| l.is_empty())
         .take_while(|l| !l.is_empty());
-    let Ok(number) = number.parse::<u32>() else {
-        return Some(Err(Malformed {
-            fixed: false,
-            problem: format!("`## Review round {number}` has no round number"),
-        }));
-    };
     let (mut reviewers, mut range, mut findings) = (None, None, None);
     let mut breakerless = false;
     for line in lines {
@@ -246,6 +240,13 @@ fn round(body: &str) -> Option<Result<Round, Malformed>> {
             findings.get_or_insert(value);
         }
     }
+    let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
+    let Ok(number) = number.parse::<u32>() else {
+        return Some(Err(Malformed {
+            fixed,
+            problem: format!("`## Review round {number}` has no round number"),
+        }));
+    };
     let missing = |name| {
         format!(
             "review round {number} has no `{name}:` line. Write the round in the \
@@ -281,7 +282,6 @@ fn round(body: &str) -> Option<Result<Round, Malformed>> {
             findings,
         })
     };
-    let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     Some(fields().map_err(|problem| Malformed { fixed, problem }))
 }
 

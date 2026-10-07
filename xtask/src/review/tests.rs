@@ -87,13 +87,14 @@ fn passes_1089_with_its_rounds_before_the_fixed_format() {
 }
 
 #[test]
-fn skips_an_earlier_quote_of_the_format() {
-    let quote =
-        bot("The format:\n\n```\n## Review round <n>\n\nReviewers: reviewer\n```");
-    assert_eq!(
-        check(&record(vec![quote, bot(ROUND)])),
-        Vec::<String>::new()
-    );
+fn fails_an_earlier_round_with_fields_and_no_number() {
+    for heading in ["## Review round 1.", "## Review round <n>"] {
+        let first = bot(&format!("{heading}\n\nReviewers: reviewer"));
+        assert_eq!(
+            check(&record(vec![first, bot(ROUND)])),
+            vec![format!("`{heading}` has no round number")]
+        );
+    }
 }
 
 #[test]
