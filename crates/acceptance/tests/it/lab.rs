@@ -110,6 +110,11 @@ impl Lab {
             wall: host.wall(),
             budget: 1 << 20,
             memory: Box::new(|len| Ok(block::Heap::new(len))),
+            files: {
+                let host = host.clone();
+                Arc::new(move || host.files())
+            },
+            entropy: host.entropy(),
         });
         self.members.push(Member {
             name: name.into(),

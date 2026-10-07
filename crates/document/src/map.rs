@@ -76,8 +76,7 @@ impl Map {
         self.0.iter()
     }
 
-    /// The attributes, by key, to take a deep document apart in a test.
-    #[cfg(test)]
+    /// The attributes, by key, to take a deep document apart.
     pub(crate) fn into_vec(self) -> Vec<Attribute> {
         self.0
     }

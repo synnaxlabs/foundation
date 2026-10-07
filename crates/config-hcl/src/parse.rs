@@ -875,6 +875,7 @@ mod tests {
     use crate::{Unclosed, write};
     use document::Position;
     use document::diagnostic::{Diagnostic, Note};
+    use document::encoding::Checked;
     use proptest::prelude::*;
 
     fn at(offset: u32, line: u32, column: u32) -> Position {
@@ -2690,8 +2691,11 @@ c = "°C # not a comment"
                 assert_eq!(read(Source(0), &text), expected);
             } else {
                 let document = read(Source(0), &text).unwrap();
-                let bytes = document::encoding::encode(&document).unwrap();
-                assert_eq!(document::encoding::decode(&bytes).unwrap(), document);
+                let bytes = Checked::new(document.clone()).unwrap().encode();
+                assert_eq!(
+                    document::encoding::decode(&bytes).unwrap().document(),
+                    &document
+                );
             }
         }
 
@@ -2803,6 +2807,7 @@ c = "°C # not a comment"
                 document in document(),
                 edits in prop::collection::vec(edit(), 1..4),
             ) {
+                let document = Checked::new(document).unwrap();
                 let mut chars: Vec<char> = write(&document).unwrap().chars().collect();
                 for (i, c) in &edits {
                     let i = i.index(chars.len().saturating_add(1));
@@ -2821,7 +2826,10 @@ c = "°C # not a comment"
         fn check_text(text: &str) -> Result<(), TestCaseError> {
             match read(Source(0), text) {
                 Ok(document) => {
-                    let written = write(&document);
+                    let checked = Checked::new(document.clone()).map_err(|error| {
+                        TestCaseError::fail(format!("{error:?} from {text:?}"))
+                    })?;
+                    let written = write(&checked);
                     let Ok(written) = written else {
                         return Err(TestCaseError::fail(format!(
                             "{written:?} from {text:?}"

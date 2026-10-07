@@ -17,6 +17,7 @@ the person's laptop and runs its launcher line there: `cmux new-workspace --name
 | `laptop.architect` | laptop | the person | `/architect` | `~/.factory/bin/factory-agent laptop.architect` |
 | `laptop.integrator-1` | laptop | the person | `/build` | `~/.factory/bin/factory-agent laptop.integrator-1` |
 | `laptop.integrator-2` | laptop | the person | `/build` | `~/.factory/bin/factory-agent laptop.integrator-2` |
+| `laptop.director` | laptop | the person | `/direct` | `~/.factory/bin/factory-agent laptop.director` |
 | `laptop.monitor` | laptop | the person | none | none: it runs already |
 | `box1.builder-1` | box1 | Ronaldo | `/build` | `~/.factory/bin/factory-agent box1.builder-1` |
 | `box1.builder-2` | box1 | Ronaldo | `/build` | `~/.factory/bin/factory-agent box1.builder-2` |
@@ -32,19 +33,19 @@ the person's laptop and runs its launcher line there: `cmux new-workspace --name
 The launcher sources `~/.factory/env`, so `gh` and `git` act as the GitHub App
 `synnax-foundation-factory[bot]` (one private key per machine). It makes the worktree
 `~/Desktop/synnaxlabs/foundation-wt/<role>`, sets `FACTORY_NAME`, and starts Claude
-Code with `--name <role>`, the factory mod, and the role's skill. The architect runs at
-`xhigh` effort, the others at `high`. The monitor watches factory efficiency and
-performance.
+Code with `--name <role>`, the factory mod, and the role's skill. The architect and the
+director run at `xhigh` effort, the others at `high`. The director owns the quality bar
+and the issue queue. The monitor keeps the work moving: it unblocks sessions and
+watches efficiency.
 
-A builder works one issue per context. When its PR merges, the engineer runs `/clear`
-and then `/build`.
+A builder works one issue per context. When its PR merges, it calls the factory mod's
+`next` tool, which runs `/clear` and then `/build` by itself.
 
 ## Workstreams
 
-Each machine is home to a set of crates: its engineer approves PRs to its risk crates.
-A home is not a limit. Any builder takes a `ready` issue in any crate, so work goes to
-idle builders and every account spends its budget. One issue is in progress per crate.
-The coordinator keeps this table current.
+Each machine is home to a set of crates. A home is not a limit. Any builder takes a
+`ready` issue in any crate, so work goes to idle builders and every account spends its
+budget. One issue is in progress per crate. The coordinator keeps this table current.
 
 | Machine | Host | Crates |
 | --- | --- | --- |
@@ -53,8 +54,7 @@ The coordinator keeps this table current.
 | box2 | `foundation-factory-2`, 32 vCPU | `transport`, `clock`, `estimate`, `sim`, `env`, `os`, `secret`, `connector`, `connector-<kind>`, `daqmx-stub` |
 
 The risk crates are `raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`,
-`home`, and `replica` on box1, and `transport` on box2. The machine's engineer approves
-each PR to them.
+`home`, and `replica` on box1, and `transport` on box2. The red-teams aim at them.
 
 ## Milestones
 
@@ -77,8 +77,7 @@ that pass in CI.
   simulator.
 - **Machine work at night.** The red-teams run simulation campaigns, fuzz, and mutants.
   Each failure becomes a day-lane issue with a reduced repro.
-- A night PR that needs a code owner waits for the morning. The rest merge through the
-  queue.
+- Night PRs merge through the queue like day PRs.
 
 ## Messages
 
@@ -95,9 +94,9 @@ that pass in CI.
   with zero other approvals.
 - After its local gate and review, the author runs `gh pr merge <n> --auto`. The queue
   tests each PR on top of `main` and merges it.
-- Code owners (`.github/CODEOWNERS`): the person owns `oracles/`, the decisions,
-  `.github/`, `CLAUDE.md`, `.claude/`, and each `public-api.txt`. The engineers own the
-  risk crates of their machine. Everything else merges when its checks pass.
+- Code owners (`.github/CODEOWNERS`): the person owns `oracles/` (except the fuzz
+  inputs in `oracles/fuzz/`), `.github/`, `CLAUDE.md`, and `.claude/`. Everything else
+  merges when its checks pass.
 - The architect reviews every public-interface or crate-dependency change before the
   person.
 - Branches start with the machine: `<machine>/<issue>-<slug>`, for example
@@ -107,10 +106,11 @@ that pass in CI.
 
 - Tasks, decisions, and approvals live in issues, PRs, and the repo, never only in a
   message or a session's context.
-- An approval is a link to the person's or engineer's own comment, with its UTC time.
-  Never record a paraphrase as an approval.
-- A new decision says "Supersedes <link>". Decision changes ship in their own PRs, never
-  inside code.
+- An approval is a link to the person's or the architect's own comment, with its UTC
+  time. Never record a paraphrase as an approval.
+- A new decision says "Supersedes <link>". A ruling ships in the code PR that needs it,
+  with the link to the architect's comment. A change to the meaning of a ruling needs a
+  new approval before the PR merges.
 - Each issue's last state comment says what is done, the next step, and open questions.
 
 ## Models

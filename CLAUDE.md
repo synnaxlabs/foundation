@@ -208,5 +208,5 @@ default, template, and system instruction.
 - Commit and push only on your own branch, in your own worktree.
 - Never force-push a commit that someone else may have pulled.
 - Never stash. Never `git checkout` or `git reset` over files you did not change.
-- PRs merge through the merge queue. Code owners approve the paths they own
-  (`docs/factory.md`).
+- PRs merge through the merge queue. Only `oracles/`, `.github/`, `CLAUDE.md`, and
+  `.claude/` need the person's approval (`docs/factory.md`).

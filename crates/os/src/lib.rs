@@ -5,6 +5,12 @@
 use std::fmt;
 use std::path::Path;
 
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "rustix has no call that allocates all of a file"
+)]
+mod allocate;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "the clock is an OS call")]
 mod clock;
