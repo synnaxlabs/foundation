@@ -2397,6 +2397,8 @@ mod tests {
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [readers[1], readers[0]]);
+                assert_eq!(taken(&mut shard, readers[1], 0), [seq(0, 1)]);
+                write(&test, &mut shard, a, &[20]);
                 for reader in readers {
                     close(&mut shard, reader);
                     assert_eq!(taken(&mut shard, reader, 0), []);
