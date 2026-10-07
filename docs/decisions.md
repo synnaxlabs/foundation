@@ -2730,11 +2730,14 @@ How to read this record:
   that InfluxDB 1, 2, and 3 each store as written, in each part (measurement name, tag
   key, tag value, field key). It refuses the rest at construction, so the error
   reaches the config diagnostic in place of a partial write that InfluxDB answers with
-  204 or drops. One set of refused characters holds for every part: NUL in a tag value
-  is refused, though InfluxDB 3 keeps it, so a user learns one rule, not four.
-  Foundation names hold only ASCII letters, digits, `_`, `-`, `.`, and `@`, so the rule
-  bites only on text that a user writes in the connector's config. Lost: a rule for
-  each part. #1098 widens the set to what InfluxDB 1 and 2 with `validate-keys` drop.
+  204 or drops. One set of refused characters holds for every part. Today the set is a
+  backslash, a newline, a carriage return, a tab, and NUL. #1098 will widen it to what
+  InfluxDB 1 and 2 with `validate-keys` drop, and its PR updates this list. NUL in a
+  tag value is refused, though InfluxDB 3 keeps it. No user needs it, and a user learns
+  one rule, not four. Foundation names hold only ASCII letters, digits, `_`, `-`, `.`,
+  and `@`, so the rule applies only to text that a user writes in the connector's
+  config. Lost: a rule for each part. It keeps NUL in tags for no caller, and the set
+  a user may write then depends on the part.
   Decided by the architect (`laptop.architect-2`) on 2026-10-07T06:26:41Z
   (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,

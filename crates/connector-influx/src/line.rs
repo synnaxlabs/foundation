@@ -143,14 +143,13 @@ impl Float {
 pub enum Error {
     /// An empty part.
     Empty(Part),
-    /// A part with a character that a line cannot hold: a backslash, a newline, a
-    /// carriage return, a tab, or NUL.
+    /// A part with a character that [`Measurement::new`] refuses.
     Character {
-        /// The part.
+        /// The part that holds `character`.
         part: Part,
-        /// The text of the part.
+        /// The text of the part, as given.
         text: String,
-        /// The character.
+        /// The first refused character in `text`.
         character: char,
     },
     /// A name or key that InfluxDB keeps for itself: one that starts with `_`, or

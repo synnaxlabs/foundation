@@ -203,7 +203,8 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 text: "a\nb".into(),
                 character: '\n',
             },
-            "the value \"a\\nb\" of the tag \"k\" holds '\\n', which a line cannot hold",
+            "the value \"a\\nb\" of the tag \"k\" holds '\\n', \
+             which a line cannot hold",
         ),
         (
             Measurement::new("m", &[], &["f\r"]),
@@ -254,7 +255,8 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 text: "a\tb".into(),
                 character: '\t',
             },
-            "the value \"a\\tb\" of the tag \"k\" holds '\\t', which a line cannot hold",
+            "the value \"a\\tb\" of the tag \"k\" holds '\\t', \
+             which a line cannot hold",
         ),
         (
             Measurement::new("m", &[("k2", "a\tb"), ("k1", "a\tb")], &["f"]),
@@ -263,7 +265,8 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 text: "a\tb".into(),
                 character: '\t',
             },
-            "the value \"a\\tb\" of the tag \"k1\" holds '\\t', which a line cannot hold",
+            "the value \"a\\tb\" of the tag \"k1\" holds '\\t', \
+             which a line cannot hold",
         ),
         (
             Measurement::new("m", &[], &["f", "\tf"]),
@@ -400,16 +403,16 @@ proptest! {
     }
 
     #[test]
-    fn refuses_a_tab_or_nul_anywhere(
+    fn refuses_a_refused_character_anywhere(
         name in name(),
         at in any::<proptest::sample::Index>(),
-        character in proptest::sample::select(vec!['\t', '\0']),
+        character in proptest::sample::select(vec!['\\', '\n', '\r', '\t', '\0']),
         part in 0..4_usize,
     ) {
         let mut chars: Vec<char> = name.chars().collect();
         chars.insert(at.index(chars.len() + 1), character);
-        let name: String = chars.into_iter().collect();
-        let n = name.as_str();
+        let text: String = chars.into_iter().collect();
+        let n = text.as_str();
         let (got, part) = match part {
             0 => (Measurement::new(n, &[("k", "v")], &["f"]), Part::Measurement),
             1 => (Measurement::new("m", &[(n, "v")], &["f"]), Part::TagKey),
@@ -419,6 +422,6 @@ proptest! {
             ),
             _ => (Measurement::new("m", &[("k", "v")], &["f", n]), Part::FieldKey),
         };
-        prop_assert_eq!(got, Err(Error::Character { part, text: name, character }));
+        prop_assert_eq!(got, Err(Error::Character { part, text, character }));
     }
 }
