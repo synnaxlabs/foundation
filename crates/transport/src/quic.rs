@@ -327,9 +327,8 @@ impl Endpoint {
     /// `Ready` when the stream holds no message: it took all of `message`, or with
     /// `None`, all of the one before. Else `Pending`: write again after
     /// [`Event::Writable`] to send the rest. The streams that wait for the
-    /// connection take turns, by
-    /// class with `Complete` ahead of `Latest` while it is owed bytes, then oldest
-    /// first, so a write behind one waits.
+    /// connection take turns, by class with `Complete` ahead of `Latest` while it is
+    /// owed bytes, then oldest first, so a write behind one waits.
     ///
     /// # Errors
     ///
@@ -404,9 +403,8 @@ impl Endpoint {
     ///
     /// [`Error::Reset`] with `Code(0)` after an [`Endpoint::cancel`] reset the
     /// stream, and [`Error::Stopped`] when the peer stopped it; each later finish
-    /// gives it too.
-    /// The error of the connection's [`Event::Closed`] once it ended, and
-    /// [`Error::Broken`] when the call finds a fault of the peer's.
+    /// gives it too. The error of the connection's [`Event::Closed`] once it ended,
+    /// and [`Error::Broken`] when the call finds a fault of the peer's.
     ///
     /// # Panics
     ///
