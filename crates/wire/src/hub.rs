@@ -255,7 +255,8 @@ impl Reply {
 
 /// The run of keys after an open, in the open's order. A series of the session has
 /// the place of its channel's first key in the run, from 0. The run holds the key of
-/// the open's index.
+/// the open's index. [`Home`] does not check this: it does not know the index, so its
+/// caller does.
 pub mod keys {
     use std::slice;
 
