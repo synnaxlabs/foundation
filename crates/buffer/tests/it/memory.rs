@@ -1,6 +1,6 @@
 //! A file driver over memory, a stand-in until `sim` has files (#114).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -85,6 +85,14 @@ impl Memory {
     }
 }
 
+/// The key of `path` in the map: its spelling with each `.` segment dropped, so
+/// `./b` and `b` name one file, as on a disk.
+fn key(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|part| *part != Component::CurDir)
+        .collect()
+}
+
 fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("a length fits in u64")
 }
@@ -100,7 +108,7 @@ impl Driver for Memory {
         mode: Mode,
     ) -> Request<'a, Box<dyn Descriptor>> {
         let mut files = lock(&self.files);
-        let found = files.get(path).cloned();
+        let found = files.get(&key(path)).cloned();
         let result = match (found, mode) {
             (Some(bytes), Mode::Create { len })
                 if to_u64(lock(&bytes).len()) != len =>
@@ -114,7 +122,7 @@ impl Driver for Memory {
             (Some(bytes), _) => Ok(bytes),
             (None, Mode::Create { len }) => {
                 let bytes = Arc::new(Mutex::new(vec![0; to_usize(len)]));
-                files.insert(path.into(), Arc::clone(&bytes));
+                files.insert(key(path), Arc::clone(&bytes));
                 Ok(bytes)
             }
             (None, _) => Err(Error::NotFound { path: path.into() }),
@@ -146,7 +154,7 @@ impl Driver for Memory {
     }
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
-        lock(&self.files).remove(path);
+        lock(&self.files).remove(&key(path));
         Box::pin(async { Ok(()) })
     }
 
@@ -221,15 +229,18 @@ impl Descriptor for Open {
 
     fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
         let mut files = lock(&self.files);
-        let result = match files.get(from) {
+        let (old, new) = (key(from), key(to));
+        let result = match files.get(&old) {
             Some(bytes) if !Arc::ptr_eq(bytes, &self.bytes) => {
                 Err(Error::NotFound { path: from.into() })
             }
             None => Err(Error::NotFound { path: from.into() }),
-            Some(_) if files.contains_key(to) => Err(Error::Exists { path: to.into() }),
+            Some(_) if files.contains_key(&new) => {
+                Err(Error::Exists { path: to.into() })
+            }
             Some(_) => {
-                let bytes = files.remove(from).expect("invariant: `from` was found");
-                files.insert(to.into(), bytes);
+                let bytes = files.remove(&old).expect("invariant: `from` was found");
+                files.insert(new, bytes);
                 *lock(&self.path) = to.into();
                 Ok(())
             }

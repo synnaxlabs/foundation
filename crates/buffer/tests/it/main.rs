@@ -13,7 +13,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
@@ -403,6 +403,27 @@ where
     let (mut sim, handle) = start(seed, memory, main);
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
+}
+
+#[test]
+fn a_memory_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    fn ready<T>(future: impl Future<Output = T>) -> T {
+        match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("a memory call ends at once"),
+        }
+    }
+    let files = Memory::default().files();
+    let create = Mode::Create { len: 4_096 };
+    drop(ready(files.open(FilePath::new("b"), create)).unwrap());
+    let mut file = ready(files.open(FilePath::new("a"), create)).unwrap();
+    let found = ready(file.rename(FilePath::new("./b")));
+    assert_eq!(found, Err(FileError::Exists { path: "./b".into() }));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+    ready(file.rename(FilePath::new("./c"))).unwrap();
+    let reopened = ready(files.open(FilePath::new("c"), Mode::Read)).unwrap();
+    assert_eq!(reopened.len(), 4_096);
 }
 
 #[test]

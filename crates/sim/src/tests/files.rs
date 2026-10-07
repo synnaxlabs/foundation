@@ -1220,6 +1220,18 @@ fn a_rename_moves_the_file_and_the_handle_follows_it() {
 }
 
 #[test]
+fn a_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    let (found, names) = run(0, MIB, |node, _| async move {
+        drop(create(&node, "b", KIB).await);
+        let mut file = create(&node, "a", KIB).await;
+        let found = file.rename(Path::new("./b")).await;
+        (found, node.files().list(Path::new("")).await.unwrap())
+    });
+    assert_eq!(found, Err(Error::Exists { path: "./b".into() }));
+    assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+}
+
+#[test]
 fn a_rename_onto_a_file_that_is_there_gives_exists_and_changes_nothing() {
     run(0, MIB, |node, _| async move {
         let (files, pool) = (node.files(), pool());
