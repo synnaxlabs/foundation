@@ -95,11 +95,17 @@ fn key(path: &Path) -> PathBuf {
 
 /// Whether `path` ends in `/` or `/.`, as `a/` does. Such a path names only a
 /// directory: a disk gives `EISDIR` (21) on a create and `ENOTDIR` (20) on a
-/// file that is there. A path with no name at all, as `.`, is the directory
-/// itself: `EISDIR` on each call.
+/// file that is there.
 fn slashed(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
     bytes.ends_with(b"/") || bytes.ends_with(b"/.")
+}
+
+/// Whether `path` is the data directory itself by a `.` segment, as `.` or `./`
+/// is: a disk gives `EISDIR` on each file call. The empty path is not one: a disk
+/// finds no file at it.
+fn directory(path: &Path) -> bool {
+    !path.as_os_str().is_empty() && key(path).as_os_str().is_empty()
 }
 
 fn io(path: &Path, operation: Operation, code: i32) -> Error {
@@ -127,7 +133,7 @@ impl Driver for Memory {
         let mut files = lock(&self.files);
         let found = files.get(&key(path)).cloned();
         let result = match (found, mode) {
-            _ if key(path).as_os_str().is_empty() => Err(io(path, Operation::Open, 21)),
+            _ if directory(path) => Err(io(path, Operation::Open, 21)),
             (_, Mode::Create { .. }) if slashed(path) => {
                 Err(io(path, Operation::Open, 21))
             }
@@ -177,7 +183,7 @@ impl Driver for Memory {
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
         let mut files = lock(&self.files);
-        let result = if key(path).as_os_str().is_empty() {
+        let result = if directory(path) {
             Err(io(path, Operation::Remove, 21))
         } else if files.contains_key(&key(path)) && slashed(path) {
             Err(io(path, Operation::Remove, 20))

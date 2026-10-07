@@ -517,6 +517,23 @@ fn a_memory_path_of_the_data_directory_names_no_file() {
 }
 
 #[test]
+fn a_memory_empty_path_names_no_file() {
+    let files = Memory::default().files();
+    let mut results = Vec::new();
+    for mode in [Mode::Read, Mode::Write, Mode::Create { len: 1 }] {
+        results.push(ready(files.open(FilePath::new(""), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new(""))));
+    let not_found = || FileError::NotFound { path: "".into() };
+    let expected = [Err(not_found()), Err(not_found()), Err(not_found()), Ok(())];
+    assert_eq!(results, expected);
+    assert_eq!(
+        ready(files.list(FilePath::new(""))).unwrap(),
+        Vec::<PathBuf>::new()
+    );
+}
+
+#[test]
 fn a_new_ring_keeps_its_layout_across_opens() {
     let memory = Memory::default();
     run(1, memory.clone(), |shard| async move {

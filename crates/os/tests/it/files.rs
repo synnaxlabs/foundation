@@ -377,6 +377,24 @@ fn a_path_of_the_data_directory_names_no_file() {
 }
 
 #[test]
+fn an_empty_path_names_no_file() {
+    run(|files, _| async move {
+        let mut results = Vec::new();
+        for mode in [Mode::Read, Mode::Write, Mode::Create { len: 4 * KIB }] {
+            results.push(files.open(Path::new(""), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new("")).await);
+        let not_found = || Error::NotFound { path: "".into() };
+        let expected = [Err(not_found()), Err(not_found()), Err(not_found()), Ok(())];
+        assert_eq!(results, expected);
+        assert_eq!(
+            files.list(Path::new("")).await.unwrap(),
+            Vec::<PathBuf>::new()
+        );
+    });
+}
+
+#[test]
 fn a_rename_onto_a_file_that_is_there_gives_exists_and_changes_nothing() {
     run(|files, _| async move {
         let pool = pool();
