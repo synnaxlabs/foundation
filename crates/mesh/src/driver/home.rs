@@ -26,13 +26,16 @@ impl Mesh {
     /// Makes `home` the home of `index`. A follower forwards it to the leader. It
     /// returns when an entry that sets it has committed and this node applied it; a
     /// later entry may change it again. It proposes again when a new leader replaces
-    /// the entry.
+    /// the entry. It has no time limit: while no leader takes the change, it tries
+    /// again after each tick. A drop of the future ends the call, but a leader that
+    /// took the change can still commit it.
     ///
     /// # Errors
     ///
     /// [`Error::NoVote`] when this node is not a voter, [`Error::NotMember`] when
     /// `home` is not a member of the region, and [`Error::Stopped`] when the group
-    /// stopped.
+    /// stopped. The first two read what this node applied, so a node that has not
+    /// applied a promotion or a join yet gives them.
     pub async fn set_home(
         &self,
         index: channel::Key,

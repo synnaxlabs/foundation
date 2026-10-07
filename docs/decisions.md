@@ -2336,6 +2336,14 @@ How to read this record:
   applies that change, and the caller tries again (approved by the architect with two
   changes, `NoVote` and the bound of `Applied`, 2026-10-07T11:54:56Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407).
+  `Ok` means that the entry at the position of the try applied. That is an entry that
+  sets the home only while `State::apply` never refuses a home change. A change kind
+  that lets `apply` refuse a home change (such as a removal of a member) must also make
+  `set_home` tell a refused entry from one that set the home. The surface as built, the
+  doc of `set_home`, and the four points that the plan did not state (a joint
+  configuration, `Error::Pool`, the time to a stop in a forward, and `NoVote` before
+  `NotMember`) are approved by the architect, 2026-10-07T20:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
