@@ -40,3 +40,5 @@ mod message;
     expect(dead_code, reason = "the driver of #471 is the first user")
 )]
 mod region;
+#[cfg(test)]
+mod testing;

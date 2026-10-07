@@ -122,89 +122,19 @@ fn statement(claim: &Claim) -> Vec<u8> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use aws_lc_rs::signature::KeyPair;
     use proptest::prelude::*;
     use proptest::sample::Index;
-    use raft::{
-        Answer, Body, Config, Data, Grant, Hard, Proof, Raft, Start, Term, Voters,
-    };
+    use raft::{Answer, Body, Config, Data, Grant, Hard, Raft, Start, Term, Voters};
 
     use super::*;
     use crate::bytes::put_optional_proof;
-
-    fn key(id: u8) -> node::Key {
-        node::Key::from_u128(u128::from(id))
-    }
-
-    fn private(id: u8) -> PrivateKey {
-        PrivateKey([id; 32])
-    }
-
-    fn signer(id: u8) -> Signer {
-        Signer::new(key(id), &private(id))
-    }
-
-    fn public(id: u8) -> PublicKey {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&private(id).0).unwrap();
-        PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
-    }
-
-    fn members(ids: &[u8]) -> BTreeMap<node::Key, PublicKey> {
-        ids.iter().map(|&id| (key(id), public(id))).collect()
-    }
-
-    fn message(from: u8, to: u8, body: Body, proof: Option<Proof>) -> Message {
-        Message {
-            from: key(from),
-            to: key(to),
-            term: Term(5),
-            body,
-            proof,
-        }
-    }
-
-    fn reply_body(grant: Grant, answer: Answer) -> Body {
-        match grant {
-            Grant::PreVote => Body::PreVoteReply { answer },
-            Grant::Vote => Body::VoteReply { answer },
-        }
-    }
-
-    // `voter`'s grant to `candidate` in term 5, signed as `sign` signs a reply.
-    fn granted(voter: u8, grant: Grant, candidate: u8) -> Message {
-        let body = reply_body(grant, Answer::Granted(None));
-        let mut ready = Ready {
-            messages: vec![message(voter, candidate, body, None)],
-            ..Ready::default()
-        };
-        signer(voter).sign(&mut ready);
-        ready.messages.remove(0)
-    }
-
-    fn signature(voter: u8, grant: Grant, candidate: u8) -> Signature {
-        let (_, signature) = granted(voter, grant, candidate).claims().next().unwrap();
-        signature.unwrap()
-    }
+    use crate::testing::{
+        self, granted, key, members, message, public, reply_body, signature, signer,
+    };
 
     // A heartbeat of node 1 in term 5 with its votes from 1, 2 and 3, signed.
     fn proven() -> Message {
-        let proof = Proof {
-            grant: Grant::Vote,
-            candidate: key(1),
-            voters: [
-                (key(1), None),
-                (key(2), Some(signature(2, Grant::Vote, 1))),
-                (key(3), Some(signature(3, Grant::Vote, 1))),
-            ]
-            .into(),
-        };
-        let heartbeat = Body::Heartbeat { commit: 0 };
-        let mut ready = Ready {
-            messages: vec![message(1, 2, heartbeat, Some(proof))],
-            ..Ready::default()
-        };
-        signer(1).sign(&mut ready);
-        ready.messages.remove(0)
+        testing::proven(1, 2, Body::Heartbeat { commit: 0 })
     }
 
     fn voter(message: &mut Message, id: u8) -> &mut Option<Signature> {
