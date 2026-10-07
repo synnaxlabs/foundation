@@ -479,6 +479,8 @@ mod tests {
     use env::net::udp::{self, Meta, Transmit};
     use raft::{Answer, Hard, Term};
     use sim::{Crash, Sim, link};
+    use transport::Address;
+    use types::node::SealKey;
 
     use super::*;
     use crate::card;
@@ -1480,11 +1482,15 @@ mod tests {
             admission: [1; 64],
             ..common::member(2)
         };
+        let mut card = record(2, 3, 2).card.card().clone();
+        card.seal_key = SealKey::new([8; 32]).unwrap();
+        let address = Address::Udp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4100));
+        card.addresses = card::addresses::Addresses::new(vec![address]).unwrap();
         let other = Member {
+            card: card::Signed::sign(key(2), card, &private(3)),
             admission: [1; 64],
             expiry: Some(Span::MILLISECOND),
             status: [("clock.offset".parse().unwrap(), INDEX)].into(),
-            ..record(2, 3, 2)
         };
         let cases = [
             ("an equal record", record(2, 2, 1)),
