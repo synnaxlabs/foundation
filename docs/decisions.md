@@ -1008,7 +1008,9 @@ How to read this record:
   2026-10-06) and the run, the index place, and `MALFORMED` on #1064
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
   whole keys and ends and one message type for each direction
-  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163). The byte
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
+  open of no channel and the place checks in `hub`
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). The byte
   form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
