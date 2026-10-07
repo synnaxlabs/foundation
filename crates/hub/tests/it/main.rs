@@ -37,8 +37,9 @@ const WIDE_AREA: u64 = 1 << 24;
 const WIDE_BODY_MAX: usize = 1 << 22;
 /// Samples per series of a frame whose charge is past the window of a reader.
 const PAST_WINDOW: i64 = 140_000;
-/// The pool reserves its budget once for each size class, 59 times here: with
-/// 8 tests at once, a larger budget passes the 4 GiB cap of a test process in CI.
+/// The pool reserves its budget once for each size class, 59 times here. 8 tests at
+/// once with a budget of 8 MiB, 63 classes, passed the 4 GiB cap of a test process in
+/// CI.
 const POOL: usize = 1 << 22;
 const COMMIT: Span = Span::from_nanos(10_000_000);
 /// Past the commit of a write.

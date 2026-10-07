@@ -6,12 +6,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-block = { path = "../block" }
 env = { path = "../env" }
 home = { path = "../home" }
 types = { path = "../types" }
 
 [dev-dependencies]
+block = { path = "../block" }
 buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 codec = { path = "../codec" }

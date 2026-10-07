@@ -44,7 +44,7 @@ pub enum Error {
         data_type: Type,
     },
     /// The home refused the writer for another reason. It is never
-    /// [`::home::writer::Error::Type`], which gives [`Error::Type`].
+    /// [`crate::home::writer::Error::Type`], which gives [`Error::Type`].
     Home(::home::writer::Error),
     /// The writer names no channel.
     Empty,
