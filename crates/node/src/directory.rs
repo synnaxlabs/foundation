@@ -51,8 +51,9 @@ pub(crate) async fn claim(
     files.sync_dir(root).await.map_err(Error::Directory)
 }
 
-/// The number after `prefix` in `name`, in plain decimal, so `shards-03` and
-/// `shards-+3` give none.
+/// The number after `prefix` in `name`, in plain decimal that fits a `usize`, so
+/// `shards-03`, `shards-+3`, and `shards-18446744073709551616` give none. Reads the
+/// name only, so a file counts as a directory would.
 fn count(name: &Path, prefix: &str) -> Option<usize> {
     let rest = name.to_str()?.strip_prefix(prefix)?;
     let count = rest.parse::<usize>().ok()?;

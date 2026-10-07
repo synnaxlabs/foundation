@@ -1031,6 +1031,46 @@ mod directory {
         assert_eq!(listed, made.map(PathBuf::from));
     }
 
+    /// A count in plain decimal that does not fit a `usize` is not a ring and not a
+    /// record. `usize::MAX + 1` is `18446744073709551616`.
+    #[test]
+    fn a_count_that_does_not_fit_a_usize_is_not_a_count() {
+        for name in ["shard-18446744073709551616", "shards-18446744073709551616"] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            sim.run_on(&host, move |host, _| async move {
+                host.files()
+                    .create_dir(Path::new(name))
+                    .await
+                    .expect("makes");
+            })
+            .expect("the run ends");
+            assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
+            let mut made = ["shard-0", "shard-1", name, "shards-2"];
+            made.sort_unstable();
+            let made = made.map(PathBuf::from);
+            assert_eq!(listed(&mut sim, &host, ""), made, "{name}");
+        }
+    }
+
+    /// The claim reads names only, so a file with the name of a record counts.
+    #[test]
+    fn a_file_named_as_a_record_is_a_record() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        sim.run_on(&host, |host, _| async move {
+            let mode = env::files::Mode::Create { len: 0 };
+            let file = host.files().open(Path::new("shards-3"), mode).await;
+            file.expect("makes").close().await;
+        })
+        .expect("the run ends");
+        let refused = Err(Error::Shards {
+            stored: 3,
+            cores: 2,
+        });
+        assert_eq!(run_on(&mut sim, &host), refused);
+    }
+
     /// A crash at the sync of the record: a power cut loses the record, and a
     /// process crash keeps it. The next start syncs the record before `shard-0`.
     #[test]
