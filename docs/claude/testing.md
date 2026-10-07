@@ -76,8 +76,9 @@ again once to prove that the failure replays (r16 59).
 
 - **A bug fix starts with a failing regression test.** Show it fails for the reason you
   diagnosed, then fix the code. A fix of a test that fails only sometimes is a bug fix
-  too: its regression test makes the cause happen on each run. A run in a reviewer's
-  worktree does not count.
+  too: a regression test that the PR commits makes the cause happen on each run. A
+  failure that a session makes only outside the committed tests, such as in the
+  breaker's worktree, does not count.
 - **Test what the change is for.** When a change exists to remove work (a clock read, a
   copy, an allocation, a round trip), a test counts that work and fails when the change
   is reverted.
@@ -148,16 +149,17 @@ proptest failure file. A change to the bytes of a fuzz input deletes the old inp
 the old file and add the new bytes as a new file. Each target's corpus,
 `oracles/fuzz/<target>/`, is its own oracle, and only a byte string that `main` held
 counts. When a PR renames or splits a target, an input of its corpus may move to the
-corpus of a target that replaces it. Such a move, or a move inside one corpus, keeps the
-bytes and is not a deletion. A byte string that only a PR branch held, such as the old
-bytes of an input that a PR adds and then changes before it merges, was never an oracle.
-A PR deletes an input when a byte string that `oracles/fuzz/<target>/` holds at its
-merge base with `main` (`git merge-base origin/main HEAD`) is in no file of
-`oracles/fuzz/<target>/`, or of the corpus of a target that replaces it, at its head. An
-audit of `main` takes each state that
+corpus of each target that replaces it. Such a move, or a move inside one corpus, keeps
+the bytes and is not a deletion. A byte string that only a PR branch held, such as the
+old bytes of an input that a PR adds and then changes before it merges, was never an
+oracle. A PR deletes an input when a byte string that `oracles/fuzz/<target>/` holds at
+its merge base with `main` (`git merge-base origin/main HEAD`) is in no file of
+`oracles/fuzz/<target>/` at its head, unless a target replaces it and the corpus of each
+such target holds it. An audit of `main` takes each state that
 `git log --first-parent origin/main -- oracles/fuzz/<target>` lists: a byte string that
-`oracles/fuzz/<target>/` holds in one state, and that neither it nor the corpus of a
-target that replaces it holds on `origin/main`, was deleted
+`oracles/fuzz/<target>/` holds in one state, and that no file of it holds on
+`origin/main`, was deleted, unless a target replaces it and the corpus of each such
+target holds it on `origin/main`
 (https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500,
 2026-10-07T19:46:25Z).
 
