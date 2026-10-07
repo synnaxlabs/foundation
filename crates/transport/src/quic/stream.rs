@@ -30,10 +30,9 @@ pub(crate) struct Key {
 
 /// The sending half of a stream. The caller gives it to each write call, and to
 /// [`Endpoint::reset`](super::Endpoint::reset) to end it. The connection keeps the
-/// stream's message in hand. It sends the rest by itself once the stream finished or
-/// when the message came from a write that does not wait, and else at the caller's
-/// next write. Dropping the sender does nothing to the stream, so finish or reset it
-/// first: until then, the message in hand keeps its send budget and its turn.
+/// stream's message in hand and sends the rest of it by itself. Dropping the sender
+/// does nothing to the stream, so finish or reset it first: until then, the message
+/// in hand keeps its send budget and its turn.
 #[derive(Debug)]
 pub(crate) struct Sender {
     key: Key,
@@ -206,12 +205,18 @@ struct Turns {
 }
 
 /// The bytes that `Complete` is owed, which order the turn and the room of the send
-/// budget.
+/// budget, and the classes that compete for them.
 #[derive(Debug, Default)]
 struct Share {
     /// [`LATEST_COST`] for each byte of `Latest` that noq-proto took, less each byte
-    /// of `Complete`. `Complete` goes ahead of `Latest` while it is positive.
+    /// of `Complete`, within one peer window either way. `Complete` goes ahead of
+    /// `Latest` while it is positive.
     owed: isize,
+    /// The peer's window.
+    window: usize,
+    /// For each class, by rank, the bytes of the other class of the share that
+    /// noq-proto may take before the class stops competing while it holds nothing.
+    recent: [usize; 4],
 }
 
 /// The bytes of `Complete` that noq-proto takes for each byte of `Latest`, while both
@@ -613,22 +618,40 @@ impl Share {
     }
 
     /// Counts `bytes` of a message of `class` that noq-proto took. `paired` when
-    /// both `Latest` and `Complete` compete for the send budget. Else the bytes move
-    /// `owed` toward 0 and never past it, so a class alone makes no debt or credit.
+    /// both `Latest` and `Complete` compete. Else the bytes move `owed` toward 0 and
+    /// never past it, so a class alone makes no debt or credit.
     fn took(&mut self, class: Class, bytes: usize, paired: bool) {
-        let bytes = isize::try_from(bytes).expect("invariant: a write fits in memory");
-        let change = match class {
-            Class::Latest => LATEST_COST * bytes,
-            Class::Complete => -bytes,
+        let (change, other) = match class {
+            _ if bytes == 0 => return,
+            Class::Latest => (LATEST_COST, Class::Complete),
+            Class::Complete => (-1, Class::Latest),
             Class::Command | Class::CatchUp => return,
         };
-
-        let owed = self.owed + change;
-        self.owed = if paired {
+        self.offered(class);
+        let recent = &mut self.recent[other.rank()];
+        *recent = recent.saturating_sub(bytes);
+        let bytes = isize::try_from(bytes).expect("invariant: a write fits in memory");
+        let owed = self.owed + change * bytes;
+        let owed = if paired {
             owed
         } else {
             owed.clamp(self.owed.min(0), self.owed.max(0))
         };
+        let window = isize::try_from(self.window)
+            .map_or(isize::MAX, |window| LATEST_COST.saturating_mul(window));
+        self.owed = owed.clamp(-window, window);
+    }
+
+    /// Counts `class` as competing until noq-proto takes one peer window of the
+    /// other class of the share: a stream of it was written or gave a message back.
+    fn offered(&mut self, class: Class) {
+        self.recent[class.rank()] = self.window;
+    }
+
+    /// Whether `class` competes: a claim of it holds room or waits in `sending`, or
+    /// it was offered within one peer window.
+    fn competes(&self, class: Class, sending: &Budget) -> bool {
+        sending.competes(class) || self.recent[class.rank()] > 0
     }
 }
 
@@ -735,9 +758,10 @@ impl Sending {
         }
     }
 
-    /// Whether both `Latest` and `Complete` compete for the send budget.
+    /// Whether both `Latest` and `Complete` compete.
     fn paired(&self) -> bool {
-        self.budget.competes(Class::Latest) && self.budget.competes(Class::Complete)
+        let competes = |class| self.share.competes(class, &self.budget);
+        competes(Class::Latest) && competes(Class::Complete)
     }
 }
 
@@ -847,6 +871,7 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) -> Result<(), Fault> {
         self.sending.budget = Budget::new(peer.window_bytes);
+        self.sending.share.window = peer.window_bytes;
         events.push_back(Event::Available { key });
         let bi = self.take(inner, key, Dir::Bi)?;
         if self.take(inner, key, Dir::Uni)? || bi {
@@ -1018,6 +1043,8 @@ impl Streams {
         if let Some(taken) = message.take_if(admitted) {
             half.load(taken, Rest::Pump);
             _ = self.sending.write(inner, half);
+        } else {
+            share.offered(half.claim.class);
         }
         Ok(())
     }
@@ -2329,7 +2356,10 @@ mod tests {
 
         #[test]
         fn complete_alone_pays_what_it_is_owed_and_gains_no_credit() {
-            let mut share = Share::default();
+            let mut share = Share {
+                window: 1 << 20,
+                ..Share::default()
+            };
             share.took(Class::Latest, 100, true);
             share.took(Class::Complete, 299, false);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
@@ -2341,7 +2371,10 @@ mod tests {
 
         #[test]
         fn latest_alone_spends_its_credit_and_makes_no_debt() {
-            let mut share = Share::default();
+            let mut share = Share {
+                window: 1 << 20,
+                ..Share::default()
+            };
             share.took(Class::Complete, 300, true);
             share.took(Class::Latest, 99, false);
             assert_eq!(share.owed, -3);
@@ -2352,7 +2385,10 @@ mod tests {
 
         #[test]
         fn latest_owes_three_bytes_of_complete_for_each_of_its_own() {
-            let mut share = Share::default();
+            let mut share = Share {
+                window: 1 << 20,
+                ..Share::default()
+            };
             share.took(Class::Latest, 10, true);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
             share.took(Class::Complete, 29, true);
@@ -2365,7 +2401,12 @@ mod tests {
         fn room_an_owed_class_frees_waits_while_the_other_holds_room() {
             /// The classes that get room a message of `class` frees.
             fn room(owed: isize, class: Class, sending: &Budget) -> Vec<Class> {
-                Share { owed }.room(class, sending).collect()
+                Share {
+                    owed,
+                    ..Share::default()
+                }
+                .room(class, sending)
+                .collect()
             }
             let mut budget = Budget::new(10);
             let [mut latest] = claims(Class::Latest);
@@ -2389,7 +2430,10 @@ mod tests {
 
         #[test]
         fn other_classes_owe_nothing() {
-            let mut share = Share::default();
+            let mut share = Share {
+                window: 1 << 20,
+                ..Share::default()
+            };
             share.took(Class::Command, 10, true);
             share.took(Class::CatchUp, 10, true);
             assert_eq!(share.owed, 0);
@@ -2401,7 +2445,10 @@ mod tests {
                 history in vec((0..3_u8, 1..=WRITE_MAX), 0..64),
                 run in vec(1..=WRITE_MAX, 1..256),
             ) {
-                let mut share = Share::default();
+                let mut share = Share {
+                window: 1 << 20,
+                ..Share::default()
+            };
                 let max = isize::try_from(WRITE_MAX).expect("fits");
                 for (writer, bytes) in history {
                     match writer {
@@ -4303,7 +4350,7 @@ mod tests {
             write(&mut pair.client, now, &mut filler, &small);
             pair.run(RUN);
             let senders = [&latest, &first, &second];
-            let messages = [(2, 40_000), (3, 50_000), (4, 40_000)];
+            let messages = [(2, 40_000), (3, 50_000), (4, 60_000)];
             for (sender, (byte, len)) in senders.iter().zip(messages) {
                 let message = Some(shard.block(&vec![byte; len]));
                 let written = pair.client.endpoint.write(now, sender, &mut { message });
@@ -4320,10 +4367,10 @@ mod tests {
                     .expect("there")
             };
             let fill = at(&incoming, filler.key().id);
-            // Steps of credit. `latest` takes the first and puts `Complete` first.
-            // `first` and `second` take the rest, and the last step turns the order
-            // back while `second` still holds part of its message.
-            for _ in 0..5 {
+            // Steps of credit. The first write of `latest` puts `Complete` first,
+            // and the last step turns the order back while `second` still holds
+            // part of its message.
+            for _ in 0..6 {
                 let now = pair.now();
                 for _ in 0..20 {
                     let read =
@@ -4743,6 +4790,211 @@ mod tests {
                 let bytes = MESSAGE_MAX;
                 let read = backlog(&mut pair, shard, &mut senders, bytes, 20 * RUN);
                 assert_share(read, bytes, 40);
+            });
+        }
+
+        /// The bytes a pair with a window of `window` bytes sends in a [`STEP`]: one
+        /// window for each round trip.
+        fn capacity(window: usize) -> usize {
+            let steps = (2 * DELAY).as_nanos() / STEP.as_nanos();
+            window / usize::try_from(steps).expect("fits")
+        }
+
+        /// What [`offer`] read and offered.
+        struct Offer {
+            /// The message bytes the server read in the span, by class rank.
+            read: [usize; 4],
+            /// The bytes of `Latest` the server read in all.
+            latest: usize,
+            /// The samples made.
+            samples: usize,
+            /// The samples that a newer one replaced before the stream took them.
+            replaced: usize,
+        }
+
+        /// Gives `sample`, or the sample `pending` holds, to `sender` with
+        /// `try_write`. A sample given back stays in `pending`.
+        fn send(pair: &mut Pair, sender: &mut Sender, pending: &mut Option<Block>) {
+            let Some(sample) = pending.take() else {
+                return;
+            };
+            let now = pair.now();
+            let given = pair.client.endpoint.try_write(now, sender, sample);
+            *pending = given.expect("taken or given back");
+        }
+
+        /// Like [`backlog`], but each `Latest` sender gets a new sample of `bytes`
+        /// bytes each time `rate` bytes of them build up, and gives each to
+        /// `try_write`. A sample that `try_write` gives back waits, and the next
+        /// sample replaces it. After `span`, no sample is made, and the pair runs
+        /// until each waiting sample went and the server read it.
+        fn offer(
+            pair: &mut Pair,
+            shard: &Shard,
+            senders: &mut [Sender],
+            bytes: usize,
+            rate: usize,
+            span: Duration,
+        ) -> Offer {
+            let message = shard.block(&vec![0; bytes]);
+            let (mut receivers, mut read, mut total) = (Vec::new(), [0; 4], [0; 4]);
+            let (mut samples, mut replaced) = (0, 0);
+            let mut pending: Vec<_> = senders.iter().map(|_| (0, None)).collect();
+            let nanos = |span: Duration| u64::try_from(span.as_nanos()).expect("fits");
+            let warm = pair.now().0 + nanos(2 * RUN);
+            let end = warm + nanos(span);
+            while pair.now().0 < end {
+                pair.run(STEP);
+                senders.rotate_left(1);
+                pending.rotate_left(1);
+                for (sender, (built, waiting)) in senders.iter_mut().zip(&mut pending) {
+                    if half(&mut pair.client, sender).claim.class != Class::Latest {
+                        refill(pair, sender, &message);
+                        continue;
+                    }
+                    *built += rate;
+                    while *built >= bytes {
+                        *built -= bytes;
+                        samples += 1;
+                        replaced +=
+                            usize::from(waiting.replace(message.clone()).is_some());
+                        send(pair, sender, waiting);
+                    }
+                    send(pair, sender, waiting);
+                }
+                let before = total;
+                take(pair, &mut receivers, &mut total);
+                if pair.now().0 > warm {
+                    for (read, (after, before)) in
+                        read.iter_mut().zip(total.iter().zip(before))
+                    {
+                        *read += after - before;
+                    }
+                }
+            }
+            while pending.iter().any(|(_, waiting)| waiting.is_some()) {
+                pair.run(STEP);
+                for (sender, (_, waiting)) in senders.iter_mut().zip(&mut pending) {
+                    if half(&mut pair.client, sender).claim.class != Class::Latest {
+                        let now = pair.now();
+                        let flushed = pair.client.endpoint.write(now, sender, &mut None);
+                        assert!(flushed.is_ok(), "{flushed:?}");
+                    }
+                    send(pair, sender, waiting);
+                }
+                take(pair, &mut receivers, &mut total);
+            }
+            pair.run(RUN);
+            take(pair, &mut receivers, &mut total);
+            Offer {
+                read,
+                latest: total[Class::Latest.rank()],
+                samples,
+                replaced,
+            }
+        }
+
+        /// Runs [`offer`] on `senders` with `Latest` offering twice its share of the
+        /// `capacity` of the pair, and asserts the share.
+        fn assert_offered_share(
+            pair: &mut Pair,
+            shard: &Shard,
+            senders: &mut [Sender],
+            bytes: usize,
+            capacity: usize,
+            span: Duration,
+        ) {
+            let latest = senders
+                .iter()
+                .filter(|sender| {
+                    half(&mut pair.client, sender).claim.class == Class::Latest
+                })
+                .count();
+            let rate = capacity / 2 / latest;
+            let offer = offer(pair, shard, senders, bytes, rate, span);
+            assert!(offer.replaced > 0, "Latest offered more than its share");
+            eprintln!(
+                "SHARE {bytes} {:?} {:.3} samples {} replaced {}",
+                offer.read,
+                offer.read[2] as f64 / offer.read[1] as f64,
+                offer.samples,
+                offer.replaced
+            );
+            assert_share(offer.read, bytes, 20);
+        }
+
+        #[test]
+        fn latest_that_offers_twice_its_share_shares_the_link_one_to_three() {
+            for bytes in [MESSAGE_MAX / 4, MESSAGE_MAX / 8, MESSAGE_MAX / 16] {
+                testing::run(1, move |shard| {
+                    let mut pair = connected(shard);
+                    let classes = [Class::Latest, Class::Complete];
+                    let mut senders =
+                        classes.map(|class| open_sender(&mut pair, class));
+                    let capacity = capacity(1 << 20);
+                    assert_offered_share(
+                        &mut pair,
+                        shard,
+                        &mut senders,
+                        bytes,
+                        capacity,
+                        5 * RUN,
+                    );
+                });
+            }
+        }
+
+        #[test]
+        fn latest_that_offers_twice_its_share_shares_the_send_budget_one_to_three() {
+            for bytes in [MESSAGE_MAX / 4, MESSAGE_MAX / 8, MESSAGE_MAX / 16] {
+                testing::run(1, move |shard| {
+                    let mut pair = narrow(shard);
+                    let classes = [
+                        Class::Latest,
+                        Class::Latest,
+                        Class::Latest,
+                        Class::Latest,
+                        Class::Complete,
+                    ];
+                    let mut senders =
+                        classes.map(|class| open_sender(&mut pair, class));
+                    let capacity = capacity(NARROW);
+                    assert_offered_share(
+                        &mut pair,
+                        shard,
+                        &mut senders,
+                        bytes,
+                        capacity,
+                        20 * RUN,
+                    );
+                });
+            }
+        }
+
+        #[test]
+        fn latest_at_half_its_share_gets_each_sample_and_complete_the_rest() {
+            testing::run(1, |shard| {
+                let mut pair = connected(shard);
+                let classes = [Class::Latest, Class::Complete];
+                let mut senders = classes.map(|class| open_sender(&mut pair, class));
+                let (bytes, capacity, span) =
+                    (MESSAGE_MAX / 4, capacity(1 << 20), 5 * RUN);
+                let offer =
+                    offer(&mut pair, shard, &mut senders, bytes, capacity / 8, span);
+                assert_eq!(offer.latest, (offer.samples - offer.replaced) * bytes);
+                let [_, latest, complete, _] = offer.read;
+                let steps =
+                    usize::try_from(span.as_nanos() / STEP.as_nanos()).expect("fits");
+                let link = capacity * steps;
+                assert!(
+                    20 * (latest + complete) >= 19 * link,
+                    "{:?} of {link}",
+                    offer.read
+                );
+                eprintln!(
+                    "HALF {:?} link {link} samples {} replaced {}",
+                    offer.read, offer.samples, offer.replaced
+                );
             });
         }
 
