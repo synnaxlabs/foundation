@@ -61,21 +61,19 @@ impl<'a> History<'a> {
     /// code. A moved file counts as removed and added.
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
-    /// by its resolution and by the moves of its base side. A `.rs`, `Cargo.toml`, or
-    /// `Cargo.lock` file that `git merge-tree` finds a conflict in between its parents
-    /// gives "resolves a conflict in `<file>` in `<merge>`". A path that is not code,
-    /// that its first parent changes since its merge base with its second parent, as
-    /// the merge reads it, and that the merge moves into a code file by its own rename
-    /// detection gives "the base moves `<old>`, which the PR changes, into the code
-    /// file `<new>`". Else the change is read to `end` from the tree that
-    /// `git merge-tree` makes of `from` and the newest base commit that `end` holds,
-    /// not from `from`: the base's code does not count, and text of the range that the
-    /// base moves into a code file does. A code file that this tree has a conflict in
-    /// gives "has a conflict in `<file>` between its start and the base", so a conflict
-    /// that leaves no markers fails closed too. Such a move of a path that `from`
-    /// changes, in the merge that makes this tree, gives the same phrase as for a merge
-    /// on the chain. An `end` that holds more than one newest base commit gives "holds
-    /// the base at more than one newest commit: `<commit>`, `<commit>`".
+    /// by its resolution: a `.rs`, `Cargo.toml`, or `Cargo.lock` file that
+    /// `git merge-tree` finds a conflict in between its parents gives "resolves a
+    /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
+    /// tree that `git merge-tree` makes of `from` and the newest base commit that `end`
+    /// holds, not from `from`: the base's code does not count, and text of the range
+    /// that the base moves into a code file does. A code file that this tree has a
+    /// conflict in gives "has a conflict in `<file>` between its start and the base",
+    /// so a conflict that leaves no markers fails closed too. A path that is not code,
+    /// that `from` changes since its merge base with that base commit, as the merge
+    /// reads it, and that the merge that makes this tree moves into a code file by its
+    /// own rename detection gives "the base moves `<old>`, which the PR changes, into
+    /// the code file `<new>`". An `end` that holds more than one newest base commit
+    /// gives "holds the base at more than one newest commit: `<commit>`, `<commit>`".
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
     /// a removed one.
@@ -119,9 +117,6 @@ impl<'a> History<'a> {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
-            }
-            if let Some(moved) = self.moved_into_code(first, second, &merged.tree)? {
-                return Ok(Some(moved));
             }
         }
         let bases = self.git(&["merge-base", "--all", &end_sha, &base])?;
@@ -365,8 +360,10 @@ impl<'a> History<'a> {
         }))
     }
 
-    /// The mode and path of each file that is not code and that `first` changes or
-    /// moves since its merge base with `second`, as a merge of the two reads that base.
+    /// The mode and path of each file that is not code and that `first` changes since
+    /// its merge base with `second`, as a merge of the two reads that base. A file
+    /// that `first` moves since that base is in too, which changes no result: no file
+    /// of the base has its path, so the base cannot move it into a code file.
     ///
     /// # Errors
     ///
@@ -377,12 +374,10 @@ impl<'a> History<'a> {
         second: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, String> {
         let bases = self.git(&["merge-base", "--all", first, second])?;
-        if bases.is_empty() {
-            return Ok(Vec::new());
-        }
         // A merge of `first` with a commit that has no files and the same merge bases
-        // builds the same base, and gives a conflict with `first` as stage 3 for each
-        // file of `first` that differs from it.
+        // builds the same base. It gives a conflict with `first` as stage 3 for each
+        // file that the base and `first` both hold with a difference, and for each file
+        // that `first` moves.
         let gone = self.commit(EMPTY_TREE, &bases.lines().collect::<Vec<_>>())?;
         let (_, output) = self.merge_tree(&[&gone, first])?;
         // `<tree>NUL`, then `<mode> <blob> <stage>TAB<path>NUL` for each stage of each

@@ -3142,27 +3142,26 @@ How to read this record:
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not
-  code, to a code path, by the rename detection of the merge. In the range of a round
-  with `Breaker: skipped`, such a merge is a code change. A base move of a path that the
-  PR did not change stays clean. Decided by the director at 2026-10-07T17:21:14Z
+  code, to a code path, by the rename detection of the merge. A base move of a path that
+  the PR did not change stays clean. Decided by the director at 2026-10-07T17:21:14Z
   (https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6043078385). When
   the last round is a later round with `Breaker: skipped`, it fails if its range changes
   code: a `.rs` line that, trimmed, is not blank and does not start with `//` (a doctest
   line is a comment), or any `Cargo.toml` or `Cargo.lock` line. Each line of a moved
   file counts as removed and added. A merge of the base in the range counts only by its
-  resolution and by the base moves above: a conflict that `git merge-tree` finds between
-  its parents in a `.rs`, `Cargo.toml`, or `Cargo.lock` file is a code change, and so is
-  a path that is not code, that its first parent changes since its merge base with its
-  second parent, as the merge reads it, and that the merge moves into a code file, by
-  the merge's own rename detection. The rest of the range is read from the tree that
-  `git merge-tree` makes of its start and the newest base commit that its end holds, not
-  from its start: the base's code does not count, and text that the range changes and
-  the base moves into a code file does. So does a path that is not code, that the start
-  changes since its merge base with that base commit, as the merge reads it, and that
-  this merge moves into a code file, by the merge's own rename detection. A conflict in
-  this tree in a code file is a code change, also one that leaves no markers, and so is
-  an end that holds more than one newest base commit. Found by the director at
-  2026-10-07T14:50:33Z
+  resolution: a conflict that `git merge-tree` finds between its parents in a `.rs`,
+  `Cargo.toml`, or `Cargo.lock` file is a code change. The rest of the range is read
+  from the tree that `git merge-tree` makes of its start and the newest base commit that
+  its end holds, not from its start: the base's code does not count, and text that the
+  range changes and the base moves into a code file does. So does a path that is not
+  code, that the start changes since its merge base with that base commit, as the merge
+  reads it, and that this merge moves into a code file, by the merge's own rename
+  detection. A conflict in this tree in a code file is a code change, also one that
+  leaves no markers, and so is an end that holds more than one newest base commit. In
+  the range, a base move counts only through this tree. Decided by the director at
+  2026-10-07T18:27:30Z
+  (https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6044222273). Found
+  by the director at 2026-10-07T14:50:33Z
   (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed by
   #1451. An earlier round's skip is taken as written, since a rebase can drop its range
   from the clone. An earlier round in the fixed format that does not parse fails. A

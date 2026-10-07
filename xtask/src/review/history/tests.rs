@@ -643,10 +643,7 @@ fn text_of_the_pr_that_the_base_moves_into_a_code_file_counts() {
         );
         assert_eq!(
             repo.code_change(&end, &repo.head()),
-            Ok(Some(
-                "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
-                    .to_string()
-            )),
+            Ok(Some("changes code at `a.rs:1`".to_string())),
             "{earlier}"
         );
     }
@@ -718,7 +715,7 @@ fn a_base_move_counts_by_the_source_that_the_merge_pairs() {
 }
 
 #[test]
-fn a_base_move_that_a_later_commit_undoes_counts() {
+fn a_base_move_that_a_later_commit_undoes_does_not_count() {
     let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
     let (repo, _) = Repo::with_pr("move-undone");
     repo.advance_main("a.md", text);
@@ -732,17 +729,11 @@ fn a_base_move_that_a_later_commit_undoes_counts() {
     repo.git(&["switch", "--quiet", "pr"]);
     repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
     let undone = repo.commit("a.rs", text);
-    assert_eq!(
-        repo.code_change(&end, &undone),
-        Ok(Some(
-            "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
-                .to_string()
-        ))
-    );
+    assert_eq!(repo.code_change(&end, &undone), Ok(None));
 }
 
 #[test]
-fn a_base_move_before_a_later_merge_of_the_base_counts() {
+fn a_base_move_before_a_later_merge_of_the_base_does_not_count() {
     let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
     let (repo, _) = Repo::with_pr("move-then-merge");
     repo.advance_main("a.md", text);
@@ -758,13 +749,7 @@ fn a_base_move_before_a_later_merge_of_the_base_counts() {
     repo.commit("a.rs", text);
     repo.advance_main("c.txt", "c\n");
     repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
-    assert_eq!(
-        repo.code_change(&end, &repo.head()),
-        Ok(Some(
-            "the base moves `a.md`, which the PR changes, into the code file `a.rs`"
-                .to_string()
-        ))
-    );
+    assert_eq!(repo.code_change(&end, &repo.head()), Ok(None));
 }
 
 #[test]
