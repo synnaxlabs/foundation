@@ -2508,6 +2508,13 @@ How to read this record:
   there, because a process crash can leave it unsynced. A one-sector file lost: it
   needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
   https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
+  After a stop, a shard starts no disk step: shard 0 checks the stop before the
+  claim, and each shard before its open. A started step runs to its end. A skipped
+  step drops its handoff, so each later shard skips too. A stop is not a failure,
+  so `join` gives `Ok` when no shard failed. A shard that panics as it starts stops
+  the node, so the claim or open after it does not start and `join` gives the
+  panic. Decided by the architect on #1062 (#1174):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

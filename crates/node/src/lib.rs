@@ -156,15 +156,15 @@ impl Node {
                 clock: monotonic.clone(),
                 entropy: entropy.clone(),
                 failed: Arc::clone(&failed),
+                stop: stop.clone(),
             };
             let first = first.take();
             let make = files();
             let main = move |tasks: env::tasks::Tasks| {
                 let files = make();
                 if let Some((mesh, wall, give)) = first {
-                    let failed = Arc::clone(&open.failed);
                     tasks.spawn(async { mesh.run(wall).await });
-                    tasks.spawn(claim(files.clone(), cores, give, failed));
+                    tasks.spawn(open.claim(files.clone(), cores, give));
                 }
                 open.serve(files, Rc::new(pool), tasks, guard)
             };
@@ -226,25 +226,33 @@ struct Open {
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
     failed: Arc<OnceLock<Error>>,
-}
-
-/// Claims the data directory for `cores` shards, then gives the node's first
-/// interner. A failed claim goes into `failed` and gives none, so no ring opens.
-async fn claim(
-    files: env::files::Files,
-    cores: usize,
-    give: Give<Interner>,
-    failed: Arc<OnceLock<Error>>,
-) {
-    match directory::claim(&files, cores).await {
-        Ok(()) => give.give(Interner::new()),
-        Err(error) => failed
-            .set(error)
-            .expect("invariant: shard 0 opens no ring after a failed claim"),
-    }
+    stop: Stop,
 }
 
 impl Open {
+    /// Claims the data directory for `cores` shards, then gives the node's first
+    /// interner. A failed claim goes into `failed` and gives none, so no ring opens.
+    /// So does a stop raised before the claim, but it is not a failure.
+    fn claim(
+        &self,
+        files: env::files::Files,
+        cores: usize,
+        give: Give<Interner>,
+    ) -> impl Future<Output = ()> + 'static {
+        let (failed, stop) = (Arc::clone(&self.failed), self.stop.clone());
+        async move {
+            if stop.raised() {
+                return;
+            }
+            match directory::claim(&files, cores).await {
+                Ok(()) => give.give(Interner::new()),
+                Err(error) => failed
+                    .set(error)
+                    .expect("invariant: shard 0 opens no ring after a failed claim"),
+            }
+        }
+    }
+
     /// Opens the shard's buffer and keeps it until `guard` completes. A failed open
     /// drops `guard`, which stops the node.
     async fn serve(
@@ -263,6 +271,7 @@ impl Open {
     /// Waits for the interner, opens the shard's buffer on the shard's thread, and
     /// gives the interner to the next shard. A failed open is kept for
     /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
+    /// So does a stop raised before the open, but it is not a failure.
     async fn run(
         self,
         files: env::files::Files,
@@ -270,6 +279,9 @@ impl Open {
         tasks: env::tasks::Tasks,
     ) -> Option<buffer::Buffer> {
         let mut interner = self.take.await?;
+        if self.stop.raised() {
+            return None;
+        }
         let config = buffer::Config {
             files,
             dir: directory::shard(self.core),

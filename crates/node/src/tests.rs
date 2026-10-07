@@ -635,6 +635,46 @@ mod buffer {
         );
     }
 
+    #[test]
+    fn a_stop_before_the_opens_makes_no_ring() {
+        let mut run = start(7, 3, &[]);
+        run.node.stop();
+        assert_eq!(run.sim.run(), Ok(()));
+        assert_eq!(run.node.join(), Ok(()));
+        assert_eq!(listed(&mut run.sim, &run.host, ""), Vec::<PathBuf>::new());
+    }
+
+    /// A stop at any point of the claim and the opens ends each step that started
+    /// and starts no other, so the data directory holds the claim and the rings of
+    /// the first shards, each whole. A stop between the claim and the first open
+    /// leaves the claim alone.
+    #[test]
+    fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
+        let all = ["shard-0", "shard-1", "shard-2", "shards-3"].map(PathBuf::from);
+        let mut seen = [false; 5];
+        for step in 0..200 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 3);
+            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let after = Span::from_nanos(step * 10_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()), "at {after:?}");
+            assert_eq!(node.join(), Ok(()), "at {after:?}");
+            let listed = listed(&mut sim, &host, "");
+            let rings = listed.len().saturating_sub(1);
+            let made: Vec<PathBuf> = if listed.is_empty() {
+                Vec::new()
+            } else {
+                all[..rings].iter().chain(&all[3..]).cloned().collect()
+            };
+            assert_eq!(listed, made, "at {after:?}");
+            seen[listed.len()] = true;
+            assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
+        }
+        assert_eq!(seen[1..], [true; 4], "a stop after each step");
+    }
+
     /// A crash at any point of the claim and the first opens leaves a data directory
     /// that the next start opens.
     #[test]
@@ -726,11 +766,16 @@ mod buffer {
         }
     }
 
+    /// A shard that panics as it starts stops the node before shard 1 starts its
+    /// open, so `join` gives the panic.
     #[test]
-    fn join_gives_a_ring_that_did_not_open_over_a_shard_that_panicked() {
+    fn a_shard_that_panics_before_an_open_skips_it() {
         for seed in 0..32 {
             let e = refused(seed, 3, 1, &[(2, Fault::Panic)]);
-            assert_eq!(e, opened(1), "seed {seed}");
+            let panicked = thread::Panicked {
+                name: "shard-2".into(),
+            };
+            assert_eq!(e, Error::Panicked(panicked), "seed {seed}");
         }
     }
 
@@ -785,10 +830,11 @@ mod directory {
     }
 
     /// With more than one record of another count, the error gives the smallest, in
-    /// any order of the list.
+    /// any order of the list. `shards-10` lists before `shards-3`.
     #[test]
     fn the_smallest_other_count_is_the_stored_one() {
-        for (records, stored) in [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4)] {
+        let cases = [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4), (&[10, 3], 3)];
+        for (records, stored) in cases {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
             for &k in records {
@@ -962,8 +1008,18 @@ mod directory {
         );
     }
 
+    /// A claim that started before a shard panicked runs to its end, and `join` gives
+    /// its error over the panic. A panic before the claim skips it.
     #[test]
     fn join_gives_a_refused_data_directory_over_a_shard_that_panicked() {
+        let shards = Error::Shards {
+            stored: 2,
+            cores: 3,
+        };
+        let panicked = Error::Panicked(thread::Panicked {
+            name: "shard-2".into(),
+        });
+        let mut seen = [false; 2];
         for seed in 0..32 {
             let mut sim = sim::Sim::new(sim::Config {
                 seed,
@@ -981,14 +1037,13 @@ mod directory {
             };
             panics(&mut run);
             let e = run.node.join().unwrap_err();
-            assert_eq!(
-                e,
-                Error::Shards {
-                    stored: 2,
-                    cores: 3
-                },
-                "seed {seed}"
-            );
+            let claimed = e == shards;
+            assert!(claimed || e == panicked, "seed {seed}: {e:?}");
+            seen[usize::from(claimed)] = true;
         }
+        assert_eq!(
+            seen, [true; 2],
+            "a panic before and after the claim started"
+        );
     }
 }
