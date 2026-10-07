@@ -1322,6 +1322,33 @@ mod tests {
                 ])
             );
         }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement_with_a_bad_home() {
+            let [mut documents] =
+                placement(&[("select", string("edge.*")), ("home", Kind::Integer(7))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "document.bad-name",
+                        at(0, 13),
+                        "a name is a string or a reference, not an integer",
+                        NAME_FIX,
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `placement` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
     }
 
     mod retentions {
@@ -1522,6 +1549,32 @@ mod tests {
                         at(0, 14),
                         "`hold` is not an attribute of the `retention` block",
                         "Use `select` or `keep`, or remove it",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `retention` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_retention_without_keep() {
+            let [mut documents] = retention(&[("select", string("edge.**"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.missing-attribute",
+                        at(0, 0),
+                        "the `retention` block has no `keep`",
+                        "Add a `keep` attribute with a span such as \"3d\"",
                     ),
                     refused(
                         "config.unknown-block",
