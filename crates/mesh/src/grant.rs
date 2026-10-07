@@ -40,13 +40,16 @@ impl Signer {
     /// # Panics
     ///
     /// When a grant or a change of another node has no signature: the caller stepped
-    /// a message that did not pass [`check`].
+    /// a message that did not pass [`check`], or an entry that [`decode`] did not
+    /// give.
+    ///
+    /// [`decode`]: crate::entry::decode
     pub(crate) fn sign(&self, ready: &mut Ready) {
         ready.sign(|claim| {
             assert_eq!(
                 claim.signer(),
                 self.key,
-                "invariant: each message passed `check` before `step`"
+                "invariant: each claim of another node arrives signed"
             );
             let signature = self.pair.sign(&statement(claim));
             Signature(
@@ -289,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: each message passed `check` before `step`")]
+    #[should_panic(expected = "invariant: each claim of another node arrives signed")]
     fn sign_panics_on_an_unsigned_change_of_another_node() {
         let mut change = signed_change();
         change.votes.candidate = key(2);
@@ -367,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: each message passed `check` before `step`")]
+    #[should_panic(expected = "invariant: each claim of another node arrives signed")]
     fn sign_panics_on_an_unsigned_entry_of_another_node() {
         let mut message = proven();
         *voter(&mut message, 2) = None;

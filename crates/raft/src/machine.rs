@@ -84,8 +84,9 @@ impl Ready {
     /// claim: this node's entry in the hard proof and in each message's proof, each
     /// grant it sends, and the votes and the signature of each change it wrote, in
     /// `entries`, in `committed`, and in each append. Another node's grant or change
-    /// keeps the signature it came with, so it has one when the caller checked its
-    /// message (see [`Message::claims`]).
+    /// keeps the signature it came with: a grant has one when the caller checked its
+    /// message (see [`Message::claims`]), and a change when the caller's entry form
+    /// holds one.
     pub fn sign(&mut self, mut sign: impl FnMut(&Claim<'_>) -> Signature) {
         if let Some(hard) = &mut self.hard
             && let Some(proof) = &mut hard.proof
@@ -318,17 +319,17 @@ impl Raft {
             return Err(Error::ChangePending { at });
         }
         let joint = self.voters.enter(voters);
-        Ok(self.propose_entry(self.change(joint)))
+        Ok(self.propose_entry(Data::Voters(self.change(joint))))
     }
 
-    // A configuration entry's data, with this leader's votes as its proof.
-    fn change(&self, voters: Voters) -> Data {
+    // A configuration change with this leader's votes as its proof.
+    fn change(&self, voters: Voters) -> Change {
         let proof = self.votes.clone();
-        Data::Voters(Change {
+        Change {
             voters,
             votes: proof.expect("invariant: only a leader writes a configuration"),
             signature: None,
-        })
+        }
     }
 
     fn leading(&self) -> Result<(), Error> {
@@ -693,7 +694,7 @@ impl Raft {
             return;
         }
         let voters = self.voters.leave();
-        let change = self.change(voters);
+        let change = Data::Voters(self.change(voters));
         self.log.push(self.term, change);
         self.sync_voters();
     }
@@ -3523,7 +3524,7 @@ mod tests {
                 incoming: [1, 4, 5].into_iter().map(key).collect(),
                 outgoing: [1, 2, 3].into_iter().map(key).collect(),
             };
-            let joint = raft.change(joint);
+            let joint = Data::Voters(raft.change(joint));
             raft.propose_entry(joint);
             // Nodes 4 and 5 had one tick to answer a leader they did not know.
             tick_times(&mut raft, 1);
@@ -3567,7 +3568,7 @@ mod tests {
             }
             sent(&mut raft);
             let new = voters(&[1, 2, 3, 4]);
-            let at = raft.propose_entry(raft.change(new.clone()));
+            let at = raft.propose_entry(Data::Voters(raft.change(new.clone())));
             assert_eq!(at.index, 2);
             assert_eq!(raft.voters(), &new);
             // The new peer gets one probe from the end of the log, then waits.
