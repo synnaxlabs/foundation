@@ -288,26 +288,26 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  costs its length plus the header and at most 64 bytes or a quarter of its length
-  more, and a frame with only empty series still costs its headers. The charge depends
-  only on the frame's length, so the home and the `hub` compute the same charge for
-  the same frame. A remote complete reader gets only the series of its view (M2): the
-  home sends a frame of those series, and both ends charge that frame. The person
-  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
-  charge is part of the wire contract: a change to `block`'s header or size classes
-  needs a new wire version (C9d). The classes changed to four per doubling under wire
-  version 1 (#188), because no release carries that version. The window counts
-  charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
-  and does not count. Credits apply only to complete delivery, which is reliable: a lost
-  frame would leak credit. The `hub` raises the limit only after it releases a frame,
-  and it bounds its decoded copies itself, since a small encoded frame can decode to
-  much more. It sends a `Credit` only when the room it has not announced reaches half
-  the window, and puts the grants for all sessions on one link into one message. It
-  sizes one window per reader from the link's bandwidth-delay product, adapts it, and
-  divides it among the indexes the reader reads. Each session with room can pass its
-  limit by one frame, so the `hub` counts one largest frame per such session against the
-  window, and a reader pins at most its window. Replaces r11 5.2 (a window beyond the
-  acknowledged position): flow control stays apart from durable acks.
+  costs its length plus the header and at most 64 bytes or a quarter of its length more,
+  and a frame with only empty series still costs its headers. The charge depends only on
+  the frame's length, so the home and the `hub` compute the same charge for the same
+  frame. A remote complete reader gets only the series of its view (M2): the home sends
+  a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
+  that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
+  frames"), #267. The charge is part of the wire contract: a change to `block`'s header
+  or size classes needs a new wire version (C9d). The classes changed to four per
+  doubling under wire version 1 (#188), because no release carries that version. The
+  window counts charges, not wire bytes. Per-connection framing in `wire` (X35) pins no
+  pool memory and does not count. Credits apply only to complete delivery, which is
+  reliable: a lost frame would leak credit. The `hub` raises the limit only after it
+  releases a frame, and it bounds its decoded copies itself, since a small encoded frame
+  can decode to much more. It sends a `Credit` only when the room it has not announced
+  reaches half the window, and puts the grants for all sessions on one link into one
+  message. It sizes one window per reader from the link's bandwidth-delay product,
+  adapts it, and divides it among the indexes the reader reads. Each session with room
+  can pass its limit by one frame, so the `hub` counts one largest frame per such
+  session against the window, and a reader pins at most its window. Replaces r11 5.2 (a
+  window beyond the acknowledged position): flow control stays apart from durable acks.
   Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
@@ -1017,48 +1017,61 @@ How to read this record:
   reader sends `Credit`, its total grant since the open; the home sends each frame as a
   `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
   `Head` has no form. The body holds only the series of the reader's view, the index
-  series too, written from the frame's block as slices, and both ends charge
-  `View::charge` (M2). A series has the place of its first listing in the open, from 0;
-  the index, when the open does not list it, has place `channels`. An open of no channel
-  is not valid. Only the fixed part of `Open` and of `Head` is one message. The rest is
-  one run of bytes, in messages of at most the peer's `message_bytes_max`, back to back
-  with no prefix: after `Open`, the keys; after `Head`, the place and end of each series
-  in the body, then the body. A message never splits a key or an end, so each side
-  decodes each message as it arrives. The keys run holds exactly `channels` keys and the
-  ends run exactly the head's number of series, so each side counts them to find where a
-  run ends, and the body starts a new message. So no count of channels or series has a
-  cap, and the reader fills one block of the length of the last end. A run message with
-  more keys or ends than remain is not valid. A head of no series is not valid, since a
-  frame holds its index. The home checks each key as it arrives and never allocates by
-  the peer's count. A head with more series than places, or an end with a place the
-  session does not have or that repeats in its frame, is not valid; the reader's `hub`
-  checks this when it maps a place to its key. The body is laid out as the series bytes
-  of the frame of only the view's series that `View::charge` charges (FRAME LAYOUT), in
-  the home's entry order, with ends the home computes for those series: the first series
-  starts at 0, and each other at the end before it rounded up to a multiple of 8. An end
-  below the start of its series is not valid; `types::frame::check` refuses it. The
-  padding may hold any bytes (FRAME LAYOUT), and the reader ignores it: the reader
-  copies each series into a frame of its own, whose entry order follows its own slots,
-  and its `Draft` writes zeros in the padding of that frame. Each direction has its own
-  messages: the reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`
-  or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
-  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode, comes from the wrong side, or breaks a rule above), which every
-  protocol may use. Lost: a `message_bytes_max` of at least the largest pool block (a
-  client or a foreign peer can set 1472, and it ties `transport` to the pool); a cap of
-  91 channels a session, the most that fit in 1472 bytes; the index in its own field of
-  `Open`, because the home knows its index and a second copy needs a check; the whole
-  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
-  open needs no mesh time (READER RULES), and a later named open can add one; grants for
-  many sessions in one message, which wait until a link carries a second session. The
-  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
-  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
+  series too, written from the frame's block as slices, and both ends charge the frame
+  that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
+  in the open, from 0; the index, when the open does not list it, has place `channels`.
+  The reader's `hub` lists the keys in the entry order of its own frame (its slot
+  order), the index too, so a place is an entry of the reader's frame. An open of no
+  channel is not valid. Only the fixed part of `Open` and of `Head` is one message. The
+  rest is one run of bytes, in messages of at most the peer's `message_bytes_max`, back
+  to back with no prefix: after `Open`, the keys; after `Head`, the place and end of
+  each series in the body, then the body. A message never splits a key or an end, so
+  each side decodes each message as it arrives. The keys run holds exactly `channels`
+  keys and the ends run exactly the head's number of series, so each side counts them to
+  find where a run ends, and the body starts a new message. So no count of channels or
+  series has a cap, and the reader fills one block of its frame's length: the header,
+  the range, a descriptor for each series, and the body to the last end. A run message
+  with more keys or ends than remain is not valid. A head of no series is not valid,
+  since a frame holds its index. The home checks each key as it arrives and never
+  allocates by the peer's count. A head with more series than places, or an end with a
+  place the session does not have or that is not above the place before it, is not
+  valid; the reader's `hub` checks this as the head and each end arrive, so it holds no
+  more ends than it has places. The ends and the body are in place order: the home
+  writes the series of each place it has, from 0, each from the frame's block as a
+  slice, with ends it computes in that order. The first series starts at 0, and each
+  other at the end before it rounded up to a multiple of 8. So the body is the series
+  bytes of the reader's own frame (FRAME LAYOUT), and the reader builds that frame in
+  one block: the header and descriptors that `types` writes, then the body as it
+  arrives, with no copy of a series after the receive. An end below the start of its
+  series is not valid; `types` refuses it, as `frame::check` does. The padding may hold
+  any bytes (FRAME LAYOUT). Each direction has its own messages: the reader sends
+  `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop codes: 16
+  `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not the home
+  of the index), and 2 `wire::header::MALFORMED` (a message that does not decode, comes
+  from the wrong side, or breaks a rule above), which every protocol may use. Lost: a
+  `message_bytes_max` of at least the largest pool block (a client or a foreign peer can
+  set 1472, and it ties `transport` to the pool); a cap of 91 channels a session, the
+  most that fit in 1472 bytes; the index in its own field of `Open`, because the home
+  knows its index and a second copy needs a check; the whole `Frame::body` (a reader
+  gets only its view); an `UNSYNCED` code, because an unnamed open needs no mesh time
+  (READER RULES), and a later named open can add one; grants for many sessions in one
+  message, which wait until a link carries a second session. The coordinator approved
+  the messages (2026-10-05); the architect decided the rest (#561, 2026-10-06) and the
+  run, the index place, and `MALFORMED` on #1064
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
   whole keys and ends and one message type for each direction
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
   open of no channel and the place checks in `hub`
-  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). The byte
-  form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). Amended
+  (2026-10-07, #1068): the body follows the places, not the home's entry order, so an
+  end whose place is not above the place before it is not valid; both ends charge the
+  reader's frame. Lost: a copy of each series at the reader (one per sample at every
+  remote reader at P1 rates, which the home's free order cannot justify,
+  `docs/claude/performance.md` rule 10); a reader key set in the home's order (key sets
+  are sorted by slot); a start in each descriptor (a disk and wire format change, C9d).
+  Decided by the architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359). The
+  byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
   `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`.
