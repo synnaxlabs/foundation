@@ -1631,11 +1631,14 @@ How to read this record:
   second region adds the region key under `foundation/grant/2`. The driver (#471)
   checks each claim of a message against the public keys of the members before each
   `step`. The format version stays 1: no log has shipped. A later record replaces the
-  entries from its first index. A file is 1 MiB, or the length of its first
-  record when that is more, and a record that does not fit starts the next file. In a
-  file with no record, it makes that file again, larger, so each file but the last
-  holds a record. A write puts its record in blocks, one block of the pool at a time and
-  of 64 KiB at most, from the end of the record to its start, and then syncs one time.
+  entries from its first index. A file is 1 MiB, or the length of the record that the
+  log made it for when that is more. A record that does not fit starts the next file.
+  In a file with no record, it makes that file again, larger, so each file but the last
+  holds a record. After a stopped write, the next record starts the file that the log
+  made for the stopped record. Decided by `laptop.architect` (2026-10-07T10:38:51Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314. A write
+  puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
+  the end of the record to its start, and then syncs one time.
   Each block but the one at the end of the record ends at a multiple of the block size
   in the file, so no two blocks share a sector. The block with the header is the last
   that it writes, so a write that the pool stops (`Error::Pool`) leaves no header: the

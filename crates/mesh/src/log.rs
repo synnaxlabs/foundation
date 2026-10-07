@@ -45,7 +45,7 @@ const CHECK: usize = 8;
 const HEADER: usize = 34;
 /// The sector a header stays inside.
 const SECTOR: usize = files::SECTOR;
-/// The length of a file, unless its first record needs more.
+/// The length of a file, unless the record that the log made it for needs more.
 const SEGMENT: u64 = 1 << 20;
 /// The most bytes in one block of a read or a write.
 const CHUNK: usize = 64 << 10;
@@ -2072,13 +2072,7 @@ mod tests {
                 let (mut log, _) = open(&node).await.unwrap();
                 log.write(None, &[bytes(1, LARGE)]).await.unwrap();
                 drop(log);
-                let mut files = Vec::new();
-                for name in node.files().list(Path::new(DIR)).await.unwrap() {
-                    let path = Path::new(DIR).join(&name);
-                    let len = node.files().open(&path, Mode::Read).await.unwrap().len();
-                    files.push((name, len));
-                }
-                files
+                lens(&node).await
             })
             .unwrap();
         let len = wide(encode(0, None, &[bytes(1, LARGE)]).len());
@@ -2280,6 +2274,70 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stored(&mut sim, &node), Ok(records(&[340, 10])));
+    }
+
+    /// The name and the length of each file of the log.
+    async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
+        let mut lens = Vec::new();
+        for name in node.files().list(Path::new(DIR)).await.unwrap() {
+            let path = Path::new(DIR).join(&name);
+            let len = node.files().open(&path, Mode::Read).await.unwrap().len();
+            lens.push((name, len));
+        }
+        lens
+    }
+
+    /// Writes a record for each of `before`, then a record of 3 MiB that the pool
+    /// stops after one block, then a record of 100 bytes. Returns the name and the
+    /// length of each file.
+    fn files_after_a_stopped_large_write(
+        before: &'static [usize],
+    ) -> Vec<(PathBuf, u64)> {
+        let (mut sim, node) = sim(0);
+        let next = before.len().saturating_add(1);
+        let files = sim
+            .run_on(&node, move |node, _| async move {
+                let pool = odd_pool();
+                let (mut log, _) =
+                    Log::open(node.files(), DIR.into(), Rc::clone(&pool))
+                        .await
+                        .unwrap();
+                for entry in records(before).entries {
+                    log.write(None, &[entry]).await.unwrap();
+                }
+                let held = pool.alloc(1792).unwrap();
+                let large = bytes(wide(next), 3 << 20);
+                let error = log.write(None, &[large]).await.unwrap_err();
+                assert_eq!(error, Error::Pool(exhausted(1536, 64)));
+                drop(held);
+                log.write(None, &[bytes(wide(next), 100)]).await.unwrap();
+                drop(log);
+                lens(&node).await
+            })
+            .unwrap();
+        sim.crash(&node, Crash::Power);
+        let lens: Vec<usize> = before.iter().copied().chain([100]).collect();
+        assert_eq!(stored(&mut sim, &node), Ok(records(&lens)));
+        files
+    }
+
+    // The log made `log-0` again for the record of 3 MiB, which is 3,145,788 bytes
+    // with its header.
+    #[test]
+    fn a_record_after_a_stopped_first_record_starts_the_file_of_that_record() {
+        let files = files_after_a_stopped_large_write(&[]);
+        assert_eq!(files, [(PathBuf::from("log-0"), 3_145_788)]);
+    }
+
+    // The record of 100 bytes fits in `log-0`, and the end of the log is in `log-1`.
+    #[test]
+    fn a_record_after_a_stopped_record_starts_the_file_of_that_record() {
+        let files = files_after_a_stopped_large_write(&[10]);
+        let expected = [("log-0", SEGMENT), ("log-1", 3_145_788)];
+        assert_eq!(
+            files,
+            expected.map(|(name, len)| (PathBuf::from(name), len))
+        );
     }
 
     // The sync that fails is the one of the third record, which the files keep or
