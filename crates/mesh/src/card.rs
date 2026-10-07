@@ -66,7 +66,7 @@ impl Card {
 }
 
 /// A card that its own `public_key` signed, over `foundation/card/1`, the node key,
-/// and the card's encoding. Only [`Signed::sign`] and [`Signed::check`] make one, and
+/// and the card's encoding. Only [`Signed::sign`] and `Unchecked::check` make one, and
 /// each keeps the node key that the signature covers. It proves only that the public
 /// key in the card signed it. That the node owns the public key comes from its
 /// admission.

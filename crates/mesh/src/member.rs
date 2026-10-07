@@ -235,24 +235,30 @@ mod tests {
     }
 
     proptest! {
-        #[test]
-        fn a_member_round_trips(member in records()) {
-            prop_assert_eq!(decoded(&encoded(&member)), Some(member));
-        }
+        // Each case checks one card signature for each byte, so it is slow.
+        #![proptest_config(ProptestConfig::with_cases(32))]
 
         // A decode that takes two forms of one value fails here.
         #[test]
         fn a_changed_byte_that_decodes_encodes_back(
             member in records(),
-            at in any::<prop::sample::Index>(),
             flip in 1..=u8::MAX,
         ) {
-            let mut bytes = encoded(&member);
-            let at = at.index(bytes.len());
-            bytes[at] ^= flip;
-            if let Some(changed) = decoded(&bytes) {
-                prop_assert_eq!(encoded(&changed), bytes);
+            let bytes = encoded(&member);
+            for at in 0..bytes.len() {
+                let mut bytes = bytes.clone();
+                bytes[at] ^= flip;
+                if let Some(changed) = decoded(&bytes) {
+                    prop_assert_eq!(encoded(&changed), bytes);
+                }
             }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_member_round_trips(member in records()) {
+            prop_assert_eq!(decoded(&encoded(&member)), Some(member));
         }
 
         #[test]
