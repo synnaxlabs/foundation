@@ -2270,8 +2270,11 @@ How to read this record:
   file call `Error::Directory`. Any record of another count fails the start, also
   next to `shards-<cores>`, and `stored` is the smallest such count, so the error
   does not hang on the order of the list. A name whose rest is not a count in plain
-  decimal (`shards-03`, `shards-+3`) is not a record. A one-sector file lost: it
-  needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
+  decimal (`shards-03`, `shards-+3`), or is zero, is not a record. With no record,
+  rings up to `shard-<k>` are a record of `k + 1`, so a data directory made before
+  #1076 is checked too; a crash cannot leave a ring with no record. A one-sector
+  file lost: it needs a block, a write, two syncs, and a decode. Decided by the
+  architect, #1076:
   https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is

@@ -466,6 +466,27 @@ mod buffer {
         Pin::new(&mut node.interner).poll(&mut cx)
     }
 
+    /// A data directory that a node of 3 shards left before the record existed is
+    /// made for 3 shards, so a start on 2 cores is refused.
+    #[test]
+    fn rings_of_three_shards_with_no_record_are_refused_on_two_cores() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        for core in 0..3 {
+            write(&mut sim, &host, core, 1 + core as u128);
+        }
+        let e = run_on(&mut sim, &host);
+        let listed = listed(&mut sim, &host, "");
+        assert_eq!(
+            e,
+            Err(Error::Shards {
+                stored: 3,
+                cores: 2
+            }),
+            "{listed:?}"
+        );
+    }
+
     #[test]
     fn the_shards_assign_the_indexes_they_recover_in_one_table() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -530,6 +551,30 @@ mod buffer {
             .expect("the run ends");
         // Two header blocks of 4 KiB, then the area.
         assert_eq!(len, 8192 + (64 << 20));
+    }
+
+    /// Each shard makes its files once, so shard 0 claims the data directory and
+    /// opens its ring on one disk.
+    #[test]
+    fn each_shard_makes_its_files_once() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let made = Arc::new(Mutex::new(0));
+        let mut config = config(&host, 1 << 20, Box::new(heap));
+        let files = config.files;
+        config.files = {
+            let made = Arc::clone(&made);
+            Arc::new(move || {
+                *made.lock().unwrap() += 1;
+                files()
+            })
+        };
+        let node = Node::start(config);
+        assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+        assert_eq!(*made.lock().unwrap(), 2);
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -702,7 +747,14 @@ mod directory {
         let host = host(&mut sim, 2);
         sim.run_on(&host, |host, _| async move {
             let files = host.files();
-            let names = ["shards-x", "shards", "other-3", "shards-03", "shards-+3"];
+            let names = [
+                "shards-x",
+                "shards",
+                "other-3",
+                "shards-03",
+                "shards-+3",
+                "shards-0",
+            ];
             for name in names {
                 files.create_dir(Path::new(name)).await.expect("makes");
             }
@@ -716,11 +768,31 @@ mod directory {
             "shard-1",
             "shards",
             "shards-+3",
+            "shards-0",
             "shards-03",
             "shards-2",
             "shards-x",
         ];
         assert_eq!(listed, made.map(PathBuf::from));
+    }
+
+    /// With no record, rings up to `shard-<k>` are a record of `k + 1`, and a name
+    /// that is not a plain count is not a ring.
+    #[test]
+    fn rings_with_no_record_are_a_record() {
+        let refused = |cores| Err(Error::Shards { stored: 3, cores });
+        for (cores, made) in [(2, refused(2)), (3, Ok(())), (4, refused(4))] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, cores);
+            sim.run_on(&host, |host, _| async move {
+                let files = host.files();
+                for name in ["shard-0", "shard-2", "shard-03", "shard-x"] {
+                    files.create_dir(Path::new(name)).await.expect("makes");
+                }
+            })
+            .expect("the run ends");
+            assert_eq!(run_on(&mut sim, &host), made, "{cores} cores");
+        }
     }
 
     #[test]

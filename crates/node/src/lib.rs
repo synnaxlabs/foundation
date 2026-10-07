@@ -15,7 +15,6 @@ mod stop;
 mod tests;
 
 use std::fmt;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
@@ -23,7 +22,6 @@ use env::thread::Handle;
 use types::frame::key_set::Interner;
 use types::time::Span;
 
-use crate::directory::Claim;
 use crate::handoff::{Give, Take};
 use crate::stop::{Guard, Stop};
 
@@ -95,7 +93,7 @@ impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
     /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
-    /// takes the remainder. Shard 0 first records the shard count in the data
+    /// takes the remainder. The start first records the shard count in the data
     /// directory, or checks the one there. Each shard opens its buffer in directory
     /// `shard-<i>` of its files, and makes it there when it is not there. The shards
     /// open their buffers one after another, in order of core. Returns once each
@@ -151,20 +149,20 @@ impl Node {
                 core,
                 take,
                 give,
-                files: Arc::clone(&files),
                 clock: monotonic.clone(),
                 entropy: entropy.clone(),
                 failed: Arc::clone(&failed),
             };
-            let first = first
-                .take()
-                .map(|(mesh, wall, give)| (mesh, wall, open.claim(cores, give)));
+            let first = first.take();
+            let files = Arc::clone(&files);
             let main = move |tasks: env::tasks::Tasks| {
-                if let Some((mesh, wall, claim)) = first {
+                let files = files();
+                if let Some((mesh, wall, give)) = first {
+                    let failed = Arc::clone(&open.failed);
                     tasks.spawn(async { mesh.run(wall).await });
-                    tasks.spawn(claim.run());
+                    tasks.spawn(claim(files.clone(), cores, give, failed));
                 }
-                open.serve(Rc::new(pool), tasks, guard)
+                open.serve(files, Rc::new(pool), tasks, guard)
             };
             match shards.start(shard, main) {
                 Ok(handle) => started.push(Shard { handle, failed }),
@@ -221,33 +219,38 @@ struct Open {
     core: usize,
     take: Take<Interner>,
     give: Give<Interner>,
-    files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
     failed: Arc<OnceLock<Error>>,
 }
 
-impl Open {
-    /// The claim of the data directory for a node of `cores` shards. A failed claim
-    /// goes into this shard's error cell.
-    fn claim(&self, cores: usize, give: Give<Interner>) -> Claim {
-        Claim {
-            files: Arc::clone(&self.files),
-            cores,
-            give,
-            failed: Arc::clone(&self.failed),
-        }
+/// Claims the data directory for `cores` shards, then gives the node's first
+/// interner. A failed claim goes into `failed` and gives none, so no ring opens.
+async fn claim(
+    files: env::files::Files,
+    cores: usize,
+    give: Give<Interner>,
+    failed: Arc<OnceLock<Error>>,
+) {
+    match directory::claim(&files, cores).await {
+        Ok(()) => give.give(Interner::new()),
+        Err(error) => failed
+            .set(error)
+            .expect("invariant: shard 0 opens no ring after a failed claim"),
     }
+}
 
+impl Open {
     /// Opens the shard's buffer and keeps it until `guard` completes. A failed open
     /// drops `guard`, which stops the node.
     async fn serve(
         self,
+        files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
     ) {
-        if let Some(buffer) = self.run(pool, tasks).await {
+        if let Some(buffer) = self.run(files, pool, tasks).await {
             guard.await;
             drop(buffer);
         }
@@ -258,13 +261,14 @@ impl Open {
     /// [`Node::join`], keeps the interner from the shards after it, and gives `None`.
     async fn run(
         self,
+        files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Option<buffer::Buffer> {
         let mut interner = self.take.await?;
         let config = buffer::Config {
-            files: (self.files)(),
-            dir: PathBuf::from(format!("shard-{}", self.core)),
+            files,
+            dir: directory::shard(self.core),
             pool,
             clock: self.clock,
             tasks,

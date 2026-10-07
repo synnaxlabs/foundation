@@ -1,52 +1,46 @@
-//! The record of the shard count in the data directory.
+//! The names in the data directory: the record of the shard count, and the
+//! directory of each shard's ring.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
-
-use types::frame::key_set::Interner;
 
 use crate::Error;
-use crate::handoff::Give;
 
 /// The prefix of the record: an empty directory `shards-<n>`. A crash leaves the
 /// whole name or none, so the record has no bytes to tear.
 const RECORD: &str = "shards-";
+/// The prefix of the directory of each shard's ring.
+const SHARD: &str = "shard-";
 
-/// The claim of the data directory for a node of `cores` shards. It heads the
-/// interner handoff, so no shard opens its ring before the claim ends.
-pub(crate) struct Claim {
-    pub(crate) files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
-    pub(crate) cores: usize,
-    pub(crate) give: Give<Interner>,
-    pub(crate) failed: Arc<OnceLock<Error>>,
-}
-
-impl Claim {
-    /// Claims the data directory, then gives the node's interner to shard 0. A failed
-    /// claim is kept for [`crate::Node::join`] and gives none, so no ring opens.
-    pub(crate) async fn run(self) {
-        match claim(&(self.files)(), self.cores).await {
-            Ok(()) => self.give.give(Interner::new()),
-            Err(error) => self
-                .failed
-                .set(error)
-                .expect("invariant: a failed claim stops shard 0 before its open"),
-        }
-    }
+/// The directory of the ring of the shard on `core`.
+pub(crate) fn shard(core: usize) -> PathBuf {
+    PathBuf::from(format!("{SHARD}{core}"))
 }
 
 /// Records `cores` in the data directory when no count is there, and syncs it
-/// before any ring is made. Refuses a directory that records another count.
-async fn claim(files: &env::files::Files, cores: usize) -> Result<(), Error> {
+/// before any ring is made. Refuses a directory that records another count. With no
+/// record, rings up to `shard-<k>` are a record of `k + 1`.
+pub(crate) async fn claim(
+    files: &env::files::Files,
+    cores: usize,
+) -> Result<(), Error> {
     let root = Path::new("");
     let names = files.list(root).await.map_err(Error::Directory)?;
-    let counts: Vec<usize> = names.iter().filter_map(|name| count(name)).collect();
+    let mut counts: Vec<usize> = names
+        .iter()
+        .filter_map(|name| count(name, RECORD))
+        .filter(|&k| k > 0)
+        .collect();
+    let recorded = !counts.is_empty();
+    if !recorded {
+        let rings = names.iter().filter_map(|name| count(name, SHARD));
+        counts.extend(rings.max().map(|k| k + 1));
+    }
     // The smallest, so the error does not hang on the order of the list.
     let other = counts.iter().copied().filter(|&k| k != cores).min();
     if let Some(stored) = other {
         return Err(Error::Shards { stored, cores });
     }
-    if counts.is_empty() {
+    if !recorded {
         let record = PathBuf::from(format!("{RECORD}{cores}"));
         files.create_dir(&record).await.map_err(Error::Directory)?;
         files.sync_dir(root).await.map_err(Error::Directory)?;
@@ -54,10 +48,10 @@ async fn claim(files: &env::files::Files, cores: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// The count of a record named `name`: a plain count, so `shards-03` and `shards-+3`
-/// are not records.
-fn count(name: &Path) -> Option<usize> {
-    let rest = name.to_str()?.strip_prefix(RECORD)?;
+/// The number after `prefix` in `name`, in plain decimal, so `shards-03` and
+/// `shards-+3` give none.
+fn count(name: &Path, prefix: &str) -> Option<usize> {
+    let rest = name.to_str()?.strip_prefix(prefix)?;
     let count = rest.parse::<usize>().ok()?;
     (count.to_string() == rest).then_some(count)
 }
