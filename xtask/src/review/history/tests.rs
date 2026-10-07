@@ -1056,7 +1056,7 @@ fn a_merge_driver_in_the_tree_does_not_hide_a_conflict() {
 
 #[test]
 fn reaches_through_a_clean_merge_of_a_rename() {
-    let (repo, _) = Repo::with_pr("rename");
+    let (repo, _) = Repo::with_pr("reach-rename");
     let lines = (1..=10)
         .map(|n| format!("line {n}\n"))
         .collect::<Vec<_>>()
