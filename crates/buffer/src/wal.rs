@@ -41,6 +41,21 @@ fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length in memory fits in u64")
 }
 
+/// The size of the largest record of a body of at most `body_max` bytes, in whole
+/// blocks, or `None` when `body_max` is under one block less the record header or
+/// over `u32::MAX`.
+fn window(body_max: usize) -> Option<u64> {
+    let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+    body.contains(&body_max)
+        .then(|| to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN)))
+}
+
+/// The smallest area with a largest record of `window` bytes: the restart record,
+/// the skip of less than a record before the end of the area, then the record.
+fn area_min(window: u64) -> u64 {
+    to_u64(RESTART) + (window - BLOCK) + window
+}
+
 /// An offset that is not on a block boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Unaligned {
@@ -86,6 +101,16 @@ pub struct Unfit {
     pub body_max: usize,
 }
 
+/// A file length that holds no ring. [`Layout::fit`] says which lengths do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Small {
+    /// The length that was given, in bytes.
+    pub len: u64,
+    /// The least length that holds a ring of the `body_max` that was given, in
+    /// bytes.
+    pub min: u64,
+}
+
 /// The sizes of one ring: the area in bytes and the most bytes one record body
 /// holds. A record is one group commit, so `body_max` bounds a commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,19 +138,11 @@ impl Layout {
     /// holds only its restart record takes any record, wherever the restart record
     /// is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
-        let window = HEADER_LEN
-            .checked_add(body_max)
-            .and_then(|len| len.checked_next_multiple_of(ALIGN))
-            .map(to_u64);
-        let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
-        match window {
+        match window(body_max) {
             Some(window)
-                if body.contains(&body_max)
-                    && area.is_multiple_of(BLOCK)
+                if area.is_multiple_of(BLOCK)
                     && area <= u64::MAX - AREA_START
-                    // The restart record, the skip of less than a record before
-                    // the end of the area, then the record.
-                    && to_u64(RESTART) + (window - BLOCK) + window <= area =>
+                    && area_min(window) <= area =>
             {
                 Ok(Self {
                     area,
@@ -142,11 +159,25 @@ impl Layout {
     ///
     /// # Errors
     ///
-    /// [`Unfit`] when no ring of that `body_max` fits in `len` bytes, with the area
-    /// that was left: `len` less the two header blocks, in whole blocks.
-    pub fn fit(len: u64, body_max: usize) -> Result<Self, Unfit> {
-        let area = len.saturating_sub(AREA_START) / BLOCK * BLOCK;
-        Self::new(area, body_max)
+    /// [`Small`] when `len` holds no ring of that `body_max`.
+    ///
+    /// # Panics
+    ///
+    /// When `body_max` is under 4087 bytes or over `u32::MAX`, which no ring takes.
+    pub fn fit(len: u64, body_max: usize) -> Result<Self, Small> {
+        let window = window(body_max).unwrap_or_else(|| {
+            panic!("a body of at most {body_max} bytes makes no ring")
+        });
+        let min = AREA_START + area_min(window);
+        if len < min {
+            return Err(Small { len, min });
+        }
+        let area = (len - AREA_START) / BLOCK * BLOCK;
+        Ok(Self {
+            area,
+            body_max,
+            window,
+        })
     }
 
     /// The area in bytes.
@@ -1138,22 +1169,10 @@ mod tests {
 
         #[test]
         fn fits_the_smallest_ring_in_its_file_and_no_ring_in_a_byte_less() {
-            let smallest = 4 * 4096;
-            assert_eq!(
-                Layout::fit(smallest, 4087).map(Layout::file_len),
-                Ok(smallest)
-            );
-            let cases = [
-                ("a byte less", smallest - 1, 4096),
-                ("the header blocks less a byte", 8191, 0),
-                ("no bytes", 0, 0),
-            ];
-            for (case, len, area) in cases {
-                let unfit = Unfit {
-                    area,
-                    body_max: 4087,
-                };
-                assert_eq!(Layout::fit(len, 4087), Err(unfit), "{case}");
+            let min = 4 * 4096;
+            assert_eq!(Layout::fit(min, 4087).map(Layout::file_len), Ok(min));
+            for len in [min - 1, 8191, 0] {
+                assert_eq!(Layout::fit(len, 4087), Err(Small { len, min }));
             }
         }
 
@@ -1165,25 +1184,38 @@ mod tests {
             );
         }
 
+        #[test]
+        #[should_panic(expected = "a body of at most 4086 bytes makes no ring")]
+        fn panics_on_a_body_under_a_block() {
+            let _layout = Layout::fit(u64::MAX, 4086);
+        }
+
+        #[test]
+        #[should_panic(expected = "a body of at most 4294967296 bytes makes no ring")]
+        fn panics_on_a_body_over_u32() {
+            let _layout = Layout::fit(u64::MAX, 1 << 32);
+        }
+
         proptest! {
-            /// A fit takes the most whole blocks of `len`, and refuses only a `len`
-            /// under the smallest ring of `body_max`.
+            /// A fit takes the most whole blocks of `len`, and refuses each `len`
+            /// under one least length, which is the file of a ring.
             #[test]
             fn fits_the_largest_ring_in_len(
                 len in prop_oneof![0..32 * 4096u64, 0..u64::MAX - 4096],
                 body_max in BODY_MIN..=3 * ALIGN - HEADER_LEN,
             ) {
-                let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
+                let min = Layout::fit(0, body_max).expect_err("no ring in 0 bytes").min;
+                prop_assert_eq!(Layout::fit(min, body_max).map(Layout::file_len), Ok(min));
                 match Layout::fit(len, body_max) {
                     Ok(layout) => {
+                        prop_assert!(min <= len);
                         prop_assert_eq!(layout.body_max(), body_max);
                         prop_assert!(layout.file_len() <= len);
                         prop_assert!(layout.file_len() + 4096 > len);
                     }
-                    Err(unfit) => {
-                        prop_assert!(AREA_START + 2 * record > len);
-                        let area = len.saturating_sub(8192) / 4096 * 4096;
-                        prop_assert_eq!(unfit, Unfit { area, body_max });
+                    Err(small) => {
+                        prop_assert!(len < min);
+                        prop_assert_eq!(small, Small { len, min });
                     }
                 }
             }
