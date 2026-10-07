@@ -1198,6 +1198,39 @@ mod tests {
         }
 
         #[test]
+        fn refuses_only_the_unknown_attribute_of_a_placement_with_no_node() {
+            let attributes = [("select", string("edge.*")), ("node", string("edge"))];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 12),
+                    "`node` is not an attribute of the `placement` block",
+                    "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement() {
+            let [mut documents] =
+                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![refused(
+                    "config.unknown-block",
+                    at(0, 50),
+                    "the `placement` block cannot hold the `inner` block",
+                    "Remove it",
+                )])
+            );
+        }
+
+        #[test]
         fn refuses_an_attribute_that_a_placement_does_not_have() {
             let attributes = [
                 ("select", string("edge.*")),
