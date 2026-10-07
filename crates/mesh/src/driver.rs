@@ -1543,6 +1543,26 @@ mod tests {
     }
 
     #[test]
+    fn open_gives_the_error_of_raft() {
+        solo(|node, tasks| async move {
+            let (mut log, _) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
+            let at = Position {
+                term: Term(1),
+                index: 1,
+            };
+            let data = Data::Voters(Voters::default());
+            log.write(None, &[Entry { at, data }]).await.unwrap();
+            drop(log);
+            let refused = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
+            assert_eq!(refused, Error::Raft(raft::Error::NoVoters));
+            let text = "a configuration has an empty incoming voter set";
+            assert_eq!(refused.to_string(), text);
+        });
+    }
+
+    #[test]
     fn a_dropped_mesh_frees_its_log_before_the_next_tick() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
