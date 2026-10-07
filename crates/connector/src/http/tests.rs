@@ -485,7 +485,6 @@ fn refuses_a_uri_it_cannot_reach() {
     let mut network = Network::new(10);
     for uri in [
         "https://10.0.0.2/",
-        "http://influx:8086/",
         "/write",
         "http://admin:secret@10.0.0.2:8086/",
     ] {
@@ -496,7 +495,7 @@ fn refuses_a_uri_it_cannot_reach() {
         );
         assert_eq!(
             error.to_string(),
-            format!("{uri} is not an http URI with an IP host")
+            format!("{uri} is not an http URI with a host")
         );
     }
 }
@@ -541,4 +540,5 @@ fn stream_is_vectored_and_writes_a_whole_plain_write() {
     assert_eq!(text(&seen.lock().expect("no panic")), text(HEAD));
 }
 
+mod name;
 mod pool;

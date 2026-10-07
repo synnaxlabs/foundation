@@ -7,14 +7,13 @@ mod stream;
 use std::cell::Cell;
 use std::fmt;
 use std::future::poll_fn;
-use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Poll;
 
 use bytes::Bytes;
 use env::clock::Clock;
-use env::net::{self, Net, tcp};
+use env::net::{self, Net, Tcp, tcp};
 use env::tasks::Tasks;
 use http::uri::{PathAndQuery, Scheme};
 use http::{HeaderValue, Request, Response, Uri, header};
@@ -34,8 +33,8 @@ const OPTIONS: tcp::Options = tcp::Options {
     delayed: false,
 };
 
-/// Sends HTTP/1.1 requests over `env`. It keeps one idle connection for each origin
-/// and reuses it. It does not reuse a connection idle longer than 90 s, and the next
+/// Sends HTTP/1.1 requests over `env`. It keeps one idle connection for each origin,
+/// the host and port of a URI, and reuses it with no new name lookup. It does not reuse a connection idle longer than 90 s, and the next
 /// send closes it. It drops a connection that the server closed, and the connection
 /// of a request that failed. A dropped client closes its idle connections. It stays
 /// on the thread that made it.
@@ -50,7 +49,7 @@ const OPTIONS: tcp::Options = tcp::Options {
 /// use connector::http::{Client, Error};
 ///
 /// async fn ping(client: &Client) -> Result<u16, Error> {
-///     let request = http::Request::get("http://10.0.0.2:8086/ping")
+///     let request = http::Request::get("http://influx:8086/ping")
 ///         .body(Bytes::new())
 ///         .expect("a valid request");
 ///     Ok(client.send(request).await?.status().as_u16())
@@ -98,14 +97,16 @@ impl Client {
     }
 
     /// Sends `request` and reads the whole response. The URI gives the host and the
-    /// port, which defaults to 80. The client sets `Host` when the request has none,
-    /// and sends the path and query only.
+    /// port, which defaults to 80. A new connection looks up the host and tries each
+    /// address in order. The client sets `Host` when the request has none, and sends
+    /// the path and query only.
     ///
     /// # Errors
     ///
-    /// - [`Error::Uri`] when the scheme is not `http`, the URI has user info, or the
-    ///   host is not an IP address.
-    /// - [`Error::Connect`] when the host did not take the connection.
+    /// - [`Error::Uri`] when the scheme is not `http`, the URI has no host, or the
+    ///   URI has user info.
+    /// - [`Error::Connect`] when the name lookup failed, or no address of the host
+    ///   took the connection.
     /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
     /// - [`Error::TooLarge`] when the response body is larger than the cap.
     /// - [`Error::Protocol`] when the stream failed, the server broke HTTP, or the
@@ -134,16 +135,16 @@ impl Client {
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         let (mut parts, body) = request.into_parts();
-        let remote = remote(&parts.uri)?;
+        let origin = origin(&parts.uri)?;
         origin_form(&mut parts);
         let request = Request::from_parts(parts, Whole(Some(body)));
-        let request = match self.pool.take(remote, self.clock.now()) {
+        let request = match self.pool.take(&origin, self.clock.now()) {
             Some(mut connection) => {
                 let received = connection.received.get();
                 let spare = request.method().is_idempotent().then(|| copy(&request));
                 match connection.sender.try_send_request(request).await {
                     Ok(response) => {
-                        return self.read(remote, connection, response).await;
+                        return self.read(origin, connection, response).await;
                     }
                     Err(mut error) => {
                         // With no byte of a response, the server may have closed the
@@ -158,15 +159,15 @@ impl Client {
             }
             None => request,
         };
-        let mut connection = self.connect(remote).await?;
+        let mut connection = self.connect(&origin).await?;
         let response = connection.sender.send_request(request).await?;
-        self.read(remote, connection, response).await
+        self.read(origin, connection, response).await
     }
 
-    /// Reads the whole body of `response`, then keeps `connection` for `remote`.
+    /// Reads the whole body of `response`, then keeps `connection` for `origin`.
     async fn read(
         &self,
-        remote: SocketAddr,
+        origin: Origin,
         connection: Connection,
         response: Response<Incoming>,
     ) -> Result<Response<Bytes>, Error> {
@@ -182,16 +183,12 @@ impl Client {
                 bytes.extend_from_slice(&data);
             }
         }
-        self.pool.put(remote, connection, self.clock.now());
+        self.pool.put(origin, connection, self.clock.now());
         Ok(Response::from_parts(parts, Bytes::from(bytes)))
     }
 
-    async fn connect(&self, remote: SocketAddr) -> Result<Connection, Error> {
-        let config = tcp::Config {
-            remote,
-            options: OPTIONS,
-        };
-        let tcp = self.net.connect(&config).await.map_err(Error::Connect)?;
+    async fn connect(&self, origin: &Origin) -> Result<Connection, Error> {
+        let tcp = self.dial(origin).await.map_err(Error::Connect)?;
         let received = Rc::default();
         let stream = Stream {
             tcp,
@@ -205,6 +202,32 @@ impl Client {
         });
         Ok(Connection { sender, received })
     }
+
+    /// Connects to the first address of `origin` that takes the stream. When none
+    /// does, gives the error of the first.
+    async fn dial(&self, origin: &Origin) -> Result<Tcp, net::Error> {
+        let mut first = None;
+        for remote in self.net.resolve(&origin.host, origin.port).await? {
+            let config = tcp::Config {
+                remote,
+                options: OPTIONS,
+            };
+            match self.net.connect(&config).await {
+                Ok(tcp) => return Ok(tcp),
+                Err(error) => {
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        Err(first.expect("invariant: a lookup gives an address"))
+    }
+}
+
+/// Where requests go: a host in ASCII lowercase, and a port.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Origin {
+    host: String,
+    port: u16,
 }
 
 /// A connection to a server.
@@ -215,8 +238,8 @@ struct Connection {
     received: Rc<Cell<u64>>,
 }
 
-/// The address `uri` names.
-fn remote(uri: &Uri) -> Result<SocketAddr, Error> {
+/// The origin of `uri`.
+fn origin(uri: &Uri) -> Result<Origin, Error> {
     let fail = || Error::Uri { uri: uri.clone() };
     if uri.scheme() != Some(&Scheme::HTTP) {
         return Err(fail());
@@ -225,13 +248,10 @@ fn remote(uri: &Uri) -> Result<SocketAddr, Error> {
     if authority.as_str().contains('@') {
         return Err(fail());
     }
-    let host = authority.host();
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    let ip: IpAddr = host.parse().map_err(|_not_ip| fail())?;
-    Ok(SocketAddr::new(ip, authority.port_u16().unwrap_or(80)))
+    Ok(Origin {
+        host: authority.host().to_ascii_lowercase(),
+        port: authority.port_u16().unwrap_or(80),
+    })
 }
 
 /// A copy of `request`, to send again.
@@ -268,13 +288,12 @@ fn origin_form(parts: &mut http::request::Parts) {
 /// Why an exchange failed.
 #[derive(Debug)]
 pub enum Error {
-    /// The scheme is not `http`, the URI has user info, or the host is not an IP
-    /// address.
+    /// The scheme is not `http`, the URI has no host, or the URI has user info.
     Uri {
         /// The URI of the request.
         uri: Uri,
     },
-    /// The host did not take the connection.
+    /// The name lookup failed, or no address of the host took the connection.
     Connect(net::Error),
     /// The exchange took longer than the timeout.
     TimedOut,
@@ -301,7 +320,7 @@ impl From<hyper::Error> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Uri { uri } => write!(f, "{uri} is not an http URI with an IP host"),
+            Self::Uri { uri } => write!(f, "{uri} is not an http URI with a host"),
             Self::Connect(error) => write!(f, "the connect failed: {error}"),
             Self::TimedOut => write!(f, "the exchange timed out"),
             Self::TooLarge { max } => {

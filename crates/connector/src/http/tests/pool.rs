@@ -17,7 +17,7 @@ const OVER: Span = Span::from_nanos(IDLE_MAX.nanos() + 1);
 
 /// What the server does with one request.
 #[derive(Clone)]
-enum Reply {
+pub(super) enum Reply {
     /// Writes the bytes and waits for the next request.
     Bytes(String),
     /// Writes the bytes, waits for the span, and closes the stream, as a server
@@ -29,19 +29,19 @@ enum Reply {
 
 /// What a server saw.
 #[derive(Default)]
-struct Log {
+pub(super) struct Log {
     /// The stream of each request, in the order they came, by accept order.
-    requests: Vec<usize>,
+    pub(super) requests: Vec<usize>,
     /// The bytes of each request, in the order they came.
-    bytes: Vec<Vec<u8>>,
+    pub(super) bytes: Vec<Vec<u8>>,
     /// When each stream came and ended, by accept order.
-    streams: Vec<(Monotonic, Option<Monotonic>)>,
+    pub(super) streams: Vec<(Monotonic, Option<Monotonic>)>,
 }
 
 impl Network {
     /// Serves each stream on `port` until it ends. `answer` gets the index of each
     /// request, counted over all streams.
-    fn serve_each(
+    pub(super) fn serve_each(
         &mut self,
         port: u16,
         answer: impl Fn(usize) -> Reply + Send + Sync + 'static,
@@ -122,7 +122,7 @@ fn after(time: Monotonic, span: Span) -> Monotonic {
     time.checked_add(span).expect("a short run")
 }
 
-fn ok(_: usize) -> Reply {
+pub(super) fn ok(_: usize) -> Reply {
     Reply::Bytes(OK.into())
 }
 
@@ -131,7 +131,7 @@ fn sends(network: &Network, port: u16, n: usize) -> Vec<Step> {
     (0..n).map(|_| Step::Send(get(&url))).collect()
 }
 
-fn all_ok(outcomes: &[Result<http::Response<Bytes>, Error>]) {
+pub(super) fn all_ok(outcomes: &[Result<http::Response<Bytes>, Error>]) {
     for outcome in outcomes {
         let response = outcome.as_ref().expect("the server answers");
         assert_eq!(response.body().as_ref(), b"ok");
