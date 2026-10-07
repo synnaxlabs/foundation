@@ -1,10 +1,10 @@
 //! A write and `next` make no heap allocation once the hub has taken a few frames: for
 //! a complete reader when frames wait for it and when it waits for them, and for latest
 //! readers that the write wakes, also two writes in one commit and readers replaced.
-//! The commit task is not counted. The home's `woken`, which that task calls, is
-//! counted on its own: it makes none once its keys are sized, while a complete reader
-//! takes each frame. This binary has no test harness: the count covers each thread, and
-//! a harness allocates on its own thread at any time.
+//! The commit task is not counted. The home's `woken` after a commit, which that task
+//! calls, is counted on its own: it makes none once its keys are sized, while a
+//! complete reader takes each frame. This binary has no test harness: the count covers
+//! each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
