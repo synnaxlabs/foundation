@@ -15,7 +15,7 @@ use crate::bytes::{put_grant, put_key, put_keys, put_position};
 const GRANT: &[u8] = b"foundation/grant/1";
 const CHANGE: &[u8] = b"foundation/voters/1";
 
-/// Signs this node's grants with its node key.
+/// Signs this node's grants and changes with its node key.
 pub(crate) struct Signer {
     key: node::Key,
     pair: Ed25519KeyPair,

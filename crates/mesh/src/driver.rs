@@ -998,6 +998,41 @@ mod tests {
         }
 
         #[test]
+        fn refuses_an_append_whose_change_is_forged_before_it_steps() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let at = Position {
+                    term: common::TERM,
+                    index: 1,
+                };
+                let joint = Voters {
+                    incoming: [key(1), key(2)].into(),
+                    outgoing: [key(1), key(2), key(3)].into(),
+                };
+                let mut entry = common::change(2, at, joint);
+                let Data::Voters(change) = &mut entry.data else {
+                    unreachable!("a change is a voters entry");
+                };
+                change.signature.as_mut().unwrap().0[63] ^= 1;
+                let append = Body::Append {
+                    prev: Position::default(),
+                    entries: vec![entry],
+                    commit: 0,
+                };
+                let forged = Error::Grant(grant::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Err(forged));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 2).await);
+                assert_eq!(term(&mesh), Term(0));
+                let founding = Voters {
+                    incoming: [key(1), key(2), key(3)].into(),
+                    outgoing: [].into(),
+                };
+                assert_eq!(*mesh.group.borrow().raft.voters(), founding);
+            });
+        }
+
+        #[test]
         fn a_member_does_not_move_a_node_with_no_voters_to_its_term() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &[]).await.unwrap();

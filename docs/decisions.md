@@ -1304,15 +1304,20 @@ How to read this record:
   claims the proof's grant to its candidate in the term of the message or hard
   state, a granted reply claims its grant from the sender to the receiver in the
   message's term, and a configuration entry claims its change from the leader whose
-  votes it holds. `Claim::signer` is the node whose signature a claim needs. `raft`
-  gives this node's own entries, grants, and changes with no signature (`None`).
+  votes it holds. `Claim::signer` is the node whose signature a claim needs
+  (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
+  `raft` gives this node's own entries, grants, and changes with no signature
+  (`None`).
   `Ready::sign` gives each `None` the signature that the caller's closure makes for
   its claim, in the hard proof, in each message, and in each change this node wrote
   (in `entries`, in `committed`, and in each append), before the write and the
   sends. The caller checks each pair that `Message::claims` gives before `step` and
   refuses a `None`: `step` keeps each signature as it came, so an unchecked `None`
   of another voter reaches `Ready::sign`. `Message::claims` also gives each claim
-  of a change an append carries: its votes in the entry's term, then the change.
+  of a change an append carries: its votes in the entry's term, then the change
+  (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -1428,9 +1433,9 @@ How to read this record:
   `votes` of the leader that wrote the entry (its election proof as it held it at
   the write: a vote that arrives later joins the leader's proof, not an entry it
   already wrote), and the leader's `signature` of the entry (`None` until
-  `Ready::sign`). A node that missed the change checks the entry with them before it
-  counts a later proof against it, and refuses a change whose votes are not `Vote`:
-  the chain, the second PR of #881 (architect, #881,
+  `Ready::sign`). After the second PR of #881 (the chain), a node that missed the
+  change checks the entry with them before it counts a later proof against it, and
+  refuses a change whose votes are not `Vote` (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
   A node uses the latest `Voters` entry in its log from the time it writes it;
   `Start.voters` is the configuration before `Start.entries`. A node that joins
@@ -1519,8 +1524,9 @@ How to read this record:
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
   endian), and the candidate (16 bytes, little endian). A change signs
   `foundation/voters/1`, the leader (16 bytes), the term and the index (8 bytes
-  each), and the incoming and the outgoing keys, each as in the entry (architect,
-  #881, https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  each), and the incoming and the outgoing keys, each with its count as in the
+  entry, not the 4-byte count of the plan: one form for both (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
   The signer in the bytes keeps two members that share a key from sharing a
   signature. Grants name no region; a second region adds the region key under
   `foundation/grant/2`. The driver (#471)
