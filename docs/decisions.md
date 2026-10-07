@@ -2261,17 +2261,18 @@ How to read this record:
   not open stops the node, and `join` gives `Error::Buffer` with the core, after
   `Start` and `Memory` and before `Panicked`. A data directory made for another shard
   count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
-  is the long-term path (#1077). The count is an empty directory `shards-<n>` in the
-  data directory, made and synced before `shard-0`, so a crash leaves it whole or
-  absent. Shard 0 claims it at the head of the interner handoff. Another count gives
-  `Error::Shards`, and a failed file call `Error::Directory`. With more than one
-  record of another count, `stored` is the smallest, so the error does not hang on
-  the order of the list. A name whose rest is not a plain count (`shards-03`,
-  `shards-+3`) is not a record. A one-sector file lost: it needs a block, a write,
-  two syncs, and a decode. Approved by the architect on #1076:
-  https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049. Running the stored count on another core count lost:
+  is the long-term path (#1077). Running the stored count on another core count lost:
   it bends C2. Decided by the architect on #1062:
-  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
+  count is an empty directory `shards-<n>` in the data directory, made and synced
+  before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the
+  head of the interner handoff. Another count gives `Error::Shards`, and a failed
+  file call `Error::Directory`. Any record of another count fails the start, also
+  next to `shards-<cores>`, and `stored` is the smallest such count, so the error
+  does not hang on the order of the list. A name whose rest is not a count in plain
+  decimal (`shards-03`, `shards-+3`) is not a record. A one-sector file lost: it
+  needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
+  https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
