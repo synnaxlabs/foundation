@@ -8,7 +8,6 @@ pub mod reader;
 pub mod writer;
 
 use std::cell::RefCell;
-use std::future;
 use std::rc::Rc;
 use std::task::Waker;
 
@@ -125,36 +124,47 @@ impl Hub {
     }
 
     /// Opens a writer session on `config.channels` and the index of each. A local
-    /// writer opens in the call, and the future is ready; a remote writer will wait
-    /// for its home.
+    /// writer opens at the first poll and does not wait; a remote writer will wait for
+    /// its home.
     ///
     /// # Errors
     ///
-    /// [`writer::Error::Unknown`] for the first name that no channel has, then
-    /// [`writer::Error::Home`] when the home refuses the writer.
-    pub fn writer(
+    /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
+    /// name that no channel has, then [`writer::Error::Home`] when the home refuses
+    /// the writer.
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "a remote writer will wait for its home"
+    )]
+    pub async fn writer(
         &self,
         config: writer::Config,
-    ) -> impl Future<Output = Result<Writer, writer::Error>> {
-        future::ready(Writer::open(&self.0, config))
+    ) -> Result<Writer, writer::Error> {
+        Writer::open(&self.0, config)
     }
 
     /// Opens a reader session on `channels`, which share one index, as
     /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, with
     /// every channel its writer wrote. A complete reader gets each live frame written
-    /// after this call.
+    /// after the returned future resolves.
     ///
     /// # Errors
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
     /// another index than the first. [`reader::Error::Empty`] for no name.
-    pub fn reader(
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "a remote reader will wait for its home"
+    )]
+    pub async fn reader(
         &self,
         channels: &[Name],
         mode: reader::Mode,
-    ) -> impl Future<Output = Result<Reader, reader::Error>> {
-        future::ready(Reader::open(&self.0, channels, mode))
+    ) -> Result<Reader, reader::Error> {
+        Reader::open(&self.0, channels, mode)
     }
 }
 

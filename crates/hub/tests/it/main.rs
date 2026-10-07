@@ -9,7 +9,8 @@ use std::path::{Path as FilePath, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Heap, Pool};
 use env::clock::Clock;
@@ -315,7 +316,7 @@ fn opens_no_session_on_an_unknown_name() {
 }
 
 #[test]
-fn opens_no_reader_on_two_indexes_or_on_no_channel() {
+fn opens_no_session_on_two_indexes_or_on_no_channel() {
     run(3, |test| async move {
         let names = [name("value"), name("value-b")];
         let error = test
@@ -335,6 +336,10 @@ fn opens_no_reader_on_two_indexes_or_on_no_channel() {
             .expect_err("an error");
         assert_eq!(error, reader::Error::Empty);
         assert_eq!(error.to_string(), "a reader names at least one channel");
+        let writer = test.hub.writer(config("a", &[])).await;
+        let error = writer.expect_err("an error");
+        assert_eq!(error, writer::Error::Empty);
+        assert_eq!(error.to_string(), "a writer names at least one channel");
     });
 }
 
@@ -601,6 +606,31 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
             count: 1000,
         };
         assert_eq!(received.frame.range(0), Some(range));
+    });
+}
+
+/// A waker that notes that it was woken.
+#[derive(Default)]
+struct Flag(AtomicBool);
+
+impl Wake for Flag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn wakes_a_latest_reader_that_waits_in_the_write() {
+    run(17, |test| async move {
+        let mut latest = test.reader(&["value"], Mode::Latest).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut next = pin!(latest.next());
+        let polled = next.as_mut().poll(&mut Context::from_waker(&waker));
+        assert!(polled.is_pending());
+        write(&mut writer, &[test.now()], &[1]);
+        assert!(flag.0.load(Ordering::Relaxed), "the write wakes the reader");
     });
 }
 

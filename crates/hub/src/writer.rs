@@ -13,7 +13,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::{State, home};
+use crate::State;
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -35,7 +35,9 @@ pub enum Error {
     /// No channel has this name.
     Unknown(Name),
     /// The home refused the writer.
-    Home(home::writer::Error),
+    Home(::home::writer::Error),
+    /// The writer names no channel.
+    Empty,
 }
 
 impl fmt::Display for Error {
@@ -43,6 +45,7 @@ impl fmt::Display for Error {
         match self {
             Self::Unknown(name) => write!(f, "no channel is named {name}"),
             Self::Home(error) => error.fmt(f),
+            Self::Empty => f.write_str("a writer names at least one channel"),
         }
     }
 }
@@ -56,7 +59,7 @@ pub struct Writer {
     key: ::home::writer::Key,
     set: Arc<KeySet>,
     /// The outcomes of the last write.
-    outcomes: Vec<home::Outcome>,
+    outcomes: Vec<::home::Outcome>,
 }
 
 impl Writer {
@@ -71,6 +74,9 @@ impl Writer {
             lease,
             channels,
         } = config;
+        if channels.is_empty() {
+            return Err(Error::Empty);
+        }
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;
         let mut groups: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = Vec::new();
@@ -149,7 +155,7 @@ impl Writer {
         &mut self,
         label: Label,
         frame: Draft,
-    ) -> Result<&[home::Outcome], home::Error> {
+    ) -> Result<&[::home::Outcome], ::home::Error> {
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
         let written = state.home.write(self.key, label, frame);

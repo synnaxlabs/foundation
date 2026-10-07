@@ -20,8 +20,9 @@ const WINDOW: u64 = 1 << 20;
 /// Which frames a reader gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Each live frame, after the commit that holds it. A reader that leaves frames
-    /// untaken until it is a window behind gets no later frame.
+    /// Each live frame, after the commit that holds it. A reader that falls a window
+    /// behind gets no later frame: it left frames untaken, or one commit held more
+    /// than a window of frames.
     Complete,
     /// The newest live frame, before its commit.
     Latest,
