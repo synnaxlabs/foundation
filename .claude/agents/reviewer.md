@@ -35,6 +35,8 @@ Check:
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?
 
-Report only findings you can show: a concrete input and the wrong result, or a failing
-test you wrote and ran. For each: file and line, the failure, and the fix. Most severe
-first. No praise, no summary of the PR.
+Start the report with the rating and the summary of code quality that "Rating" in
+`.claude/skills/review/SKILL.md` defines, for the whole PR at the head you reviewed.
+Then report only findings you can show: a concrete input and the wrong result, or a
+failing test you wrote and ran. For each: file and line, the failure, and the fix. Most
+severe first. No praise, and no other summary.
