@@ -61,6 +61,8 @@ struct Half {
     rest: Rest,
     /// The stream waits its turn in [`Turns`].
     waiting: bool,
+    /// The caller has an [`Event::Writable`] for the stream that no write answered.
+    notified: bool,
     /// The code the peer stopped the stream with.
     stopped: Option<Code>,
 }
@@ -292,6 +294,7 @@ impl Half {
             claim: Claim::new(class),
             rest: Rest::Caller,
             waiting: false,
+            notified: false,
             stopped,
         }
     }
@@ -665,6 +668,7 @@ impl Sending {
         id: StreamId,
     ) -> Result<Option<&'a mut Half>, Error> {
         let half = halves.get_mut(&id).expect(HALF);
+        half.notified = false;
         if let Some(code) = half.stopped {
             return Err(Error::Stopped { code });
         }
@@ -1036,7 +1040,7 @@ impl Streams {
             if half.rest == Rest::Finish {
                 self.halves.remove(&id);
                 finish(inner, id);
-            } else {
+            } else if !mem::replace(&mut half.notified, true) {
                 events.push_back(Event::Writable { stream: half.key });
             }
         }
@@ -4201,13 +4205,28 @@ mod tests {
             let mut pair = connected(shard);
             let mut first = open_sender(&mut pair, Class::Complete);
             let id = first.key().id;
-            assert_eq!(writable(&mut pair, id), []);
+            assert_eq!(writable(&mut pair, &[id]), []);
             fill(&mut pair, shard, &mut first);
             let second = open_sender(&mut pair, Class::Complete);
             let woken = Event::Writable {
                 stream: first.key(),
             };
-            assert_eq!(writable(&mut pair, second.key().id), [woken]);
+            assert_eq!(writable(&mut pair, &[second.key().id]), [woken]);
+        });
+    }
+
+    #[test]
+    fn writable_from_noq_proto_twice_in_one_drive_wakes_the_sender_once() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let second = open_sender(&mut pair, Class::Complete);
+            let woken = Event::Writable {
+                stream: first.key(),
+            };
+            let ids = [first.key().id, second.key().id];
+            assert_eq!(writable(&mut pair, &ids), [woken]);
         });
     }
 
@@ -4221,17 +4240,19 @@ mod tests {
         pair.run(RUN);
     }
 
-    /// The events that the client's streams give for a noq-proto `Writable` of
-    /// stream `id`.
-    fn writable(pair: &mut Pair, id: StreamId) -> VecDeque<Event> {
+    /// The events that the client's streams give for a noq-proto `Writable` of each
+    /// stream in `ids`, all in one drive.
+    fn writable(pair: &mut Pair, ids: &[StreamId]) -> VecDeque<Event> {
         let key = key(&pair.client);
         let connection = super::super::find(&mut pair.client.endpoint.connections, key);
         let connection = connection.expect("a connection");
         let mut events = VecDeque::new();
-        let event = StreamEvent::Writable { id };
         let inner = &mut connection.inner;
-        let translated = connection.streams.event(inner, key, &event, &mut events);
-        translated.expect("no fault");
+        for &id in ids {
+            let event = StreamEvent::Writable { id };
+            let translated = connection.streams.event(inner, key, &event, &mut events);
+            translated.expect("no fault");
+        }
         connection.streams.pump(inner, &mut events);
         events
     }
