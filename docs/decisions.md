@@ -1910,7 +1910,12 @@ How to read this record:
   (BQ11a) and the joining node is outside input. Lost: a bearer secret in the `Join`,
   which every member could replay and which binds to no card. Decided by
   `laptop.architect` (2026-10-07T09:27:39Z):
-  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. A
+  `ticket::Voter` holds only the node key, the public key to pin, and the addresses,
+  not a signed card: the ticket is the trust root, so a voter's signature over its own
+  card checks nothing that the ticket does not give. The ticket's text form can reuse
+  the byte form of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:14:01Z):
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302.
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).

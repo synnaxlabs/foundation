@@ -354,6 +354,8 @@ mod tests {
                 public_key: public(7)
             })
         );
+        // The count is region state, which every node must agree on.
+        assert_eq!(record.uses, 1);
     }
 
     #[test]
