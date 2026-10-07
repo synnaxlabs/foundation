@@ -131,8 +131,9 @@ nothing checked again. So when round 1 led to fix commits:
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
    of a round with no commit is low and in text, its comment gives `Findings: none` and
-   lists them under a line `Text fixes:`. The author applies each with the `reviewer`'s
-   words as given, and needs no further round.
+   lists them under a line `Text fixes:`. Each item gives the exact new text: an item
+   that asks the author to write text is a finding. The author applies each with the
+   `reviewer`'s words as given, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge, whose
