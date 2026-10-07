@@ -5921,21 +5921,31 @@ mod tests {
 
         #[test]
         fn break_at_the_hello_on_a_stop_before_it_with_a_code_over_32_bits() {
-            testing::run(1, |shard| {
-                let mut pair = foreign_dial(shard, |_| {});
-                let connection = foreign(&mut pair);
-                let hello = connection.streams().open(Dir::Uni).expect("a stream");
-                let id = raw(connection, Dir::Bi, &[1], false);
-                let over = VarInt::from_u64(1 << 32).expect("a varint");
-                let stopped = connection.recv_stream(id).stop(over);
-                stopped.expect("stopped");
-                pair.run(RUN);
-                let mut send = foreign(&mut pair).send_stream(hello);
-                let own = OWN.encode();
-                assert_eq!(send.write(&own), Ok(own.len()));
-                send.finish().expect("finished");
-                assert_refused(&mut pair, "a stop code over 32 bits: 4294967296");
-            });
+            // The stream waits for its first message byte, queues, or drops at the
+            // hello.
+            let streams: [(&[u8], bool); 4] = [
+                (&[1], false),
+                (&[1, 1, b'b'], true),
+                (&[1], true),
+                (&[], true),
+            ];
+            for (bytes, end) in streams {
+                testing::run(1, move |shard| {
+                    let mut pair = foreign_dial(shard, |_| {});
+                    let connection = foreign(&mut pair);
+                    let hello = connection.streams().open(Dir::Uni).expect("a stream");
+                    let id = raw(connection, Dir::Bi, bytes, end);
+                    let over = VarInt::from_u64(1 << 32).expect("a varint");
+                    let stopped = connection.recv_stream(id).stop(over);
+                    stopped.expect("stopped");
+                    pair.run(RUN);
+                    let mut send = foreign(&mut pair).send_stream(hello);
+                    let own = OWN.encode();
+                    assert_eq!(send.write(&own), Ok(own.len()));
+                    send.finish().expect("finished");
+                    assert_refused(&mut pair, "a stop code over 32 bits: 4294967296");
+                });
+            }
         }
 
         #[test]
