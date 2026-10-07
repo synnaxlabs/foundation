@@ -150,33 +150,23 @@ async fn serve(
         return Ok(());
     };
     sender.send(reply(state, Reply::Opened)?).await?;
+    // `peer` lives across turns, so a frame never drops a read of the peer. `take`
+    // gives up a frame only in the poll that returns it.
+    let mut peer = pin!(peer(receiver, home, credit.as_ref()));
     loop {
-        // Both futures are cancel-safe: a dropped `recv` keeps its message queued, and
-        // `take` gives up a frame only in the poll that returns it.
         let event = {
-            let mut recv = pin!(receiver.recv());
             let mut take = pin!(session.take());
-            poll_fn(|cx| match recv.as_mut().poll(cx) {
-                Poll::Ready(message) => Poll::Ready(Event::Message(message)),
+            poll_fn(|cx| match peer.as_mut().poll(cx) {
+                Poll::Ready(finished) => Poll::Ready(Event::Finished(finished)),
                 Poll::Pending => take.as_mut().poll(cx).map(Event::Frame),
             })
             .await
         };
         match event {
-            Event::Message(message) => {
-                let Some(message) = message? else {
-                    sender.finish()?;
-                    return Ok(());
-                };
-                let FromReader::Credit(grant) = home.decode(&message)? else {
-                    unreachable!(
-                        "invariant: after the keys run, Home gives only credits"
-                    );
-                };
-                credit
-                    .as_ref()
-                    .expect("invariant: Home refuses a credit in a latest session")
-                    .grant(grant.limit_bytes);
+            Event::Finished(finished) => {
+                finished?;
+                sender.finish()?;
+                return Ok(());
             }
             Event::Frame(Ok((frame, set, _))) => {
                 places.send(state, sender, &frame, set).await?;
@@ -194,8 +184,27 @@ async fn serve(
 }
 
 enum Event<F> {
-    Message(Result<Option<Block>, transport::Error>),
+    /// The peer finished, or broke the stream or HUB WIRE.
+    Finished(Result<(), Error>),
     Frame(Result<F, Ended>),
+}
+
+/// Reads what the peer sends after the keys run, and grants each credit. Returns when
+/// the peer finishes.
+async fn peer(
+    receiver: &mut Receiver,
+    mut home: Home,
+    credit: Option<&Credit>,
+) -> Result<(), Error> {
+    while let Some(message) = receiver.recv().await? {
+        let FromReader::Credit(grant) = home.decode(&message)? else {
+            unreachable!("invariant: after the keys run, Home gives only credits");
+        };
+        credit
+            .expect("invariant: Home refuses a credit in a latest session")
+            .grant(grant.limit_bytes);
+    }
+    Ok(())
 }
 
 /// A session open at the home.
@@ -340,10 +349,9 @@ impl Places {
             );
             sender.send(block.freeze()).await?;
         }
-        let body = frame.body();
         let mut cut = Cut::default();
         while cut.next(&self.series, sender.bytes_max(), &mut self.parts) {
-            sender.send_parts(body.clone(), &self.parts).await?;
+            sender.send_parts(frame.body(), &self.parts).await?;
         }
         Ok(())
     }
