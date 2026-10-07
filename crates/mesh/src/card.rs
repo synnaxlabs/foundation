@@ -274,16 +274,39 @@ mod tests {
         ]
     }
 
+    // Any valid name: segments up to a drawn length, kept while they fit the
+    // byte limit.
+    fn name() -> impl Strategy<Value = Name> {
+        (1..Name::MAX_BYTES)
+            .prop_flat_map(|longest| {
+                let segment = format!("@?[A-Za-z0-9_-]{{1,{longest}}}");
+                let segment = proptest::string::string_regex(&segment).unwrap();
+                prop::collection::vec(segment, 1..=Name::MAX_BYTES.div_ceil(2))
+            })
+            .prop_map(|segments| {
+                let mut segments = segments.into_iter();
+                let mut name = segments.next().unwrap();
+                for segment in segments {
+                    let longer = format!("{name}.{segment}");
+                    if longer.len() > Name::MAX_BYTES {
+                        break;
+                    }
+                    name = longer;
+                }
+                name.parse().unwrap()
+            })
+    }
+
     // The card of node `id`, with its own public key.
     fn card(id: u8) -> impl Strategy<Value = Card> {
         (
-            "@?[A-Za-z0-9_-]{1,16}(\\.@?[A-Za-z0-9_-]{1,16}){0,11}",
+            name(),
             seal_key(),
             prop::collection::vec(address(), 0..4),
             any::<u64>(),
         )
             .prop_map(move |(name, seal_key, addresses, version)| Card {
-                name: name.parse().unwrap(),
+                name,
                 public_key: public(id),
                 seal_key,
                 addresses,
