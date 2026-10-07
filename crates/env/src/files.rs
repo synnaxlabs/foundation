@@ -56,8 +56,9 @@ impl Files {
     }
 
     /// Opens the file at `path`. A file that [`Mode::Create`] makes is not durable
-    /// until [`Files::sync_dir`] on its directory ends. After that, a crash leaves it
-    /// whole, with `len` zero bytes. A create that gives [`Error::Full`] leaves no file
+    /// until [`Files::sync_dir`] on its directory ends, and a crash before the open
+    /// ends can leave it with no bytes. After `sync_dir` ends, a crash leaves it whole,
+    /// with `len` zero bytes. A create that gives [`Error::Full`] leaves no file
     /// at `path` and keeps no blocks. Another error can leave an empty file at `path`,
     /// as a crash can.
     ///
@@ -69,8 +70,7 @@ impl Files {
     ///   the file with [`Mode::Write`] or [`Mode::Create`]. A handle holds it until it
     ///   drops and its calls end, in this process or another.
     /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length that
-    ///   is not empty. It treats an empty file that is there as missing and allocates
-    ///   it, because a crash between the create and the allocation leaves one.
+    ///   is not empty.
     /// - [`Error::Full`] when the disk has no room for the file that
     ///   [`Mode::Create`] allocates.
     /// - [`Error::Io`] for other failures.
@@ -245,10 +245,10 @@ pub enum Mode {
     /// Reads and writes a file that is there. One handle at a time writes a file; see
     /// [`Files::open`].
     Write,
-    /// Reads and writes a file. When it is not there, makes it with `len` bytes,
-    /// allocated and zeroed, and makes the allocation durable before the open ends. A
-    /// file that is there keeps its bytes and must have `len` bytes. One handle at a
-    /// time writes a file; see [`Files::open`].
+    /// Reads and writes a file. When it is not there, or is there with no bytes, makes
+    /// it with `len` bytes, allocated and zeroed, and makes the allocation durable
+    /// before the open ends. Any other file that is there keeps its bytes and must
+    /// have `len` bytes. One handle at a time writes a file; see [`Files::open`].
     Create {
         /// The length of the file.
         len: u64,
