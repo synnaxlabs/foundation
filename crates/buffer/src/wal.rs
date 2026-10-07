@@ -137,6 +137,18 @@ impl Layout {
         }
     }
 
+    /// The largest ring whose file takes at most `len` bytes, with records of a
+    /// body of at most `body_max` bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Unfit`] when no ring of that `body_max` fits in `len` bytes, with the area
+    /// that was left: `len` less the two header blocks, in whole blocks.
+    pub fn fit(len: u64, body_max: usize) -> Result<Self, Unfit> {
+        let area = len.saturating_sub(AREA_START) / BLOCK * BLOCK;
+        Self::new(area, body_max)
+    }
+
     /// The area in bytes.
     #[must_use]
     pub fn area(self) -> u64 {
@@ -1122,6 +1134,59 @@ mod tests {
                 Ok(4096)
             );
             assert_eq!(Layout::new(4 * 4096, 4088).map(|l| l.window), Ok(8192));
+        }
+
+        #[test]
+        fn fits_the_smallest_ring_in_its_file_and_no_ring_in_a_byte_less() {
+            let smallest = 4 * 4096;
+            assert_eq!(
+                Layout::fit(smallest, 4087).map(Layout::file_len),
+                Ok(smallest)
+            );
+            let cases = [
+                ("a byte less", smallest - 1, 4096),
+                ("the header blocks less a byte", 8191, 0),
+                ("no bytes", 0, 0),
+            ];
+            for (case, len, area) in cases {
+                let unfit = Unfit {
+                    area,
+                    body_max: 4087,
+                };
+                assert_eq!(Layout::fit(len, 4087), Err(unfit), "{case}");
+            }
+        }
+
+        #[test]
+        fn fits_the_largest_file() {
+            assert_eq!(
+                Layout::fit(u64::MAX, 4087).map(Layout::file_len),
+                Ok(u64::MAX - 4095)
+            );
+        }
+
+        proptest! {
+            /// A fit takes the most whole blocks of `len`, and refuses only a `len`
+            /// under the smallest ring of `body_max`.
+            #[test]
+            fn fits_the_largest_ring_in_len(
+                len in prop_oneof![0..32 * 4096u64, 0..u64::MAX - 4096],
+                body_max in BODY_MIN..=3 * ALIGN - HEADER_LEN,
+            ) {
+                let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
+                match Layout::fit(len, body_max) {
+                    Ok(layout) => {
+                        prop_assert_eq!(layout.body_max(), body_max);
+                        prop_assert!(layout.file_len() <= len);
+                        prop_assert!(layout.file_len() + 4096 > len);
+                    }
+                    Err(unfit) => {
+                        prop_assert!(AREA_START + 2 * record > len);
+                        let area = len.saturating_sub(8192) / 4096 * 4096;
+                        prop_assert_eq!(unfit, Unfit { area, body_max });
+                    }
+                }
+            }
         }
 
         proptest! {
