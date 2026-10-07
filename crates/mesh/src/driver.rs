@@ -871,9 +871,12 @@ mod tests {
                     spoofed.to_string(),
                     format!("a message names node {} {text}", key(2))
                 );
-                let stranger = message(9, 1, Body::Heartbeat { commit: 0 });
-                let received = mesh.receive(public(9), stranger);
-                assert_eq!(received, Err(Error::Spoofed { from: key(9) }));
+                for body in [Body::Heartbeat { commit: 0 }, Body::HeartbeatReply] {
+                    let received = mesh.receive(public(9), message(9, 1, body));
+                    assert_eq!(received, Err(Error::Spoofed { from: key(9) }));
+                }
+                let reply = message(2, 1, Body::AppendReply { last: 0 });
+                assert_eq!(mesh.receive(public(3), reply), Err(spoofed.clone()));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
                 assert_eq!(term(&mesh), Term(0));
@@ -1153,6 +1156,7 @@ mod tests {
             assert_eq!(voter.err(), Some(refused.clone()));
             let text = format!("node {} is not a member of the region", key(3));
             assert_eq!(refused.to_string(), text);
+            assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
         });
     }
 
@@ -1171,6 +1175,7 @@ mod tests {
                 pool: pool(),
             };
             assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
+            assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
             let text = "the private key of this node is not the key of its member";
             assert_eq!(Error::WrongKey.to_string(), text);
         });
