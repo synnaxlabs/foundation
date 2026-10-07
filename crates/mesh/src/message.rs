@@ -529,8 +529,7 @@ mod tests {
         twice.swap(len - 40, len - 24);
         twice[len - 40] = 2;
         twice[len - 24] = 2;
-        let home = [&[2, 1][..], &key(7), &key(8)].concat();
-        let cases: [(&str, &[u8]); 20] = [
+        let cases: [(&str, &[u8]); 13] = [
             ("no bytes", &[]),
             ("an unknown kind", &[0]),
             ("a cut message", &heartbeat[..heartbeat.len() - 1]),
@@ -542,6 +541,21 @@ mod tests {
             ("a grant that is not 0 or 1", &grant),
             ("proof voters that do not rise", &proven([2, 1])),
             ("a proof voter twice", &proven([1, 1])),
+            ("voters that do not rise", &falling),
+            ("a voter twice", &twice),
+        ];
+        for (name, bytes) in cases {
+            assert_eq!(Message::decode(bytes), None, "{name}");
+        }
+        assert!(Message::decode(&voters([1, 2])).is_some());
+        assert!(Message::decode(&proven([1, 2])).is_some());
+        assert!(Message::decode(&granted).is_some());
+    }
+
+    #[test]
+    fn decode_refuses_what_is_not_a_proposal_or_an_answer() {
+        let home = [&[2, 1][..], &key(7), &key(8)].concat();
+        let cases: [(&str, &[u8]); 7] = [
             ("a proposal with no change", &[2]),
             ("a change of an unknown kind", &[2, 9]),
             ("a cut change", &home[..home.len() - 1]),
@@ -552,15 +566,11 @@ mod tests {
                 &[&[4][..], &key(7)].concat(),
             ),
             ("a cut leader", &[&[5][..], &key(7)[..15]].concat()),
-            ("voters that do not rise", &falling),
-            ("a voter twice", &twice),
         ];
         for (name, bytes) in cases {
             assert_eq!(Message::decode(bytes), None, "{name}");
         }
-        assert!(Message::decode(&voters([1, 2])).is_some());
-        assert!(Message::decode(&proven([1, 2])).is_some());
-        assert!(Message::decode(&granted).is_some());
+        assert!(Message::decode(&home).is_some());
     }
 
     #[test]

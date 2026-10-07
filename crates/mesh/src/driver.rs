@@ -539,7 +539,7 @@ async fn run(
 mod tests {
     use std::io::IoSliceMut;
     use std::iter;
-    use std::mem;
+    use std::mem::ManuallyDrop;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::Path;
     use std::pin::pin;
@@ -983,7 +983,7 @@ mod tests {
     /// The position after `at` in its term.
     fn after(at: Position, count: u64) -> Position {
         Position {
-            index: at.index + count,
+            index: at.index.checked_add(count).unwrap(),
             ..at
         }
     }
@@ -1159,7 +1159,7 @@ mod tests {
                     };
                     let mesh = Mesh::open(config).await.unwrap();
                     // No write of the log ends from here on.
-                    mem::forget(fill(&pool));
+                    let _held = ManuallyDrop::new(fill(&pool));
                     let answers = Answers::default();
                     // Longer than each election timeout.
                     for _ in 0..30 {
