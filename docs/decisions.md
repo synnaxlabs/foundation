@@ -3284,8 +3284,10 @@ How to read this record:
   hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
   &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
   one call that takes a name in place of a path in the data directory (#1449, decided
-  by `laptop.architect-2`, 2026-10-07: https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
-  panic list and the bare-name reason: https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
+  by `laptop.architect-2`, 2026-10-07:
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
+  panic list and the bare-name reason:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
