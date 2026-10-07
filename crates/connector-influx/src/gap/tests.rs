@@ -1,11 +1,11 @@
 use super::*;
 
 fn gap() -> Gap {
-    named("influx", "edge.time")
+    named("influx", "edge.time", Path::Live)
 }
 
-fn named(connector: &str, index: &str) -> Gap {
-    Gap::new(&connector.parse().unwrap(), &index.parse().unwrap())
+fn named(connector: &str, index: &str, path: Path) -> Gap {
+    Gap::new(&connector.parse().unwrap(), &index.parse().unwrap(), path)
 }
 
 fn written(gap: &mut Gap, seq: u64, stamp: i64) -> String {
@@ -16,7 +16,9 @@ fn written(gap: &mut Gap, seq: u64, stamp: i64) -> String {
 
 fn count(gap: &mut Gap, seq: u64) -> String {
     written(gap, seq, 1_000)
-        .strip_prefix("m v=1 0\nfoundation_gaps,connector=influx,index=edge.time ")
+        .strip_prefix(
+            "m v=1 0\nfoundation_gaps,connector=influx,index=edge.time,path=live ",
+        )
         .unwrap()
         .into()
 }
@@ -27,7 +29,19 @@ fn writes_one_line_at_the_stamp_after_the_gap() {
     gap.add(10..15);
     assert_eq!(
         written(&mut gap, 15, 1_000),
-        "m v=1 0\nfoundation_gaps,connector=influx,index=edge.time count=5i 1000\n"
+        "m v=1 0\nfoundation_gaps,connector=influx,index=edge.time,path=live \
+         count=5i 1000\n"
+    );
+}
+
+#[test]
+fn tags_a_backfill_gap_with_its_path() {
+    let mut gap = named("influx", "edge.time", Path::Backfill);
+    gap.add(10..15);
+    assert_eq!(
+        written(&mut gap, 15, 1_000),
+        "m v=1 0\nfoundation_gaps,connector=influx,index=edge.time,path=backfill \
+         count=5i 1000\n"
     );
 }
 
@@ -83,11 +97,11 @@ fn counts_each_seq_up_to_the_next_sample() {
 
 #[test]
 fn writes_each_name_character_as_is() {
-    let mut gap = named("my-influx_1", "@edge.time-a_b");
+    let mut gap = named("my-influx_1", "@edge.time-a_b", Path::Live);
     gap.add(0..1);
     assert_eq!(
         written(&mut gap, 1, 7),
-        "m v=1 0\nfoundation_gaps,connector=my-influx_1,index=@edge.time-a_b \
+        "m v=1 0\nfoundation_gaps,connector=my-influx_1,index=@edge.time-a_b,path=live \
          count=1i 7\n"
     );
 }

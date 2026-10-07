@@ -3,6 +3,7 @@
 
 use std::ops::Range;
 
+use types::frame::Path;
 use types::name::Name;
 use types::time::Stamp;
 
@@ -11,8 +12,9 @@ use crate::line::{Measurement, Value};
 /// The measurement of the gap lines.
 pub const MEASUREMENT: &str = "foundation_gaps";
 
-/// The gap of one index of one connector. It holds the seqs from the first trimmed
-/// seq up to the next sample, then writes them as one line at that sample's stamp.
+/// The gap of one path of one index of one connector. It holds the seqs from the first
+/// trimmed seq up to the next sample, then writes them as one line at that sample's
+/// stamp.
 #[derive(Debug)]
 pub struct Gap {
     measurement: Measurement,
@@ -20,14 +22,26 @@ pub struct Gap {
 }
 
 impl Gap {
-    /// An empty gap, with `connector` and `index` as its tags.
+    /// An empty gap of one path, with `connector`, `index`, and `path` (`live` or
+    /// `backfill`) as its tags.
     #[must_use]
-    #[expect(clippy::missing_panics_doc, reason = "a name is a valid tag value")]
-    pub fn new(connector: &Name, index: &Name) -> Self {
-        let tags = [("connector", connector.as_str()), ("index", index.as_str())];
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "a name or a path is a valid tag value"
+    )]
+    pub fn new(connector: &Name, index: &Name, path: Path) -> Self {
+        let path = match path {
+            Path::Live => "live",
+            Path::Backfill => "backfill",
+        };
+        let tags = [
+            ("connector", connector.as_str()),
+            ("index", index.as_str()),
+            ("path", path),
+        ];
         Self {
             measurement: Measurement::new(MEASUREMENT, &tags, &["count"])
-                .expect("invariant: a name is a valid tag value"),
+                .expect("invariant: a name or a path is a valid tag value"),
             seqs: None,
         }
     }
