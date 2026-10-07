@@ -99,15 +99,20 @@ impl Shard {
 
     /// Puts `bytes` at `at` of both header blocks and fixes their CRCs.
     fn tamper(&self, at: usize, bytes: &[u8]) {
-        let file = self.memory.bytes(RING);
         for place in [0, to_usize(BLOCK)] {
-            let mut block = file[place..place + to_usize(BLOCK)].to_vec();
-            block[at..at + bytes.len()].copy_from_slice(bytes);
-            let crc = crc32c::crc32c(&block[..CRC_AT]);
-            let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
-            block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
-            self.memory.put(RING, place, &block);
+            self.tamper_block(place, at, bytes);
         }
+    }
+
+    /// Puts `bytes` at `at` of the header block at `place` and fixes its CRC.
+    fn tamper_block(&self, place: usize, at: usize, bytes: &[u8]) {
+        let file = self.memory.bytes(RING);
+        let mut block = file[place..place + to_usize(BLOCK)].to_vec();
+        block[at..at + bytes.len()].copy_from_slice(bytes);
+        let crc = crc32c::crc32c(&block[..CRC_AT]);
+        let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
+        block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
+        self.memory.put(RING, place, &block);
     }
 
     /// Opens a ring that holds a record at `offset` that this build cannot read. The
@@ -160,6 +165,7 @@ impl Shard {
         assert_eq!(at, start, "no record starts at {offset}");
         let chain = match before.map(|before| (before, file[before + 8])) {
             None => {
+                assert!(file.starts_with(b"FNDNRING"), "the ring has no header");
                 let chains = [0, to_usize(BLOCK)].map(|block| u32_at(block + CHAIN_AT));
                 assert_eq!(chains[0], chains[1], "the header holds two tail chains");
                 chains[0]
@@ -2235,7 +2241,20 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
 fn seal_refuses_the_first_record_under_two_tail_chains() {
     run(112, Memory::default(), |shard| async move {
         shard.create_two_records().await;
-        shard.memory.put(RING, 0, &[0; SECTOR]);
+        shard.memory.put(RING, to_usize(BLOCK), &[0; SECTOR]);
+        shard.seal(0);
+    });
+}
+
+/// Two zero header blocks hold no tail chain: the open draws a new one.
+#[test]
+#[should_panic(expected = "the ring has no header")]
+fn seal_refuses_the_first_record_of_a_ring_with_no_header() {
+    run(120, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        for block in [0, to_usize(BLOCK)] {
+            shard.memory.put(RING, block, &[0; SECTOR]);
+        }
         shard.seal(0);
     });
 }
@@ -2329,6 +2348,22 @@ fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
         let unaligned = Error::Unaligned { tail: BLOCK + 1 };
         shard.open_refused(layout(AREA, BODY_MAX), unaligned).await;
     });
+}
+
+/// The two blocks of a new ring tie, so the open takes the first one. It does not
+/// check the tail of the other.
+#[test]
+fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
+    let unaligned = Error::Unaligned { tail: BLOCK + 1 };
+    for (place, result) in [(0, Err(unaligned)), (to_usize(BLOCK), Ok(()))] {
+        run(119, Memory::default(), move |shard| async move {
+            let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+            drop(buffer.expect("opens"));
+            shard.tamper_block(place, TAIL_AT, &(BLOCK + 1).to_le_bytes());
+            let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+            assert_eq!(opened.map(drop), result, "the block at {place}");
+        });
+    }
 }
 
 #[test]

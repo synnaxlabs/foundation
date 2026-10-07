@@ -456,10 +456,11 @@ How to read this record:
   `Invalid` after that write. Each statement about a record holds only when no CRC gives
   a false match. Decided by the architect (#1049,
   https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
-  A header block with a tail off a block boundary gives `Unaligned` with that tail, and
-  such an open also leaves the ring as read. `Invalid` then names a record only: the
-  first record of a ring is at offset 0. Lost: the tail in `Unfit`, which is also the
-  error of `Layout::new`, where a tail has no value. Decided by the architect (#1093,
+  A tail off a block boundary in the header block that the open takes gives `Unaligned`
+  with that tail, and such an open also leaves the ring as read. The open does not check
+  the tail of the other block. `Invalid` then names a record only: the first record of a
+  ring is at offset 0. Lost: the tail in `Unfit`, which is also the error of
+  `Layout::new`, where a tail has no value. Decided by the architect (#1093,
   https://github.com/synnaxlabs/foundation/issues/1093#issuecomment-6031034712).
   The restart record needs one free block: an open of a full ring first moves records at
   the tail to a segment. The walk holds one pool block at a time and reads a longer
