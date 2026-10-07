@@ -1079,3 +1079,97 @@ fn reads_no_system_config_or_attributes_file() {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{name}");
     }
 }
+
+#[test]
+fn a_last_merge_of_an_older_base_commit_reads_from_the_newest() {
+    let (repo, from) = Repo::with_pr("merge-older-last");
+    let older = repo.advance_main("c.rs", "fn c() {}\n");
+    repo.advance_main("x.rs", "fn check() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "rm"]);
+    let end = repo.git(&[
+        "commit-tree",
+        "HEAD^{tree}",
+        "-p",
+        "HEAD",
+        "-p",
+        &older,
+        "-m",
+        "merge",
+    ]);
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `x.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_merge_of_the_pr_into_main_reads_from_main() {
+    let (repo, from) = Repo::with_pr("merge-foxtrot");
+    repo.git(&["switch", "--quiet", "-c", "q", "main"]);
+    let q = repo.commit("q.rs", "fn q() {}\n");
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--no-ff", "--no-edit", &q]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    let main = repo.advance_main("x.rs", "fn check() {}\n");
+    // The head merges the PR into main, and its tree drops the base's `x.rs`.
+    let tree = repo.git(&["merge-tree", "--write-tree", &from, &q]);
+    let end = repo.git(&[
+        "commit-tree",
+        &tree,
+        "-p",
+        &main,
+        "-p",
+        &from,
+        "-m",
+        "merge",
+    ]);
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `x.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_file_directory_conflict_of_the_start_and_the_base_counts() {
+    let (repo, _) = Repo::with_pr("merge-dirfile");
+    std::fs::create_dir(repo.dir.join("x.rs")).unwrap();
+    let end = repo.commit("x.rs/a.txt", "pr\n");
+    repo.git(&["rm", "--quiet", "-r", "x.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "rm x.rs/"]);
+    let base = repo.advance_main("x.rs", "fn base() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "rm x.rs"]);
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some(format!(
+            "has a conflict in `x.rs~{base}` between its start and the base"
+        )))
+    );
+}
+
+#[test]
+fn a_range_that_holds_two_newest_base_commits_counts() {
+    let (repo, from) = Repo::with_pr("merge-two-newest");
+    repo.git(&["switch", "--quiet", "-c", "q", "main"]);
+    let q = repo.commit("q.rs", "fn q() {}\n");
+    repo.git(&["switch", "--quiet", "main"]);
+    let older = repo.commit("c.txt", "c\n");
+    repo.git(&["merge", "--quiet", "--no-ff", "--no-edit", &q]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", &older]);
+    repo.git(&["merge", "--quiet", "--no-edit", &q]);
+    let mut newest = [older, q];
+    newest.sort_unstable();
+    assert_eq!(
+        repo.code_change(&from, &repo.head()),
+        Ok(Some(format!(
+            "holds the base at more than one newest commit: `{}`",
+            newest.join("`, `")
+        )))
+    );
+}

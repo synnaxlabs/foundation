@@ -60,11 +60,13 @@ impl<'a> History<'a> {
     /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
     /// `git merge-tree` finds a conflict in between its parents gives "resolves a
     /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
-    /// tree that `git merge-tree` makes of `from` and the base parent of the last such
-    /// merge, not from `from`: the base's code does not count, and text of the range
-    /// that the base moves into a code file does. A code file that this tree has a
-    /// conflict in gives "has a conflict in `<file>` between its start and the
-    /// base", so a conflict that leaves no markers fails closed too.
+    /// tree that `git merge-tree` makes of `from` and the newest base commit that
+    /// `end` holds, not from `from`: the base's code does not count, and text of the
+    /// range that the base moves into a code file does. A code file that this tree
+    /// has a conflict in gives "has a conflict in `<file>` between its start and the
+    /// base", so a conflict that leaves no markers fails closed too. An `end` that
+    /// holds more than one newest base commit gives "holds the base at more than one
+    /// newest commit: `<commit>`, `<commit>`".
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
     /// a removed one.
@@ -98,25 +100,28 @@ impl<'a> History<'a> {
             "--parents",
             &range,
         ])?;
-        let mut last = None;
         for line in chain.lines() {
             let Some((first, second)) = self.base_merge(line, &base)? else {
                 continue;
             };
             let merge = line.split(' ').next().unwrap_or_default();
-            let merged = self.merged(first, second)?;
-            if let Some(path) = merged.conflicts.iter().find(|p| code_path(p)) {
+            if let Some(path) = self.merged(first, second)?.code_conflict() {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
             }
-            last = Some(second);
         }
-        let Some(second) = last else {
-            return self.first_change(&from_sha, &end_sha);
+        let bases = self.git(&["merge-base", "--all", &end_sha, &base])?;
+        let mut bases: Vec<_> = bases.lines().collect();
+        bases.sort_unstable();
+        let [newest] = bases[..] else {
+            return Ok(Some(format!(
+                "holds the base at more than one newest commit: `{}`",
+                bases.join("`, `")
+            )));
         };
-        let merged = self.merged(&from_sha, second)?;
-        if let Some(path) = merged.conflicts.iter().find(|p| code_path(p)) {
+        let merged = self.merged(&from_sha, newest)?;
+        if let Some(path) = merged.code_conflict() {
             return Ok(Some(format!(
                 "has a conflict in `{path}` between its start and the base"
             )));
@@ -347,6 +352,19 @@ struct Merged {
     /// Each path with a conflict, in the order `git` gives, with each byte that is not
     /// UTF-8 replaced.
     conflicts: Vec<String>,
+}
+
+impl Merged {
+    /// The first conflicted path that is a code path, also one that `git` renamed to
+    /// `<path>~<side>` for a file/directory conflict.
+    fn code_conflict(&self) -> Option<&str> {
+        self.conflicts
+            .iter()
+            .find(|p| {
+                code_path(p) || p.rsplit_once('~').is_some_and(|(p, _)| code_path(p))
+            })
+            .map(String::as_str)
+    }
 }
 
 /// Whether a change to `path`, a path as `git` gives it, can change code: a `.rs`
