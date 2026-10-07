@@ -309,6 +309,7 @@ mod tests {
             0_u64..3_000,
             Just(1_471),
             Just(1_472),
+            Just(VarInt::MAX.into_inner()),
             (any::<u64>(), 2_u32..=64)
                 .prop_map(|(bits, shift)| bits.checked_shr(shift).unwrap_or(0)),
         ]
@@ -576,6 +577,16 @@ mod tests {
                 assert_eq!(Hello::decode(&bytes), expected, "{pairs:?} {lens:?}");
             }
         }
+    }
+
+    #[test]
+    fn decode_gives_the_largest_varint_as_its_value() {
+        let max = VarInt::MAX.into_inner();
+        let hello = Hello {
+            window_bytes: usize::try_from(max).expect("64 bits"),
+            message_bytes_max: 1_472,
+        };
+        assert_eq!(Hello::decode(&encode(&[(0, max), (1, 1_472)])), Ok(hello));
     }
 
     #[test]
