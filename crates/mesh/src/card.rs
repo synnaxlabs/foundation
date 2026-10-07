@@ -5,7 +5,7 @@ use std::fmt;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
-use crate::bytes::{put_key, take};
+use crate::bytes::{put_key, put_name, take, take_key, take_name};
 use crate::ed25519;
 
 pub mod addresses;
@@ -32,11 +32,7 @@ impl Card {
     /// public key, the seal key, a count of addresses as 8 little-endian bytes, each
     /// address, then the version as 8 little-endian bytes.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
-        let name = self.name.as_str().as_bytes();
-        out.push(
-            u8::try_from(name.len()).expect("invariant: a name is at most 255 bytes"),
-        );
-        out.extend(name);
+        put_name(&self.name, out);
         out.extend(self.public_key.to_bytes());
         out.extend(self.seal_key.to_bytes());
         self.addresses.encode(out);
@@ -44,17 +40,15 @@ impl Card {
     }
 
     /// Takes one card from the start of `bytes`. `None` when the bytes do not start
-    /// with what [`Card::encode`] gives, such as a count of more than 32 addresses;
-    /// `bytes` is then at no known place.
+    /// with what [`Card::encode`] gives, such as an address list that
+    /// [`Addresses::new`](addresses::Addresses::new) refuses; `bytes` is then at no known
+    /// place.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the `Join` change of #336 is the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
-        let [len] = take(bytes)?;
-        let (name, rest) = bytes.split_at_checked(usize::from(len))?;
-        *bytes = rest;
-        let name = std::str::from_utf8(name).ok()?.parse().ok()?;
+        let name = take_name(bytes)?;
         let public_key = PublicKey::new(take(bytes)?).ok()?;
         let seal_key = SealKey::new(take(bytes)?).ok()?;
         let addresses = addresses::Addresses::decode(bytes)?;
@@ -120,6 +114,27 @@ impl Signed {
             card,
             signature,
         })
+    }
+
+    /// Adds the one byte form of the signed card to `out`: the node key as 16
+    /// little-endian bytes, the card, then the signature.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_key(self.key, out);
+        self.card.encode(out);
+        out.extend(self.signature);
+    }
+
+    /// Takes one signed card from the start of `bytes`. `None` when the bytes do not
+    /// start with what [`Signed::encode`] gives, or when the signature does not hold;
+    /// `bytes` is then at no known place.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        let key = take_key(bytes)?;
+        let card = Card::decode(bytes)?;
+        Self::check(key, card, take(bytes)?).ok()
     }
 
     /// The node that the card is signed for. The signature covers it.
