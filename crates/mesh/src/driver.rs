@@ -200,7 +200,7 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// - [`Error::Stopped`] when the group stops before the write ends.
+    /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
     /// - [`Error::Raft`] with [`raft::Error::NotLeader`] when this node does not
     ///   lead, or when a new leader replaces the entry before a write holds it.
     pub(crate) async fn propose(&self, change: Change) -> Result<Position, Error> {
@@ -1054,17 +1054,16 @@ mod tests {
                 let (other, results) = (mesh.clone(), Rc::clone(&results));
                 tasks.spawn(async move {
                     let proposed = other.propose(home(id)).await;
-                    results.borrow_mut().push(proposed.map(|at| at.index));
+                    results.borrow_mut().push(proposed.unwrap());
                 });
             }
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
             assert_eq!(*results.borrow(), []);
             drop(held);
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
-            let mut indexes = results.take();
-            indexes.sort_by_key(|index| index.clone().ok());
-            let next = first.index.checked_add(1).unwrap();
-            assert_eq!(indexes, [Ok(next), Ok(next.checked_add(1).unwrap())]);
+            let mut positions = results.take();
+            positions.sort_by_key(|at| at.index);
+            assert_eq!(positions, [after(first, 1), after(first, 2)]);
         });
     }
 
@@ -1149,6 +1148,37 @@ mod tests {
             };
             assert_eq!(mesh.receive(public(2), reply), Ok(()));
             assert_eq!(proposal.await, Ok(after(first, 1)));
+            let cause = Malformed::Kind { kind: 9 };
+            let stopped = Error::Stopped(Stopped::Change { at: bad, cause });
+            assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+        });
+    }
+
+    // One `Ready` replaces the entry of the proposal and commits an entry that is
+    // not a change.
+    #[test]
+    fn a_replaced_proposal_gives_not_the_leader_when_its_ready_stops_the_group() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let first = elect(&mesh).await;
+            let mut proposal = pin!(mesh.propose(home(1)));
+            assert!(now(proposal.as_mut()).await.is_pending());
+            let bad = Position {
+                term: common::TERM,
+                index: 2,
+            };
+            let append = Body::Append {
+                prev: first,
+                entries: vec![Entry {
+                    at: bad,
+                    data: Data::Bytes(vec![9]),
+                }],
+                commit: 2,
+            };
+            assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+            let leader = Some(key(2));
+            let replaced = Error::Raft(raft::Error::NotLeader { leader });
+            assert_eq!(proposal.await, Err(replaced));
             let cause = Malformed::Kind { kind: 9 };
             let stopped = Error::Stopped(Stopped::Change { at: bad, cause });
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
