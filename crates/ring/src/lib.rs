@@ -296,25 +296,18 @@ fn config(capacity: usize) -> Config {
 }
 
 #[cfg(test)]
-#[cfg(not(loom))]
-mod tests {
-    use std::collections::VecDeque;
-    use std::pin::pin;
+mod tally {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    use proptest::prelude::*;
-
-    use super::{Consumer, Full, Producer, config, new, with_origin};
+    use std::task::{Wake, Waker};
 
     /// Counts the wakes it gets.
     #[derive(Default)]
-    struct Tally(AtomicUsize);
+    pub(crate) struct Tally(AtomicUsize);
 
     impl Tally {
-        fn count(&self) -> usize {
+        pub(crate) fn count(&self) -> usize {
             self.0.load(Relaxed)
         }
     }
@@ -325,10 +318,24 @@ mod tests {
         }
     }
 
-    fn create_waker() -> (Arc<Tally>, Waker) {
+    pub(crate) fn create_waker() -> (Arc<Tally>, Waker) {
         let tally = Arc::new(Tally::default());
         (Arc::clone(&tally), Waker::from(tally))
     }
+}
+
+#[cfg(test)]
+#[cfg(not(loom))]
+mod tests {
+    use std::collections::VecDeque;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use proptest::prelude::*;
+
+    use super::tally::create_waker;
+    use super::{Consumer, Full, Producer, config, new, with_origin};
 
     /// Polls a new `pop` one time, then drops it.
     fn poll_pop<T: Send>(consumer: &mut Consumer<T>, waker: &Waker) -> Poll<Option<T>> {
@@ -506,7 +513,42 @@ mod tests {
     }
 
     mod pop {
+        use std::sync::Mutex;
+
         use super::*;
+
+        /// Pushes when its last clone drops. A poll drops the waker of the park
+        /// before it, so the push lands inside that poll.
+        struct PushOnDrop(Arc<Mutex<Producer<u8>>>);
+
+        #[expect(clippy::manual_noop_waker, reason = "the test needs its drop")]
+        impl Wake for PushOnDrop {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for PushOnDrop {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push(1).unwrap();
+            }
+        }
+
+        #[test]
+        fn takes_its_park_back_when_a_push_lands_in_the_poll() {
+            let (producer, mut consumer) = new(config(2));
+            let producer = Arc::new(Mutex::new(producer));
+            let pushing = Waker::from(Arc::new(PushOnDrop(Arc::clone(&producer))));
+            let (tally, waker) = create_waker();
+            assert_eq!(poll_pop(&mut consumer, &pushing), Poll::Pending);
+            drop(pushing);
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
+            assert_eq!(producer.lock().unwrap().push(2), Ok(()));
+            assert_eq!(tally.count(), 0);
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(2)));
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
+            assert_eq!(tally.count(), 0);
+            assert_eq!(producer.lock().unwrap().push(3), Ok(()));
+            assert_eq!(tally.count(), 1);
+        }
 
         /// A `pop` that finds a value looks before it parks, so it leaves no clone
         /// of the waker behind.
@@ -644,6 +686,23 @@ mod tests {
             assert_eq!(Arc::strong_count(&value), 3);
             drop(consumer);
             assert_eq!(Arc::strong_count(&value), 1);
+        }
+    }
+
+    // Each text shows no field, so a new field does not break these.
+    mod debug {
+        use super::*;
+
+        #[test]
+        fn names_the_producer_and_shows_no_field() {
+            let (producer, _consumer) = new::<u8>(config(4));
+            assert_eq!(format!("{producer:?}"), "Producer { .. }");
+        }
+
+        #[test]
+        fn names_the_consumer_and_shows_no_field() {
+            let (_producer, consumer) = new::<u8>(config(4));
+            assert_eq!(format!("{consumer:?}"), "Consumer { .. }");
         }
     }
 
@@ -799,6 +858,7 @@ mod model {
     use loom::model::Builder;
     use loom::thread;
 
+    use super::tally::create_waker;
     use super::{Full, config, new};
 
     /// Checks schedules with at most five forced thread switches. The models with
@@ -915,6 +975,26 @@ mod model {
             assert_eq!(value, Some(1));
             assert_eq!(block_on(consumer.pop()), None);
             pushes.join().unwrap();
+        });
+    }
+
+    /// A push lands at each point of a poll. When both end, the consumer is not
+    /// parked: it took its park back, or the producer woke it.
+    #[test]
+    fn leaves_no_park_behind_when_a_push_lands_in_a_poll() {
+        loom::model(|| {
+            let (mut producer, mut consumer) = new(config(2));
+            let pushes = thread::spawn(move || {
+                producer.push(1).unwrap();
+                producer
+            });
+            let (tally, waker) = create_waker();
+            let first = pin!(consumer.pop()).poll(&mut Context::from_waker(&waker));
+            let mut producer = pushes.join().unwrap();
+            assert!(matches!(first, Poll::Pending | Poll::Ready(Some(1))));
+            let before = tally.count();
+            producer.push(2).unwrap();
+            assert_eq!(tally.count(), before);
         });
     }
 }

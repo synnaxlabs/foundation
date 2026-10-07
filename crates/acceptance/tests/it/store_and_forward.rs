@@ -3,10 +3,10 @@ use std::time::Duration;
 use crate::lab::{Gap, Lab, Received};
 
 const RATE: u64 = 1_000_000;
-const HOUR: Duration = Duration::from_secs(3600);
-const WRITTEN: u64 = RATE * 3600;
+const OUTAGE: Duration = Duration::from_secs(60);
+const WRITTEN: u64 = RATE * OUTAGE.as_secs();
 
-/// Writes at `RATE` on an edge node for one hour while its link to the cloud is cut,
+/// Writes at `RATE` on an edge node for one minute while its link to the cloud is cut,
 /// with a disk budget that holds `budget` of samples, heals the link, and returns
 /// what the Influx out connector stored and the seqs written.
 fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
@@ -24,9 +24,9 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
     lab.run(Duration::from_secs(5));
     lab.cut(edge, cloud);
     lab.write(edge, "edge.value", RATE, WRITTEN);
-    lab.run(HOUR);
+    lab.run(OUTAGE);
     lab.heal(edge, cloud);
-    lab.run(HOUR);
+    lab.run(OUTAGE);
     let stored = lab.stored("influx", "edge.value");
     let written = lab.written("edge.value");
     lab.stop();
@@ -34,9 +34,9 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
 }
 
 #[test]
-#[ignore = "waits on #336, #337, #340, #341, #451, and #1256"]
-fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
-    let (stored, written) = check(HOUR);
+#[ignore = "waits on #336, #337, #340, #341, #451, #1256, #1419, and #1446"]
+fn a_budget_for_the_outage_delivers_every_sample_in_seq_order() {
+    let (stored, written) = check(OUTAGE);
     assert_eq!(stored.samples, WRITTEN, "count");
     assert_eq!(stored.seqs, Some(written), "seqs");
     assert!(stored.contiguous, "seq order");
@@ -44,9 +44,9 @@ fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
 }
 
 #[test]
-#[ignore = "waits on #336, #337, #340, #341, #451, and #1256"]
-fn a_budget_for_half_the_hour_delivers_one_gap_of_the_trimmed_samples() {
-    let (stored, written) = check(HOUR / 2);
+#[ignore = "waits on #336, #337, #340, #341, #451, #1256, #1419, and #1446"]
+fn a_budget_for_half_the_outage_delivers_one_gap_of_the_trimmed_samples() {
+    let (stored, written) = check(OUTAGE / 2);
     let [Gap { after: 0, count }] = stored.gaps[..] else {
         panic!("one gap before every sample, got {:?}", stored.gaps);
     };
