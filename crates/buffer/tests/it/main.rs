@@ -1700,7 +1700,7 @@ fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
 
 /// A sim with `seed` and one node on it, whose disk holds the shard directory and
 /// `bytes` of files.
-fn node_with_disk(seed: u64, bytes: u64) -> (sim::Sim, sim::node::Node) {
+fn create_node_with_disk(seed: u64, bytes: u64) -> (sim::Sim, sim::node::Node) {
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -1720,7 +1720,7 @@ fn a_ring_with_no_checkpoint_is_made_again_in_the_room_that_it_leaves() {
     let new = layout(AREA, BODY_MAX);
     let len = AREA_START + AREA;
     for old in [len, len + AREA] {
-        let (mut sim, node) = node_with_disk(10, old + len / 2);
+        let (mut sim, node) = create_node_with_disk(10, old + len / 2);
         create_unwritten(&mut sim, &node, old);
         let found = open_with(&mut sim, &node, new);
         assert_eq!(found, (Found::Unwritten(old), Ok(new), len));
@@ -1741,7 +1741,7 @@ fn a_crash_in_an_open_leaves_a_ring_that_opens_in_the_room_of_one() {
         (sim::Crash::Power, true),
     ] {
         each_cut(0..8, 5_000, |seed, cut| {
-            let (mut sim, node) = node_with_disk(seed, len + len / 2);
+            let (mut sim, node) = create_node_with_disk(seed, len + len / 2);
             if unwritten {
                 create_unwritten(&mut sim, &node, len);
             }
@@ -1765,7 +1765,8 @@ fn a_failed_remove_of_a_ring_with_no_checkpoint_fails_the_open() {
         (DIR, Operation::SyncDir, Found::Absent),
     ];
     for (path, operation, left) in faults {
-        let (mut sim, node) = node_with_disk(10, AREA_START + 2 * AREA + len / 2);
+        let (mut sim, node) =
+            create_node_with_disk(10, AREA_START + 2 * AREA + len / 2);
         create_unwritten(&mut sim, &node, len);
         node.fail_file(FilePath::new(path), operation);
         let opened = sim.run_on(&node, move |node, tasks| async move {
@@ -1794,7 +1795,7 @@ fn a_failed_remove_of_a_ring_with_no_checkpoint_fails_the_open() {
 fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
     let len = AREA_START + AREA;
     for seed in 0..256 {
-        let (mut sim, node) = node_with_disk(seed, len + len / 2);
+        let (mut sim, node) = create_node_with_disk(seed, len + len / 2);
         create_unwritten(&mut sim, &node, len);
         let results = [1, 2].map(|index| {
             let result = Arc::new(Mutex::new(None));
@@ -2027,7 +2028,7 @@ fn three_opens_and_a_failed_sync(
     seed: u64,
     disk: u64,
 ) -> ([Result<(), Error>; 3], Tail) {
-    let (mut sim, node) = node_with_disk(seed, disk);
+    let (mut sim, node) = create_node_with_disk(seed, disk);
     node.fail_file(FilePath::new(""), Operation::SyncDir);
     let results = [200_000, 75_000, 35_000].map(|gap| {
         let result = Arc::new(Mutex::new(None));
