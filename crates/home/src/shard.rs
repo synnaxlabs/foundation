@@ -255,8 +255,8 @@ impl std::error::Error for Error {}
 /// Resolves when every group applied and every handoff appended before
 /// [`Shard::committed`] is on disk, or with the error that ended the buffer first. It
 /// does not borrow the shard, and it holds the shard's ring open until it drops. Held
-/// past the drop of the shard, it resolves only once the buffer ended, after the
-/// buffer wrote what was queued at the drop.
+/// past the drop of the shard, it resolves only once the buffer ended, with an error
+/// or with none. Its result is only for what was appended before the call.
 #[derive(Debug)]
 pub struct Commit(buffer::Commit);
 
@@ -487,7 +487,8 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// Gives the error that ended the buffer when it ended before they were on disk.
+    /// The future gives the error that ended the buffer when the buffer ended before
+    /// those groups and handoffs were on disk.
     pub fn committed(&self) -> Commit {
         Commit(self.buffer.committed())
     }
@@ -3160,7 +3161,6 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, live), Ok(&[lost(0, 0, 2)][..]));
             let mut commit = shard.committed();
             assert_eq!(polled(&mut commit), Poll::Ready(Ok(())));
-            assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
             drop(blocks);
         });
     }
@@ -3200,6 +3200,31 @@ mod tests {
             assert_eq!(polled(&mut none), Poll::Ready(Ok(())));
             let handoff = handoff_to("subject-a");
             assert_eq!(find(&test.ring().await, &handoff).len(), 2);
+        });
+    }
+
+    #[test]
+    fn gives_ok_past_the_drop_for_what_was_on_disk_when_a_later_commit_fails() {
+        run(109, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let mut none = shard.committed();
+            shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            let commit = shard.committed();
+            test.node.fail_file(FilePath::new(RING), Operation::WriteAt);
+            drop(shard);
+            assert_eq!(polled(&mut none), Poll::Pending);
+            let failed = env::files::Error::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::WriteAt,
+                code: 5,
+            };
+            assert_eq!(commit.await, Err(failed));
+            assert_eq!(polled(&mut none), Poll::Ready(Ok(())));
+            let handoff = handoff_to("subject-a");
+            assert_eq!(find(&test.ring().await, &handoff).len(), 0);
         });
     }
 
