@@ -23,10 +23,10 @@ read the diff (`gh pr diff <n>`) and every file it touches. In a second round yo
 the earlier findings and a commit range: review only that range, and check that each fix
 closes its finding and adds no new defect, and that each answer with no code change
 holds against the code and against "Findings" step 3 of `.claude/skills/review/SKILL.md`
-on `main`. Name each answer that defers work, with its issue and, in a risk crate, the
-link to the architect's OK. An answer that names later work with no linked issue, or a
-deferral in a risk crate with no linked OK, is a finding. A report gives, after the
-summary, the `Public surface:` and `Hot path:` lines that
+on `main`. Name each answer that defers work or decides what a ruling means, with its
+issue and each link to the architect that step 3 asks for. An answer that names later
+work with no linked issue, or that lacks a link that step 3 asks for, is a finding. A
+report gives, after the summary, the `Public surface:` and `Hot path:` lines that
 `.claude/agents/architecture.md` defines: in a second round for the range, and in a
 round 1 that runs no `architecture` agent for the PR.
 
