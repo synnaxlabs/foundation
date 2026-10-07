@@ -13,12 +13,18 @@
 //! compression   := select:patterns mode:u8                                  tag 5
 //! placement     := select:patterns standby:optional copies:names            tag 6
 //! time          := select:patterns peers:optional_names                     tag 7
+//! channel       := key kind                                                 tag 8
+//! kind          := 0 error:optional_key control:optional_key                index
+//!                | 1 index:key quality:optional_key data_type unit:optional  data
+//! data_type     := 0 scalar:u8 | 1 scalar:u8 len:u32 | 2 scalar:u8 max:u32 | 3 | 4 | 5
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! text          := length:u64 UTF-8 bytes
 //! names         := count:u64 text*
 //! optional      := 0 | 1 text
 //! optional_names := 0 | 1 names
+//! key           := u128
+//! optional_key  := 0 | 1 key
 //! ```
 //!
 //! A `text` is a name. `document` is the canonical encoding of the connector config.
@@ -36,6 +42,10 @@
 //! A policy sets at least one budget.
 //!
 //! A compression `mode` is 0 auto, 1 raw, or 2 max.
+//!
+//! A `data_type` is a scalar, an array, a list, a string, bytes, or quality, in that
+//! order from 0. A `scalar` numbers the variants of [`Scalar`] in order from 0. The
+//! `unit` of a data channel is the text of a [`Unit`].
 
 #![deny(
     clippy::indexing_slicing,
@@ -49,15 +59,19 @@ use std::{fmt, str};
 use document::encoding;
 use types::authority::Authority;
 use types::byte;
+use types::channel as key;
 use types::name::{self, Name, Selector, Written};
+use types::sample::{self, Scalar};
 
 use crate::access::{Action, Actions, Policy};
+use crate::channel::{self, Channel, Data, DataType};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
 use crate::node_settings;
 use crate::placement;
 use crate::region::{Delegation, NoVoters};
 use crate::time;
+use crate::unit::{self, Unit};
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
@@ -67,6 +81,7 @@ const NODE_SETTINGS: u8 = 4;
 const COMPRESSION: u8 = 5;
 const PLACEMENT: u8 = 6;
 const TIME: u8 = 7;
+const CHANNEL: u8 = 8;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -90,6 +105,8 @@ pub enum Definition {
     Placement(placement::Policy),
     /// A time policy.
     Time(time::Policy),
+    /// A channel.
+    Channel(Channel),
 }
 
 impl Definition {
@@ -154,6 +171,10 @@ impl Definition {
                     }
                 }
             }
+            Self::Channel(channel) => {
+                out.push(CHANNEL);
+                put_channel(&mut out, channel);
+            }
         }
         out
     }
@@ -184,6 +205,7 @@ impl Definition {
             COMPRESSION => Self::Compression(reader.compression()?),
             PLACEMENT => Self::Placement(reader.placement()?),
             TIME => Self::Time(reader.time()?),
+            CHANNEL => Self::Channel(reader.channel()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -202,6 +224,99 @@ const fn mode_byte(mode: Mode) -> u8 {
         Mode::Auto => 0,
         Mode::Raw => 1,
         Mode::Max => 2,
+    }
+}
+
+/// Every scalar, in the order of their bytes.
+const SCALARS: [Scalar; 14] = [
+    Scalar::Bool,
+    Scalar::I8,
+    Scalar::I16,
+    Scalar::I32,
+    Scalar::I64,
+    Scalar::U8,
+    Scalar::U16,
+    Scalar::U32,
+    Scalar::U64,
+    Scalar::F32,
+    Scalar::F64,
+    Scalar::Stamp,
+    Scalar::Span,
+    Scalar::Uuid,
+];
+
+const SCALAR: u8 = 0;
+const ARRAY: u8 = 1;
+const LIST: u8 = 2;
+const STRING: u8 = 3;
+const BYTES: u8 = 4;
+const QUALITY: u8 = 5;
+
+fn scalar(out: &mut Vec<u8>, scalar: Scalar) {
+    let at = SCALARS
+        .iter()
+        .position(|s| *s == scalar)
+        .expect("invariant: SCALARS holds every scalar");
+    out.push(u8::try_from(at).expect("invariant: SCALARS has fewer than 256 items"));
+}
+
+fn data_type(out: &mut Vec<u8>, data_type: DataType) {
+    match data_type {
+        DataType::Sample(sample::Type::Scalar(element)) => {
+            out.push(SCALAR);
+            scalar(out, element);
+        }
+        DataType::Sample(sample::Type::Array { element, len }) => {
+            out.push(ARRAY);
+            scalar(out, element);
+            out.extend_from_slice(&len.to_le_bytes());
+        }
+        DataType::Sample(sample::Type::List { element, max }) => {
+            out.push(LIST);
+            scalar(out, element);
+            out.extend_from_slice(&max.to_le_bytes());
+        }
+        DataType::Sample(sample::Type::String) => out.push(STRING),
+        DataType::Sample(sample::Type::Bytes) => out.push(BYTES),
+        DataType::Quality => out.push(QUALITY),
+    }
+}
+
+fn put_channel(out: &mut Vec<u8>, channel: &Channel) {
+    put_key(out, channel.key);
+    match &channel.kind {
+        channel::Kind::Index { error, control } => {
+            out.push(0);
+            optional_key(out, *error);
+            optional_key(out, *control);
+        }
+        channel::Kind::Data(data) => {
+            out.push(1);
+            put_key(out, data.index());
+            optional_key(out, data.quality());
+            data_type(out, data.data_type());
+            match data.unit() {
+                None => out.push(0),
+                Some(unit) => {
+                    out.push(1);
+                    text(out, unit.as_str());
+                }
+            }
+        }
+    }
+}
+
+fn put_key(out: &mut Vec<u8>, key: key::Key) {
+    out.extend_from_slice(&key.as_u128().to_le_bytes());
+}
+
+fn optional_key(out: &mut Vec<u8>, key: Option<key::Key>) {
+    match key {
+        None => out.push(0),
+        Some(key) => {
+            out.push(1);
+            put_key(out, key);
+        }
     }
 }
 
@@ -265,6 +380,34 @@ impl<'a> Reader<'a> {
             .ok_or(Error::Truncated { at })?;
         self.rest = rest;
         Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, Error> {
+        let at = self.at();
+        let (&bytes, rest) = self
+            .rest
+            .split_first_chunk()
+            .ok_or(Error::Truncated { at })?;
+        self.rest = rest;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn key(&mut self) -> Result<key::Key, Error> {
+        let at = self.at();
+        let (&bytes, rest) = self
+            .rest
+            .split_first_chunk()
+            .ok_or(Error::Truncated { at })?;
+        self.rest = rest;
+        Ok(key::Key::from_u128(u128::from_le_bytes(bytes)))
+    }
+
+    fn optional_key(&mut self) -> Result<Option<key::Key>, Error> {
+        Ok(if self.flag()? {
+            Some(self.key()?)
+        } else {
+            None
+        })
     }
 
     fn byte(&mut self) -> Result<u8, Error> {
@@ -407,6 +550,64 @@ impl<'a> Reader<'a> {
         Ok(time::Policy::new(select, peers))
     }
 
+    fn channel(&mut self) -> Result<Channel, Error> {
+        let key = self.key()?;
+        let at = self.at();
+        let kind = match self.byte()? {
+            0 => channel::Kind::Index {
+                error: self.optional_key()?,
+                control: self.optional_key()?,
+            },
+            1 => channel::Kind::Data(self.data()?),
+            found => return Err(Error::ChannelKind { at, found }),
+        };
+        Ok(Channel { key, kind })
+    }
+
+    fn data(&mut self) -> Result<Data, Error> {
+        let index = self.key()?;
+        let quality = self.optional_key()?;
+        let at = self.at();
+        let data_type = self.data_type()?;
+        let unit = if self.flag()? {
+            let at = self.at();
+            Some(Unit::new(self.text()?).map_err(|error| Error::Unit { at, error })?)
+        } else {
+            None
+        };
+        Data::new(index, quality, data_type, unit)
+            .map_err(|error| Error::Channel { at, error })
+    }
+
+    fn data_type(&mut self) -> Result<DataType, Error> {
+        let at = self.at();
+        let sample = match self.byte()? {
+            SCALAR => sample::Type::Scalar(self.scalar()?),
+            ARRAY => sample::Type::Array {
+                element: self.scalar()?,
+                len: self.u32()?,
+            },
+            LIST => sample::Type::List {
+                element: self.scalar()?,
+                max: self.u32()?,
+            },
+            STRING => sample::Type::String,
+            BYTES => sample::Type::Bytes,
+            QUALITY => return Ok(DataType::Quality),
+            found => return Err(Error::DataType { at, found }),
+        };
+        Ok(DataType::Sample(sample))
+    }
+
+    fn scalar(&mut self) -> Result<Scalar, Error> {
+        let at = self.at();
+        let found = self.byte()?;
+        SCALARS
+            .get(usize::from(found))
+            .copied()
+            .ok_or(Error::Scalar { at, found })
+    }
+
     fn access(&mut self) -> Result<Policy, Error> {
         let subjects = self.patterns()?;
         let select = self.patterns()?;
@@ -538,9 +739,45 @@ pub enum Error {
         /// Why they make no policy.
         error: placement::Error,
     },
+    /// A channel kind byte is not 0 (index) or 1 (data).
+    ChannelKind {
+        /// Where the byte is.
+        at: usize,
+        /// The byte.
+        found: u8,
+    },
+    /// A data type byte names no data type.
+    DataType {
+        /// Where the byte is.
+        at: usize,
+        /// The byte.
+        found: u8,
+    },
+    /// A scalar byte names no scalar.
+    Scalar {
+        /// Where the byte is.
+        at: usize,
+        /// The byte.
+        found: u8,
+    },
+    /// A unit does not read.
+    Unit {
+        /// Where the unit's length is.
+        at: usize,
+        /// Why it does not read.
+        error: unit::Error,
+    },
+    /// A data channel cannot exist.
+    Channel {
+        /// Where the data type is.
+        at: usize,
+        /// Why it cannot exist.
+        error: channel::Error,
+    },
 }
 
 impl fmt::Display for Error {
+    #[expect(clippy::too_many_lines, reason = "one arm for each error")]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Newer { found } => write!(
@@ -600,6 +837,21 @@ impl fmt::Display for Error {
                     f,
                     "compression mode {found} at byte {at} is not a known mode"
                 )
+            }
+            Self::ChannelKind { at, found } => {
+                write!(f, "the channel kind {found} at byte {at} is not 0 or 1")
+            }
+            Self::DataType { at, found } => {
+                write!(f, "the data type {found} at byte {at} is not a known type")
+            }
+            Self::Scalar { at, found } => {
+                write!(f, "the scalar {found} at byte {at} is not a known scalar")
+            }
+            Self::Unit { at, error } => {
+                write!(f, "the unit at byte {at} does not read: {error}")
+            }
+            Self::Channel { at, error } => {
+                write!(f, "the data channel at byte {at}: {error}")
             }
         }
     }
