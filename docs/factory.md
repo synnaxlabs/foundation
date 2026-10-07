@@ -35,8 +35,9 @@ The launcher sources `~/.factory/env`, so `gh` and `git` act as the GitHub App
 `~/Desktop/synnaxlabs/foundation-wt/<role>`, sets `FACTORY_NAME`, and starts Claude
 Code with `--name <role>`, the factory mod, and the role's skill. The architect and the
 director run at `xhigh` effort, the others at `high`. The director owns the quality bar
-and the issue queue. The monitor keeps the work moving: it unblocks sessions and
-watches efficiency.
+and the issue queue, decides the hard calls the architect sends it, and approves each
+red-team PR. The monitor keeps the work moving: it unblocks sessions and watches
+efficiency.
 
 A builder works one issue per context. When its PR merges, it calls the factory mod's
 `next` tool, which runs `/clear` and then `/build` by itself.

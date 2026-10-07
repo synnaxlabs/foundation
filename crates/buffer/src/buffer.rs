@@ -92,9 +92,11 @@ pub enum Error {
     /// The header holds sizes that make no ring.
     Unfit(Unfit),
     /// A header block or a record at `offset` passed its CRC but cannot be read:
-    /// another version or a defect wrote it. The ring is not written to.
+    /// another version or a defect wrote it. The ring reads as it did before the
+    /// open.
     Invalid {
-        /// The offset in the ring file.
+        /// The offset of the record in the ring. A header block gives 0, which is also
+        /// the offset of the first record of a ring.
         offset: u64,
     },
 }

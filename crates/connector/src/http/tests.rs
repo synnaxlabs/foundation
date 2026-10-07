@@ -55,7 +55,11 @@ impl Network {
     }
 
     fn remote(&self) -> SocketAddr {
-        SocketAddr::new(self.server.addresses()[0], PORT)
+        self.remote_on(PORT)
+    }
+
+    fn remote_on(&self, port: u16) -> SocketAddr {
+        SocketAddr::new(self.server.addresses()[0], port)
     }
 
     fn url(&self, path: &str) -> String {
@@ -84,7 +88,7 @@ impl Network {
                 let mut stream = poll_fn(|cx| listener.poll_accept(cx))
                     .await
                     .expect("a stream comes");
-                let request = request(&mut stream).await;
+                let request = request(&mut stream).await.expect("the read works");
                 slot.lock()
                     .expect("no panic under the lock")
                     .clone_from(&request);
@@ -96,13 +100,30 @@ impl Network {
         seen
     }
 
-    /// Sends `request` from the client node and gives the outcome. The client shard
-    /// lives on after the send, so the connection task ends on its own.
-    #[expect(clippy::unwrap_in_result, reason = "a test may panic")]
+    /// Sends `request` from the client node and gives the outcome.
     fn send(&mut self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
+        let mut outcomes = self.run(vec![Step::Send(request)]);
+        outcomes.pop().expect("one send gives one outcome")
+    }
+
+    /// Runs `steps` with one client on the client node, then drops the client, and
+    /// gives the outcome of each send. The client shard lives on for a minute after
+    /// the drop, so the connection tasks end on their own.
+    fn run(&mut self, steps: Vec<Step>) -> Vec<Result<Response<Bytes>, Error>> {
         let (net, clock) = (self.client.net(), self.client.clock());
-        let out = Arc::new(Mutex::new(None));
+        let waits = steps
+            .iter()
+            .map(|step| match step {
+                Step::Wait(span) => *span,
+                Step::Send(_) => TIMEOUT,
+            })
+            .fold(Span::MINUTE, |total, span| {
+                Span::from_nanos(total.nanos() + span.nanos())
+            });
+        let out = Arc::new(Mutex::new(Vec::new()));
         let slot = Arc::clone(&out);
+        let elapsed = Arc::new(Mutex::new(None));
+        let last = Arc::clone(&elapsed);
         let handle =
             self.client
                 .shards()
@@ -114,26 +135,43 @@ impl Network {
                         timeout: TIMEOUT,
                         body_max: BODY_MAX,
                     });
-                    let start = clock.now();
-                    let outcome = client.send(request).await;
-                    let elapsed = Span::from_nanos(
-                        i64::try_from(clock.now().0 - start.0).expect("a short run"),
-                    );
-                    *slot.lock().expect("no panic under the lock") =
-                        Some((outcome, elapsed));
+                    for step in steps {
+                        match step {
+                            Step::Wait(span) => clock.sleep(span).await,
+                            Step::Send(request) => {
+                                let start = clock.now();
+                                let outcome = client.send(request).await;
+                                *last.lock().expect("no panic under the lock") =
+                                    Some(Span::from_nanos(
+                                        i64::try_from(clock.now().0 - start.0)
+                                            .expect("a short run"),
+                                    ));
+                                slot.lock()
+                                    .expect("no panic under the lock")
+                                    .push(outcome);
+                            }
+                        }
+                    }
+                    drop(client);
                     clock.sleep(Span::MINUTE).await;
                 });
         self.handles.push(handle.expect("the shard starts"));
-        self.sim.run_for(Span::MINUTE).expect("the run ends");
-        let out = out.lock().expect("no panic under the lock").take();
-        let (outcome, elapsed) = out.expect("send returned within a minute");
-        self.elapsed = Some(elapsed);
-        outcome
+        self.sim.run_for(waits).expect("the run ends");
+        self.elapsed = *elapsed.lock().expect("no panic under the lock");
+        std::mem::take(&mut *out.lock().expect("no panic under the lock"))
     }
 }
 
-/// Reads one request: the head, then a body of its `content-length`.
-async fn request(stream: &mut Tcp) -> Vec<u8> {
+/// What the client does next in [`Network::run`].
+#[expect(clippy::large_enum_variant, reason = "a test makes a few")]
+enum Step {
+    Send(Request<Bytes>),
+    Wait(Span),
+}
+
+/// Reads one request: the head, then a body of its `content-length`. Gives fewer
+/// bytes when the stream ends first.
+async fn request(stream: &mut Tcp) -> Result<Vec<u8>, net::Error> {
     let mut bytes = Vec::new();
     loop {
         let text = String::from_utf8_lossy(&bytes);
@@ -143,15 +181,13 @@ async fn request(stream: &mut Tcp) -> Vec<u8> {
                 .find_map(|line| line.strip_prefix("content-length: "))
                 .map_or(0, |n| n.parse::<usize>().expect("a length"));
             if bytes.len() >= end + 4 + length {
-                return bytes;
+                return Ok(bytes);
             }
         }
         let mut buffer = [0; 512];
-        let n = poll_fn(|cx| stream.poll_read(cx, &mut buffer))
-            .await
-            .expect("the read works");
+        let n = poll_fn(|cx| stream.poll_read(cx, &mut buffer)).await?;
         if n == 0 {
-            return bytes;
+            return Ok(bytes);
         }
         bytes.extend_from_slice(&buffer[..n]);
     }
@@ -323,7 +359,7 @@ fn reply_then_read(
 }
 
 #[test]
-fn closes_the_stream_after_the_exchange() {
+fn closes_the_stream_when_the_client_drops() {
     let mut network = Network::new(14);
     let end = Arc::new(Mutex::new(None));
     network.serve(reply_then_read(
@@ -482,7 +518,10 @@ fn stream_is_vectored_and_writes_a_whole_plain_write() {
         .shards()
         .start(shard("client"), move |_| async move {
             let tcp = net.connect(&config).await.expect("the server listens");
-            let mut stream = super::Stream(tcp);
+            let mut stream = super::Stream {
+                tcp,
+                received: std::rc::Rc::default(),
+            };
             assert!(
                 hyper::rt::Write::is_write_vectored(&stream),
                 "hyper copies each body into its buffer unless the stream is vectored"
@@ -501,3 +540,5 @@ fn stream_is_vectored_and_writes_a_whole_plain_write() {
     assert_eq!(*written.lock().expect("no panic"), Some(HEAD.len()));
     assert_eq!(text(&seen.lock().expect("no panic")), text(HEAD));
 }
+
+mod pool;

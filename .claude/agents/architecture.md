@@ -32,6 +32,9 @@ Check:
 - The 14 red flags in `docs/claude/design.md`. Name each one you find.
 - Complexity: does each new public item, field, and parameter earn its place? Callers
   that repeat the same steps mean the surface is wrong, not that a helper is missing.
+- Depth: for each new or changed public surface, sketch the deeper option: fewer
+  items, with the steps that callers repeat pulled inside. When the deeper option
+  serves every caller on record, the shallower surface is a finding, even if it works.
 - Structural avoidance: a workaround for a deeper problem. Name the problem.
 - New patterns: a trait with one implementation, a registry, or new machinery where an
   existing mechanism already covers the case.

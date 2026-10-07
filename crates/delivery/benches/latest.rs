@@ -7,7 +7,6 @@ use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
-use types::time::Stamp;
 
 fn main() {
     divan::main();
@@ -25,9 +24,7 @@ fn opened(sessions: usize) -> (Frame, Readers, Vec<Key>) {
         .expect("the pool holds the frame")
         .freeze(Path::Live);
     let mut readers = Readers::new(0);
-    let keys = (0..sessions)
-        .map(|_| readers.open_latest(None, Stamp::from_nanos(0)).key)
-        .collect();
+    let keys = (0..sessions).map(|_| readers.open_latest().key).collect();
     (frame, readers, keys)
 }
 
