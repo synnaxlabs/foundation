@@ -738,6 +738,7 @@ mod tests {
         members: &[u8],
         voters: &[u8],
     ) -> Config {
+        let pool = create_pool();
         Config {
             key: key(id),
             private_key: private(id),
@@ -748,8 +749,8 @@ mod tests {
             clock: node.clock(),
             entropy: node.entropy(),
             tasks: tasks.clone(),
-            pool: create_pool(),
-            transport: Rc::new(create_transport(node, tasks, id, 0, create_pool())),
+            transport: Rc::new(create_transport(node, tasks, id, 0, Rc::clone(&pool))),
+            pool,
         }
     }
 
@@ -1010,8 +1011,9 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let transport = create_transport(&node, &tasks, id, PORT, create_pool());
-        let transport = Rc::new(transport);
+        let base = config(&node, &tasks, id, &IDS, &IDS);
+        let pool = Rc::clone(&base.pool);
+        let transport = Rc::new(create_transport(&node, &tasks, id, PORT, pool));
         let hidden = board.lock().unwrap().hidden;
         let member = |of| {
             if hidden == Some(of) {
@@ -1023,7 +1025,7 @@ mod tests {
         let config = Config {
             members: IDS.map(member).into(),
             transport: Rc::clone(&transport),
-            ..config(&node, &tasks, id, &IDS, &IDS)
+            ..base
         };
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, proposing, streams) = (mesh.clone(), mesh.clone(), tasks.clone());

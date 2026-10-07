@@ -95,9 +95,10 @@ pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
     ids.iter().map(|&id| member(id)).collect()
 }
 
-/// A pool of 4 MiB.
+/// A pool of 1 MiB. It reserves 51 MiB, so the tests of 8 threads stay under the
+/// 4 GiB that CI gives a test process.
 pub(crate) fn create_pool() -> Rc<Pool> {
-    let config = block::Config { budget: 4 << 20 };
+    let config = block::Config { budget: 1 << 20 };
     let memory = block::Heap::new(config.reservation());
     Rc::new(Pool::new(config, memory))
 }
