@@ -246,21 +246,20 @@ How to read this record:
   time the holds on the indexes it selects (READER RULES), so `buffer` may trim a sample
   past the cap (STORE TRIM). Retention deletes nothing: a ring frees only at its tail,
   so a time on one index cannot free its samples. It keeps no history window. An index
-  that no policy selects has no time cap. `keep` is zero or more. At `0s`, after the
-  first estimate of `home`, the cap frees the hold on each sample stored before the mesh
-  time of `home` (READER RULES). A trim gives a reader that is behind a gap at any
-  `keep` (STORE TRIM). Most specific wins as a whole policy (X25), equal specificity is
-  a plan error (S12), and a data channel takes its index's policy (X26). Lost: a finite
-  default `keep` (5.3), a value for "no cap", a size cap per index, and a read that
-  reports each sample past `keep` as a gap while its bytes are on disk. That read does
-  not depend on disk pressure, but at `0s` a reader a few milliseconds behind loses each
-  sample it reads from disk, and each read needs `keep` and a clock. Stale commands are
-  the job of `max_age` (A20), not of retention. In `config`, `select` and `keep` are
-  both required. `keep` reads with `document::read::span` (`document.bad-span`), where a
-  negative span reads, and `config` refuses it with `config.negative-span` at the `keep`
-  value. The code names the defect, so a later span bound (a reader `hold`, S10) uses it
-  too. Ruling and answers:
-  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
+  that no policy selects has no time cap. `keep` is zero or more. At `0s` the cutoff is
+  the mesh time of `home`, from its first estimate (READER RULES). A trim gives a reader
+  that is behind a gap at any `keep` (STORE TRIM). Most specific wins as a whole policy
+  (X25), equal specificity is a plan error (S12), and a data channel takes its index's
+  policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", a size cap
+  per index, and a read that reports each sample past `keep` as a gap while its bytes
+  are on disk. That read does not depend on disk pressure, but at `0s` a reader a few
+  milliseconds behind loses each sample it reads from disk, and each read needs `keep`
+  and a clock. Stale commands are the job of `max_age` (A20), not of retention. In
+  `config`, `select` and `keep` are both required. `keep` reads with
+  `document::read::span` (`document.bad-span`), where a negative span reads, and
+  `config` refuses it with `config.negative-span` at the `keep` value. The code names
+  the defect, so a later span bound (a reader `hold`, S10) uses it too. Ruling and
+  answers: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. The lost
   read: decided by `laptop.architect`, 2026-10-07T12:30:53Z,
