@@ -365,7 +365,11 @@ mod tests {
             let new = readers.open(reader, Start::At(live(0)), limit).key;
             readers.queue(&first, 0..1);
             assert_eq!(readers.release(1), [new]);
+            readers.records().for_each(drop);
+            assert_eq!(readers.ack(new, live(1)), Ok(()));
             dropped(&mut readers, old.into());
+            readers.flush();
+            assert_eq!(readers.records().count(), 1);
             readers.queue(&frames.frame(2), 1..2);
             readers.queue(&frames.frame(3), 2..3);
             assert_eq!(readers.release(3), []);
@@ -375,6 +379,17 @@ mod tests {
             let next = complete(&mut readers, "c", live(3));
             assert_eq!(next, complete::Key(2));
             assert!(!readers.behind(next));
+            let missed = readers.open(Reader::Unnamed, Start::At(live(2)), 0).key;
+            assert!(readers.behind(missed));
+            let reader = Reader::Named {
+                name: name("b"),
+                hold: Span::from_nanos(10),
+            };
+            let resume = Start::Resume {
+                presented: None,
+                otherwise: live(9),
+            };
+            assert_eq!(readers.open(reader, resume, 0).position, live(0));
         }
     }
 
