@@ -13,7 +13,12 @@ clock, the network, the disk, or a random source directly. Clippy's
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
-behavior. Never print a pointer. No `thread_local!` state.
+behavior. Never print a pointer. No `thread_local!` state. One exception: the `hyper`
+server of HTTP SIM SERVER (`docs/decisions.md`) reads OS time into a `thread_local!` on
+each poll, only for the `date` header, which is off. It gets no `timer`, so no read
+changes what it does (the person,
+https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
+2026-10-07T17:04:29Z).
 
 ## Layers
 
