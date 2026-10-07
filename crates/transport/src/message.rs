@@ -113,9 +113,7 @@ impl Reader {
     /// `Pending` when it has none now, or `None` when the stream has ended. The
     /// reader never asks for a byte past the current message, so later messages
     /// stay with the source. It holds the bytes of a message until the message is
-    /// whole. A read that ends before the message has its block copies the bytes it
-    /// took into one buffer of the message's length; the read that takes the block
-    /// copies the buffer, then the bytes it took, into it.
+    /// whole, and no chunk from `source` outlives the call.
     ///
     /// Returns the message, `Pending` when `admit` or `take` refuses or the source
     /// has no more bytes now, or `None` when the stream ended between two messages.
@@ -179,7 +177,7 @@ impl Reader {
                 State::Body { len, have } if *have < *len => {
                     let error = match next(&mut source, len.saturating_sub(*have)) {
                         Ok(Poll::Pending) => {
-                            self.held.keep(*len);
+                            self.held.spill(*len);
                             return Ok(Poll::Pending);
                         }
                         Ok(Poll::Ready(Some(chunk))) => {
@@ -190,13 +188,12 @@ impl Reader {
                         Ok(Poll::Ready(None)) => ended(),
                         Err(error) => error,
                     };
-                    self.state = START;
-                    self.held.clear();
+                    self.clear();
                     return Err(error);
                 }
                 State::Body { len, .. } => {
                     let Some(mut block) = take(*len) else {
-                        self.held.keep(*len);
+                        self.held.spill(*len);
                         return Ok(Poll::Pending);
                     };
                     self.held.drain_into(&mut block);
@@ -206,17 +203,24 @@ impl Reader {
             }
         }
     }
+
+    /// Drops the message in hand, so that the reader holds no bytes of it. For a
+    /// stream that ended outside [`Reader::read`], as by a reset that `source` did
+    /// not give.
+    pub(crate) fn clear(&mut self) {
+        self.state = START;
+        self.held.clear();
+    }
 }
 
 #[cfg(test)]
 impl Reader {
-    /// The length and capacity of each buffer that holds bytes across reads, and
-    /// the count of chunks held.
-    pub(crate) fn held(&self) -> (Vec<(usize, usize)>, usize) {
+    /// The length and capacity of the buffer that holds bytes across reads, if it
+    /// has an allocation, and the count of chunks held.
+    pub(crate) fn held(&self) -> (Option<(usize, usize)>, usize) {
         let buffer = &self.held.buffer;
-        let buffers =
-            (buffer.capacity() > 0).then(|| (buffer.len(), buffer.capacity()));
-        (buffers.into_iter().collect(), self.held.chunks.len())
+        let held = (buffer.capacity() > 0).then(|| (buffer.len(), buffer.capacity()));
+        (held, self.held.chunks.len())
     }
 }
 
@@ -224,13 +228,13 @@ impl Held {
     /// Holds `chunk`, the next bytes of a message of `len` bytes.
     fn push(&mut self, len: usize, chunk: Bytes) {
         if self.chunks.len() == CHUNKS_MAX {
-            self.keep(len);
+            self.spill(len);
         }
         self.chunks.push(chunk);
     }
 
     /// Copies the chunks into the buffer of a message of `len` bytes, and drops them.
-    fn keep(&mut self, len: usize) {
+    fn spill(&mut self, len: usize) {
         if self.chunks.is_empty() {
             return;
         }

@@ -1227,6 +1227,7 @@ impl Streams {
         if (missed || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
+            reader.clear();
             result = Err(reset_error(error));
         }
         if !matches!(result, Ok(Poll::Pending)) {
@@ -2076,7 +2077,7 @@ mod tests {
                     let read = pair.server.endpoint.read(now, receiver, |_, _| None);
                     assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
                     let len = usize::from(LEN);
-                    let held = (vec![(usize::from(have), len)], 0);
+                    let held = (Some((usize::from(have), len)), 0);
                     assert_eq!(receiver.reader.held(), held);
                 }
                 assert!(kept.iter().all(Bytes::is_unique));
@@ -2085,8 +2086,56 @@ mod tests {
             for receiver in &mut receivers {
                 let read = next(&mut pair.server, now, receiver);
                 assert_eq!(read, Ok(Poll::Ready(Some((1..=LEN).collect()))));
-                assert_eq!(receiver.reader.held(), (vec![], 0));
+                assert_eq!(receiver.reader.held(), (None, 0));
             }
+        });
+    }
+
+    /// Four streams in turn each send a whole message of [`MESSAGE_MAX`] bytes that
+    /// finds no block, then reset. The receive budget holds three such messages.
+    #[test]
+    fn reset_messages_that_wait_for_a_block_hold_no_bytes_past_the_budget() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let large = vec![3; MESSAGE_MAX];
+            let prefix = message::prefix(MESSAGE_MAX);
+            let bytes = [[byte(Class::Complete)].as_slice(), &*prefix, &large].concat();
+            let mut receivers = Vec::new();
+            for _ in 0..4 {
+                let id = raw(pair.client.connection(), Dir::Uni, &bytes, false);
+                pair.run(RUN);
+                let mut receiver = accept(&mut pair.server).receiver;
+                for tries in 0.. {
+                    let (now, mut asked) = (pair.now(), false);
+                    let read = pair.server.endpoint.read(now, &mut receiver, |_, _| {
+                        asked = true;
+                        None
+                    });
+                    assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+                    if asked {
+                        break;
+                    }
+                    assert!(tries < 100, "the message never became whole");
+                    pair.run(STEP);
+                }
+                let mut send = pair.client.connection().send_stream(id);
+                send.reset(VarInt::from_u32(5)).expect("reset");
+                pair.run(RUN);
+                let now = pair.now();
+                let read = pair.server.endpoint.read(now, &mut receiver, |_, _| None);
+                assert_eq!(read.map(|_| ()), Err(Error::Reset { code: Code(5) }));
+                receivers.push(receiver);
+            }
+            let held: usize = receivers
+                .iter()
+                .filter_map(|receiver| receiver.reader.held().0)
+                .map(|(_, capacity)| capacity)
+                .sum();
+            assert!(
+                held <= NARROW + MESSAGE_MAX,
+                "the readers hold {held} bytes, over the budget of {}",
+                NARROW + MESSAGE_MAX
+            );
         });
     }
 
