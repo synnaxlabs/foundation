@@ -160,8 +160,8 @@ state on `main`.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
   `raft` counts the keys of a proof, and `mesh::claim` checks each signature
   against the voter's public key. `Mesh::receive` runs that check before `step`, and
-  `Mesh::serve` runs it for each message of a stream. No node serves mesh streams
-  yet (#471). `raft/tests/it/hostile.rs` pins the refusal.
+  `Mesh::serve` runs it for each `raft` message of a one-way stream. No node serves
+  mesh streams yet (#471). `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
   and refuses a leader it cannot prove. It rejoins at the next election whose grants
   are a quorum of what it holds. When a second node fails before that, the group
