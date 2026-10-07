@@ -854,7 +854,9 @@ How to read this record:
   to either needs a new version. `Layout::draft` writes zeros in the padding of a frame
   from lengths. A frame from ends gets its padding from `Draft::body_mut`, which the
   caller fills whole (decided by the architect, #1246, 2026-10-07T15:17:43Z:
-  https://github.com/synnaxlabs/foundation/issues/1246#issuecomment-6040879844). No
+  https://github.com/synnaxlabs/foundation/issues/1246#issuecomment-6040879844).
+  Supersedes the zero padding of every draft in
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642. No
   reader reads the padding, so `frame::check` does not check it. A frame from a peer may
   hold other bytes there, which `replica` stores and copy mode (X43) sends as they are
   (decided by the architect, #1064:
