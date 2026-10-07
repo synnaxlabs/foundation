@@ -231,12 +231,7 @@ impl Sender {
     }
 
     /// Marks the stream finished.
-    ///
-    /// # Panics
-    ///
-    /// When the sender holds part of a message, or after `end`.
     pub(super) fn end(&mut self) {
-        self.check();
         self.finished = true;
     }
 
@@ -909,7 +904,8 @@ impl Streams {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream.
+    /// [`Error::Stopped`] when the peer stopped the stream. Each later finish gives
+    /// it too.
     ///
     /// # Panics
     ///
@@ -922,9 +918,10 @@ impl Streams {
         let Some(at) = self.senders.iter().position(|&(other, _)| other == id) else {
             panic!("invariant: a sender finishes once");
         };
-        if let (_, Some(code)) = self.senders.swap_remove(at) {
+        if let (_, Some(code)) = self.senders[at] {
             return Err(Error::Stopped { code });
         }
+        self.senders.swap_remove(at);
         match inner.send_stream(id).finish() {
             Ok(()) => Ok(()),
             Err(FinishError::Stopped(_)) => panic!("{STOPPED}"),
@@ -3099,31 +3096,40 @@ mod tests {
     }
 
     #[test]
-    fn after_the_connection_ends_give_nothing_and_take_nothing() {
+    fn after_the_connection_ends_give_its_error_until_it_drains_then_nothing() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let (now, key) = (pair.now(), key(&pair.client));
             let opened = pair.client.endpoint.open(now, key, Class::Complete);
             let (mut sender, mut receiver) = opened.expect("a stream");
             let mut other = open_sender(&mut pair, Class::Latest);
+            let mut finishing = [Class::Latest, Class::Latest]
+                .map(|class| open_sender(&mut pair, class));
             pair.client.endpoint.close(now, key, Code(7));
-            for run in [Duration::ZERO, Duration::from_secs(3)] {
+            let closed = Error::Closed { code: Code(7) };
+            for (finished, (run, ended)) in finishing.iter_mut().zip([
+                (Duration::ZERO, Err(closed.clone())),
+                (Duration::from_secs(3), Ok(())),
+            ]) {
                 pair.run(run);
                 let now = pair.now();
-                assert_eq!(
-                    next(&mut pair.client, now, &mut receiver),
-                    Ok(Poll::Pending)
-                );
+                let read = next(&mut pair.client, now, &mut receiver);
+                assert_eq!(read, ended.clone().map(|()| Poll::Pending));
                 let endpoint = &mut pair.client.endpoint;
                 assert!(endpoint.open(now, key, Class::Command).is_none());
                 assert!(endpoint.accept(key).is_none());
-                assert_eq!(endpoint.flush(now, &mut sender), Ok(Poll::Pending));
+                let flushed = endpoint.flush(now, &mut sender);
+                assert_eq!(flushed, ended.clone().map(|()| Poll::Pending));
+                let written = endpoint.write(now, &mut sender, shard.block(b"a"));
+                assert_eq!(written, ended.clone().map(|()| Poll::Pending));
+                assert!(!sender.holds());
+                assert_eq!(endpoint.finish(now, finished), ended.clone());
+                let given = ended.map(|()| Some(b"b".to_vec()));
+                let block = shard.block(b"b");
+                assert_eq!(try_write(&mut pair.client, now, &mut other, block), given);
             }
             let now = pair.now();
             let endpoint = &mut pair.client.endpoint;
-            let written = endpoint.write(now, &mut sender, shard.block(b"a"));
-            assert_eq!(written, Ok(Poll::Pending));
-            assert_eq!(endpoint.finish(now, &mut other), Ok(()));
             endpoint.reset(now, sender, Code(9));
             endpoint.stop(now, receiver, Code(9));
         });
@@ -3319,7 +3325,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_that_does_not_wait_gives_back_the_message_when_the_connection_ended() {
+    fn a_write_that_does_not_wait_gives_the_close_when_the_connection_ended() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -3327,7 +3333,7 @@ mod tests {
             pair.client.endpoint.close(now, client, Code(0));
             let written =
                 try_write(&mut pair.client, now, &mut sender, shard.block(b"a"));
-            assert_eq!(written, Ok(Some(b"a".to_vec())));
+            assert_eq!(written, Err(Error::Closed { code: Code(0) }));
         });
     }
 

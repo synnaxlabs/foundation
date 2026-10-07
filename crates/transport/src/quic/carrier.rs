@@ -398,8 +398,8 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After [`Session::finish`], or as [`Endpoint::write`] does while the session is
-    /// live.
+    /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::write`] does
+    /// while the session is live.
     pub(crate) fn poll_write(
         &self,
         cx: &mut Context<'_>,
@@ -434,8 +434,8 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// After [`Session::finish`], or as [`Endpoint::finish`] does while the session is
-    /// live.
+    /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::finish`] does
+    /// while the session is live.
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
         self.with(|endpoint, clock, slot| {
             sender.check_unfinished();

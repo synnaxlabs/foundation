@@ -50,8 +50,9 @@ enum State {
     Accepting,
     /// The caller has the key.
     Open,
-    /// The caller has its [`Event::Closed`], or never had the key.
-    Ended,
+    /// The caller has its [`Event::Closed`] with `error`, or never had the key
+    /// (`None`).
+    Ended { error: Option<Error> },
 }
 
 impl Connection {
@@ -114,7 +115,7 @@ impl Connection {
             }
         }
         assert!(
-            !drained || matches!(self.state, State::Ended),
+            !drained || !self.live(),
             "invariant: noq-proto ends a connection before it drains"
         );
         drained
@@ -147,10 +148,9 @@ impl Connection {
                 let expected = match self.end() {
                     State::Dialing { expected } => Some(expected),
                     State::Open => None,
-                    State::Accepting | State::Ended => return,
+                    State::Accepting | State::Ended { .. } => return,
                 };
-                let error = error(reason, expected);
-                events.push_back(Event::Closed { key, error });
+                events.push_back(self.closed(error(reason, expected)));
             }
             noq_proto::Event::Stream(event) if self.live() => {
                 assert!(
@@ -192,7 +192,15 @@ impl Connection {
 
     /// Whether the connection has not ended.
     pub(super) fn live(&self) -> bool {
-        !matches!(self.state, State::Ended)
+        !matches!(self.state, State::Ended { .. })
+    }
+
+    /// The error of the connection's [`Event::Closed`], once the caller has it.
+    pub(super) fn error(&self) -> Option<&Error> {
+        match &self.state {
+            State::Ended { error } => error.as_ref(),
+            _ => None,
+        }
     }
 
     /// Whether the handshake finished and the connection has not ended.
@@ -211,14 +219,13 @@ impl Connection {
         let known = match self.end() {
             State::Dialing { .. } | State::Open => true,
             State::Accepting => false,
-            State::Ended => panic!("invariant: a fault is found on a live connection"),
+            State::Ended { .. } => {
+                panic!("invariant: a fault is found on a live connection")
+            }
         };
         let code = VarInt::from_u64(1 << 32).expect("invariant: 2^32 is a varint");
         self.inner.close(now, code, Bytes::from(reason.clone()));
-        known.then_some(Event::Closed {
-            key: self.key,
-            error: Error::Broken { reason },
-        })
+        known.then(|| self.closed(Error::Broken { reason }))
     }
 
     /// Closes the connection with `code`, and gives its [`Event::Closed`] unless it
@@ -232,13 +239,9 @@ impl Connection {
             State::Dialing { .. } | State::Open => {
                 self.inner
                     .close(now, VarInt::from_u32(code.0), Bytes::new());
-                let error = Error::Closed { code };
-                Some(Event::Closed {
-                    key: self.key,
-                    error,
-                })
+                Some(self.closed(Error::Closed { code }))
             }
-            State::Ended => None,
+            State::Ended { .. } => None,
             State::Accepting => {
                 panic!("invariant: the caller has no key for a connection it never got")
             }
@@ -249,7 +252,19 @@ impl Connection {
     /// gives the state it had.
     fn end(&mut self) -> State {
         self.datagrams = Received::default();
-        mem::replace(&mut self.state, State::Ended)
+        mem::replace(&mut self.state, State::Ended { error: None })
+    }
+
+    /// Keeps `error` for the stream calls, and gives the ended connection's
+    /// [`Event::Closed`].
+    fn closed(&mut self, error: Error) -> Event {
+        self.state = State::Ended {
+            error: Some(error.clone()),
+        };
+        Event::Closed {
+            key: self.key,
+            error,
+        }
     }
 
     /// The peer of a connected connection.

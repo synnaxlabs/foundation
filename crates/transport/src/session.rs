@@ -364,6 +364,32 @@ mod tests {
     }
 
     #[test]
+    fn a_close_ends_a_recv_that_waits_alone() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let received = incoming.receiver.recv().await;
+                assert_eq!(
+                    received.map(|m| m.map(|m| m.to_vec())),
+                    Ok(Some(b"a".to_vec()))
+                );
+                let closed = Error::PeerClosed { code: Code(8) };
+                assert_eq!(incoming.receiver.recv().await.map(|_| ()), Err(closed));
+            },
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                side.session.close(Code(8));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_close_ends_an_accept_that_waits_alone() {
         let (mut sim, ..) = testing::sessions(
             0,

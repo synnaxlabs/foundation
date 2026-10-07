@@ -134,6 +134,7 @@ impl Sender {
     /// }
     /// ```
     pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
+        self.stream.as_mut().ok_or(CANCELLED)?;
         drop(message);
         todo!("#68")
     }
@@ -634,6 +635,8 @@ mod tests {
                 // The peer's window holds at most 17 such messages.
                 assert!((1..=17).contains(&sent), "{sent}");
                 assert_eq!(sender.send(side.block(b"a")).await, Err(CANCELLED));
+                let tried = sender.try_send(side.block(b"a")).map(|_| ());
+                assert_eq!(tried, Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
@@ -779,6 +782,53 @@ mod tests {
                 let _incoming = side.session.accept().await.expect("a stream");
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 side.session.close(Code(5));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_finish_right_after_this_side_closes_gives_the_close() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                side.session.close(Code(5));
+                let closed = Err(Error::Closed { code: Code(5) });
+                assert_eq!(sender.finish(), closed);
+                assert_eq!(sender.finish(), closed);
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn each_finish_after_the_peer_stopped_the_stream_gives_the_stop() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                let stopped = Err(Error::Stopped { code: Code(3) });
+                assert_eq!(sender.finish(), stopped);
+                assert_eq!(sender.finish(), stopped);
+                side.session.close(Code(5));
+            },
+            |side| async move {
+                let incoming = side.session.accept().await.expect("a stream");
+                incoming.receiver.stop(Code(3));
+                let closed = Error::PeerClosed { code: Code(5) };
+                assert_eq!(side.session.closed().await, closed);
             },
         );
         assert_eq!(sim.run(), Ok(()));
