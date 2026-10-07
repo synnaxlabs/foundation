@@ -55,7 +55,7 @@ pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, Member> {
 }
 
 /// A pool of 4 MiB.
-pub(crate) fn pool() -> Rc<Pool> {
+pub(crate) fn create_pool() -> Rc<Pool> {
     let config = block::Config { budget: 4 << 20 };
     let memory = block::Heap::new(config.reservation());
     Rc::new(Pool::new(config, memory))

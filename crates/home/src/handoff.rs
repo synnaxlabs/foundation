@@ -99,7 +99,7 @@ mod tests {
     use types::frame::key_set::Group;
 
     use super::*;
-    use crate::common::{interner, key, pool};
+    use crate::common::{create_pool, interner, key};
 
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {
@@ -126,7 +126,7 @@ mod tests {
             let stored_at = Stamp::from_nanos(9);
 
             let entry = entry(
-                &pool(4096),
+                &create_pool(4096),
                 Handoff { to: Some(&holder) },
                 &index(),
                 12,
@@ -148,7 +148,7 @@ mod tests {
         #[test]
         fn has_no_part_when_no_writer_holds_control() {
             let entry = entry(
-                &pool(4096),
+                &create_pool(4096),
                 Handoff { to: None },
                 &index(),
                 12,
@@ -167,7 +167,7 @@ mod tests {
         fn writes_the_authority_then_the_subject() {
             let holder = writer("plant.pump-1", 7);
 
-            let body = body(&pool(4096), Handoff { to: Some(&holder) })
+            let body = body(&create_pool(4096), Handoff { to: Some(&holder) })
                 .expect("room")
                 .expect("a holder");
 
@@ -178,7 +178,7 @@ mod tests {
         fn writes_the_largest_body_for_the_longest_subject() {
             let holder = writer(&"b".repeat(Name::MAX_BYTES), 7);
 
-            let body = body(&pool(4096), Handoff { to: Some(&holder) })
+            let body = body(&create_pool(4096), Handoff { to: Some(&holder) })
                 .expect("room")
                 .expect("a holder");
 
@@ -187,7 +187,7 @@ mod tests {
 
         #[test]
         fn takes_no_block_when_no_writer_holds_control() {
-            let pool = pool(4096);
+            let pool = create_pool(4096);
 
             let body = body(&pool, Handoff { to: None }).expect("no block");
 
@@ -197,7 +197,7 @@ mod tests {
 
         #[test]
         fn returns_the_pool_error_when_the_pool_is_full() {
-            let pool = pool(4096);
+            let pool = create_pool(4096);
             let mut held = Vec::new();
             while let Ok(block) = pool.alloc(4) {
                 held.push(block);
@@ -274,7 +274,7 @@ mod tests {
             ))
         ) {
             let holder = holder.map(|(subject, authority)| writer(&subject, authority));
-            let pool = pool(4096);
+            let pool = create_pool(4096);
 
             let body = body(&pool, Handoff { to: holder.as_ref() }).expect("room");
             let bytes = body.as_deref().unwrap_or_default();
