@@ -141,7 +141,6 @@ mod tests {
     use types::node::PrivateKey;
     use types::time::Span;
 
-    use super::STAGGER;
     use crate::testing::{self, IDLE, address, nodes, spans};
     use crate::tls::public;
     use crate::{Address, Code, Error, Peer};
@@ -227,8 +226,8 @@ mod tests {
             Address::Udp(address(&silent)),
             Address::Udp(address(&server)),
         ];
-        let to = Span::from_nanos(STAGGER.nanos() + 5 * Span::MILLISECOND.nanos());
-        dial(&client, addresses, STAGGER, to);
+        let ms = Span::MILLISECOND;
+        dial(&client, addresses, spans(ms, 250), spans(ms, 255));
         assert_eq!(sim.run(), Ok(()));
     }
 
