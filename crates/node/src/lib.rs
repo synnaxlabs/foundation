@@ -119,14 +119,20 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// If a shard's part of the budget needs more address space than a `usize` holds.
+    /// If a shard's part of the budget needs more address space than a `usize` holds,
+    /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let budget =
             u64::try_from(config.budget).expect("invariant: a usize fits a u64");
         let cores = config.shards.cores().get();
         match parts(budget, config.disk, cores) {
-            Ok(parts) => Self::spawn(config, parts),
+            Ok(parts) => {
+                let Ok(count) = u32::try_from(cores) else {
+                    panic!("the host has {cores} cores, more than a node numbers");
+                };
+                Self::spawn(config, parts.into_iter().zip(0..count))
+            }
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
@@ -145,10 +151,10 @@ impl Node {
         }
     }
 
-    /// Starts the shards of `config`, each with its part in `parts`.
+    /// Starts the shards of `config`, each with its part and its number in `parts`.
     fn spawn<M: block::Memory + 'static>(
         config: Config<M>,
-        parts: Vec<(block::Config, buffer::Layout)>,
+        parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
         let Config {
             shards,
@@ -162,15 +168,14 @@ impl Node {
         } = config;
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
-        let cores = shards.cores().get();
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
         // Shard 0 runs the mesh clock, and gives the first interner once it has
-        // claimed the data directory.
-        let mut first = Some((mesh, wall, give));
+        // claimed the data directory for the node's cores.
+        let mut first = Some((mesh, wall, give, shards.cores().get()));
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
-        for (core, (config, layout)) in parts.into_iter().enumerate() {
+        for (core, ((config, layout), number)) in parts.enumerate() {
             // A shard that does not start drops `give`, so `interner` gives `None`.
             let (give, take) = handoff::pair();
             let take = std::mem::replace(&mut interner, take);
@@ -189,7 +194,7 @@ impl Node {
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
             let open = Open {
-                core,
+                shard: number,
                 take,
                 give,
                 monotonic: monotonic.clone(),
@@ -203,7 +208,7 @@ impl Node {
             let make = files();
             let main = move |tasks: env::tasks::Tasks| {
                 let files = make();
-                if let Some((mesh, wall, give)) = first {
+                if let Some((mesh, wall, give, cores)) = first {
                     tasks.spawn(async { mesh.run(wall).await });
                     tasks.spawn(open.claim(files.clone(), cores, give));
                 }
@@ -280,7 +285,8 @@ fn error(
 /// it. The shards open one after another, in order of core, because each open
 /// assigns slots in the node's one interner.
 struct Open {
-    core: usize,
+    /// The shard's number on its node: its core.
+    shard: u32,
     take: Take<Interner>,
     give: Give<Interner>,
     monotonic: env::clock::Clock,
@@ -371,9 +377,10 @@ impl Open {
         if self.stop.raised() {
             return None;
         }
+        let core = usize::try_from(self.shard).expect("invariant: a u32 fits a usize");
         let config = buffer::Config {
             files,
-            dir: directory::shard(self.core),
+            dir: directory::shard(core),
             pool,
             clock: self.monotonic,
             tasks,
@@ -385,18 +392,14 @@ impl Open {
             Ok(buffer) => {
                 self.give.give(interner);
                 Some(home::Shard::new(home::Config {
-                    shard: u32::try_from(self.core)
-                        .expect("invariant: a core fits a u32"),
+                    shard: self.shard,
                     buffer,
                     clock: self.clock,
                     limits: LIMITS,
                 }))
             }
             Err(error) => {
-                let error = Error::Buffer {
-                    core: self.core,
-                    error,
-                };
+                let error = Error::Buffer { core, error };
                 self.failed
                     .set(error)
                     .expect("invariant: a shard opens its buffer once");

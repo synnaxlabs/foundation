@@ -2788,6 +2788,8 @@ How to read this record:
   resets to 2000-01-01, and refuses backfill from before 2000; ahead 10 s, ten times
   the MVP time error target of 1 s. A field of `node::Config` lost, because a setting
   comes from the spec (NODE SETTINGS), not from the caller of `Node::start`.
+  Decided by the architect on #1287:
+  https://github.com/synnaxlabs/foundation/pull/1287#issuecomment-6034425115.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

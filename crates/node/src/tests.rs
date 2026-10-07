@@ -1320,7 +1320,7 @@ mod home {
     use crate::stop::Stop;
     use crate::{BODY_MAX, Open, handoff};
 
-    /// What the home that `Open::run` gives for shard `core` of `host` does: the key
+    /// What the home that `Open::run` gives for shard `shard` of `host` does: the key
     /// of a writer of one index, at `slot`, and the outcomes of a frame of one sample
     /// at each stamp that `stamps` gives for mesh time `now`.
     struct Written {
@@ -1333,7 +1333,7 @@ mod home {
     fn written(
         sim: &mut sim::Sim,
         host: &sim::node::Node,
-        core: usize,
+        shard: u32,
         stamps: fn(Stamp) -> Vec<Stamp>,
     ) -> Written {
         sim.run_on(host, move |host, tasks| async move {
@@ -1347,7 +1347,7 @@ mod home {
             let memory = block::Heap::new(config.reservation());
             let pool = block::Pool::new(config, memory);
             let open = Open {
-                core,
+                shard,
                 take,
                 give,
                 monotonic: host.clock(),
@@ -1368,14 +1368,7 @@ mod home {
                 data: &[(values, Type::Scalar(Scalar::I64))],
             }]);
             home.carry(slot);
-            let now = loop {
-                if let Some(mesh) = clock.now().mesh {
-                    let (earliest, latest) =
-                        (mesh.earliest.nanos(), mesh.latest.nanos());
-                    break Stamp::from_nanos(earliest.midpoint(latest));
-                }
-                host.clock().sleep(Span::MILLISECOND).await;
-            };
+            let now = mesh_now(&clock, &host.clock()).await;
             let key = home
                 .open_writer(writer::Writer {
                     subject: "a".parse().expect("a name"),
@@ -1406,6 +1399,17 @@ mod home {
             }
         })
         .expect("the run ends")
+    }
+
+    /// The midpoint of mesh time, once `clock` has one.
+    async fn mesh_now(clock: &clock::Reader, monotonic: &env::clock::Clock) -> Stamp {
+        loop {
+            if let Some(mesh) = clock.now().mesh {
+                let (earliest, latest) = (mesh.earliest.nanos(), mesh.latest.nanos());
+                return Stamp::from_nanos(earliest.midpoint(latest));
+            }
+            monotonic.sleep(Span::MILLISECOND).await;
+        }
     }
 
     /// Each shard's home numbers its writers with the shard's core, and accepts
