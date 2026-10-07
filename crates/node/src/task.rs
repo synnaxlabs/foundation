@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use hub::Hub;
 
-use crate::scope::{Boxed, Scope};
+use crate::scope::Scope;
 
 /// A task of [`crate::Node::spawn`], with its future boxed.
-pub(crate) type Task = Box<dyn FnOnce(Hub) -> Boxed + Send>;
+pub(crate) type Task = Box<dyn FnOnce(Hub) -> env::tasks::Task + Send>;
 
 /// The two ends of the queue of tasks for shard 0. A task is pushed once, never on a
 /// frame's path, so a mutex is fine.
