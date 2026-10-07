@@ -741,12 +741,10 @@ pub(super) mod tests {
         drained(readers);
     }
 
-    /// Makes each call on the closed session `key`. Asserts that the calls make no
-    /// record and do not change the floor, the deadline, or whether a frame is
-    /// pending. It drops the records made before the calls. The caller checks its
-    /// open sessions after it.
+    /// Makes each call on the closed session `key`, and asserts that they do not
+    /// change the floor, the deadline, or whether a frame is pending. The caller
+    /// checks its records and open sessions after it.
     pub(super) fn dropped(readers: &mut Readers, key: Key) {
-        drained(readers);
         let before = (readers.floor(), readers.deadline(), readers.pending());
         if let Key::Complete(key) = key {
             readers.grant(key, u64::MAX);
@@ -757,7 +755,6 @@ pub(super) mod tests {
         if let Key::Complete(key) = key {
             readers.close_named(key, at(i64::MAX));
         }
-        assert_eq!(drained(readers), []);
         assert_eq!(
             (readers.floor(), readers.deadline(), readers.pending()),
             before
@@ -1007,9 +1004,23 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(2)), 0).key;
             readers.close_named(key, at(1));
+            drained(&mut readers);
             dropped(&mut readers, key.into());
+            assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.floor(), Some(live(2)));
             assert_eq!(readers.deadline(), Some(at(11)));
+        }
+
+        #[test]
+        fn after_a_close_leaves_an_open_reader_with_nothing_to_flush() {
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(2)), 0).key;
+            readers.close_named(old, at(1));
+            readers.open(named("b", 10), Start::At(live(3)), 0);
+            drained(&mut readers);
+            dropped(&mut readers, old.into());
+            readers.flush();
+            assert_eq!(drained(&mut readers), []);
         }
 
         #[test]
@@ -1019,7 +1030,9 @@ pub(super) mod tests {
             let old = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
             let new = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
             readers.queue(&frames.frame(1), 0..1);
+            drained(&mut readers);
             dropped(&mut readers, old.into());
+            assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.release(1), [new]);
             assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
             assert_eq!(readers.ack(new, live(1)), Ok(()));
@@ -1033,7 +1046,9 @@ pub(super) mod tests {
             let name = "a".parse().expect("valid name");
             let new = readers.open_named_latest(name, at(1)).key;
             assert_eq!(readers.put(frames.frame(1)), [new]);
+            drained(&mut readers);
             dropped(&mut readers, old.into());
+            assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
         }
 
@@ -2284,8 +2299,8 @@ pub(super) mod tests {
                 readers.advance(at(now));
                 model.forget(now);
                 apply(&mut readers, &mut model, input, now);
-                records.extend(readers.records());
                 dropped_closed(&mut readers, &model);
+                records.extend(readers.records());
             }
             assert_eq!(readers.floor(), model.floor());
             assert_eq!(readers.deadline(), model.deadline());
