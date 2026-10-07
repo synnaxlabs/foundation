@@ -23,6 +23,14 @@ fn times(store: &Store, measurement: &str, tags: &[(&str, &str)]) -> Vec<i64> {
         .collect()
 }
 
+/// The fields as a map that owns its keys.
+fn owned(fields: Fields<'_>) -> BTreeMap<String, Field> {
+    fields
+        .iter()
+        .map(|(key, field)| (key.to_owned(), field))
+        .collect()
+}
+
 /// Each point of `measurement`, with its tags and fields as maps.
 fn read(
     store: &Store,
@@ -30,14 +38,7 @@ fn read(
 ) -> Vec<(Stamp, Tags, BTreeMap<String, Field>)> {
     store
         .points(measurement, &[])
-        .map(|point| {
-            let fields = point
-                .fields
-                .iter()
-                .map(|(key, field)| (key.to_owned(), field))
-                .collect();
-            (point.time, point.tags.clone(), fields)
-        })
+        .map(|point| (point.time, point.tags.clone(), owned(point.fields)))
         .collect()
 }
 
@@ -72,7 +73,7 @@ fn a_later_write_replaces_only_the_fields_it_sets() {
     let store = stored("m v=1 10\nm w=2i 10\nm v=3 10\n");
     let point = store.points("m", &[]).next().unwrap();
     assert_eq!(
-        point.fields,
+        owned(point.fields),
         map(&[("v", Field::Float(3.0)), ("w", Field::Integer(2))])
     );
 }
@@ -156,7 +157,10 @@ fn stores_a_leading_tab_and_a_tab_in_a_string() {
     let store = stored("\tm v=1 10\nm s=\"a\tb\" 20\n");
     assert_eq!(times(&store, "m", &[]), [10, 20]);
     let point = store.points("m", &[]).last().unwrap();
-    assert_eq!(point.fields, map(&[("s", Field::String("a\tb".into()))]));
+    assert_eq!(
+        owned(point.fields),
+        map(&[("s", Field::String("a\tb".into()))])
+    );
 }
 
 #[test]
@@ -195,7 +199,7 @@ fn stores_a_backslash_or_nul_that_the_writer_refuses() {
         ])
     );
     assert_eq!(
-        point.fields,
+        owned(point.fields),
         map(&[("v\\w", Field::Float(1.0)), ("x\0y", Field::Float(2.0))])
     );
 }
@@ -695,8 +699,6 @@ fn fields_are_equal_when_they_set_the_same_keys_to_equal_values() {
     assert_eq!(fields[0], fields[1]);
     assert_ne!(fields[0], fields[2]);
     assert_ne!(fields[0], fields[3]);
-    assert_ne!(fields[0], map(&[("v", Field::Float(2.0))]));
-    assert_ne!(fields[0], map(&[("w", Field::Float(1.0))]));
 }
 
 #[test]

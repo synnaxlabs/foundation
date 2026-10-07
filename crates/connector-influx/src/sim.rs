@@ -434,7 +434,7 @@ pub struct Point<'a> {
 }
 
 /// The fields that one stored point sets, by key. Two are equal when they set the same
-/// keys to equal values.
+/// keys to equal values. `Debug` prints them as a map.
 #[derive(Clone, Copy)]
 pub struct Fields<'a> {
     chunk: &'a Chunk,
@@ -442,13 +442,14 @@ pub struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
-    /// The value of `key`, or `None` when the point does not set it.
+    /// The value of `key`, or `None` when the point does not set it. A string value is
+    /// a copy.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Field> {
         self.chunk.columns.get(key)?.get(self.at)
     }
 
-    /// Each field that the point sets, in key order.
+    /// Each field that the point sets, in key order. Each string value is a copy.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, Field)> + 'a {
         let at = self.at;
         self.chunk
@@ -461,14 +462,6 @@ impl<'a> Fields<'a> {
 impl PartialEq for Fields<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.iter().eq(other.iter())
-    }
-}
-
-impl PartialEq<BTreeMap<String, Field>> for Fields<'_> {
-    fn eq(&self, other: &BTreeMap<String, Field>) -> bool {
-        self.iter().eq(other
-            .iter()
-            .map(|(key, field)| (key.as_str(), field.clone())))
     }
 }
 
