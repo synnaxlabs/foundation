@@ -323,23 +323,27 @@ How to read this record:
   at its third commit. A commit of twice the commits before it is not refused after
   commits of 256 records of one block, and is refused after commits of 257. After
   commits of 64 records of four blocks, which are a quarter of the area, a commit of 128
-  is not refused, and it is refused when the commit two before it skipped 3 blocks at a
-  wrap. With one record in each commit, three records and the blocks of one wrap skip
-  must fit in the area. Four of the largest record less one block always hold them, and
-  a smaller ring can refuse a live write under a steady load: with a largest record of
-  four blocks, commits of 2, 4, 4, and 4 blocks get `Full` on a ring of 13 or 14 blocks.
-  `Layout::new` accepts two of the largest record today, and #1276 sets the minimum to
-  four before the trim turns on. That minimum is for one record in each commit: on a
-  ring of 16 blocks, a steady load of one record of four blocks and one of two in each
-  commit is refused at its third commit. A trim moves the tail to the boundary after a
-  record of any kind: a wrap record and a restart record also end where a tail can go.
-  Steady pressure in the ruling means a load whose commits fit the area. The ring size
-  for a real load is the sizing of `node` (SHARD DISK), not the minimum of
-  `Layout::new`. Decided by the architect: the headroom (#1222,
+  and the commit of 64 after it are not refused when no wrap skips a block from the
+  commit two before the 128 to the commit after it. When a wrap skips 3 blocks in one of
+  those four, the 128 or the commit after it is refused. With one record in each commit,
+  three records and the blocks of one wrap skip must fit in the area. Four of the
+  largest record less one block always hold them, and a smaller ring can refuse a live
+  write under a steady load: with a largest record of four blocks, commits of 2, 4, 4,
+  and 4 blocks get `Full` on a ring of 13 or 14 blocks. `Layout::new` accepts two of the
+  largest record today, and #1276 sets the minimum to four before the trim turns on.
+  That minimum is for one record in each commit: on a ring of 16 blocks, a steady load
+  of one record of four blocks and one of two in each commit is refused at its third
+  commit. A trim moves the tail to the boundary after a record of any kind: a wrap
+  record and a restart record also end where a tail can go. Steady pressure in the
+  ruling means a load whose commits fit the area. The ring size for a real load is the
+  sizing of `node` (SHARD DISK), not the minimum of `Layout::new`. Decided by the
+  architect: the headroom (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557), the area
   that the bound needs (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034545693,
-  2026-10-07T08:57:53Z), and the boundaries and the deferral of the minimum to #1276
+  2026-10-07T08:57:53Z, and with the skip in the `4c` case
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034791932,
+  2026-10-07T09:12:31Z), and the boundaries and the deferral of the minimum to #1276
   (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the

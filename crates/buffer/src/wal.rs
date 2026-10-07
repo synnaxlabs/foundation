@@ -1912,23 +1912,27 @@ mod tests {
             assert_eq!(doubled(257), Some((400, full)));
         }
 
-        /// The ring must also hold the blocks that a wrap skips in those commits.
+        /// The ring must also hold the blocks that a wrap skips in those commits. The
+        /// first record takes one block, so only the first wrap skips: 3 blocks. With
+        /// 1 to 5 commits before the doubled one, the skip is in the commit after it,
+        /// in it (2 and 3), in the commit before it, or in the commit two before it.
         #[test]
         fn a_ring_that_holds_three_commits_and_no_wrap_skip_refuses_a_record() {
             let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
-            let even = || vec![BODY_MAX; 64];
-            let skipped = [vec![8], vec![BODY_MAX; 63], vec![8; 3]].concat();
-            let doubled = |before: Vec<usize>| {
-                let ends = [before, even(), vec![BODY_MAX; 128], even()];
-                let commits = iter::repeat_n(even(), 403).chain(ends);
+            let doubled = |before: usize| {
+                let ends = [vec![BODY_MAX; 128], vec![BODY_MAX; 64]];
+                let commits = iter::repeat_n(vec![BODY_MAX; 64], before).chain(ends);
                 steady(layout, commits.map(|lens| (lens, vec![])))
             };
-            assert_eq!(doubled(even()), None);
-            let full = Full {
-                needed: 16384,
-                free: 4096,
+            let got: Vec<_> = (0..=7).map(doubled).collect();
+            let full = |commit| {
+                let (needed, free) = (16384, 4096);
+                Some((commit, Full { needed, free }))
             };
-            assert_eq!(doubled(skipped), Some((405, full)));
+            let (needed, free) = (28672, 16384);
+            let first = Some((2, Full { needed, free }));
+            let skipped = [first, first, full(3), full(4), full(5)];
+            assert_eq!(got, [vec![None], skipped.to_vec(), vec![None; 2]].concat());
         }
 
         /// Four of the largest record hold three commits of one record, not of two.
