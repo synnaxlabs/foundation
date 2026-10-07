@@ -196,7 +196,7 @@ pub(crate) fn record(id: u8, options: Options) -> Change {
     }
 }
 
-/// The join of node `id` with `name`, which ticket `ticket` admits.
+/// The join of node `id` with the name `name_text`, which ticket `ticket_id` admits.
 pub(crate) fn join(ticket_id: u8, id: u8, name_text: &str) -> Join {
     let card = signed(id, name_text);
     Join {
