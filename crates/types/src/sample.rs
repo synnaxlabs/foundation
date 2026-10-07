@@ -218,8 +218,8 @@ impl Error {
     pub const fn fix(self) -> &'static str {
         match self {
             Self::Syntax => {
-                "Use one of the forms that the message names, with exact case and a space \
-                 only after the comma of a list"
+                "Use one of the forms that the message names, with exact case and a \
+                 space only after the comma of a list"
             }
             Self::Element => {
                 "Use a scalar as the element, such as f32[3] or list<u8, 16>"
@@ -241,8 +241,8 @@ impl fmt::Display for Error {
                  bytes"
             }
             Self::Element => {
-                "expected a scalar element: bool, i8, i16, i32, i64, u8, u16, u32, u64, \
-                 f32, f64, stamp, span, or uuid"
+                "expected a scalar element: bool, i8, i16, i32, i64, u8, u16, u32, \
+                 u64, f32, f64, stamp, span, or uuid"
             }
             Self::Count => "expected a count of 0 to 4294967295, with no leading zero",
             Self::Lengths => "expected one array length",
@@ -358,13 +358,13 @@ mod tests {
                 Error::Syntax,
                 "expected a sample type such as f64, f32[3], list<u8, 16>, string, or \
                  bytes",
-                "Use one of the forms that the message names, with exact case and a space \
-                 only after the comma of a list",
+                "Use one of the forms that the message names, with exact case and a \
+                 space only after the comma of a list",
             ),
             (
                 Error::Element,
-                "expected a scalar element: bool, i8, i16, i32, i64, u8, u16, u32, u64, \
-                 f32, f64, stamp, span, or uuid",
+                "expected a scalar element: bool, i8, i16, i32, i64, u8, u16, u32, \
+                 u64, f32, f64, stamp, span, or uuid",
                 "Use a scalar as the element, such as f32[3] or list<u8, 16>",
             ),
             (
