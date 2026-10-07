@@ -518,10 +518,11 @@ struct Group {
 impl Group {
     // The public key of `key` in the applied state, else in the joins of the log
     // as `raft` holds it. When those name two public keys, the joins below the
-    // first configuration entry that names `key` in either half decide: the leader
+    // first configuration entry whose incoming half names `key` decide: the leader
     // applied the join that made `key` a voter before it wrote that entry, so that
     // join is below it, and a later join can be a forgery. Two keys there too give
-    // none until the apply decides.
+    // none until the apply decides. An outgoing half repeats an earlier incoming
+    // half, so it names no node first.
     fn public_key(&self, key: node::Key) -> Option<Known> {
         if let Some(member) = self.state.member(key) {
             return Some(Known::Applied(member.public_key()));
@@ -746,7 +747,7 @@ fn holds(entries: &[Entry], at: Position) -> bool {
 enum Written {
     // The node key and public key of a join.
     Join(node::Key, PublicKey),
-    // The nodes that a configuration entry names, in either half.
+    // The nodes in the incoming half of a configuration entry.
     Named(BTreeSet<node::Key>),
 }
 
@@ -754,10 +755,7 @@ enum Written {
 fn written(entries: &[Entry]) -> impl Iterator<Item = (u64, Written)> {
     entries.iter().filter_map(|entry| {
         let written = match &entry.data {
-            Data::Voters(change) => {
-                let Voters { incoming, outgoing } = &change.voters;
-                Written::Named(incoming.iter().chain(outgoing).copied().collect())
-            }
+            Data::Voters(change) => Written::Named(change.voters.incoming.clone()),
             Data::Bytes(bytes) => {
                 let Ok(Change::Join(join)) = Change::decode(bytes) else {
                     return None;

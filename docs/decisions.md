@@ -2207,8 +2207,8 @@ How to read this record:
   (decided by `laptop.architect`, 2026-10-07T20:37:34Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046390090).
   When the unapplied joins of a signer name two keys, its key is the key of the
-  joins below the first configuration entry, in the log as `raft` holds it, that
-  names the signer in either half, when those joins name one key, else none: the
+  joins below the first configuration entry, in the log as `raft` holds it, whose
+  incoming half names the signer, when those joins name one key, else none: the
   leader applied the real join before it wrote that entry, so Log Matching puts the
   real join below it in each log, and a join above it can be a forgery. The sender
   check and the claim check both use this lookup (decided by `laptop.director`,
@@ -2216,9 +2216,16 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046503082.
   Supersedes the two-keys sentence of
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038611630).
-  Triggers: a change kind that removes a member states this rule again; the test of
-  a log that holds the two joins and no configuration entry that names the signer,
-  with the entry in the chain only, gets its own decision if it fails. Two joins
+  The incoming half is enough: `raft` makes the outgoing half of an entry from the
+  incoming half of the configuration in force, so a signer that only an outgoing
+  half names is in the incoming half of an earlier entry, or of the applied
+  configuration, and then its join is applied (decided by `laptop.architect`,
+  2026-10-07T20:49:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046585323).
+  Triggers: a change kind that removes a member, or a change to how `raft` makes
+  the outgoing half, states this rule again; the test of a log that holds the two
+  joins and no configuration entry that names the signer, with the entry in the
+  chain only, gets its own decision if it fails. Two joins
   below that entry still strand a follower under a leader that the real node
   elected, until #336 builds the voter that checks a join before it stamps it. A
   hard proof that lost such a claim can be no quorum at a node with a newer
