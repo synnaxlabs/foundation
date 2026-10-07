@@ -133,7 +133,7 @@ impl listener::Driver for Listener {
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         self.owner.check(&self.node);
         let (key, pair) =
-            ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
+            ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())))?;
         let stream = Stream::new(self.node.clone(), key, pair, self.owner.life);
         Poll::Ready(Ok(Box::new(stream)))
     }
