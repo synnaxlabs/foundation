@@ -1261,9 +1261,10 @@ impl Streams {
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
             });
         }
-        // The reader takes no bytes while it waits for room or a block, so only this
-        // finds a reset.
-        if (missed || receiving.waits(claim))
+        // The reader takes no bytes while it waits for room or a block, or for an
+        // empty message, so only this finds a reset.
+        let empty = matches!(&result, Ok(Poll::Ready(Some(block))) if block.is_empty());
+        if (missed || empty || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
             result = Err(reset_error(error));
@@ -3673,6 +3674,22 @@ mod tests {
             pair.server.endpoint.close(now, server, Code(9));
             let read = next(&mut pair.server, now, &mut receiver);
             assert_eq!(read, Err(Error::Closed { code: Code(9) }));
+        });
+    }
+
+    #[test]
+    fn reset_by_the_peer_fail_the_read_of_an_empty_message_no_read_took() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let id = raw(pair.client.connection(), Dir::Uni, &[2, 0], false);
+            pair.run(RUN);
+            let mut receiver = accept(&mut pair.server).receiver;
+            let reset = pair.client.connection().send_stream(id).reset(7u32.into());
+            reset.expect("reset");
+            pair.run(RUN);
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(7) }));
         });
     }
 
