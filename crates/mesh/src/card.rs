@@ -564,4 +564,29 @@ mod tests {
         };
         assert_eq!(decoded(&encoded(&ports)), Some(ports), "ports, own relay");
     }
+
+    #[test]
+    fn a_card_at_the_edges_of_name_and_ip_round_trips() {
+        let names = [
+            "a".to_string(),
+            "a".repeat(255),
+            format!("@{}", "b".repeat(254)),
+            vec!["c"; 128].join("."),
+        ];
+        for name in names {
+            let card = Card {
+                name: name.parse().unwrap(),
+                ..fixed()
+            };
+            assert_eq!(decoded(&encoded(&card)), Some(card), "{name}");
+        }
+        let ips = Card {
+            addresses: ["255.255.255.255:1", "[::ffff:1.2.3.4]:1", "[::]:1"]
+                .into_iter()
+                .map(|at| Address::Udp(at.parse().unwrap()))
+                .collect(),
+            ..fixed()
+        };
+        assert_eq!(decoded(&encoded(&ips)), Some(ips), "edge IPs");
+    }
 }
