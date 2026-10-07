@@ -90,7 +90,7 @@ impl Shard {
         block.freeze()
     }
 
-    /// Makes the ring file with `len` zero bytes and no header, when none is there.
+    /// Makes the ring file with `len` zero bytes and no header, when no file is there.
     async fn create_zeroed(&self, len: u64) {
         self.memory
             .files()
