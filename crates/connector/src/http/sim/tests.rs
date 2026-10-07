@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use ::sim::{Sim, node};
 use bytes::Bytes;
-use env::net::tcp;
+use env::net::{self, tcp};
 use env::thread::Handle;
 use http::{Method, Request, Response, StatusCode};
 use types::time::Span;
@@ -37,7 +37,10 @@ enum End {
 struct Network {
     sim: Sim,
     client: node::Node,
+    server: node::Node,
     remote: SocketAddr,
+    /// The error that `serve` gave, once it ends.
+    failed: Arc<Mutex<Option<net::Error>>>,
     /// Each request that reached the answer, as the answer echoes it.
     seen: Arc<Mutex<Vec<String>>>,
     handles: Vec<Handle>,
@@ -84,17 +87,23 @@ impl Network {
             slot.lock().expect("no panic under the lock").push(text);
             response
         };
+        let failed = Arc::new(Mutex::new(None));
+        let ended = Arc::clone(&failed);
         let handle = server
             .shards()
             .start(shard("server"), move |tasks| async move {
                 let error = serve(listener, tasks, answer).await;
-                panic!("the listener failed: {error}");
+                *ended.lock().expect("no panic under the lock") = Some(error);
+                // The streams it accepted end when this shard ends.
+                std::future::pending::<()>().await;
             })
             .expect("the shard starts");
         Self {
             sim,
             client,
+            server,
             remote,
+            failed,
             seen,
             handles: vec![handle],
         }
@@ -423,4 +432,63 @@ fn ends_the_stream_of_an_http2_preface_with_no_answer() {
         End::Failed("10.0.0.2:8086 reset the stream".into())
     );
     assert_eq!(network.seen(), [""; 0]);
+}
+
+#[test]
+fn gives_the_error_of_a_failed_accept_and_serves_the_streams_it_accepted() {
+    let mut network = Network::new();
+    let (net, clock, remote) =
+        (network.client.net(), network.client.clock(), network.remote);
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let slot = Arc::clone(&out);
+    let handle = network
+        .client
+        .shards()
+        .start(shard("client"), move |tasks| async move {
+            let client = Client::new(Config {
+                net: net.clone(),
+                clock: clock.clone(),
+                tasks,
+                timeout: TIMEOUT,
+                body_max: 1024,
+            });
+            for path in ["/before", "/after"] {
+                let request = Request::post(format!("http://{remote}{path}"))
+                    .body(Bytes::new())
+                    .expect("a valid request");
+                let response = client.send(request).await.expect("an answer");
+                slot.lock()
+                    .expect("no panic under the lock")
+                    .push(response.status());
+                clock.sleep(Span::SECOND).await;
+            }
+            let config = tcp::Config {
+                remote,
+                options: super::super::OPTIONS,
+            };
+            let refused = net.connect(&config).await.map(drop);
+            assert_eq!(refused, Err(net::Error::Refused { remote }));
+        })
+        .expect("the shard starts");
+    network.handles.push(handle);
+    network
+        .sim
+        .run_for(Span::from_nanos(500_000_000))
+        .expect("the run goes on");
+    network.server.fail_listener(remote);
+    network.sim.run_for(Span::MINUTE).expect("the run ends");
+    let failed = network
+        .failed
+        .lock()
+        .expect("no panic under the lock")
+        .take();
+    assert_eq!(failed, Some(net::Error::Io { code: 5 }));
+    assert_eq!(
+        *out.lock().expect("no panic under the lock"),
+        [StatusCode::OK; 2]
+    );
+    assert_eq!(
+        network.seen(),
+        ["POST /before HTTP/1.1 ", "POST /after HTTP/1.1 "]
+    );
 }
