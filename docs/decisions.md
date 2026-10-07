@@ -1842,7 +1842,7 @@ How to read this record:
   incoming keys, the outgoing keys (each an 8-byte count, then the keys in rising
   order), the votes in the proof form, and the leader's signature (64 bytes). No
   form holds a grant or a change with no signature: encode panics on one, because
-  the caller signs before each write and send. `mesh::grant` signs each claim with
+  the caller signs before each write and send. `mesh::claim` signs each claim with
   the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
   endian), and the candidate (16 bytes, little endian). A change signs
@@ -1939,7 +1939,7 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  (`Error::NotVoter`), and each claim holds (`Error::Claim`). So a node with a
   configuration refuses a leader that is not a voter of that configuration, when a
   change that the node does not hold made that leader a voter. The node does not get the
   log from that leader (a known defect, #1096, that #1107 fixes). A node with no

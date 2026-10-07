@@ -19,8 +19,8 @@ use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
+use crate::claim::{self, Signer};
 use crate::error::{Error, Stopped};
-use crate::grant::{self, Signer};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
@@ -186,7 +186,7 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
     ///   voter of this node's configuration.
-    /// - [`Error::Grant`] when a claim in the message does not hold.
+    /// - [`Error::Claim`] when a claim in the message does not hold.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
@@ -210,7 +210,7 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
-        grant::check(&message, public_key)?;
+        claim::check(&message, public_key)?;
         group.raft.step(message)?;
         group.wake();
         Ok(())
@@ -1742,7 +1742,7 @@ mod tests {
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 let proof = heartbeat.proof.as_mut().unwrap();
                 proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
-                let forged = Error::Grant(grant::Error::Forged { signer: key(3) });
+                let forged = Error::Claim(claim::Error::Forged { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(forged.clone()));
                 assert_eq!(
                     forged.to_string(),
@@ -1759,7 +1759,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                let refused = Error::Grant(grant::Error::NotMember { signer: key(3) });
+                let refused = Error::Claim(claim::Error::NotMember { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
             });
         }
@@ -1779,7 +1779,7 @@ mod tests {
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
                 let not_voter = Error::NotVoter { from: key(3) };
                 assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
-                let grant = Error::Grant(grant::Error::Forged { signer: key(1) });
+                let grant = Error::Claim(claim::Error::Forged { signer: key(1) });
                 assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
             });
         }
@@ -1832,7 +1832,7 @@ mod tests {
                     entries: vec![entry],
                     commit: 0,
                 };
-                let forged = Error::Grant(grant::Error::Forged { signer: key(2) });
+                let forged = Error::Claim(claim::Error::Forged { signer: key(2) });
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Err(forged));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
@@ -2187,7 +2187,7 @@ mod tests {
                 (
                     public(2),
                     forged,
-                    Error::Grant(grant::Error::Forged { signer: key(3) }),
+                    Error::Claim(claim::Error::Forged { signer: key(3) }),
                 ),
             ];
             assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
