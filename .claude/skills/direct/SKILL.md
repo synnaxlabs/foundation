@@ -35,8 +35,10 @@ For each code PR, launch a fresh subagent with the PR number. It checks, with fi
   declare, and each allocation, copy, lock, or wakeup on it that the rules forbid.
 - **Defects** it can show.
 
-It also gives the rating and summary that `/review` "Rating" defines. Post the verdict
-as one comment on the PR that starts with them, as given. Then act on each problem:
+It also gives the rating and summary that `/review` "Rating" defines. It judges the
+PR by the rules at its merge commit (`git show <merge>:<path>`), never by a rule in an
+open PR or in your branch. Post the verdict as one comment on the PR that starts with
+them, as given. Then act on each problem:
 
 - A defect: an issue with its `crate:` label.
 - A contract question: send it to the crate's architect.
