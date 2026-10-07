@@ -1452,10 +1452,11 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each grant holds (`Error::Grant`). A node with no
-  configuration takes no request. Only a voter that an operator wiped is such a node
-  (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242:
+  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node refuses a leader
+  that became a voter after the newest configuration in its log, and does not get the
+  log from it (#1096). A node with no configuration takes no request. Only a voter that
+  an operator wiped is such a node (#881), because a node that joins opens with the
+  founding voters from its join answer (decided by the architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the

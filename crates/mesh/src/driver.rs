@@ -1343,10 +1343,11 @@ mod tests {
                 })
                 .unwrap();
             if end != Some(home(3)) {
+                assert_eq!(end, Some(home(1)));
                 lost.push(run);
             }
         }
-        assert!(!lost.is_empty());
+        assert!(!lost.is_empty() && lost.len() < 64);
     }
 
     #[test]
