@@ -200,7 +200,7 @@ struct Scratch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Queued for the next group commit. A group with no samples stores nothing and
-    /// is applied with an empty range, also when the write found no room.
+    /// is applied with an empty range, also when a live write found no room.
     Applied {
         /// The slot of the group's index.
         slot: Slot,
@@ -400,9 +400,9 @@ impl Shard {
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
     /// whose bodies no record or no block of the pool holds; no seq moves for either.
-    /// A handoff with no room decides before the size: each group with samples of the
-    /// frame is lost, or the frame gets [`Error::Full`]. [`Error::Disk`] after a failed commit, before any other error
-    /// but [`Error::Resend`].
+    /// A handoff with no room decides before the size: each group with samples of a
+    /// live frame is lost, and a backfill frame gets [`Error::Full`]. [`Error::Disk`]
+    /// after a failed commit, before any other error but [`Error::Resend`].
     ///
     /// # Panics
     ///
@@ -2554,6 +2554,21 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
             shard.committed().await.expect("the commit ends");
             assert_eq!(find(&test.ring().await, &handoff_to("subject-a")).len(), 1);
+        });
+    }
+
+    #[test]
+    fn refuses_a_backfill_write_with_no_samples_whose_handoff_has_no_room() {
+        run(119, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            let blocks = test.fill();
+            let a = shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            assert_eq!(shard.write(a, BACKFILL, empty), Err(Error::Full));
+            drop(blocks);
         });
     }
 
