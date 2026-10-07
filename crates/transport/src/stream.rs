@@ -1251,9 +1251,10 @@ mod tests {
                 assert_eq!(side.session.closed().await, closed);
             },
             |side| async move {
-                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
                 let mut messages = Vec::new();
-                while let Some(message) = incoming.receiver.recv().await.expect("read") {
+                while let Some(message) = receiver.recv().await.expect("read") {
                     messages.push(message.to_vec());
                 }
                 assert_eq!(messages.pop(), Some(b"c".to_vec()));
