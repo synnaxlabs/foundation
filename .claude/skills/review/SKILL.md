@@ -108,6 +108,6 @@ numbers when its range changes code on a hot path), the `Deferred:` line of each
 comment links the OK of each deferral in a risk crate, the `Public surface:` line of the
 last round comment links the architect's approval of each item, each finding of an
 architect review has its fix commit or a linked answer, and each later step that a
-round, an architect review, or an architect's ruling names is stated on an open issue
-that does it (a new issue, or a comment on an existing one) or as a trigger in the
-decisions entry. Only then does the author run `gh pr ready`.
+round, an architect review, an architect's ruling, or an issue that the PR closes names
+is stated on an open issue that does it (a new issue, or a comment on an existing one)
+or as a trigger in the decisions entry. Only then does the author run `gh pr ready`.
