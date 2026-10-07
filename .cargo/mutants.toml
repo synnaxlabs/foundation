@@ -1,3 +1,7 @@
+# Build with all features on, as CI's test step does, so code behind a feature such as
+# `sim` is mutated and tested.
+all_features = true
+
 # Mutants that no test can catch, each with the reason.
 exclude_re = [
   # Benchmarks ship in no binary; the run itself checks them.

@@ -10,9 +10,11 @@ use raft::{
     Answer, Body, Change, Data, Entry, Grant, Message, Position, Proof, Ready,
     Signature, Term, Voters,
 };
-use types::node::{self, PrivateKey, PublicKey};
+use types::node::{self, PrivateKey, PublicKey, SealKey};
 
+use crate::card::{self, Card};
 use crate::grant::Signer;
+use crate::member::Member;
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);
@@ -34,8 +36,25 @@ pub(crate) fn public(id: u8) -> PublicKey {
     PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
 }
 
-pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, PublicKey> {
-    ids.iter().map(|&id| (key(id), public(id))).collect()
+/// The record of node `id`, with a card that the node signed.
+pub(crate) fn member(id: u8) -> Member {
+    let card = Card {
+        name: format!("plant.node{id}").parse().unwrap(),
+        public_key: public(id),
+        seal_key: SealKey::new([9; 32]).unwrap(),
+        addresses: Vec::new(),
+        version: 1,
+    };
+    Member {
+        card: card::Signed::sign(key(id), card, &private(id)),
+        admission: [0; 64],
+        expiry: None,
+        status: BTreeMap::new(),
+    }
+}
+
+pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, Member> {
+    ids.iter().map(|&id| (key(id), member(id))).collect()
 }
 
 /// A pool of 4 MiB.

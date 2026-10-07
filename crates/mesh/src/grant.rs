@@ -3,7 +3,6 @@
 //! grant byte, the term, and the candidate. A change signs `foundation/voters/1`, the
 //! leader, the term, the index, the incoming voters, and the outgoing voters.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
@@ -56,7 +55,8 @@ impl Signer {
 }
 
 /// Checks each signature that `message` carries against the public keys of the
-/// region's members.
+/// region's members. `public_key` gives the key of a member, and `None` for a node
+/// that is not one.
 ///
 /// # Errors
 ///
@@ -68,10 +68,10 @@ impl Signer {
 /// When a claim has no signature. A decoded message gives each claim one.
 pub(crate) fn check(
     message: &Message,
-    members: &BTreeMap<node::Key, PublicKey>,
+    public_key: impl Fn(node::Key) -> Option<PublicKey>,
 ) -> Result<(), Error> {
     for (claim, signature) in message.claims() {
-        verify(&claim, signature, members)?;
+        verify(&claim, signature, &public_key)?;
     }
     Ok(())
 }
@@ -80,13 +80,13 @@ pub(crate) fn check(
 fn verify(
     claim: &Claim<'_>,
     signature: Option<Signature>,
-    members: &BTreeMap<node::Key, PublicKey>,
+    public_key: impl Fn(node::Key) -> Option<PublicKey>,
 ) -> Result<(), Error> {
     let signer = claim.signer();
-    let public = members.get(&signer).ok_or(Error::NotMember { signer })?;
+    let public = public_key(signer).ok_or(Error::NotMember { signer })?;
     let Signature(bytes) =
         signature.expect("invariant: decode gives each claim a signature");
-    if !ed25519::holds(*public, &statement(claim), &bytes) {
+    if !ed25519::holds(public, &statement(claim), &bytes) {
         return Err(Error::Forged { signer });
     }
     Ok(())
@@ -152,7 +152,7 @@ fn statement(claim: &Claim<'_>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use proptest::prelude::*;
     use proptest::sample::Index;
@@ -164,9 +164,14 @@ mod tests {
     use super::*;
     use crate::bytes::put_optional_proof;
     use crate::common::{
-        self, TERM, granted, key, members, message, public, reply_body, signature,
-        signer,
+        self, TERM, granted, key, message, public, reply_body, signature, signer,
     };
+
+    fn members(ids: &[u8]) -> impl Fn(node::Key) -> Option<PublicKey> {
+        let members: BTreeMap<_, _> =
+            ids.iter().map(|&id| (key(id), public(id))).collect();
+        move |voter| members.get(&voter).copied()
+    }
 
     fn proven() -> Message {
         common::proven(1, 2, Body::Heartbeat { commit: 0 })
@@ -253,9 +258,9 @@ mod tests {
             voters: &joint,
         };
         let signature = change.signature;
-        assert_eq!(verify(&claim, signature, &members(&[1, 2, 3])), Ok(()));
+        assert_eq!(verify(&claim, signature, members(&[1, 2, 3])), Ok(()));
         let unknown = Err(Error::NotMember { signer: key(1) });
-        assert_eq!(verify(&claim, signature, &members(&[2, 3])), unknown);
+        assert_eq!(verify(&claim, signature, members(&[2, 3])), unknown);
     }
 
     #[test]
@@ -303,7 +308,7 @@ mod tests {
     #[test]
     fn a_signed_grant_passes() {
         for grant in [Grant::PreVote, Grant::Vote] {
-            assert_eq!(check(&granted(2, grant, 1), &members(&[1, 2, 3])), Ok(()));
+            assert_eq!(check(&granted(2, grant, 1), members(&[1, 2, 3])), Ok(()));
         }
     }
 
@@ -331,7 +336,7 @@ mod tests {
         };
         signer(2).sign(&mut ready);
         assert_eq!(ready.messages, std::slice::from_ref(&refused));
-        assert_eq!(check(&refused, &members(&[1, 2])), Ok(()));
+        assert_eq!(check(&refused, members(&[1, 2])), Ok(()));
     }
 
     #[test]
@@ -377,13 +382,13 @@ mod tests {
     fn check_refuses_a_voter_that_is_not_a_member() {
         let unknown = Error::NotMember { signer: key(3) };
         let refused = Err(unknown);
-        assert_eq!(check(&proven(), &members(&[1, 2])), refused);
+        assert_eq!(check(&proven(), members(&[1, 2])), refused);
         assert_eq!(
             unknown.to_string(),
             format!("node {} is not a member of the region", key(3))
         );
         let reply = granted(3, Grant::Vote, 1);
-        assert_eq!(check(&reply, &members(&[1, 2])), refused);
+        assert_eq!(check(&reply, members(&[1, 2])), refused);
     }
 
     // An append of the change of leader 1 at index 2 of `TERM`, proven by 1.
@@ -429,7 +434,7 @@ mod tests {
     fn check_panics_on_an_unsigned_change_an_append_carries() {
         let mut message = change_append();
         change_of(&mut message).signature = None;
-        check(&message, &members(&[1, 2, 3])).unwrap();
+        check(&message, members(&[1, 2, 3])).unwrap();
     }
 
     #[test]
@@ -437,7 +442,7 @@ mod tests {
         let mut message = proven();
         voter(&mut message, 2).as_mut().unwrap().0[63] ^= 1;
         let forged = Error::Forged { signer: key(2) };
-        assert_eq!(check(&message, &members(&[1, 2, 3])), Err(forged));
+        assert_eq!(check(&message, members(&[1, 2, 3])), Err(forged));
         assert_eq!(
             forged.to_string(),
             format!("the claim of node {} is forged", key(2))
@@ -449,17 +454,23 @@ mod tests {
     fn check_panics_on_an_unsigned_entry() {
         let mut message = proven();
         *voter(&mut message, 3) = None;
-        check(&message, &members(&[1, 2, 3])).unwrap();
+        check(&message, members(&[1, 2, 3])).unwrap();
     }
 
     #[test]
     fn check_refuses_a_signature_of_another_voter_with_the_same_key() {
-        let mut members = members(&[1, 2]);
-        members.insert(key(3), public(2));
+        let two = members(&[1, 2]);
+        let members = |voter| {
+            if voter == key(3) {
+                Some(public(2))
+            } else {
+                two(voter)
+            }
+        };
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::Forged { signer: key(3) });
-        assert_eq!(check(&message, &members), refused);
+        assert_eq!(check(&message, members), refused);
     }
 
     #[test]
@@ -467,7 +478,7 @@ mod tests {
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::NotMember { signer: key(2) });
-        assert_eq!(check(&message, &members(&[1, 3])), refused);
+        assert_eq!(check(&message, members(&[1, 3])), refused);
     }
 
     #[test]
@@ -506,14 +517,13 @@ mod tests {
         let mut moved = granted(2, Grant::Vote, 1);
         moved.from = key(3);
         let refused = Err(Error::Forged { signer: key(3) });
-        assert_eq!(check(&moved, &members(&[1, 2, 3])), refused);
+        assert_eq!(check(&moved, members(&[1, 2, 3])), refused);
     }
 
     // Three voters that sign each `Ready`, send its byte form, and check each
     // message before `step`, as the driver does.
     struct Group {
         nodes: Vec<(Raft, Signer)>,
-        members: BTreeMap<node::Key, PublicKey>,
         flight: Vec<Vec<u8>>,
         committed: Vec<Vec<Data>>,
     }
@@ -546,7 +556,6 @@ mod tests {
             };
             Self {
                 nodes: [1, 2, 3].map(node).into(),
-                members: members(&[1, 2, 3]),
                 flight: Vec::new(),
                 committed: vec![Vec::new(); 3],
             }
@@ -585,7 +594,7 @@ mod tests {
             else {
                 panic!("{bytes:?} is not a raft message");
             };
-            assert_eq!(check(&message, &self.members), Ok(()), "{message:?}");
+            assert_eq!(check(&message, members(&[1, 2, 3])), Ok(()), "{message:?}");
             let (node, _) = self
                 .nodes
                 .iter_mut()
