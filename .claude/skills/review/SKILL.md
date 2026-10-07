@@ -26,8 +26,9 @@ Launch in parallel every reviewer the PR needs:
 When the PR changes a public surface or a crate's dependencies, also send its link to
 `laptop.architect`, which reviews it before the person.
 
-The breaker runs in its own worktree. Remove it when the breaker returns
-(`git worktree remove --force <path>`).
+The breaker makes its own worktree. Never give it another path: its permission check
+refuses every command outside that worktree. Remove the worktree when the breaker
+returns (`git worktree remove --force <path>`).
 
 ## Findings
 
