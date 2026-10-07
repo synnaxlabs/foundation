@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use buffer::{Buffer, Entry};
-use control::lease::Lease;
 use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Draft, Frame, Label, Path};
@@ -236,7 +235,7 @@ impl Shard {
             set,
         } = writer;
         let (now, mesh) = self.now().ok_or(writer::Error::Unsynced)?;
-        let lease = lease.map(Lease::new).transpose()?;
+        let lease = lease.map(writer::lease).transpose()?;
         let control = control::Writer { subject, authority };
         let entries = set.entries();
         let mut claims = Vec::with_capacity(set.groups().len());

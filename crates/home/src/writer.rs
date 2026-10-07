@@ -4,6 +4,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use control::lease::Lease;
 use types::authority::Authority;
 use types::frame::key_set::KeySet;
 use types::name::Name;
@@ -75,10 +76,13 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<control::lease::Error> for Error {
-    fn from(error: control::lease::Error) -> Self {
-        Self::Lease { span: error.span }
-    }
+/// The control lease of `span`.
+///
+/// # Errors
+///
+/// [`Error::Lease`] when `span` is not longer than zero.
+pub(crate) fn lease(span: Span) -> Result<Lease, Error> {
+    Lease::new(span).map_err(|error| Error::Lease { span: error.span })
 }
 
 #[cfg(test)]
@@ -105,10 +109,7 @@ mod tests {
     fn keeps_the_span_of_a_lease_error() {
         let span = Span::from_nanos(-3);
 
-        assert_eq!(
-            Error::from(control::lease::Error { span }),
-            Error::Lease { span }
-        );
+        assert_eq!(lease(span).err(), Some(Error::Lease { span }));
     }
 
     #[test]

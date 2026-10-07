@@ -43,8 +43,9 @@ pub enum Refusal {
     },
 }
 
-impl From<control::Error> for Refusal {
-    fn from(error: control::Error) -> Self {
+impl Refusal {
+    /// The refusal of a write that the gate refused with `error`.
+    fn control(error: control::Error) -> Self {
         match error {
             control::Error::Waiting => Self::Waiting,
             control::Error::Reserved => Self::Reserved,
@@ -117,7 +118,7 @@ mod tests {
                 "control lease ran out: reopen the writer to take control",
             ),
         ] {
-            assert_eq!(Refusal::from(error), refusal);
+            assert_eq!(Refusal::control(error), refusal);
             assert_eq!(refusal.to_string(), message);
         }
     }
