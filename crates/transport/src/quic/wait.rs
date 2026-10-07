@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::task::Waker;
 
+use block::{Pool, Unique};
 use types::hash::Map;
 use types::time::{Monotonic, Span};
 
 use super::{connection, stream};
-use crate::message::Miss;
 use crate::{Class, Status};
 
 /// How long the reads that wait for a block wait before the first tries again.
@@ -39,9 +39,43 @@ struct Read {
 }
 
 impl Queue {
+    /// A block of `len` bytes from `pool` for the read of `stream`, of `class`, when
+    /// the read has its turn and the pool has room; the read then leaves the queue.
+    /// Else `None`, and the read waits with `waker`, or keeps its place and takes
+    /// `waker` when it waits. A refused commit counts.
+    ///
+    /// # Panics
+    ///
+    /// When `pool` cannot hold `len` bytes.
+    pub(super) fn take(
+        &mut self,
+        now: Monotonic,
+        pool: &Pool,
+        stream: stream::Key,
+        class: Class,
+        len: usize,
+        waker: &Waker,
+    ) -> Option<Unique> {
+        if self.turn(stream, class) {
+            match pool.alloc(len) {
+                Ok(block) => {
+                    self.leave(now, stream);
+                    return Some(block);
+                }
+                Err(block::Error::Exhausted { .. }) => {}
+                Err(block::Error::Refused { .. }) => self.refusals += 1,
+                Err(error @ block::Error::TooLarge { .. }) => {
+                    panic!("the pool cannot hold a message of `bytes_max`: {error}")
+                }
+            }
+        }
+        self.wait(now, stream, class, waker);
+        None
+    }
+
     /// Whether the read of `stream`, of `class`, may try for a block now: it waits
     /// first, or it does not wait and no read of its class or a higher one waits.
-    pub(super) fn turn(&self, stream: stream::Key, class: Class) -> bool {
+    fn turn(&self, stream: stream::Key, class: Class) -> bool {
         let first = self.reads.keys().next();
         match self.places.get(&stream) {
             Some(place) => first == Some(place),
@@ -50,18 +84,14 @@ impl Queue {
     }
 
     /// Makes the read of `stream`, of `class`, wait with `waker`, or keeps its place
-    /// when it waits. `miss` is why its try failed, when it tried.
-    pub(super) fn wait(
+    /// when it waits.
+    fn wait(
         &mut self,
         now: Monotonic,
         stream: stream::Key,
         class: Class,
-        miss: Option<Miss>,
         waker: &Waker,
     ) {
-        if miss == Some(Miss::Refused) {
-            self.refusals += 1;
-        }
         if self.reads.is_empty() {
             self.since = Some(now);
         }
@@ -147,11 +177,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
+    use block::testing::Scarce;
+    use block::{Config, Heap, Pool};
     use noq_proto::{ConnectionHandle, Dir, Side, StreamId};
     use types::time::{Monotonic, Span};
 
     use super::Queue;
-    use crate::message::Miss;
     use crate::quic::{connection, stream};
     use crate::{Class, Status};
 
@@ -197,6 +228,74 @@ mod tests {
         Span::from_nanos(n * Span::MILLISECOND.nanos())
     }
 
+    fn pool(budget: usize) -> Pool {
+        let config = Config { budget };
+        let memory = Heap::new(config.reservation());
+        Pool::new(config, memory)
+    }
+
+    #[test]
+    fn a_take_in_turn_gives_a_block_and_leaves_the_queue() {
+        let pool = pool(1 << 16);
+        let mut queue = Queue::default();
+        let (first, count) = waker();
+        let (next, next_count) = waker();
+        queue.wait(at(0), stream(0, 0), Class::Complete, &first);
+        queue.wait(at(0), stream(0, 1), Class::Complete, &next);
+        let block =
+            queue.take(at(1), &pool, stream(0, 0), Class::Complete, 100, &first);
+        assert_eq!(block.map(|block| block.len()), Some(100));
+        assert_eq!([woken(&count), woken(&next_count)], [0, 1]);
+        assert!(queue.turn(stream(0, 1), Class::Complete));
+    }
+
+    #[test]
+    fn a_take_out_of_turn_takes_no_block_and_waits_behind() {
+        let pool = pool(1 << 16);
+        let mut queue = Queue::default();
+        let (waker, _) = waker();
+        queue.wait(at(0), stream(0, 0), Class::Command, &waker);
+        let block =
+            queue.take(at(1), &pool, stream(0, 1), Class::Complete, 100, &waker);
+        assert!(block.is_none());
+        assert_eq!(pool.committed(), 0);
+        queue.leave(at(2), stream(0, 0));
+        assert!(queue.turn(stream(0, 1), Class::Complete));
+    }
+
+    #[test]
+    fn a_take_with_a_full_pool_waits_then_takes_the_block_that_frees() {
+        // A 100-byte block takes 192 bytes of the budget.
+        let pool = pool(300);
+        let held = pool.alloc(100).expect("room");
+        let mut queue = Queue::default();
+        let (waker, _) = waker();
+        let read = (stream(0, 0), Class::Complete);
+        assert!(
+            queue
+                .take(at(0), &pool, read.0, read.1, 100, &waker)
+                .is_none()
+        );
+        assert!(queue.waiting());
+        drop(held);
+        assert!(
+            queue
+                .take(at(1), &pool, read.0, read.1, 100, &waker)
+                .is_some()
+        );
+        assert!(!queue.waiting());
+        assert_eq!(queue.status(at(2)).refusals, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "the pool cannot hold a message of `bytes_max`")]
+    fn a_take_over_what_the_pool_holds_panics() {
+        let pool = pool(300);
+        let (waker, _) = waker();
+        let read = (stream(0, 0), Class::Complete);
+        drop(Queue::default().take(at(0), &pool, read.0, read.1, 1_000, &waker));
+    }
+
     #[test]
     fn with_no_wait_each_read_has_its_turn() {
         let queue = Queue::default();
@@ -208,7 +307,7 @@ mod tests {
     fn a_read_that_does_not_wait_has_its_turn_only_above_each_wait() {
         let mut queue = Queue::default();
         let (waker, _) = waker();
-        queue.wait(at(0), stream(0, 0), Class::Complete, None, &waker);
+        queue.wait(at(0), stream(0, 0), Class::Complete, &waker);
         assert!(queue.waiting());
         assert!(queue.turn(stream(0, 0), Class::Complete));
         assert!(queue.turn(stream(0, 1), Class::Command));
@@ -228,7 +327,7 @@ mod tests {
         ];
         let wakers = reads.map(|_| waker());
         for ((stream, class), (waker, _)) in reads.iter().zip(&wakers) {
-            queue.wait(at(0), *stream, *class, None, waker);
+            queue.wait(at(0), *stream, *class, waker);
         }
         let mut waiting = vec![0, 1, 2, 3];
         let mut order = Vec::new();
@@ -256,9 +355,9 @@ mod tests {
         let (old, old_count) = waker();
         let (new, new_count) = waker();
         let (other, other_count) = waker();
-        queue.wait(at(0), stream(0, 0), Class::Complete, None, &old);
-        queue.wait(at(1), stream(0, 1), Class::Complete, None, &other);
-        queue.wait(at(2), stream(0, 0), Class::Complete, None, &new);
+        queue.wait(at(0), stream(0, 0), Class::Complete, &old);
+        queue.wait(at(1), stream(0, 1), Class::Complete, &other);
+        queue.wait(at(2), stream(0, 0), Class::Complete, &new);
         assert!(queue.turn(stream(0, 0), Class::Complete));
         queue.wake_first();
         let wakes = [&old_count, &new_count, &other_count].map(|count| woken(count));
@@ -270,8 +369,8 @@ mod tests {
         let mut queue = Queue::default();
         let (first, first_count) = waker();
         let (second, second_count) = waker();
-        queue.wait(at(0), stream(0, 0), Class::Command, None, &first);
-        queue.wait(at(0), stream(0, 1), Class::Complete, None, &second);
+        queue.wait(at(0), stream(0, 0), Class::Command, &first);
+        queue.wait(at(0), stream(0, 1), Class::Complete, &second);
         queue.leave(at(0), stream(0, 1));
         queue.leave(at(0), stream(0, 2));
         assert_eq!([woken(&first_count), woken(&second_count)], [0, 0]);
@@ -285,9 +384,9 @@ mod tests {
         let (ended, ended_count) = waker();
         let (also, also_count) = waker();
         let (kept, kept_count) = waker();
-        queue.wait(at(0), stream(0, 0), Class::Command, None, &ended);
-        queue.wait(at(0), stream(1, 0), Class::Complete, None, &kept);
-        queue.wait(at(0), stream(0, 1), Class::CatchUp, None, &also);
+        queue.wait(at(0), stream(0, 0), Class::Command, &ended);
+        queue.wait(at(0), stream(1, 0), Class::Complete, &kept);
+        queue.wait(at(0), stream(0, 1), Class::CatchUp, &also);
         queue.end(at(0), connection(0));
         let wakes = [&ended_count, &also_count, &kept_count].map(|count| woken(count));
         assert_eq!(wakes, [1, 1, 1]);
@@ -299,48 +398,39 @@ mod tests {
     }
 
     #[test]
-    fn the_status_counts_the_time_a_read_waits_and_each_refused_try() {
+    fn the_status_counts_the_time_a_read_waits_and_each_refused_take() {
+        let config = Config { budget: 1 << 16 };
+        let (memory, switch) = Scarce::new(config.reservation());
+        let pool = Pool::new(config, memory);
         let mut queue = Queue::default();
         let (waker, _) = waker();
+        let take = |queue: &mut Queue, millis, index| {
+            let read = stream(0, index);
+            queue.take(at(millis), &pool, read, Class::Complete, 9_000, &waker)
+        };
         let none = Status {
             waited: Span::ZERO,
             refusals: 0,
         };
         assert_eq!(queue.status(at(5)), none);
-        queue.wait(
-            at(10),
-            stream(0, 0),
-            Class::Complete,
-            Some(Miss::Refused),
-            &waker,
-        );
-        queue.wait(
-            at(12),
-            stream(0, 1),
-            Class::Complete,
-            Some(Miss::Exhausted),
-            &waker,
-        );
-        queue.wait(
-            at(14),
-            stream(0, 0),
-            Class::Complete,
-            Some(Miss::Refused),
-            &waker,
-        );
+        switch.refuse();
+        assert!(take(&mut queue, 10, 0).is_none());
+        assert!(take(&mut queue, 12, 1).is_none());
+        assert!(take(&mut queue, 14, 0).is_none());
         let status = Status {
             waited: millis(5),
             refusals: 2,
         };
         assert_eq!(queue.status(at(15)), status);
-        queue.leave(at(20), stream(0, 0));
-        queue.leave(at(30), stream(0, 1));
+        switch.allow();
+        assert!(take(&mut queue, 20, 0).is_some());
+        assert!(take(&mut queue, 30, 1).is_some());
         let status = Status {
             waited: millis(20),
             refusals: 2,
         };
         assert_eq!(queue.status(at(40)), status);
-        queue.wait(at(50), stream(0, 2), Class::Command, None, &waker);
+        queue.wait(at(50), stream(0, 2), Class::Command, &waker);
         queue.end(at(53), connection(0));
         let status = Status {
             waited: millis(23),

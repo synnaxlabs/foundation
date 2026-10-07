@@ -8,7 +8,7 @@ use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::Poll;
 
-use block::{Block, Heap, Pool};
+use block::{Block, Heap, Pool, Unique};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::net::Net;
@@ -100,6 +100,11 @@ impl Shard {
     pub(crate) fn committed(&self) -> usize {
         self.pool.committed()
     }
+}
+
+/// A block of `len` bytes from `pool`, or `None` when it has no room.
+pub(crate) fn alloc(pool: &Pool, len: usize) -> Option<Unique> {
+    pool.alloc(len).ok()
 }
 
 /// A block from `pool` that holds `bytes`.

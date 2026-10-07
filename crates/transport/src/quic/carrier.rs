@@ -422,7 +422,7 @@ impl Session {
         sender: &mut Sender,
         message: &mut Option<Block>,
     ) -> Poll<Result<(), Error>> {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             sender.check_unfinished();
             let written = match message.take() {
                 Some(message) => endpoint.write(clock.now(), sender, message),
@@ -453,7 +453,7 @@ impl Session {
     /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::finish`] does
     /// while the session is live.
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             sender.check_unfinished();
             if let Some(error) = &slot.end {
                 return Err(error.clone());
@@ -464,15 +464,15 @@ impl Session {
 
     /// Resets `sender`'s stream with `code`, as [`Endpoint::reset`] does.
     pub(crate) fn reset(&self, sender: Sender, code: Code) {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             slot.writing.remove(&sender.key().id);
             endpoint.reset(clock.now(), sender, code);
         });
     }
 
     /// Ready with the next whole message of `receiver`'s stream, `None` after the
-    /// last, or with the error. While the pool has no block for the message, it
-    /// waits in the carrier's [`wait::Queue`].
+    /// last, or with the error. It takes the message's block through the carrier's
+    /// [`wait::Queue`], and waits there while it has no block.
     ///
     /// # Errors
     ///
@@ -482,37 +482,31 @@ impl Session {
         cx: &mut Context<'_>,
         receiver: &mut Receiver,
     ) -> Poll<Result<Option<Block>, Error>> {
-        self.with_waits(|endpoint, clock, slot, waits| {
+        self.with(|endpoint, clock, slot, waits| {
             let (now, stream, class) = (clock.now(), receiver.key(), receiver.class());
-            // An ended session takes no block, so its reads skip the queue.
-            if slot.end.is_none() && !waits.turn(stream, class) {
-                waits.wait(now, stream, class, None, cx.waker());
-                return Poll::Pending;
-            }
-            let read = endpoint.read(now, receiver);
-            if let (Ok(Poll::Pending), Some(miss)) = (&read, receiver.miss()) {
-                waits.wait(now, stream, class, Some(miss), cx.waker());
-                return Poll::Pending;
-            }
-            waits.leave(now, stream);
-            match read {
+            let take =
+                |pool: &_, len| waits.take(now, pool, stream, class, len, cx.waker());
+            let read = match endpoint.read(now, receiver, take) {
+                // A read keeps its place in the queue while it waits for room.
                 Ok(Poll::Pending) => {
-                    if let Some(error) = &slot.end {
-                        return Poll::Ready(Err(error.clone()));
-                    }
-                    register_one(&mut slot.reading, stream.id, cx.waker());
-                    Poll::Pending
+                    let Some(error) = &slot.end else {
+                        register_one(&mut slot.reading, stream.id, cx.waker());
+                        return Poll::Pending;
+                    };
+                    Err(error.clone())
                 }
-                Ok(Poll::Ready(message)) => Poll::Ready(Ok(message)),
-                Err(error) => Poll::Ready(Err(error)),
-            }
+                Ok(Poll::Ready(message)) => Ok(message),
+                Err(error) => Err(error),
+            };
+            waits.leave(now, stream);
+            Poll::Ready(read)
         })
     }
 
     /// Ends a read of `receiver` that waits, as [`Endpoint::end_wait`] does, and its
     /// wait for a block.
     pub(crate) fn end_wait(&self, receiver: &mut Receiver) {
-        self.with_waits(|endpoint, clock, slot, waits| {
+        self.with(|endpoint, clock, slot, waits| {
             slot.reading.remove(&receiver.key().id);
             waits.leave(clock.now(), receiver.key());
             endpoint.end_wait(receiver);
@@ -521,7 +515,7 @@ impl Session {
 
     /// Stops `receiver`'s stream with `code`, as [`Endpoint::stop`] does.
     pub(crate) fn stop(&self, receiver: Receiver, code: Code) {
-        self.with_waits(|endpoint, clock, slot, waits| {
+        self.with(|endpoint, clock, slot, waits| {
             slot.reading.remove(&receiver.key().id);
             waits.leave(clock.now(), receiver.key());
             endpoint.stop(clock.now(), receiver, code);
@@ -536,7 +530,7 @@ impl Session {
         wakers: fn(&mut Slot) -> &mut Vec<Waker>,
         take: impl FnOnce(&mut Endpoint, &Clock, connection::Key) -> Option<T>,
     ) -> Poll<Result<T, Error>> {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             if let Some(error) = &slot.end {
                 return Poll::Ready(Err(error.clone()));
             }
@@ -552,7 +546,7 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn raw(&self, bytes: &[u8]) {
         let key = self.key;
-        self.with(|endpoint, _, _| {
+        self.with(|endpoint, _, _, _| {
             let connection = super::pair::connection(endpoint, key);
             let id = connection.streams().open(noq_proto::Dir::Uni);
             let mut send = connection.send_stream(id.expect("a stream"));
@@ -560,14 +554,9 @@ impl Session {
         });
     }
 
-    /// Runs `call` on the endpoint, the clock, and the session's slot, then wakes the
-    /// task to send what the call queued.
-    fn with<T>(&self, call: impl FnOnce(&mut Endpoint, &Clock, &mut Slot) -> T) -> T {
-        self.with_waits(|endpoint, clock, slot, _| call(endpoint, clock, slot))
-    }
-
-    /// As [`Session::with`], with the reads that wait for a block too.
-    fn with_waits<T>(
+    /// Runs `call` on the endpoint, the clock, the session's slot, and the reads
+    /// that wait for a block, then wakes the task to send what the call queued.
+    fn with<T>(
         &self,
         call: impl FnOnce(&mut Endpoint, &Clock, &mut Slot, &mut wait::Queue) -> T,
     ) -> T {
@@ -872,6 +861,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
+    use block::{Config, Heap, Pool};
     use env::net::udp::{self, Transmit};
     use noq_proto::{ConnectionHandle, Dir, Side, StreamId};
     use sim::Sim;
@@ -1228,7 +1218,13 @@ mod tests {
                 },
                 id: StreamId::new(Side::Client, Dir::Uni, 0),
             };
-            waits.wait(start, key, Class::Complete, None, &read);
+            let config = Config { budget: 300 };
+            let memory = Heap::new(config.reservation());
+            let pool = Pool::new(config, memory);
+            // A 100-byte block takes 192 bytes of the budget.
+            let held = pool.alloc(100).expect("room");
+            let taken = waits.take(start, &pool, key, Class::Complete, 100, &read);
+            assert!(taken.is_none());
             for task in [&old, &new] {
                 let mut cx = Context::from_waker(task);
                 assert!(!retry.poll(&mut cx, &waits, start, true));
@@ -1242,6 +1238,7 @@ mod tests {
             assert_eq!(woken(), [1, 0, 1]);
             clock.sleep(spans(Span::MILLISECOND, 10)).await;
             assert_eq!(woken(), [1, 0, 2]);
+            drop(held);
         });
         assert_eq!(sim.run(), Ok(()));
     }

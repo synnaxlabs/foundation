@@ -1235,8 +1235,8 @@ How to read this record:
   block, because the pool has no room or the system refused a commit. It gives the next
   message, `None` at the end, `Error::Reset` when the sender cancelled the stream, or
   the error that ended the session. A full pool and a refused commit get no error:
-  `transport::Error` has no `Pool` variant, and the read path's "no room now" is a
-  private type (architect, #68:
+  `transport::Error` has no `Pool` variant, and the read path's "no room now"
+  stays private (architect, #68:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032721674). Its doc
   says that it waits. The message stays queued, and the carrier's per-stream flow
   control holds the peer, as a read already waits for `Readable` (STREAM WIRE); TLS over

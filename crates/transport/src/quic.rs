@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use block::{Block, Pool};
+use block::{Block, Pool, Unique};
 use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
@@ -433,12 +433,12 @@ impl Endpoint {
         })
     }
 
-    /// The next whole message of `receiver`'s stream, in one block from the pool.
-    /// `Ready(None)` after the last one, and on each call after that. `Pending` when
-    /// no whole message is here yet ([`Event::Readable`] follows), when the pool has
-    /// no block for the next one now ([`Receiver::miss`] says why, and no event
-    /// follows: call again once a block may have freed), or once the connection
-    /// drained.
+    /// The next whole message of `receiver`'s stream, in the block that
+    /// `take(pool, len)` gives from the endpoint's pool: exactly `len` bytes, or
+    /// `None` when the message may not have one now. `Ready(None)` after the last
+    /// one, and on each call after that. `Pending` when no whole message is here yet
+    /// ([`Event::Readable`] follows), when `take` gives no block (no event follows:
+    /// call again once it may give one), or once the connection drained.
     ///
     /// # Errors
     ///
@@ -450,13 +450,14 @@ impl Endpoint {
         &mut self,
         now: Monotonic,
         receiver: &mut Receiver,
+        mut take: impl FnMut(&Pool, usize) -> Option<Unique>,
     ) -> Result<Poll<Option<Block>>, Error> {
         if let Some(ended) = receiver.ended() {
             return ended;
         }
         let key = receiver.key().connection;
         self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
-            streams.read(inner, receiver, pool, events)
+            streams.read(inner, receiver, |len| take(pool, len), events)
         })
     }
 
@@ -1290,7 +1291,8 @@ mod tests {
                 let (now, key) = (pair.now(), pair.server.key.expect("a key"));
                 let server = &mut pair.server.endpoint;
                 let mut incoming = server.accept(key).expect("a stream");
-                let read = server.read(now, &mut incoming.receiver).expect("read");
+                let read = server.read(now, &mut incoming.receiver, testing::alloc);
+                let read = read.expect("read");
                 let Poll::Ready(Some(message)) = read else {
                     panic!("no message");
                 };

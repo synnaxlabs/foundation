@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::task::Poll;
 use std::{mem, slice};
 
-use block::{Block, Pool};
+use block::{Block, Unique};
 use bytes::Bytes;
 use noq_proto::{
     ClosedStream, Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId,
@@ -16,7 +16,7 @@ use noq_proto::{
 use super::connection::{self, Fault};
 use super::hello::{self, Hello};
 use super::{Body, Event};
-use crate::message::{self, Miss, Reader};
+use crate::message::{self, Reader};
 use crate::{Class, Code, Error, varint};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
@@ -312,12 +312,6 @@ impl Receiver {
     /// The stream's class.
     pub(crate) fn class(&self) -> Class {
         self.claim.class
-    }
-
-    /// Why the last read found no block for the next message, when it gave `Pending`
-    /// for that reason.
-    pub(crate) fn miss(&self) -> Option<Miss> {
-        self.reader.miss()
     }
 
     /// What each read gives after the stream ended, once it has.
@@ -996,11 +990,11 @@ impl Streams {
     }
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
-    /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
-    /// yet, the next has no room in the receive budget or waits behind a stream of
-    /// its class or a higher class, or `pool` has no block for it now
-    /// ([`Receiver::miss`]). The receivers that get the freed room get
-    /// [`Event::Readable`] in `events`.
+    /// that `take(len)` gives, as [`Reader::read`]. `Ready(None)` at the end.
+    /// `Pending` when no whole message is here yet, the next has no room in the
+    /// receive budget or waits behind a stream of its class or a higher class, or
+    /// `take` gives no block for it. A message with no block holds no room. The
+    /// receivers that get the freed room get [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
@@ -1014,7 +1008,7 @@ impl Streams {
         &mut self,
         inner: &mut noq_proto::Connection,
         receiver: &mut Receiver,
-        pool: &Pool,
+        mut take: impl FnMut(usize) -> Option<Unique>,
         events: &mut VecDeque<Event>,
     ) -> Result<Poll<Option<Block>>, Error> {
         let Receiver {
@@ -1025,11 +1019,18 @@ impl Streams {
         } = receiver;
         let receiving = &mut self.receiving;
         let mut recv = inner.recv_stream(key.id);
-        let mut result = Ok(Poll::Pending);
+        let (mut result, mut missed) = (Ok(Poll::Pending), false);
         if !receiving.waits(claim) {
             let mut chunks = recv.read(true).expect(RECEIVING);
-            let admit = |len| receiving.charge(*key, len, claim, Order::RANK);
-            result = reader.read(pool, admit, |max| match chunks.next(max) {
+            let take = |len| {
+                if !receiving.charge(*key, len, claim, Order::RANK) {
+                    return None;
+                }
+                let block = take(len);
+                missed = block.is_none();
+                block
+            };
+            result = reader.read(take, |max| match chunks.next(max) {
                 Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
                 Err(ReadError::Blocked) => Ok(Poll::Pending),
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
@@ -1041,8 +1042,7 @@ impl Streams {
         {
             result = Err(reset_error(error));
         }
-        // A message with no block holds no room.
-        if !matches!(result, Ok(Poll::Pending)) || reader.miss().is_some() {
+        if !matches!(result, Ok(Poll::Pending)) || missed {
             receiving.release(claim, Order::RANK, |stream| {
                 events.push_back(Event::Readable { stream });
             });
@@ -1223,7 +1223,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use block::Heap;
+    use block::{Heap, Pool};
     use types::time::{Monotonic, Span};
 
     use super::*;
@@ -1315,8 +1315,25 @@ mod tests {
         now: Monotonic,
         receiver: &mut Receiver,
     ) -> Result<Poll<Option<Vec<u8>>>, Error> {
-        let read = side.endpoint.read(now, receiver)?;
+        let read = side.endpoint.read(now, receiver, testing::alloc)?;
         Ok(read.map(|message| message.map(|message| message.to_vec())))
+    }
+
+    /// Whether a read of `receiver` on `side` asked the pool for a block and got
+    /// none.
+    ///
+    /// # Panics
+    ///
+    /// When the read is not `Pending`.
+    fn missed(side: &mut Side, now: Monotonic, receiver: &mut Receiver) -> bool {
+        let mut missed = false;
+        let read = side.endpoint.read(now, receiver, |pool, len| {
+            let block = testing::alloc(pool, len);
+            missed = block.is_none();
+            block
+        });
+        assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+        missed
     }
 
     /// Writes `bytes` on a new stream of `connection` in `dir`, and finishes it when
@@ -1648,9 +1665,7 @@ mod tests {
             let mut incoming = accept(&mut pair.server);
             let held = pool.alloc(100).expect("room");
             let now = pair.now();
-            let read_full = next(&mut pair.server, now, &mut incoming.receiver);
-            assert_eq!(read_full, Ok(Poll::Pending));
-            assert_eq!(incoming.receiver.miss(), Some(Miss::Exhausted));
+            assert!(missed(&mut pair.server, now, &mut incoming.receiver));
             drop(held);
             let read = drain(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, (vec![vec![9; 100]], true));
@@ -1795,10 +1810,20 @@ mod tests {
                 assert_eq!(next(&mut pair.server, now, receiver), Ok(Poll::Pending));
             }
             for _ in 0..2 {
-                let read = next(&mut pair.server, now, &mut receivers[2]);
-                assert_eq!(read, Ok(Poll::Pending));
-                assert_eq!(receivers[2].miss(), Some(Miss::Exhausted));
+                assert!(missed(&mut pair.server, now, &mut receivers[2]));
             }
+            // The budget holds three of the largest messages, so a fourth message
+            // reads only when the third gave back its room.
+            let message = [7; 100];
+            let prefix = message::prefix(message.len());
+            let bytes =
+                [[byte(Class::Complete)].as_slice(), &*prefix, &message].concat();
+            raw(pair.client.connection(), Dir::Uni, &bytes, true);
+            pair.run(RUN);
+            let mut fourth = accept(&mut pair.server);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut fourth.receiver);
+            assert_eq!(read, (vec![message.to_vec()], true));
         });
     }
 

@@ -1376,4 +1376,93 @@ mod tests {
         );
         assert_eq!(sim.run(), Ok(()));
     }
+
+    #[test]
+    fn a_read_that_needs_no_block_ends_while_another_read_waits_for_one() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                let pause = spans(Span::MILLISECOND, 50);
+                send_large(&side, &[Class::Complete, Class::Complete], pause).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                // The first message fills the pool.
+                let held = first.recv().await.expect("a message").expect("a block");
+                let mut second =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut second_read = Box::pin(second.recv());
+                pending_for(
+                    &clock,
+                    spans(Span::MILLISECOND, 30),
+                    &mut [second_read.as_mut()],
+                )
+                .await;
+                // The first stream finished: its read needs no block.
+                let mut end = Box::pin(first.recv());
+                let mut deadline = pin!(clock.sleep(spans(Span::SECOND, 2)));
+                let ended = poll_fn(|cx| {
+                    assert!(second_read.as_mut().poll(cx).is_pending());
+                    if let Poll::Ready(read) = end.as_mut().poll(cx) {
+                        return Poll::Ready(Some(bytes(read)));
+                    }
+                    deadline.as_mut().poll(cx).map(|()| None)
+                })
+                .await;
+                assert_eq!(ended, Some(Ok(None)), "the end waits behind the block");
+                drop(end);
+                drop(held);
+                let message = second_read.await.expect("a message").expect("a block");
+                assert_eq!(message.to_vec(), vec![1; LARGE]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn two_reads_of_messages_that_each_fill_the_pool_each_get_theirs() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete, Class::Complete], Span::ZERO)
+                    .await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let clock = side.node.clock();
+                let mut a = side.session.accept().await.expect("a stream").receiver;
+                let mut b = side.session.accept().await.expect("a stream").receiver;
+                let mut reads = [Some(Box::pin(a.recv())), Some(Box::pin(b.recv()))];
+                let mut got = Vec::new();
+                let mut deadline = pin!(clock.sleep(spans(Span::SECOND, 5)));
+                let done = poll_fn(|cx| {
+                    for slot in &mut reads {
+                        if let Some(read) = slot
+                            && let Poll::Ready(message) = read.as_mut().poll(cx)
+                        {
+                            // Each message drops at once.
+                            let block = message.expect("a message").expect("a block");
+                            got.push(block[0]);
+                            *slot = None;
+                        }
+                    }
+                    if got.len() == 2 {
+                        return Poll::Ready(true);
+                    }
+                    deadline.as_mut().poll(cx).map(|()| false)
+                })
+                .await;
+                assert!(done, "only {got:?} arrived");
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
 }
