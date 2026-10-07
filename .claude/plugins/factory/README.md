@@ -55,6 +55,8 @@ disconnect the subscriber.
   says so.
 - The status line shows the name, the link, messages in and out, the queue, the cost,
   and the rate limits.
+- The `next` tool clears the context when the turn ends, then runs `/build`. A builder
+  calls it when its PR merges, so no person types `/clear`.
 
 ## Check it
 

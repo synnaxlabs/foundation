@@ -59,9 +59,10 @@ the commit you checked:
 
 - Label `model:fable` only an issue where a subtle mistake is expensive and hard to find
   later: consensus, crash recovery, lock-free code, wake protocols. Never a whole crate.
-- Record each design choice that you or a builder make in the crate's section of
-  `docs/decisions.md`, in its own PR, with who decided and the issue link. Only the
-  person's own words lock a decision.
+- Post each ruling as a comment on its issue at once. The builder acts on it and adds
+  it to the crate's section of `docs/decisions.md` in the code PR, with who decided and
+  the comment link. Open a record PR of your own only for a ruling with no code PR, such
+  as a new milestone. Only the person's own words lock a decision.
 - Answer "why did we decide this" from `docs/decisions.md`, `docs/research/`, and
   `docs/history/interview-log.md`, with the citation.
 

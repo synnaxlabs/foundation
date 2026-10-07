@@ -11,7 +11,7 @@ pub(crate) struct Writer {
     /// The subject and its authority, already capped by access.
     pub(crate) control: control::Writer,
     /// The control lease, if the writer set one.
-    pub(crate) lease: Option<control::Lease>,
+    pub(crate) lease: Option<control::lease::Lease>,
     /// The key set of every frame the writer writes.
     pub(crate) set: Arc<KeySet>,
 }
