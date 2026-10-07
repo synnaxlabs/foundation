@@ -21,6 +21,7 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 ///
 /// # Errors
 ///
+/// [`Error::Network`] when the socket is broken or breaks during the dial, or
 /// [`Error::Unreachable`] with each attempt's cause, in the order started, when none
 /// connects.
 pub(crate) async fn dial(
@@ -29,6 +30,7 @@ pub(crate) async fn dial(
     peer: PublicKey,
     addresses: &[Address],
 ) -> Result<quic::Session, Error> {
+    carrier.check()?;
     let mut addresses = addresses.to_vec();
     addresses.sort_by_key(|address| match address {
         Address::Udp(_) => 0,
@@ -42,6 +44,7 @@ pub(crate) async fn dial(
         addresses,
         causes: Vec::new(),
         flying: Vec::new(),
+        // The first attempt starts without it, and resets it.
         sleep: clock.sleep_until(Monotonic(0)),
     };
     poll_fn(|cx| dial.poll(cx)).await
@@ -65,8 +68,8 @@ struct Dial<'a> {
 impl Dial<'_> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<quic::Session, Error>> {
         loop {
-            if let Some(session) = self.poll_flying(cx) {
-                return Poll::Ready(Ok(session));
+            if let Some(ended) = self.poll_flying(cx) {
+                return Poll::Ready(ended);
             }
             let next = self.causes.len();
             if next == self.addresses.len() {
@@ -75,20 +78,29 @@ impl Dial<'_> {
                 }
                 return Poll::Pending;
             }
-            let failed = next == 0 || self.causes[next - 1].is_some();
-            if !failed && Pin::new(&mut self.sleep).poll(cx).is_pending() {
+            let due = next == 0 || self.causes[next - 1].is_some();
+            if !due && Pin::new(&mut self.sleep).poll(cx).is_pending() {
                 return Poll::Pending;
             }
-            self.start(next);
+            if let Err(error) = self.start(next) {
+                return Poll::Ready(Err(error));
+            }
         }
     }
 
-    /// Takes each attempt that ended, and gives the session of one that connected.
-    fn poll_flying(&mut self, cx: &mut Context<'_>) -> Option<quic::Session> {
+    /// Takes each attempt that ended. Gives the session of one that connected, or
+    /// [`Error::Network`] when the socket broke.
+    fn poll_flying(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Option<Result<quic::Session, Error>> {
         let mut at = 0;
         while let Some((index, session)) = self.flying.get(at) {
             match session.poll_connected(cx) {
-                Poll::Ready(Ok(())) => return Some(self.flying.swap_remove(at).1),
+                Poll::Ready(Ok(())) => return Some(Ok(self.flying.swap_remove(at).1)),
+                Poll::Ready(Err(error @ Error::Network { .. })) => {
+                    return Some(Err(error));
+                }
                 Poll::Ready(Err(error)) => {
                     self.causes[*index] = Some(error);
                     self.flying.swap_remove(at);
@@ -99,15 +111,16 @@ impl Dial<'_> {
         None
     }
 
-    fn start(&mut self, index: usize) {
+    /// Starts the attempt at `index`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Network`] when the socket broke.
+    fn start(&mut self, index: usize) -> Result<(), Error> {
         let started = match self.addresses[index] {
             Address::Udp(remote) => self.carrier.dial(self.peer, remote),
             // This node runs no carrier for them.
-            Address::Tcp(remote) | Address::Relay { at: remote, .. } => {
-                Err(Error::Network {
-                    error: env::net::Error::Unreachable { remote },
-                })
-            }
+            Address::Tcp(_) | Address::Relay { .. } => Err(Error::Unroutable),
         };
         match started {
             Ok(session) => {
@@ -115,8 +128,10 @@ impl Dial<'_> {
                 self.causes.push(None);
                 self.sleep.reset(self.clock.now() + STAGGER);
             }
-            Err(error) => self.causes.push(Some(error)),
+            Err(Error::Unroutable) => self.causes.push(Some(Error::Unroutable)),
+            Err(error) => return Err(error),
         }
+        Ok(())
     }
 
     fn unreachable(&mut self) -> Error {
@@ -151,13 +166,6 @@ mod tests {
 
     /// An address at port 0, where no datagram can go.
     const PORT_ZERO: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-
-    /// The error of an address this node has no route to.
-    fn no_route(remote: SocketAddr) -> Error {
-        Error::Network {
-            error: env::net::Error::Unreachable { remote },
-        }
-    }
 
     /// Starts a transport for `SERVER` on `node` that accepts one session from
     /// `CLIENT` and waits until the client closes it with code 5.
@@ -247,6 +255,58 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_address_then_a_silent_one_waits_the_stagger_before_the_next() {
+        let (mut sim, client, server) = nodes(0);
+        let silent = sim.node(sim::node::Config::default());
+        serve(&server);
+        let addresses = vec![
+            Address::Udp(PORT_ZERO),
+            Address::Udp(address(&silent)),
+            Address::Udp(address(&server)),
+        ];
+        let ms = Span::MILLISECOND;
+        dial(&client, addresses, spans(ms, 250), spans(ms, 255));
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_on_a_broken_socket_gives_why_it_broke() {
+        let (mut sim, client, _) = nodes(0);
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let at = address(&node);
+            node.fail_udp(at);
+            // The carrier sees the break when its task next polls the socket.
+            node.clock().sleep(Span::MILLISECOND).await;
+            let broken = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            for addresses in [vec![], vec![Address::Tcp(at), Address::Udp(at)]] {
+                let dialed = transport.dial(public(&SERVER), &addresses).await;
+                assert_eq!(dialed.err(), Some(broken.clone()));
+            }
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_socket_that_breaks_during_a_dial_ends_it() {
+        let (mut sim, client, _) = nodes(0);
+        let silent = address(&sim.node(sim::node::Config::default()));
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let (start, addresses) = (node.clock().now(), [Address::Udp(silent)]);
+            let dialed = transport.dial(public(&SERVER), &addresses).await;
+            let broken = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(dialed.err(), Some(broken));
+            assert_eq!(node.clock().now() - start, spans(Span::MILLISECOND, 10));
+        });
+        assert_eq!(sim.run_for(spans(Span::MILLISECOND, 10)), Ok(()));
+        client.fail_udp(address(&client));
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_dial_that_no_address_completes_gives_each_cause_in_the_order_started() {
         let (mut sim, client, _) = nodes(0);
         let silent = address(&sim.node(sim::node::Config::default()));
@@ -263,8 +323,8 @@ mod tests {
         let attempts = vec![
             (Address::Udp(silent), Error::TimedOut),
             (Address::Udp(other), Error::Authentication { expected }),
-            (Address::Udp(PORT_ZERO), no_route(PORT_ZERO)),
-            (Address::Tcp(other), no_route(other)),
+            (Address::Udp(PORT_ZERO), Error::Unroutable),
+            (Address::Tcp(other), Error::Unroutable),
         ];
         unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
@@ -288,11 +348,11 @@ mod tests {
             Address::Udp(unspecified),
         ];
         let attempts = vec![
-            (Address::Udp(PORT_ZERO), no_route(PORT_ZERO)),
-            (Address::Udp(unspecified), no_route(unspecified)),
-            (Address::Tcp(b), no_route(b)),
-            (Address::Tcp(a), no_route(a)),
-            (relay, no_route(a)),
+            (Address::Udp(PORT_ZERO), Error::Unroutable),
+            (Address::Udp(unspecified), Error::Unroutable),
+            (Address::Tcp(b), Error::Unroutable),
+            (Address::Tcp(a), Error::Unroutable),
+            (relay, Error::Unroutable),
         ];
         unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));

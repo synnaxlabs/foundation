@@ -130,6 +130,7 @@ impl Transport {
     ///
     /// # Errors
     ///
+    /// [`Error::Network`] when the socket is broken or breaks during the dial, or
     /// [`Error::Unreachable`] with the cause at each address when none gives a
     /// session.
     ///

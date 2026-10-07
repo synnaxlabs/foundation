@@ -87,29 +87,38 @@ impl Carrier {
         poll_fn(|cx| self.poll_accept(cx)).await
     }
 
+    /// Checks that the socket still works.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Network`] when the socket broke.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        match &self.0.borrow().failed {
+            Some(error) => Err(Error::Network {
+                error: error.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Starts a dial to `remote` that `peer` must answer, and gives its session,
     /// which [`Session::poll_connected`] waits on. Dropping the session closes the
     /// dial.
     ///
     /// # Errors
     ///
-    /// [`Error::Network`] when the socket broke, or with
-    /// [`env::net::Error::Unreachable`] when no datagram can go to `remote`: its
-    /// port is 0 or its IP is unspecified.
+    /// As [`Carrier::check`], or [`Error::Unroutable`] when no datagram can go to
+    /// `remote`: its port is 0 or its IP is unspecified.
     pub(crate) fn dial(
         &self,
         peer: PublicKey,
         remote: SocketAddr,
     ) -> Result<Session, Error> {
+        self.check()?;
         let mut state = self.0.borrow_mut();
-        if let Some(error) = &state.failed {
-            return Err(Error::Network {
-                error: error.clone(),
-            });
-        }
         let now = state.clock.now();
-        let key = (state.endpoint.connect(now, peer, remote))
-            .map_err(|error| Error::Network { error })?;
+        let key =
+            (state.endpoint.connect(now, peer, remote)).ok_or(Error::Unroutable)?;
         state.sessions.insert(key, Slot::default());
         state.wake();
         Ok(self.session(key))
