@@ -395,10 +395,10 @@ mod tests {
     use sim::{Crash, Sim, link};
 
     use super::*;
+    use crate::common::{self, key, message, pool, private, proven, public};
     use crate::log;
     use crate::message::Message;
     use crate::region::Malformed;
-    use crate::testing::{self, key, message, pool, private, proven, public};
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
@@ -443,7 +443,7 @@ mod tests {
         let config = Config {
             key: key(id),
             private_key: private(id),
-            members: testing::members(members),
+            members: common::members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
             clock: node.clock(),
