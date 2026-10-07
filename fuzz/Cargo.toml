@@ -20,6 +20,7 @@ crc32c = "0.6.8"
 document = { path = "../crates/document" }
 env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
+mesh = { path = "../crates/mesh", features = ["sim"] }
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
@@ -86,6 +87,13 @@ bench = false
 [[bin]]
 name = "document_encoding"
 path = "fuzz_targets/document_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_change"
+path = "fuzz_targets/mesh_change.rs"
 test = false
 doc = false
 bench = false

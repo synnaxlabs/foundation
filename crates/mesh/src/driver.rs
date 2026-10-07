@@ -1064,6 +1064,15 @@ mod tests {
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
     }
 
+    /// Polls each call one time.
+    async fn poll_each<F: Future>(calls: &mut [Pin<Box<F>>]) -> Vec<Poll<F::Output>> {
+        poll_fn(|cx| {
+            let polls = calls.iter_mut().map(|call| call.as_mut().poll(cx));
+            Poll::Ready(polls.collect())
+        })
+        .await
+    }
+
     /// Proposes `change`, and gives the result when the call does not wait.
     async fn started(mesh: &Mesh, change: Change) -> Poll<Result<Position, Error>> {
         now(pin!(mesh.propose(change))).await
@@ -1826,6 +1835,31 @@ mod tests {
             assert_eq!(mesh.group.borrow().running(), Ok(()));
             drop(held);
             assert_eq!(watch.next().await, Ok(Some(key(2))));
+        });
+    }
+
+    #[test]
+    fn a_burst_of_changes_that_the_pool_cannot_hold_commits() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                pool: small_pool(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let first = lead(&mesh, &node.clock(), home(1)).await;
+            // One poll starts each proposal, so one `Ready` holds the 99 entries.
+            let mut calls: Vec<_> = (2..=100)
+                .map(|id| Box::pin(mesh.propose(home(id))))
+                .collect();
+            let waits = poll_each(&mut calls).await;
+            assert!(waits.iter().all(Poll::is_pending));
+            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+            let positions = poll_each(&mut calls).await;
+            let expected: Vec<_> = (1..=99)
+                .map(|count| Poll::Ready(Ok(after(first, count))))
+                .collect();
+            assert_eq!(positions, expected);
+            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(100))));
         });
     }
 
