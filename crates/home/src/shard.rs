@@ -2433,8 +2433,8 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
             drop(blocks);
             // A backfill entry of index 0 with samples goes to disk.
-            let later = frame(&test.pool, &set, &[(0, &[5]), (1, &[5])]);
-            assert_eq!(shard.write(a, BACKFILL, later), Ok(&[applied(0, 0, 1)][..]));
+            let later = frame(&test.pool, &set, &[(0, &[3, 4, 5]), (1, &[3, 4, 5])]);
+            assert_eq!(shard.write(a, BACKFILL, later), Ok(&[applied(0, 0, 3)][..]));
             shard.committed().await.expect("the commit ends");
         })
         .expect("the first run ends");
