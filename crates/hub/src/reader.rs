@@ -162,7 +162,8 @@ impl Reader {
     }
 
     /// The next frame, as a view of the reader's channels. The view borrows the
-    /// reader, so the frame stays in use until the next call or the drop. After a run
+    /// reader, so the frame stays in use, and spends the reader's credit, until the
+    /// first poll of the next call or the drop. After a run
     /// of frames, it yields once, so a task that loops on it lets the shard's other
     /// tasks run.
     ///
