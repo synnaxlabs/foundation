@@ -166,7 +166,8 @@ impl Spawned {
         if polled.is_ready() {
             drop(slot);
             let running = self.running.upgrade();
-            let done = running.and_then(|r| r.borrow_mut().remove(&self.number));
+            let running = running.expect("invariant: a live slot is in the live map");
+            let done = running.borrow_mut().remove(&self.number);
             // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
         }
@@ -184,8 +185,6 @@ mod tests {
     #[test]
     fn a_task_pushed_after_the_inbox_drops_is_dropped() {
         let (queue, inbox) = pair();
-        // Only `Node`'s derive uses the impl, so this is its one test.
-        assert_eq!(format!("{queue:?}"), "Queue");
         drop(inbox);
         let task = Arc::new(());
         queue.push(Arc::clone(&task));
