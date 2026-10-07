@@ -95,7 +95,9 @@ coordinator admits them. Any builder takes any crate. One task is in progress pe
   The author fixes each finding or answers it on the PR.
 - **Ready:** the author runs `gh pr ready` when the gate passed, every review finding is
   fixed or answered, and the body is complete: oracle changes, Complexity, Shape
-  decisions, and the six performance answers on a hot path.
+  decisions, and the six performance answers on a hot path. For a red-team PR and the
+  director's rule PR, `laptop.monitor` marks it ready and queues it (`docs/factory.md`,
+  "Merge path").
 - **Merge:** `gh pr merge <n> --auto` puts it in the merge queue (`docs/factory.md`).
 
 ## Interface changes
