@@ -943,6 +943,29 @@ mod directory {
         }
     }
 
+    /// The count of rings with no record is one over the largest index, in any order
+    /// of the list. `shard-10` lists before `shard-9`.
+    #[test]
+    fn the_largest_ring_gives_the_count() {
+        let (stored, cores) = (11, 2);
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, cores);
+        sim.run_on(&host, |host, _| async move {
+            let files = host.files();
+            for name in ["shard-10", "shard-9"] {
+                files.create_dir(Path::new(name)).await.expect("makes");
+            }
+        })
+        .expect("the run ends");
+        let e = run_on(&mut sim, &host).unwrap_err();
+        assert_eq!(e, Error::Shards { stored, cores });
+        assert_eq!(
+            e.to_string(),
+            "the data directory holds 11 shards, but this node starts 2; start it \
+             on 11 cores"
+        );
+    }
+
     #[test]
     fn a_failed_file_call_of_the_claim_stops_the_node_before_any_ring() {
         use env::files::Operation::{CreateDir, List, SyncDir};

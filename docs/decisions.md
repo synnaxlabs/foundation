@@ -2501,19 +2501,24 @@ How to read this record:
   next to `shards-<cores>`, and `stored` is the smallest such count, so the error
   does not hang on the order of the list. A name whose rest is not a count in plain
   decimal (`shards-03`, `shards-+3`), or is zero, is not a record. With no record,
-  rings up to `shard-<k>` are a record of `k + 1`, so a data directory made before
-  #1076 is checked too; a crash cannot leave a ring with no record. A name
+  rings up to `shard-<k>` are a record of `k + 1`, so a data directory whose record
+  a copy dropped is checked too; a crash cannot leave a ring with no record. A name
   `shard-<usize::MAX>` is not a ring, because no node has a shard of that index.
   Each start syncs the data directory before `shard-0`, also when the record is
   there, because a process crash can leave it unsynced. A one-sector file lost: it
   needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
   https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
-  After a stop, a shard starts no disk step: shard 0 checks the stop before the
-  claim, and each shard before its open. A started step runs to its end. A skipped
-  step drops its handoff, so each later shard skips too. A stop is not a failure,
-  so `join` gives `Ok` when no shard failed. A shard that panics as it starts stops
-  the node, so the claim or open after it does not start; `join` gives its errors in
-  the order above. Decided by the architect on #1062 (#1174):
+  The rule of rings with no record stays, decided by the architect on #1178:
+  https://github.com/synnaxlabs/foundation/issues/1178#issuecomment-6032340796, with
+  the reasons at
+  https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. After a
+  stop, a shard starts no disk step: shard 0 checks the stop before the claim, and
+  each shard before its open. A started step runs to its end. A skipped step drops its
+  handoff, so each later shard skips too. A stop is not a failure, so `join` gives
+  `Ok` when no shard failed. Any failure stops the node, so a claim or open that has
+  not started does not start; `join` gives `Start` or `Memory`, else `Shards` or
+  `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
+  architect on #1062 (#1174):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
