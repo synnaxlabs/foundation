@@ -13,6 +13,7 @@ use env::net::Error;
 use env::rng::Rng;
 use types::time::Monotonic;
 
+use crate::name::key;
 use crate::{Crash, link, name};
 use wire::{Packet, Wire};
 
@@ -225,9 +226,4 @@ impl Network {
     pub(crate) fn digest(&self) -> u64 {
         self.wire.digest()
     }
-}
-
-/// The key of `host` in the name table: its ASCII lowercase, with no final dot.
-fn key(host: &str) -> String {
-    host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
 }

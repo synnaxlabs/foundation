@@ -48,10 +48,11 @@ impl Config {
             delay >= Span::ZERO,
             "the lookup of {host} takes a negative delay of {delay}"
         );
-        let bracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        let key = key(host);
+        let bracketed = key.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
         let literal = match bracketed {
             Some(v6) => v6.parse::<Ipv6Addr>().is_ok(),
-            None => host.parse::<IpAddr>().is_ok(),
+            None => key.parse::<IpAddr>().is_ok(),
         };
         assert!(!literal, "{host} is an IP literal, which no lookup reads");
     }
@@ -61,4 +62,14 @@ impl Default for Answer {
     fn default() -> Self {
         Self::Addresses(Vec::new())
     }
+}
+
+/// The key of `host` in the name table: its ASCII lowercase, with no final dot. The
+/// root name `.` keeps its dot, so that it is not the empty host.
+pub(crate) fn key(host: &str) -> String {
+    let host = host
+        .strip_suffix('.')
+        .filter(|h| !h.is_empty())
+        .unwrap_or(host);
+    host.to_ascii_lowercase()
 }

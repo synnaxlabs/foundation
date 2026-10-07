@@ -131,6 +131,10 @@ fn a_name_matches_in_any_ascii_case() {
     let (mut sim, node) = one();
     sim.name("Historian.LOCAL", addresses(vec![v4(2)]));
     assert_eq!(lookup(&mut sim, &node), (Ok(vec![at(v4(2))]), Span::ZERO));
+    let found = sim.run_on(&node, |node, _| async move {
+        node.net().resolve("HISTORIAN.Local", 4433).await
+    });
+    assert_eq!(found, Ok(Ok(vec![at(v4(2))])));
 }
 
 #[test]
@@ -196,6 +200,34 @@ fn a_name_that_is_an_ip_literal_panics() {
 fn a_name_that_is_an_ipv6_literal_in_brackets_panics() {
     let (mut sim, _) = one();
     sim.name("[fd00::2]", addresses(vec![v4(3)]));
+}
+
+#[test]
+#[should_panic(expected = "10.0.0.2. is an IP literal, which no lookup reads")]
+fn a_name_that_is_an_ip_literal_with_a_final_dot_panics() {
+    let (mut sim, _) = one();
+    sim.name("10.0.0.2.", addresses(vec![v4(3)]));
+}
+
+#[test]
+fn the_empty_host_is_not_the_root() {
+    let (mut sim, node) = one();
+    sim.name(".", addresses(vec![v4(2)]));
+    let found = sim.run_on(&node, |node, _| async move {
+        node.net().resolve("", 4433).await
+    });
+    let host = String::new();
+    assert_eq!(found, Ok(Err(Net::NotFound { host })));
+}
+
+#[test]
+fn an_ipv4_address_in_brackets_is_a_name() {
+    let (mut sim, node) = one();
+    sim.name("[10.0.0.2]", addresses(vec![v4(3)]));
+    let found = sim.run_on(&node, |node, _| async move {
+        node.net().resolve("[10.0.0.2]", 4433).await
+    });
+    assert_eq!(found, Ok(Ok(vec![at(v4(3))])));
 }
 
 #[test]
