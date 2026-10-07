@@ -108,7 +108,7 @@ impl Lab {
             shards: host.shards(),
             clock: host.clock(),
             wall: host.wall(),
-            budget: 1 << 20,
+            budget: types::byte::Size::MEBIBYTE,
             memory: Box::new(|len| Ok(block::Heap::new(len))),
             files: {
                 let host = host.clone();
