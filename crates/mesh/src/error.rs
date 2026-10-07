@@ -19,11 +19,8 @@ pub(crate) enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a member that is not a voter of this node's configuration.
-    NotVoter {
-        /// The sender.
-        from: node::Key,
-    },
+    /// A request from a node that is not a voter of this node's configuration.
+    NotVoter,
     /// A message carries a grant that does not hold.
     Grant(grant::Error),
     /// A call names a node that is not a member of the region.
@@ -44,8 +41,8 @@ impl fmt::Display for Error {
                 "a message names node {from} as its sender, but its peer does not \
                  hold the key of that member"
             ),
-            Self::NotVoter { from } => {
-                write!(f, "node {from} sent a request, but it is not a voter")
+            Self::NotVoter => {
+                f.write_str("a request came from a node that is not a voter")
             }
             Self::Grant(error) => error.fmt(f),
             Self::NotMember(key) => {
