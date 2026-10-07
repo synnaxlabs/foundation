@@ -113,9 +113,10 @@ utc() {
     date -u -d "@$1" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%MZ
 }
 
-# The host cannot cost more than its spot limit for its lifetime.
+# The spot limit, plus 0.03 USD an hour for the disk and address, for the life plus
+# 10 min of boot (#15).
 cap=$(awk -v p="$price_max" -v m="$minutes" \
-    'BEGIN { printf "%.2f", int(p * m / 60 * 100 + 0.999999) / 100 }')
+    'BEGIN { printf "%.2f", int((p + 0.03) * (m + 10) / 60 * 100 + 0.999999) / 100 }')
 name="bench-$issue-$(date -u +%Y%m%dT%H%M%S)"
 work=$(mktemp -d)
 key=$work/key

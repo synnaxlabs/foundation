@@ -133,9 +133,9 @@ args=(1047 box2.red-team delivery aaaa1111 bbbb2222)
 run '[]' "${args[@]}" release 'push (pop|peek)'
 check "a run posts the cap, the launch, the report, and the end" eval '
     [[ $status == 0 ]] &&
-    has "$(posted 15)" "bench-host cap 2.40 USD for #1047, asked by box2.red-team" &&
+    has "$(posted 15)" "bench-host cap 2.67 USD for #1047, asked by box2.red-team" &&
     has "$(posted 15)" "bench-host launch i-1: c7i.metal-24xl, #1047, asked by \
-box2.red-team, cap 2.40 USD, ends by" &&
+box2.red-team, cap 2.67 USD, ends by" &&
     has "$(posted 15)" "bench-host end i-1 for #1047: 0.00 h. Terminated: yes. \
 Still running from this run: none." &&
     [[ $(posted 1047 | grep -c "^table") == 4 ]]'
@@ -155,7 +155,7 @@ for price in -1 0 1e3; do
         [[ $status == 1 && -z $(posted 15) ]]'
 done
 
-BENCH_DAY_CAP=100 run "[$(note 1 bench-bot "bench-host cap 12.61 USD for #1")]" \
+BENCH_DAY_CAP=100 run "[$(note 1 bench-bot "bench-host cap 12.34 USD for #1")]" \
     "${args[@]}"
 check "a launch over 15 USD of caps today is withdrawn" eval '
     [[ $status == 1 ]] && has "$(cat "$T/out")" "15.01 USD of caps today" &&
@@ -166,7 +166,7 @@ run "[$(note 1 someone "bench-host cap 50.00 USD"),
     $(note 2 bench-bot "bench-host cap -100.00 USD"),
     $(note 3 bench-bot "bench-host cap 13.00 USD")]" "${args[@]}"
 check "a cap of another account or not a price does not count" eval '
-    [[ $status == 1 ]] && has "$(cat "$T/out")" "15.40 USD of caps today"'
+    [[ $status == 1 ]] && has "$(cat "$T/out")" "15.67 USD of caps today"'
 
 run "[$(note 1 bench-bot "bench-host cap 13.00 USD"),
     $(note 2 bench-bot "bench-host withdrawn 1: no host launched."),
