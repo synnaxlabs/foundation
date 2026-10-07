@@ -2,7 +2,7 @@ name: ARM
 
 on:
   pull_request:
-    paths-ignore: ['docs/**', '**.md']
+  merge_group:
   push:
     branches: [main]
     paths-ignore: ['docs/**', '**.md']
@@ -13,7 +13,35 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A trigger path filter leaves a required check pending, and a skipped one passes. So
+  # `test` skips only when this filter ran and found no change.
+  changes:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # In the merge queue, the filter diffs the group's base and head in a clone.
+      - if: github.event_name == 'merge_group'
+        uses: actions/checkout@v4
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        id: filter
+        with:
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+
   test:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.code != 'false'"
     runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v4
