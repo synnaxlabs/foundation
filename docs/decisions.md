@@ -1774,6 +1774,12 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
   https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713).
+  A refused URI gives one error for each cause: `Scheme`, `UserInfo`, `Host`, and
+  `Port`, checked in that order, so no error holds text from a URI with user info.
+  Text after `]` with no `:` is part of the host. A built URI with an empty path sends
+  `/`. Lost: one `Uri` variant that holds the URI with its user info removed, because
+  the message must name the cause. Decided by `laptop.architect-2` on #1159
+  (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a

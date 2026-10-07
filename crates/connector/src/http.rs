@@ -16,7 +16,7 @@ use bytes::Bytes;
 use env::clock::{Clock, Sleep};
 use env::net::{self, Net, Tcp, tcp};
 use env::tasks::Tasks;
-use http::uri::{PathAndQuery, Scheme};
+use http::uri::Scheme;
 use http::{HeaderValue, Request, Response, Uri, header};
 use http_body::Body as _;
 use hyper::body::Incoming;
@@ -108,9 +108,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// - [`Error::Uri`] when the scheme is not `http`, the host is empty or a bad
-    ///   IPv6 address, the port is not a number from 1 to 65535, or the URI has user
-    ///   info.
+    /// - [`Error::Scheme`] when the scheme is not `http`.
+    /// - [`Error::UserInfo`] when the URI holds user info.
+    /// - [`Error::Host`] when the host is empty or a bad IPv6 address.
+    /// - [`Error::Port`] when the port is not a number from 1 to 65535.
     /// - [`Error::Connect`] when the name lookup failed, or no address of the host
     ///   took the connection.
     /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
@@ -289,35 +290,45 @@ struct Connection {
     received: Rc<Cell<u64>>,
 }
 
-/// The origin of `uri`.
+/// The origin of `uri`. It checks the scheme, the user info, the host, and the port,
+/// in that order, so no error holds text from a URI with user info.
 fn origin(uri: &Uri) -> Result<Origin, Error> {
-    let fail = || Error::Uri { uri: uri.clone() };
     if uri.scheme() != Some(&Scheme::HTTP) {
-        return Err(fail());
+        return Err(Error::Scheme);
     }
-    let authority = uri.authority().ok_or_else(fail)?;
-    let host = authority.host();
-    let bracketed = host.strip_prefix('[').map(|h| h.strip_suffix(']'));
-    let host_valid = match bracketed {
-        Some(v6) => v6.is_some_and(|v6| v6.parse::<Ipv6Addr>().is_ok()),
+    let authority = uri
+        .authority()
+        .expect("a URI with a scheme has an authority");
+    let text = authority.as_str();
+    if text.contains('@') {
+        return Err(Error::UserInfo);
+    }
+    // `http` takes any text after `]`; with no `:`, it is part of the host.
+    let (host, port) = match text[authority.host().len()..].strip_prefix(':') {
+        Some(port) => (authority.host(), port),
+        None => (text, ""),
+    };
+    let valid = match host.strip_prefix('[') {
+        Some(v6) => v6
+            .strip_suffix(']')
+            .is_some_and(|v6| v6.parse::<Ipv6Addr>().is_ok()),
         None => !host.is_empty(),
     };
-    if authority.as_str().contains('@') || !host_valid {
-        return Err(fail());
+    if !valid {
+        return Err(Error::Host {
+            host: host.to_owned(),
+        });
     }
-    let rest = &authority.as_str()[host.len()..];
-    // `http` takes any text after `]`, and `u16::from_str` takes a leading `+`.
-    let digits = rest.strip_prefix(':').unwrap_or(rest);
-    let port = match digits {
+    // `u16::from_str` takes a leading `+`.
+    let port = match port {
         "" => 80,
-        _ if !rest.starts_with(':') || !digits.bytes().all(|b| b.is_ascii_digit()) => {
-            return Err(fail());
-        }
-        _ => digits
-            .parse()
-            .ok()
+        _ => Some(port)
+            .filter(|port| port.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|port| port.parse().ok())
             .filter(|&port| port != 0)
-            .ok_or_else(fail)?,
+            .ok_or_else(|| Error::Port {
+                port: port.to_owned(),
+            })?,
     };
     Ok(Origin {
         host: host.to_ascii_lowercase(),
@@ -346,24 +357,32 @@ fn origin_form(parts: &mut http::request::Parts) {
         parts.headers.insert(header::HOST, host);
     }
     let mut uri = http::uri::Parts::default();
-    uri.path_and_query = Some(
-        parts
-            .uri
-            .path_and_query()
-            .cloned()
-            .unwrap_or_else(|| PathAndQuery::from_static("/")),
-    );
-    parts.uri = Uri::from_parts(uri).expect("a path alone is a valid URI");
+    uri.path_and_query = parts.uri.path_and_query().cloned();
+    let uri = Uri::from_parts(uri).expect("a path alone is a valid URI");
+    // With no scheme, `Uri` shows an empty path as nothing, and `hyper` sends that.
+    parts.uri = if uri.path().is_empty() {
+        Uri::from_static("/")
+    } else {
+        uri
+    };
 }
 
 /// Why an exchange failed.
 #[derive(Debug)]
 pub enum Error {
-    /// The scheme is not `http`, the host is empty or a bad IPv6 address, the port is
-    /// not a number from 1 to 65535, or the URI has user info.
-    Uri {
-        /// The URI of the request.
-        uri: Uri,
+    /// The scheme of the URI is not `http`.
+    Scheme,
+    /// The URI holds user info. The error keeps none of it.
+    UserInfo,
+    /// The URI has no host, or a host in brackets that is not an IPv6 address.
+    Host {
+        /// The host, as the URI gives it.
+        host: String,
+    },
+    /// The port of the URI is not a number from 1 to 65535.
+    Port {
+        /// The text after the host, with no leading `:`.
+        port: String,
     },
     /// The name lookup failed, or no address of the host took the connection.
     Connect(net::Error),
@@ -392,9 +411,15 @@ impl From<hyper::Error> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Uri { uri } => write!(
+            Self::Scheme => write!(f, "the scheme of the URI is not http"),
+            Self::UserInfo => write!(
                 f,
-                "{uri} is not an http URI with a valid host and port, and no user info"
+                "the URI holds user info; give a credential through a secret"
+            ),
+            Self::Host { host } => write!(f, "the URI has no valid host: {host:?}"),
+            Self::Port { port } => write!(
+                f,
+                "the port {port:?} of the URI is not a number from 1 to 65535"
             ),
             Self::Connect(error) => write!(f, "the connect failed: {error}"),
             Self::TimedOut => write!(f, "the exchange timed out"),
@@ -411,7 +436,12 @@ impl std::error::Error for Error {
         match self {
             Self::Connect(error) => Some(error),
             Self::Protocol(failure) => Some(failure),
-            Self::Uri { .. } | Self::TimedOut | Self::TooLarge { .. } => None,
+            Self::Scheme
+            | Self::UserInfo
+            | Self::Host { .. }
+            | Self::Port { .. }
+            | Self::TimedOut
+            | Self::TooLarge { .. } => None,
         }
     }
 }
