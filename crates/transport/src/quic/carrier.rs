@@ -63,12 +63,13 @@ impl Carrier {
     ///
     /// # Errors
     ///
-    /// Why the dial ended before the handshake finished, as [`Session::closed`]
-    /// gives it.
+    /// As [`Carrier::dial`], or why the dial ended before the handshake finished, as
+    /// [`Session::closed`] gives it.
     ///
     /// # Panics
     ///
-    /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
+    /// As [`Carrier::dial`].
+    #[cfg(test)]
     pub(crate) async fn connect(
         &self,
         peer: PublicKey,
@@ -90,13 +91,38 @@ impl Carrier {
         poll_fn(|cx| self.poll_accept(cx)).await
     }
 
-    fn dial(&self, peer: PublicKey, remote: SocketAddr) -> Result<Session, Error> {
-        let mut state = self.0.borrow_mut();
-        if let Some(error) = &state.failed {
-            return Err(Error::Network {
+    /// Checks that the socket still works.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Network`] when the socket broke.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        match &self.0.borrow().failed {
+            Some(error) => Err(Error::Network {
                 error: error.clone(),
-            });
+            }),
+            None => Ok(()),
         }
+    }
+
+    /// Starts a dial to `remote` that `peer` must answer, and gives its session,
+    /// which [`Session::poll_connected`] waits on. Dropping the session closes the
+    /// dial.
+    ///
+    /// # Errors
+    ///
+    /// As [`Carrier::check`].
+    ///
+    /// # Panics
+    ///
+    /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
+    pub(crate) fn dial(
+        &self,
+        peer: PublicKey,
+        remote: SocketAddr,
+    ) -> Result<Session, Error> {
+        self.check()?;
+        let mut state = self.0.borrow_mut();
         let now = state.clock.now();
         let key = state.endpoint.connect(now, peer, remote);
         state.sessions.insert(key, Slot::default());
@@ -284,7 +310,10 @@ impl Session {
     }
 
     /// Ready when the handshake finished, or with why the dial ended.
-    fn poll_connected(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    pub(crate) fn poll_connected(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Error>> {
         let mut state = self.state.borrow_mut();
         let slot = state.slot(self.key);
         if slot.peer.is_some() {
@@ -512,7 +541,7 @@ mod tests {
     use crate::quic::Endpoint;
     use crate::testing::{self, IDLE, PORT, address, nodes, shard, spans};
     use crate::tls::public;
-    use crate::{Code, Error, Peer};
+    use crate::{Address, Code, Error, Peer};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -655,6 +684,32 @@ mod tests {
             }
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(carrier.0.borrow().sessions.len(), 0);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_that_loses_frees_its_slot() {
+        let (mut sim, client, server) = nodes(0);
+        let silent = sim.node(sim::node::Config::default());
+        let addresses = [
+            Address::Udp(address(&silent)),
+            Address::Udp(address(&server)),
+        ];
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let clock = node.clock();
+            let peer = public(&SERVER);
+            let dialed = crate::dial::dial(&carrier, &clock, peer, &addresses).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(carrier.0.borrow().sessions.len(), 1);
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         assert_eq!(sim.run(), Ok(()));
     }

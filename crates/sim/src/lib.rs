@@ -12,6 +12,7 @@
 
 pub mod line;
 pub mod link;
+pub mod name;
 pub mod node;
 pub mod shard;
 
@@ -156,6 +157,27 @@ impl Sim {
         let (from, to) = (self.own(from), self.own(to));
         config.check();
         lock(&self.shared).net().link(from, to, config);
+    }
+
+    /// Makes each lookup of `host` that starts from now on, on any node, go as
+    /// `config` says. As in DNS, a name matches in any ASCII case and with or
+    /// without one final dot. A name that no call gave has no address.
+    ///
+    /// ```
+    /// let mut sim = sim::Sim::new(sim::Config::default());
+    /// let historian = "10.0.0.2".parse().expect("an address");
+    /// let answer = sim::name::Answer::Addresses(vec![historian]);
+    /// let config = sim::name::Config { answer, ..sim::name::Config::default() };
+    /// sim.name("historian.local", config);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When `config.delay` is negative, or when `host` is an IP literal, which
+    /// [`env::net::Net::resolve`] gives with no lookup.
+    pub fn name(&mut self, host: &str, config: name::Config) {
+        config.check(host);
+        lock(&self.shared).net().name(host, config);
     }
 
     /// Sets the line that joins port `a_path` of `a` and port `b_path` of `b`, for the
@@ -473,6 +495,9 @@ fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
 
 /// The Linux code for an I/O error (`EIO`).
 const EIO: i32 = 5;
+
+/// The Linux code for a failure that may pass (`EAGAIN`).
+const EAGAIN: i32 = 11;
 
 /// The most payloads that [`messages`] drops in one chain.
 const CHAIN: usize = 16;

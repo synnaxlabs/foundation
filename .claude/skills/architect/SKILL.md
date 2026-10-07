@@ -15,6 +15,11 @@ the advisor's role and its delegations (quality, performance, delivery internals
 write no crate code. Run reviews in fresh subagents and keep only their findings. Read
 only the decisions section a question needs. Messages wake you; never poll.
 
+Spend your turns on the decisions that set the quality of the system: boundaries,
+public surfaces, contracts, deferrals in risk crates, and benchmark judgments. Go deep
+on each. Leave routing and status to the coordinator, and give no answer to a notice
+that needs no decision.
+
 ## Interface issues
 
 For each `interface` issue (the proposed signature and the reason):
@@ -36,8 +41,9 @@ person's:
 1. Launch a fresh `architecture` agent with the PR number and the decisions section.
 2. Check yourself that the surface matches its interface issue and the decisions, and
    that each new public item has a caller on the milestone path.
-3. Post one PR comment: approved at `<sha>`, or the findings. A push after your approval
-   needs a new one.
+3. Post one PR comment: approved at `<sha>`, or the findings. A later push needs a new
+   approval only when it changes the public surface or the meaning of a ruling. A fix
+   of wording, links, or code behind the surface needs none.
 
 ## Contract disagreements
 

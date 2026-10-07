@@ -95,10 +95,6 @@ pub enum Definition {
 impl Definition {
     /// Writes the canonical bytes of the definition.
     #[must_use]
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "`Connector::new` refuses a config with no encoding"
-    )]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![VERSION];
         match self {
@@ -113,8 +109,7 @@ impl Definition {
                 out.push(CONNECTOR);
                 text(&mut out, connector.kind().as_str());
                 text(&mut out, connector.node().as_str());
-                let config = encoding::encode(connector.config())
-                    .expect("invariant: a connector's config has an encoding");
+                let config = connector.config().encode();
                 count(&mut out, config.len());
                 out.extend_from_slice(&config);
             }
@@ -348,10 +343,6 @@ impl<'a> Reader<'a> {
         Ok(names)
     }
 
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "`decode` refuses a document that nests deeper than `encode` writes"
-    )]
     fn connector(&mut self) -> Result<Connector, Error> {
         let kind = self.name()?;
         let node = self.name()?;
@@ -359,8 +350,7 @@ impl<'a> Reader<'a> {
         let at = self.at();
         let config = encoding::decode(self.take(len)?)
             .map_err(|error| Error::Config { at, error })?;
-        Ok(Connector::new(kind, node, config)
-            .expect("invariant: a decoded document has an encoding"))
+        Ok(Connector::new(kind, node, config))
     }
 
     fn region(&mut self) -> Result<Delegation, Error> {

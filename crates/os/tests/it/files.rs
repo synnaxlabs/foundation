@@ -139,7 +139,6 @@ fn create_makes_a_zeroed_file_of_its_length_in_the_data_directory() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "#931")]
 fn create_allocates_each_byte_of_the_file() {
     const LEN: u64 = 64 << 20;
     run(|files, data| async move {
@@ -330,7 +329,6 @@ fn a_sync_after_a_write_succeeds() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "#931")]
 fn free_drops_by_the_bytes_of_a_created_file() {
     const LEN: u64 = 64 << 20;
     // Other jobs on the host write to the same disk, and an attempt counts their bytes

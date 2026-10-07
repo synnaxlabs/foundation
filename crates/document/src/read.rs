@@ -65,14 +65,7 @@ fn size_fix(text: &str, error: byte::Error) -> String {
             return format!("Write \"{likely}\"");
         }
     }
-    match error {
-        byte::Error::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
-        byte::Error::Unit { .. } => {
-            "Use a unit such as `MiB` or `GiB`, with exact case".into()
-        }
-        byte::Error::Fraction => "Round the size to whole bytes".into(),
-        byte::Error::Range { largest } => format!("Use at most \"{largest}\""),
-    }
+    error.fix()
 }
 
 /// Reads a block label as a name, such as `"site_a.cell_1"`.
@@ -159,7 +152,7 @@ mod tests {
     use crate::{Map, Position, Source, Span};
     use proptest::prelude::*;
 
-    const SYNTAX: &str = "Write a size such as \"200GiB\" or \"1.5GiB\"";
+    const SYNTAX: &str = "Write a size such as 200GiB or 1.5GiB";
     const UNIT: &str = "Use a unit such as `MiB` or `GiB`, with exact case";
     const FRACTION: &str = "Round the size to whole bytes";
     const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in that \
@@ -315,13 +308,13 @@ mod tests {
                 "16777216TiB",
                 "cannot read the byte size \"16777216TiB\": expected a size of at most \
                  16777215TiB",
-                "Use at most \"16777215TiB\"",
+                "Use at most 16777215TiB",
             ),
             (
                 "18446744073709551616B",
                 "cannot read the byte size \"18446744073709551616B\": expected a size \
                  of at most 18446744073709551615B",
-                "Use at most \"18446744073709551615B\"",
+                "Use at most 18446744073709551615B",
             ),
         ]);
     }
@@ -680,15 +673,7 @@ mod tests {
                     if let Some(likely) = likely {
                         prop_assert!(size(&string(likely)).is_ok(), "{:?}", text);
                     } else {
-                        let fix = match error {
-                            byte::Error::Syntax => SYNTAX.into(),
-                            byte::Error::Unit { .. } => UNIT.into(),
-                            byte::Error::Fraction => FRACTION.into(),
-                            byte::Error::Range { largest } => {
-                                format!("Use at most \"{largest}\"")
-                            }
-                        };
-                        prop_assert_eq!(diagnostic.fix, fix, "{:?}", text);
+                        prop_assert_eq!(diagnostic.fix, error.fix(), "{:?}", text);
                     }
                 }
                 (read, parsed) => {

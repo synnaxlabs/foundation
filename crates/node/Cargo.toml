@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 block = { path = "../block" }
+buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 env = { path = "../env" }
 estimate = { path = "../estimate" }

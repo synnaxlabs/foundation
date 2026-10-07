@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 const ME = 'laptop.integrator-1'
 const PEER = 'laptop.integrator-2'
 const SEND = 'mcp__factory__send'
+const NEXT = 'mcp__factory__next'
 const ROSTER = { host: 'broker', port: 8883, names: [ME, PEER, 'box1.builder-1'] }
 const HOUR_MS = 3_600_000
 
@@ -17,7 +18,12 @@ const inbox = (from: string, body: object) =>
 async function boot(
   $: any,
   on: any,
-  opts: { name?: string; busy?: boolean; store?: Record<string, unknown> } = {},
+  opts: {
+    name?: string
+    busy?: boolean
+    store?: Record<string, unknown>
+    roster?: object
+  } = {},
 ) {
   const published: { topic: string; body: any }[] = []
   const started: string[] = []
@@ -38,14 +44,20 @@ async function boot(
   mock.env(on, { HOME: '/h', ...(name ? { FACTORY_NAME: name } : {}) })
   const clock = mock.clock(on, { now: 1_000_000 })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
-  on('fs.read', () => ({ value: JSON.stringify(ROSTER) }))
+  let roster = opts.roster ?? ROSTER
+  on('fs.read', () => ({ value: JSON.stringify(roster) }))
   on('store.get', (_: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: any, e: any) => {
     store.set(e.key, e.value)
     poke()
     return { value: undefined }
   })
-  on('tool.register', () => ({ value: undefined }))
+  const registered: any[] = []
+  on('tool.register', (_: any, e: any) => {
+    registered.push(e)
+    poke()
+    return { value: undefined }
+  })
   on('session.usage', () => {
     poke()
     return {
@@ -86,6 +98,8 @@ async function boot(
     published,
     started,
     statuses,
+    registered,
+    setRoster: (next: object) => (roster = next),
     store,
     clock,
     feed: (...more: string[]) => {
@@ -287,6 +301,32 @@ test('caps message turns at 30 an hour', async ($, on) => {
   await w.settle()
 })
 
+test('takes the cap of a session from turnCaps in the roster', async ($, on) => {
+  const w = await boot($, on, { roster: { ...ROSTER, turnCaps: { [ME]: 2 } } })
+  for (let i = 0; i < 2; i++) {
+    w.feed(inbox(PEER, { id: `m${i}`, text: 'hi' }))
+    await w.until(() => w.started.length === i + 1)
+  }
+  w.feed(inbox(PEER, { id: 'm2', text: 'hi' }))
+  await w.until(() => w.statuses.some(s => s.includes('capped at 2 turns an hour')))
+  expect(w.started.length).toBe(2)
+  await w.settle()
+})
+
+test('applies a roster change within a minute, with no reload', async ($, on) => {
+  const NEW = 'laptop.director'
+  const w = await boot($, on)
+  const sends = () => w.registered.filter(r => r.name === 'send')
+  w.setRoster({ ...ROSTER, names: [...ROSTER.names, NEW] })
+  await w.clock.advance(60_000)
+  await w.until(() => sends().length === 2)
+  expect(sends()[1].inputSchema.properties.to.enum).toContain(NEW)
+  w.feed(inbox(NEW, { id: 'm1', text: 'hi' }))
+  await w.until(() => w.started.length === 1)
+  expect(w.started).toEqual([`fmsg m1 from ${NEW}: hi`])
+  await w.settle()
+})
+
 test('keeps send loaded and asks for answers through it', async ($, on) => {
   on('prompt.compose', () => ({ sections: [] }))
   const w = await boot($, on)
@@ -296,4 +336,22 @@ test('keeps send loaded and asks for answers through it', async ($, on) => {
   })
   expect(sections.map((s: any) => s.id)).toEqual(['factory:reply'])
   await w.settle()
+})
+
+test('clears the context, then runs /build, after the turn that calls next', async (
+  $,
+  on,
+) => {
+  const ran: string[] = []
+  on('command.run', (_: any, e: any) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  const w = await boot($, on)
+  const r = await $.tool.call({ tool: NEXT })
+  expect(r.result).toBe('after this turn: /clear, then /build')
+  expect(ran).toEqual([])
+  await w.clock.advance(0)
+  await w.settle()
+  expect(ran).toEqual(['clear', 'build'])
 })

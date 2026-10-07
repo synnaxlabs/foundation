@@ -1,10 +1,16 @@
 //! Documents that HCL can hold.
 
+use document::encoding::Checked;
 use document::value::{Call, Float, Kind, Value};
 use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
 use crate::parse;
+
+/// A clone of `document`, which nests no deeper than the limit.
+pub(crate) fn checked(document: &Document) -> Checked {
+    Checked::new(document.clone()).unwrap()
+}
 
 fn identifier() -> impl Strategy<Value = String> {
     prop_oneof![

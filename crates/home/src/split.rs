@@ -86,9 +86,8 @@ impl Scratch {
         set: &'a KeySet,
         mut draft: Draft,
     ) -> Split<'a> {
-        assert_eq!(
-            draft.key_set(),
-            set.key(),
+        assert!(
+            draft.key_set() == set.key(),
             "the frame is of key set {}, not of key set {}",
             draft.key_set().get(),
             set.key().get()
@@ -143,10 +142,11 @@ impl Scratch {
         for (entry, bytes) in draft.iter_mut() {
             let group = set.entries()[entry].group;
             let part = &mut self.parts[self.places[to_usize(group)]];
+            // Before the skip, so the panic does not depend on the series before it.
+            let scalar = scalar(set.entries()[entry].data_type);
             if part.check.is_err() {
                 continue;
             }
-            let scalar = scalar(set.entries()[entry].data_type);
             let count = to_usize(part.count);
             let start = self.bytes.len();
             let checked = match form {
