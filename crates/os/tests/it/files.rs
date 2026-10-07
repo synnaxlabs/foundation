@@ -501,3 +501,37 @@ fn hold_while_another_create_fails(mode: Mode) {
     creator_thread.join().unwrap();
     writer_thread.join().unwrap();
 }
+
+/// A remove that drops while it waits for room in the full queue of the I/O thread
+/// never runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
+    run(|files, data| async move {
+        create(&files, "a", KIB).await.close().await;
+        let mode = rustix::fs::Mode::from_raw_mode(0o600);
+        rustix::fs::mkfifoat(rustix::fs::CWD, data.join("p"), mode).unwrap();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        // The I/O thread blocks in the open of the FIFO until a writer opens it.
+        let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
+        assert!(blocker.as_mut().poll(&mut context).is_pending());
+        // 64 is the depth of the queue of the I/O thread.
+        let mut frees: Vec<_> = (0..64).map(|_| Box::pin(files.free())).collect();
+        for free in &mut frees {
+            assert!(free.as_mut().poll(&mut context).is_pending());
+        }
+        let mut remove = Box::pin(files.remove(Path::new("a")));
+        assert!(remove.as_mut().poll(&mut context).is_pending());
+        drop(remove);
+        let flags = rustix::fs::OFlags::WRONLY;
+        let writer = rustix::fs::open(data.join("p"), flags, mode).unwrap();
+        drop(blocker.await.unwrap());
+        drop(writer);
+        for free in frees {
+            free.await.unwrap();
+        }
+        files.free().await.unwrap();
+        let found = files.open(Path::new("a"), Mode::Read).await.map(drop);
+        assert_eq!(found, Ok(()));
+    });
+}
