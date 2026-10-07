@@ -38,7 +38,8 @@ fn main() {
     assert_eq!(decoded, Ok(credit), "the credit round trips");
 
     for series in [1, 1_000, 100_000_u32] {
-        let mut run = vec![0; usize::try_from(series).expect("a u32 fits a usize") * 8];
+        let mut run =
+            vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
         let ends = (0..series).map(|place| (place, place.wrapping_add(1)));
         let ((), allocations) = ALLOCATOR.count(|| ends::encode(ends, &mut run));
         assert_eq!(allocations, 0, "the encode of {series} ends allocated");

@@ -11,14 +11,16 @@ fn main() {
 }
 
 fn run_of(series: u32) -> Vec<u8> {
-    let mut run = vec![0; usize::try_from(series).expect("a u32 fits a usize") * 8];
+    let mut run =
+        vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
     ends::encode((0..series).map(|place| (place, (place + 1) * 8)), &mut run);
     run
 }
 
 #[divan::bench(args = SERIES)]
 fn encode_ends(bencher: Bencher<'_, '_>, series: u32) {
-    let mut run = vec![0; usize::try_from(series).expect("a u32 fits a usize") * 8];
+    let mut run =
+        vec![0; usize::try_from(series).expect("a u32 fits a usize") * ends::LEN];
     bencher.bench_local(|| {
         let ends = (0..series).map(|place| (place, (place + 1) * 8));
         ends::encode(divan::black_box(ends), &mut run);

@@ -5,7 +5,9 @@
 //! A run follows some messages: the keys of an open, and the ends and then the body
 //! of a head. A run goes as stream messages back to back, with no prefix, each at most
 //! the peer's `message_bytes_max`. A message of a run never splits a key or an end,
-//! and no message is empty.
+//! and no message is empty. The keys run holds exactly [`Open::channels`] keys, and the
+//! ends run exactly [`Head::series`] ends, so the receiver counts them to find where a
+//! run ends. The body starts a new message.
 //!
 //! Fields are little-endian.
 //!
@@ -167,8 +169,9 @@ pub struct Head {
     pub path: Path,
     /// The samples of the frame.
     pub range: Range,
-    /// The count of the frame's series, which is the count of its ends. A head with
-    /// more series than the session has places is not valid.
+    /// The count of the frame's series, which is the count of its ends. At least 1,
+    /// since a frame holds its index. A head with more series than the session has
+    /// places is not valid.
     pub series: u32,
 }
 
@@ -186,12 +189,13 @@ impl Reply {
     ///
     /// # Panics
     ///
-    /// When `out` is not [`Reply::encoded_len`] bytes.
+    /// When a head has no series, or `out` is not [`Reply::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
         match self {
             Self::Opened => out.put(&[OPENED]),
             Self::Head(head) => {
+                assert!(head.series > 0, "a head names at least one series");
                 out.put(&[HEAD, path_byte(head.path)]);
                 out.put(&head.range.seq.to_le_bytes());
                 out.put(&head.range.count.to_le_bytes());
@@ -206,7 +210,8 @@ impl Reply {
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
-    /// and [`Error::Path`] when a head names no path.
+    /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names no
+    /// series.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, bytes.len());
@@ -221,8 +226,12 @@ impl Reply {
                 let count = u32::from_le_bytes(fields.take()?);
                 let series = u32::from_le_bytes(fields.take()?);
                 fields.end()?;
+                let path = path_of(path)?;
+                if series == 0 {
+                    return Err(Error::Series);
+                }
                 Ok(Self::Head(Head {
-                    path: path_of(path)?,
+                    path,
                     range: Range { seq, count },
                     series,
                 }))
@@ -234,13 +243,14 @@ impl Reply {
 
 /// The run of keys after an open, in the open's order. A series of the session has
 /// the place of its channel's first key in the run, from 0. The index, when the run
-/// does not hold it, has place [`Open::channels`](super::Open::channels).
+/// does not hold it, has place [`Open::channels`](crate::hub::Open::channels).
 pub mod keys {
     use types::channel;
 
     use super::{Error, Writer, run};
 
-    const KEY: usize = 16;
+    /// The bytes of one key.
+    pub const LEN: usize = 16;
 
     /// Writes `keys` into `out`, one message of the run.
     ///
@@ -248,8 +258,8 @@ pub mod keys {
     ///
     /// When `keys` is empty, or `out` is not 16 bytes for each key.
     pub fn encode(keys: &[channel::Key], out: &mut [u8]) {
-        let out = Writer::run(out, keys.len(), KEY);
-        for (out, key) in out.0.as_chunks_mut::<KEY>().0.iter_mut().zip(keys) {
+        let out = Writer::run(out, keys.len(), LEN);
+        for (out, key) in out.0.as_chunks_mut::<LEN>().0.iter_mut().zip(keys) {
             *out = key.as_u128().to_le_bytes();
         }
     }
@@ -263,7 +273,7 @@ pub mod keys {
     pub fn decode(
         message: &[u8],
     ) -> Result<impl ExactSizeIterator<Item = channel::Key> + '_, Error> {
-        let keys = run::<KEY>(message)?;
+        let keys = run::<LEN>(message)?;
         Ok(keys
             .iter()
             .map(|&key| channel::Key::from_u128(u128::from_le_bytes(key))))
@@ -276,7 +286,8 @@ pub mod keys {
 pub mod ends {
     use super::{Error, Writer, run};
 
-    const END: usize = 8;
+    /// The bytes of one end.
+    pub const LEN: usize = 8;
 
     /// Writes `ends`, each a place and an end, into `out`, one message of the run.
     ///
@@ -284,8 +295,8 @@ pub mod ends {
     ///
     /// When `ends` is empty, or `out` is not 8 bytes for each end.
     pub fn encode(ends: impl ExactSizeIterator<Item = (u32, u32)>, out: &mut [u8]) {
-        let out = Writer::run(out, ends.len(), END);
-        for (out, (place, end)) in out.0.as_chunks_mut::<END>().0.iter_mut().zip(ends) {
+        let out = Writer::run(out, ends.len(), LEN);
+        for (out, (place, end)) in out.0.as_chunks_mut::<LEN>().0.iter_mut().zip(ends) {
             let [p0, p1, p2, p3] = place.to_le_bytes();
             let [e0, e1, e2, e3] = end.to_le_bytes();
             *out = [p0, p1, p2, p3, e0, e1, e2, e3];
@@ -304,7 +315,7 @@ pub mod ends {
         impl ExactSizeIterator<Item = (u32, u32)> + DoubleEndedIterator + '_,
         Error,
     > {
-        let ends = run::<END>(message)?;
+        let ends = run::<LEN>(message)?;
         Ok(ends.iter().map(|&[p0, p1, p2, p3, e0, e1, e2, e3]| {
             (
                 u32::from_le_bytes([p0, p1, p2, p3]),
@@ -331,6 +342,8 @@ pub enum Error {
     },
     /// An open names no channel.
     Channels,
+    /// A head names no series.
+    Series,
     /// A head names no path.
     Path {
         /// The path byte.
@@ -351,6 +364,7 @@ impl fmt::Display for Error {
                 "the hub message has {len} bytes, which no message of its kind has"
             ),
             Self::Channels => f.write_str("the hub open names no channel"),
+            Self::Series => f.write_str("the frame head names no series"),
             Self::Path { byte } => write!(
                 f,
                 "the frame head names path {byte}, which this node does not know"
@@ -465,7 +479,7 @@ mod tests {
     }
 
     fn live() -> Reply {
-        head(Path::Live, 0, 0, 0)
+        head(Path::Live, 0, 0, 1)
     }
 
     fn encode_open(open: Open) -> Vec<u8> {
@@ -642,7 +656,9 @@ mod tests {
                     2, 1, 8, 7, 6, 5, 4, 3, 2, 1, 0x0d, 0x0c, 0x0b, 0x0a, 3, 0, 0, 0
                 ]
             );
-            assert_eq!(encode_reply(live()), zeros(2, 18));
+            let mut live_bytes = zeros(2, 18);
+            live_bytes[14] = 1;
+            assert_eq!(encode_reply(live()), live_bytes);
         }
 
         #[test]
@@ -659,6 +675,17 @@ mod tests {
         fn refuses_each_wrong_length() {
             check(Reply::decode, 1, &[2, 18]);
             check(Reply::decode, 2, &[1, 2, 17, 19]);
+        }
+
+        #[test]
+        fn refuses_a_head_of_no_series() {
+            assert_eq!(Reply::decode(&zeros(2, 18)), Err(Error::Series));
+        }
+
+        #[test]
+        #[should_panic(expected = "a head names at least one series")]
+        fn panics_on_a_head_of_no_series() {
+            head(Path::Live, 0, 0, 0).encode(&mut [0; 18]);
         }
 
         #[test]
@@ -707,7 +734,7 @@ mod tests {
             let sent: Vec<_> = (0..200).map(key).collect();
             let run = encode_keys(&sent);
             let got: Vec<_> = run
-                .chunks(1472 / 16 * 16)
+                .chunks(1472 / super::super::keys::LEN * super::super::keys::LEN)
                 .flat_map(|message| super::super::keys::decode(message).unwrap())
                 .collect();
             assert_eq!(got, sent);
@@ -766,7 +793,7 @@ mod tests {
             let sent: Vec<_> = (0..400).map(|place| (place, place + 1)).collect();
             let run = encode_ends(&sent);
             let got: Vec<_> = run
-                .chunks(1472 / 8 * 8)
+                .chunks(1472 / super::super::ends::LEN * super::super::ends::LEN)
                 .flat_map(|message| super::super::ends::decode(message).unwrap())
                 .collect();
             assert_eq!(got, sent);
@@ -810,6 +837,7 @@ mod tests {
                 "the hub message has 4 bytes, which no message of its kind has",
             ),
             (Error::Channels, "the hub open names no channel"),
+            (Error::Series, "the frame head names no series"),
             (
                 Error::Path { byte: 2 },
                 "the frame head names path 2, which this node does not know",
@@ -832,7 +860,7 @@ mod tests {
         let path = prop_oneof![Just(Path::Live), Just(Path::Backfill)];
         prop_oneof![
             Just(Reply::Opened),
-            (path, any::<u64>(), any::<u32>(), any::<u32>())
+            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX)
                 .prop_map(|(path, seq, count, series)| head(path, seq, count, series)),
         ]
     }
