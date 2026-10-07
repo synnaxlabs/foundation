@@ -1900,6 +1900,26 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn gives_a_named_reader_that_resumes_the_frames_past_its_position() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = readers
+                .open(named("a", 10), Start::At(live(0)), 10 * CHARGE)
+                .key;
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), [key]);
+            assert_eq!(taken(&mut readers, key), [1]);
+            assert_eq!(readers.ack(key, live(1)), Ok(()));
+            readers.close_named(key, at(0));
+            let later = readers
+                .open(named("a", 10), resume(live(0)), 10 * CHARGE)
+                .key;
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [later]);
+            assert_eq!(taken(&mut readers, later), [2]);
+        }
+
+        #[test]
         fn drops_the_queued_frames_when_a_latest_session_takes_over_the_last() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
@@ -2315,11 +2335,16 @@ pub(super) mod tests {
 
         #[derive(Clone, Copy, Debug)]
         enum Live {
-            Open(u64),
+            /// Opens a session below the newest gone sample by the count, unnamed or
+            /// as a named reader that resumes.
+            Open(u64, Option<usize>),
             Close(usize),
             Ack(usize, u64),
             Grant(usize, u64),
-            Queue { gap: u64, len: u64 },
+            Queue {
+                gap: u64,
+                len: u64,
+            },
             Release(u64),
             Take(usize),
         }
@@ -2328,6 +2353,7 @@ pub(super) mod tests {
         /// by number, and how many it took.
         #[derive(Default)]
         struct Got {
+            name: Option<usize>,
             position: u64,
             behind: bool,
             /// The session missed a frame in the last release.
@@ -2338,11 +2364,12 @@ pub(super) mod tests {
             taken: usize,
         }
 
-        /// The live path stated a second way: open sessions by key, and each queued
-        /// frame.
+        /// The live path stated a second way: open sessions by key, the position of
+        /// each named reader with no open session, and each queued frame.
         #[derive(Default)]
         struct Flows {
             open: BTreeMap<complete::Key, Got>,
+            closed: BTreeMap<usize, u64>,
             queued: Vec<Queued>,
         }
 
@@ -2380,8 +2407,21 @@ pub(super) mod tests {
                 queued.any(|queued| queued.held && !queued.seq.is_empty())
             }
 
+            /// The position that a named reader resumes from: that of its open session,
+            /// which the open takes over, or the one it held at its close.
+            fn take_over(&mut self, name: usize) -> Option<u64> {
+                let open = self.open.iter().find(|(_, got)| got.name == Some(name));
+                if let Some((&key, _)) = open {
+                    return self.open.remove(&key).map(|got| got.position);
+                }
+                self.closed.remove(&name)
+            }
+
             fn close(&mut self, key: complete::Key) {
-                self.open.remove(&key);
+                let got = self.open.remove(&key).expect("the session is open");
+                if let Some(name) = got.name {
+                    self.closed.insert(name, got.position);
+                }
                 if self.open.is_empty() {
                     for queued in &mut self.queued {
                         queued.held = false;
@@ -2450,7 +2490,8 @@ pub(super) mod tests {
 
         fn live_input() -> impl Strategy<Value = Live> {
             prop_oneof![
-                (0..8_u64).prop_map(Live::Open),
+                (0..8_u64, proptest::option::of(0..2_usize))
+                    .prop_map(|(back, name)| Live::Open(back, name)),
                 any::<usize>().prop_map(Live::Close),
                 (any::<usize>(), 0..4_u64).prop_map(|(i, ahead)| Live::Ack(i, ahead)),
                 (any::<usize>(), 0..6 * CHARGE).prop_map(|(i, b)| Live::Grant(i, b)),
@@ -2464,7 +2505,8 @@ pub(super) mod tests {
         /// released frame with a sample at or past its position, in seq order, while it
         /// has credit, and none after the first it has no credit for. A session that
         /// starts at or below a sample no longer in memory gets none, and nothing is
-        /// kept with no session open. A release wakes each session that had no frame
+        /// kept with no session open. A named reader that resumes starts where its
+        /// last session stopped. A release wakes each session that had no frame
         /// waiting and now has one or missed one.
         ///
         /// The `n`th open takes `limits[n]`, or 0 past the end of `limits`.
@@ -2477,17 +2519,21 @@ pub(super) mod tests {
             let mut made = 0;
             for step in steps {
                 match step {
-                    Live::Open(back) => {
+                    Live::Open(back, name) => {
                         let start = (model.gone() + 4).saturating_sub(back);
                         let limit = limits.next().unwrap_or(0);
-                        let key = readers.open(
-                            Reader::Unnamed,
-                            Start::At(live(start)),
-                            limit,
-                        );
+                        let (reader, from) = match name {
+                            Some(name) => (named(NAMES[name], 10), resume(live(start))),
+                            None => (Reader::Unnamed, Start::At(live(start))),
+                        };
+                        let key = readers.open(reader, from, limit);
+                        let stored = name.and_then(|name| model.take_over(name));
+                        let position = stored.unwrap_or(start);
+                        assert_eq!(key.position, live(position));
                         let got = Got {
-                            position: start,
-                            behind: model.behind(start),
+                            name,
+                            position,
+                            behind: model.behind(position),
                             limit,
                             ..Got::default()
                         };
@@ -2495,7 +2541,11 @@ pub(super) mod tests {
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        readers.close(key.into());
+                        if model.got(key).name.is_some() {
+                            readers.close_named(key, at(0));
+                        } else {
+                            readers.close(key.into());
+                        }
                         model.close(key);
                     }
                     Live::Ack(i, ahead) => {
