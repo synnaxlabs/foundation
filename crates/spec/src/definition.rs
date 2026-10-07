@@ -111,6 +111,28 @@ pub enum Definition {
     Channel(Channel),
 }
 
+/// The kind of a definition. Its tree key names it, except for a connector or a
+/// channel, which is at its own name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// An access policy.
+    Access,
+    /// A connector.
+    Connector,
+    /// A channel.
+    Channel,
+    /// The record of a child region.
+    Region,
+    /// A node settings policy.
+    NodeSettings,
+    /// A compression policy.
+    Compression,
+    /// A placement policy.
+    Placement,
+    /// A time policy.
+    Time,
+}
+
 impl Definition {
     /// Writes the canonical bytes of the definition.
     #[must_use]
