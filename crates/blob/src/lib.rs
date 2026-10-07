@@ -82,11 +82,10 @@ impl From<block::Error> for Error {
 
 /// What the store knows of one digest.
 enum State {
-    /// A file of the name was listed at open, or a dropped put left one. Its bytes
-    /// may be torn or not durable.
-    Listed,
-    /// A put returned in this open: the serial of that put. A read that saw an
-    /// earlier put must not forget a later one.
+    /// A file of the name was listed at open (serial 0), or a dropped put left one
+    /// (its serial). Its bytes may be torn or not durable.
+    Listed(u64),
+    /// A put returned in this open: its serial.
     Held(u64),
     /// A put is in flight, and these calls wait for its end.
     Writing(Vec<Waker>),
@@ -99,7 +98,7 @@ enum State {
 impl fmt::Debug for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Listed => f.write_str("Listed"),
+            Self::Listed(serial) => f.debug_tuple("Listed").field(serial).finish(),
             Self::Held(serial) => f.debug_tuple("Held").field(serial).finish(),
             Self::Writing(wakers) => {
                 f.debug_tuple("Writing").field(&wakers.len()).finish()
@@ -121,7 +120,9 @@ pub struct Store {
     pool: Rc<Pool>,
     chunks: RefCell<BTreeMap<Digest, State>>,
     corruptions: Cell<u64>,
-    puts: Cell<u64>,
+    /// The serial of the next flight. A read that saw one flight's state must not
+    /// forget a later one's, so two flights never leave equal states.
+    flights: Cell<u64>,
 }
 
 impl Store {
@@ -146,7 +147,7 @@ impl Store {
                 let path = dir.join(name);
                 return Err(Error::Stray { path });
             };
-            chunks.insert(digest, State::Listed);
+            chunks.insert(digest, State::Listed(0));
         }
         Ok(Self {
             files,
@@ -154,7 +155,7 @@ impl Store {
             pool,
             chunks: RefCell::new(chunks),
             corruptions: Cell::new(0),
-            puts: Cell::new(0),
+            flights: Cell::new(1),
         })
     }
 
@@ -183,17 +184,15 @@ impl Store {
         }
         loop {
             match self.peek(digest) {
-                Peek::Absent | Peek::Listed => break,
+                Peek::Absent | Peek::Listed(_) => break,
                 Peek::Held(_) => return Ok(()),
                 Peek::Writing => self.wait(digest).await,
                 Peek::Ending => self.settle(digest).await,
             }
         }
-        let serial = self.puts.get();
-        self.puts.set(serial + 1);
         let mut flight = Flight::new(self, digest);
         let written = flight.write(chunk).await;
-        flight.after = written.is_ok().then_some(State::Held(serial));
+        flight.after = written.is_ok().then_some(State::Held(flight.serial));
         written
     }
 
@@ -210,7 +209,7 @@ impl Store {
         loop {
             match self.peek(digest) {
                 Peek::Absent => return Ok(None),
-                Peek::Held(_) | Peek::Listed => return self.read(digest).await,
+                Peek::Held(_) | Peek::Listed(_) => return self.read(digest).await,
                 Peek::Writing => self.wait(digest).await,
                 Peek::Ending => self.settle(digest).await,
             }
@@ -303,7 +302,7 @@ impl Store {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Peek {
     Absent,
-    Listed,
+    Listed(u64),
     Held(u64),
     Writing,
     Ending,
@@ -313,7 +312,7 @@ impl Peek {
     fn of(state: Option<&State>) -> Self {
         match state {
             None => Self::Absent,
-            Some(State::Listed) => Self::Listed,
+            Some(State::Listed(serial)) => Self::Listed(*serial),
             Some(State::Held(serial)) => Self::Held(*serial),
             Some(State::Writing(_)) => Self::Writing,
             Some(State::Ending(_)) => Self::Ending,
@@ -328,6 +327,7 @@ impl Peek {
 struct Flight<'a> {
     store: &'a Store,
     digest: Digest,
+    serial: u64,
     file: Option<File>,
     pending: Option<Pending>,
     /// The state after the flight, when no call is pending. `None` is absent.
@@ -346,14 +346,17 @@ impl<'a> Flight<'a> {
                 panic!("invariant: one put of a digest is in flight at a time")
             }
             Some(State::Ending(pending)) => Some(pending),
-            Some(State::Listed | State::Held(_)) | None => None,
+            Some(State::Listed(_) | State::Held(_)) | None => None,
         };
+        let serial = store.flights.get();
+        store.flights.set(serial + 1);
         Flight {
             store,
             digest,
+            serial,
             file: None,
             pending,
-            after: Some(State::Listed),
+            after: Some(State::Listed(serial)),
         }
     }
 
@@ -750,6 +753,23 @@ mod tests {
         }
 
         #[test]
+        fn over_a_file_of_another_length_on_a_full_disk_gives_full() {
+            let (mut sim, node) = create_node(0, 64 << 10);
+            let (digest, block) = chunk(7, 1 << 20);
+            sim.run_on(&node, move |node, _| async move {
+                let (_, other) = chunk(7, 512);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                let error = store.put(digest, &block).await.unwrap_err();
+                let full = files::Error::Full { path: path(digest) };
+                assert_eq!(error, Error::Files(full));
+                assert_absent(&store, digest).await;
+            })
+            .unwrap();
+        }
+
+        #[test]
         fn over_a_file_of_another_length_whose_remove_fails_gives_io() {
             let (mut sim, node) = create_default_node(0);
             sim.run_on(&node, |node, _| async move {
@@ -1087,6 +1107,43 @@ mod tests {
             .unwrap();
         }
 
+        // A stale get of torn listed bytes ends after a dropped put and a settle
+        // left the digest listed again. It must not forget the whole chunk.
+        #[test]
+        fn of_a_torn_listed_chunk_that_ends_after_a_dropped_put_keeps_it() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(8, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                let mut stale = pin!(store.get(digest));
+                for _ in 0..2 {
+                    assert!(poll_once(&mut stale).await.is_pending());
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                }
+                assert_absent(&store, digest).await;
+                {
+                    let mut put = pin!(store.put(digest, &block));
+                    for _ in 0..3 {
+                        assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                    }
+                }
+                let mut next = pin!(store.get(digest));
+                for _ in 0..2 {
+                    assert!(poll_once(&mut next).await.is_pending());
+                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                }
+                assert!(stale.await.unwrap().is_none());
+                assert_eq!(&next.await.unwrap().unwrap()[..], &block[..]);
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
         #[test]
         fn of_a_changed_chunk_gives_none_and_counts_one() {
             let (mut sim, node) = create_default_node(0);
@@ -1360,6 +1417,9 @@ mod tests {
         fn names_each_state_and_prints_no_pointer() {
             let (mut sim, node) = create_default_node(0);
             sim.run_on(&node, |node, _| async move {
+                let (listed, listed_block) = chunk(6, 100);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(listed), &listed_block).await;
                 let store = open(&node).await.unwrap();
                 let (digest, block) = chunk(7, 3000);
                 let (held, held_block) = chunk(8, 100);
@@ -1376,7 +1436,8 @@ mod tests {
                 let mut get = pin!(store.get(digest));
                 assert!(poll_once(&mut get).await.is_pending());
                 let text = format!("{store:?}");
-                assert!(text.contains("Held(0)"), "{text}");
+                assert!(text.contains("Listed(0)"), "{text}");
+                assert!(text.contains("Held(1)"), "{text}");
                 assert!(text.contains("Writing(1)"), "{text}");
                 assert!(text.contains("Ending(..)"), "{text}");
                 assert!(!text.contains("0x"), "{text}");
