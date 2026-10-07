@@ -196,8 +196,12 @@ mod tests {
     }
 
     /// Starts a transport for `CLIENT` on `node` that dials `SERVER` at `addresses`,
-    /// and expects each attempt in `attempts` to fail.
-    fn refuse(node: &Node, addresses: Vec<Address>, attempts: Vec<(Address, Error)>) {
+    /// and expects [`Error::Unreachable`] with `attempts`.
+    fn unreachable(
+        node: &Node,
+        addresses: Vec<Address>,
+        attempts: Vec<(Address, Error)>,
+    ) {
         testing::transport(node, CLIENT, move |transport, _| async move {
             let peer = public(&SERVER);
             let dialed = transport.dial(peer, &addresses).await;
@@ -263,7 +267,7 @@ mod tests {
             (Address::Udp(PORT_ZERO), no_route(PORT_ZERO)),
             (Address::Tcp(other), no_route(other)),
         ];
-        refuse(&client, addresses, attempts);
+        unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
     }
 
@@ -291,7 +295,7 @@ mod tests {
             (Address::Tcp(a), no_route(a)),
             (relay, no_route(a)),
         ];
-        refuse(&client, addresses, attempts);
+        unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
     }
 
