@@ -44,8 +44,6 @@ pub struct Opened {
     /// The session of the same named reader that this one took over, in either mode.
     /// It is closed.
     pub replaced: Option<super::Key>,
-    /// The index's newest live frame waits for the session: wake it.
-    pub woken: bool,
 }
 
 #[derive(Debug)]
@@ -78,18 +76,16 @@ impl Readers {
     fn push_latest(&mut self, name: Option<Name>) -> Opened {
         let key = Key(self.next_latest);
         self.next_latest += 1;
-        let woken = self.newest.is_some();
         self.latest.push(Session {
             key,
             name,
-            waiting: woken,
+            waiting: self.newest.is_some(),
         });
         self.woken_latest.clear();
         self.woken_latest.reserve(self.latest.len());
         Opened {
             key,
             replaced: None,
-            woken,
         }
     }
 
@@ -205,7 +201,6 @@ mod tests {
             assert_eq!(put(&mut readers, frames.frame(1)), []);
             assert_eq!(put(&mut readers, frames.frame(2)), []);
             let latest = readers.open_latest();
-            assert!(latest.woken);
             assert_eq!(taken(&mut readers, latest.key), Some(2));
             assert_eq!(taken(&mut readers, latest.key), None);
         }
@@ -214,7 +209,6 @@ mod tests {
         fn gets_nothing_before_the_first_frame() {
             let mut readers = Readers::new(0);
             let latest = readers.open_latest();
-            assert!(!latest.woken);
             assert_eq!(taken(&mut readers, latest.key), None);
         }
 
@@ -651,7 +645,6 @@ mod tests {
                             "{} is new",
                             latest.key
                         );
-                        assert_eq!(latest.woken, model.newest.is_some());
                         model.mailboxes.insert(latest.key, model.newest);
                     }
                     Input::Complete => {
