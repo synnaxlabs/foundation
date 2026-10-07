@@ -92,16 +92,21 @@ impl Dial<'_> {
         }
     }
 
-    /// Takes each attempt that ended. Gives the session of one that connected, or
-    /// [`Error::Network`] when the socket broke and none connected.
+    /// Takes each attempt that ended. Gives the session of the one that connected
+    /// first, or [`Error::Network`] when the socket broke and none connected.
     fn poll_flying(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Option<Result<quic::Session, Error>> {
-        let (mut at, mut broken) = (0, None);
+        let (mut at, mut first, mut broken) = (0, None, None);
         while let Some((index, session)) = self.flying.get(at) {
             match session.poll_connected(cx) {
-                Poll::Ready(Ok(())) => return Some(Ok(self.flying.swap_remove(at).1)),
+                Poll::Ready(Ok(connected)) => {
+                    if first.is_none_or(|(_, earliest)| connected < earliest) {
+                        first = Some((at, connected));
+                    }
+                    at += 1;
+                }
                 // A later attempt can have connected before the break.
                 Poll::Ready(Err(error @ Error::Network { .. })) => {
                     broken = Some(error);
@@ -113,6 +118,9 @@ impl Dial<'_> {
                 }
                 Poll::Pending => at += 1,
             }
+        }
+        if let Some((at, _)) = first {
+            return Some(Ok(self.flying.swap_remove(at).1));
         }
         broken.map(Err)
     }
@@ -158,11 +166,13 @@ fn routable(remote: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;
+    use std::io::IoSliceMut;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
 
+    use env::net::udp;
     use sim::node::Node;
     use types::node::PrivateKey;
     use types::time::Span;
@@ -310,7 +320,53 @@ mod tests {
     }
 
     #[test]
-    fn an_attempt_that_connects_before_the_dial_polls_again_closes_with_code_0() {
+    fn a_losing_attempt_in_its_handshake_closes_and_then_sends_nothing() {
+        let (mut sim, client, server) = nodes(0);
+        let silent = sim.node(sim::node::Config::default());
+        serve(&server);
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let arrived = Arc::clone(&arrivals);
+        testing::shard(&silent, OTHER, move |_, node| async move {
+            let config = udp::Config {
+                local: address(&node),
+                send_buffer_bytes: 1 << 20,
+                recv_buffer_bytes: 1 << 20,
+            };
+            let (_sender, mut receiver) = node.net().udp(&config).expect("a socket");
+            let clock = node.clock();
+            let start = clock.now();
+            let mut sleep = pin!(clock.sleep(spans(IDLE, 3)));
+            let mut buffer = [0; 2048];
+            loop {
+                let datagram = poll_fn(|cx| {
+                    let mut buffers = [IoSliceMut::new(&mut buffer)];
+                    let mut meta = [udp::Meta::default()];
+                    match receiver.poll_recv(cx, &mut buffers, &mut meta) {
+                        Poll::Ready(datagram) => Poll::Ready(Some(datagram)),
+                        Poll::Pending => sleep.as_mut().poll(cx).map(|()| None),
+                    }
+                });
+                let Some(datagram) = datagram.await else {
+                    break;
+                };
+                datagram.expect("a datagram");
+                arrived.lock().expect("a lock").push(clock.now() - start);
+            }
+        });
+        let addresses = vec![
+            Address::Udp(address(&silent)),
+            Address::Udp(address(&server)),
+        ];
+        let ms = Span::MILLISECOND;
+        dial(&client, addresses, spans(ms, 250), spans(ms, 255));
+        assert_eq!(sim.run(), Ok(()));
+        // The last is the close, sent when the dial took the other session.
+        let last = *arrivals.lock().expect("a lock").last().expect("a datagram");
+        assert!(spans(ms, 250) <= last && last < spans(ms, 256), "{last:?}");
+    }
+
+    #[test]
+    fn of_attempts_that_connect_before_a_poll_the_first_wins_and_the_other_closes() {
         let (mut sim, client, slow) = nodes(0);
         let fast = sim.node(sim::node::Config::default());
         let link = sim::link::Config {
@@ -320,7 +376,7 @@ mod tests {
         sim.link(&client, &slow, link);
         sim.link(&slow, &client, link);
         let ends = Arc::new(Mutex::new(Vec::new()));
-        for node in [&slow, &fast] {
+        for (name, node) in [("slow", &slow), ("fast", &fast)] {
             let ends = Arc::clone(&ends);
             testing::transport(node, SERVER, move |transport, node| async move {
                 let mut accept = pin!(transport.accept());
@@ -331,7 +387,7 @@ mod tests {
                 });
                 if let Some(session) = accepted.await {
                     let end = session.closed().await;
-                    ends.lock().expect("a lock").push(end);
+                    ends.lock().expect("a lock").push((name, end));
                 }
             });
         }
@@ -354,9 +410,9 @@ mod tests {
         });
         assert_eq!(sim.run(), Ok(()));
         let mut ends = ends.lock().expect("a lock").clone();
-        ends.sort_by_key(|end| format!("{end:?}"));
+        ends.sort_by_key(|(name, _)| *name);
         let peer = |code| Error::PeerClosed { code: Code(code) };
-        assert_eq!(ends, [peer(0), peer(5)]);
+        assert_eq!(ends, [("fast", peer(5)), ("slow", peer(0))]);
     }
 
     #[test]

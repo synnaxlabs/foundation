@@ -52,6 +52,7 @@ impl Carrier {
             accepted: Some(VecDeque::new()),
             accepting: Vec::new(),
             failed: None,
+            connects: 0,
         }));
         let task = Task::new(Rc::clone(&state), &clock, sender, receiver);
         tasks.spawn(task.run());
@@ -181,6 +182,8 @@ struct State {
     accepting: Vec<Waker>,
     /// What broke the socket.
     failed: Option<env::net::Error>,
+    /// How many dials connected.
+    connects: u64,
 }
 
 impl State {
@@ -208,6 +211,8 @@ impl State {
                 // Only an accept has no slot: a dial's drop ends its connection.
                 if let Some(slot) = self.sessions.get_mut(&key) {
                     slot.peer = Some(peer);
+                    slot.connected = self.connects;
+                    self.connects += 1;
                     slot.wake();
                     return;
                 }
@@ -260,6 +265,8 @@ impl State {
 struct Slot {
     /// The peer, once the handshake finishes.
     peer: Option<Peer>,
+    /// How many dials connected before this one, once `peer` is set.
+    connected: u64,
     /// Why the connection ended.
     end: Option<Error>,
     /// The wakers of the calls that wait on the session.
@@ -309,15 +316,16 @@ impl Session {
         .await
     }
 
-    /// Ready when the handshake finished, or with why the dial ended.
+    /// Ready when the handshake finished, with how many dials on the carrier
+    /// connected before this one, or with why the dial ended.
     pub(crate) fn poll_connected(
         &self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Error>> {
+    ) -> Poll<Result<u64, Error>> {
         let mut state = self.state.borrow_mut();
         let slot = state.slot(self.key);
         if slot.peer.is_some() {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(slot.connected));
         }
         if let Some(error) = &slot.end {
             return Poll::Ready(Err(error.clone()));
