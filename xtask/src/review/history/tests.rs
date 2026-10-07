@@ -265,11 +265,11 @@ fn a_removed_line_that_looks_like_a_header_is_code() {
 #[test]
 fn a_nul_byte_does_not_hide_code() {
     let (repo, from) = Repo::with_pr("nul");
-    let code = repo.commit("a.rs", "// A \0 byte.\nfn a() {}\n");
-    assert_eq!(
-        repo.code_change(&from, &code),
-        Ok(Some("changes code at `a.rs:2`".to_string()))
-    );
+    let added = repo.commit("a.rs", "// A \0 byte.\nfn a() {}\n");
+    let changed = repo.commit("a.rs", "// A \0 byte.\nfn b() {}\n");
+    let found = Ok(Some("changes code at `a.rs:2`".to_string()));
+    assert_eq!(repo.code_change(&from, &added), found);
+    assert_eq!(repo.code_change(&added, &changed), found);
 }
 
 #[test]
@@ -306,7 +306,8 @@ fn a_diff_driver_config_does_not_hide_code() {
     for config in [["diff.x.textconv", "true"], ["diff.external", "true"]] {
         let (repo, _) = Repo::with_pr("driver");
         repo.git(&["config", config[0], config[1]]);
-        let from = repo.commit(".gitattributes", "*.rs diff=x\n");
+        repo.commit(".gitattributes", "*.rs diff=x\n");
+        let from = repo.commit("a.rs", "// a\n");
         let code = repo.commit("a.rs", "fn a() {}\n");
         assert_eq!(
             repo.code_change(&from, &code),
@@ -318,10 +319,11 @@ fn a_diff_driver_config_does_not_hide_code() {
 
 #[test]
 fn a_colored_diff_config_does_not_hide_code() {
-    let (repo, from) = Repo::with_pr("color");
+    let (repo, _) = Repo::with_pr("color");
     repo.git(&["config", "color.diff", "always"]);
     repo.git(&["config", "diff.noprefix", "false"]);
     repo.git(&["config", "diff.renames", "copies"]);
+    let from = repo.commit("a.rs", "// a\n");
     let code = repo.commit("a.rs", "fn a() {}\n");
     assert_eq!(
         repo.code_change(&from, &code),
@@ -353,6 +355,52 @@ fn reads_only_the_file_that_a_directory_of_the_same_name_replaces() {
     assert_eq!(
         repo.code_change(&from, &code),
         Ok(Some("changes code at `x.rs/b.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn names_the_file_when_a_file_and_a_directory_of_its_name_trade_places() {
+    let (repo, _) = Repo::with_pr("swap");
+    let comments = "// c\n".repeat(10);
+    let from = repo.commit("x.rs", &comments);
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    std::fs::create_dir(repo.dir.join("x.rs")).unwrap();
+    let dir = repo.commit("x.rs/b.rs", &format!("{comments}fn b() {{}}\n"));
+    let named = Ok(Some("changes code at `x.rs/b.rs:11`".to_string()));
+    assert_eq!(repo.code_change(&from, &dir), named);
+    repo.git(&["rm", "--quiet", "-r", "x.rs"]);
+    let file = repo.commit("x.rs", &comments);
+    assert_eq!(repo.code_change(&dir, &file), named);
+}
+
+#[cfg(unix)]
+#[test]
+fn reads_a_link_that_a_file_of_code_replaces() {
+    let (repo, _) = Repo::with_pr("link");
+    std::os::unix::fs::symlink("// a", repo.dir.join("x.rs")).unwrap();
+    repo.git(&["add", "x.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "link"]);
+    let from = repo.head();
+    std::fs::remove_file(repo.dir.join("x.rs")).unwrap();
+    let end = repo.commit("x.rs", "// a\nfn b() {}\n");
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `x.rs:2`".to_string()))
+    );
+}
+
+#[test]
+fn an_order_file_config_does_not_hide_code() {
+    let (repo, _) = Repo::with_pr("order");
+    std::fs::write(repo.dir.join("order"), "x.rs/*\n*\n").unwrap();
+    repo.git(&["config", "diff.orderFile", "order"]);
+    let from = repo.commit("x.rs", "fn a() {}\n");
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    std::fs::create_dir(repo.dir.join("x.rs")).unwrap();
+    let end = repo.commit("x.rs/b.rs", "// b\n");
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `x.rs:1`".to_string()))
     );
 }
 

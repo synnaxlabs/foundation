@@ -384,6 +384,25 @@ fn names_a_round_with_no_number() {
 }
 
 #[test]
+fn fails_a_last_round_in_an_older_format() {
+    assert_eq!(
+        check(&record(vec![
+            bot(ROUND),
+            bot("## Review round 4\n\nNo findings.")
+        ])),
+        vec![
+            "review round 4 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        check(&record(vec![bot("## Review round one")])),
+        vec!["`## Review round one` has no round number".to_string()]
+    );
+}
+
+#[test]
 fn names_the_pr_field_a_record_lacks() {
     use serde_json::json;
     let pull = [json!({ "head": { "ref": "a" }, "base": {}, "labels": [] })];

@@ -66,11 +66,13 @@ impl<'a> History<'a> {
         let Some(end_sha) = self.named(end)? else {
             return Ok(Some(unnamed(end)));
         };
-        let paths = self.output(&[
+        // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
+        // the path, each ended by a NUL.
+        let raw = self.output(&[
             "diff",
-            "--no-renames",
-            "--name-only",
+            "--raw",
             "-z",
+            "--no-renames",
             &from_sha,
             &end_sha,
             "--",
@@ -78,54 +80,60 @@ impl<'a> History<'a> {
             ":(glob)**/Cargo.toml",
             ":(glob)**/Cargo.lock",
         ])?;
-        for path in paths.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        let mut fields = raw.split(|&b| b == 0);
+        while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
+            let entry = String::from_utf8_lossy(entry);
+            let [_, _, old, new, _] = entry.split(' ').collect::<Vec<_>>()[..] else {
+                return Err(format!("git diff: a bad raw entry `{entry}`"));
+            };
             let path = std::str::from_utf8(path).map_err(|e| {
                 format!(
                     "git diff: the path `{}` is not UTF-8: {e}",
                     String::from_utf8_lossy(path)
                 )
             })?;
-            if let Some(line) = self.first_code(&from_sha, &end_sha, path)? {
+            let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
+            if let Some(line) = self.first_code(old, new, rust)? {
                 return Ok(Some(format!("changes code at `{path}:{line}`")));
             }
         }
         Ok(None)
     }
 
-    /// The line number of the first line of code that `from..end` adds or removes in
-    /// the file at `path`, in `end` for an added line and in `from` for a removed one.
+    /// The line number of the first line of code that a change from the blob `old` to
+    /// the blob `new` adds or removes, in `new` for an added line and in `old` for a
+    /// removed one. A blob of zeros is a file that does not exist. `rust` tells
+    /// whether the file is a `.rs` file.
     fn first_code(
         &self,
-        from: &str,
-        end: &str,
-        path: &str,
+        old: &str,
+        new: &str,
+        rust: bool,
     ) -> Result<Option<u32>, String> {
-        // Only the hunks are read: git quotes or pads the paths in the headers. Git on
-        // macOS changes a decomposed path in its arguments, unless told not to.
+        let absent = |blob: &str| blob.bytes().all(|b| b == b'0');
+        if absent(old) || absent(new) {
+            let blob = if absent(old) { new } else { old };
+            let text = self.output(&["cat-file", "blob", blob])?;
+            let text = String::from_utf8_lossy(&text);
+            return Ok((1..)
+                .zip(text.lines())
+                .find(|(_, l)| code(rust, l))
+                .map(|(n, _)| n));
+        }
         let diff = self.git(&[
-            "-c",
-            "core.precomposeUnicode=false",
             "diff",
             "--no-ext-diff",
-            "--no-textconv",
             "--no-color",
             "--text",
             "--unified=0",
             "--inter-hunk-context=0",
-            from,
-            end,
-            "--",
-            &format!(":(literal){path}"),
+            old,
+            new,
         ])?;
-        let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
         let (mut old, mut new) = (0, 0);
         let mut hunk = false;
-        // The path also matches the files under a directory of that name, each in a
-        // section after the first.
-        for line in diff.lines().skip(1) {
-            if line.starts_with("diff ") {
-                break;
-            } else if let Some(header) = line.strip_prefix("@@ ") {
+        for line in diff.lines() {
+            if let Some(header) = line.strip_prefix("@@ ") {
                 hunk = true;
                 (old, new) = starts(header)
                     .ok_or_else(|| format!("git diff: a bad hunk header `{line}`"))?;
