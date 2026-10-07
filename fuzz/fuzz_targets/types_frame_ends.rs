@@ -1,6 +1,6 @@
 //! `Layout::from_ends` never panics on the ends of another node, it refuses exactly
 //! the ends that break one of its rules, and a frame drafted from the others has those
-//! ends.
+//! ends. `frame::check` refuses exactly the ends that do not fit a body.
 
 #![no_main]
 
@@ -19,7 +19,7 @@ use types::{
 /// The bytes of one end of an input: a `u32` entry, then a `u64` end.
 const END: usize = 12;
 
-/// The largest block that the target drafts.
+/// The largest block that the target drafts, and the largest body that it checks.
 const DRAFT_MAX: usize = 1 << 16;
 
 /// The groups of the wide key set: more than the 16 whose alternating data a layout
@@ -38,6 +38,12 @@ fn narrow(interner: &mut Interner) -> Arc<KeySet> {
         index: key(0),
         data: &[(key(1), F64), (key(2), Type::Scalar(Scalar::U8))],
     }])
+}
+
+/// The group of `narrow` with its first data channel at entry 0, before its index.
+fn late(interner: &mut Interner) -> Arc<KeySet> {
+    interner.slots().assign(key(1));
+    narrow(interner)
 }
 
 /// `GROUPS` groups of two data channels. The indexes are the first entries. The first
@@ -96,6 +102,52 @@ fn broken(set: &KeySet, ends: &[(usize, usize)]) -> Vec<Error> {
     broken
 }
 
+/// Each rule of `frame::check` that the first bad end of `ends` breaks in a body of
+/// `len` bytes.
+fn unfit(len: usize, ends: &[(usize, usize)]) -> Vec<BadEnd> {
+    let mut last = 0;
+    for &(_, end) in ends {
+        let (start, mut unfit) = (start(last), Vec::new());
+        if end > len {
+            unfit.push(BadEnd::Past { end, len });
+        }
+        if end < start {
+            unfit.push(BadEnd::Before { end, start });
+        }
+        if !unfit.is_empty() {
+            return unfit;
+        }
+        last = end;
+    }
+    if last == len {
+        Vec::new()
+    } else {
+        vec![BadEnd::Short { last, len }]
+    }
+}
+
+/// Bytes that differ between near places, so that a series cut at a wrong place
+/// differs.
+fn body(len: usize) -> Vec<u8> {
+    (0..=250).cycle().take(len).collect()
+}
+
+/// `frame::check` must refuse a body of `len` bytes exactly when `ends` do not fit
+/// it, and `split` must cut a body that fits at them.
+fn fit(len: usize, ends: &[(usize, usize)]) {
+    let (body, unfit) = (body(len), unfit(len, ends));
+    if let Err(error) = frame::check(&body, ends.iter().copied()) {
+        assert!(unfit.contains(&error), "{error:?} is not in {unfit:?}");
+        return;
+    }
+    assert_eq!(unfit, [], "the check took ends that do not fit");
+    let mut last = 0;
+    for (end, series) in frame::split(&body, ends.iter().map(|&(_, end)| (end, end))) {
+        assert_eq!(series, &body[start(last)..end], "a series moved");
+        last = end;
+    }
+}
+
 /// A frame drafted from `layout`, the layout of `ends`, must have them, and its series
 /// must be the ones that `ends` cut from its body.
 fn draft(set: &KeySet, layout: Layout, ends: &[(usize, usize)]) {
@@ -105,11 +157,9 @@ fn draft(set: &KeySet, layout: Layout, ends: &[(usize, usize)]) {
     let mut draft = layout
         .draft(&pool, Form::Raw)
         .expect("the pool holds the block");
-    let body = draft.body_mut();
-    assert_eq!(body.len(), body_len, "the draft has another body");
-    for (byte, n) in body.iter_mut().zip((0..=250).cycle()) {
-        *byte = n;
-    }
+    let drafted = draft.body_mut();
+    assert_eq!(drafted.len(), body_len, "the draft has another body");
+    drafted.copy_from_slice(&body(body_len));
     let frame = draft.freeze(Path::Live);
     let ends = || ends.iter().copied();
     assert!(frame.ends().eq(ends()), "the frame has other ends");
@@ -130,14 +180,13 @@ fuzz_target!(|bytes: &[u8]| {
         return;
     };
     let mut interner = Interner::new();
-    let set = if selector % 2 == 0 {
-        narrow(&mut interner)
-    } else {
-        wide(&mut interner)
+    let set = match selector % 3 {
+        0 => narrow(&mut interner),
+        1 => wide(&mut interner),
+        _ => late(&mut interner),
     };
-    let ends: Vec<_> = bytes
-        .as_chunks::<END>()
-        .0
+    let (ends, rest) = bytes.as_chunks::<END>();
+    let ends: Vec<_> = ends
         .iter()
         .map(|&[e0, e1, e2, e3, end @ ..]| {
             let entry = u32::from_le_bytes([e0, e1, e2, e3]);
@@ -148,6 +197,13 @@ fuzz_target!(|bytes: &[u8]| {
             )
         })
         .collect();
+    // The bytes after the last whole end give the length of the body to check.
+    let len = rest
+        .iter()
+        .take(3)
+        .rev()
+        .fold(0, |len, &byte| len << 8 | usize::from(byte));
+    fit(len.min(DRAFT_MAX), &ends);
 
     let broken = broken(&set, &ends);
     let layout = match Layout::from_ends(&set, &ends) {
