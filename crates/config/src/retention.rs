@@ -1,7 +1,7 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
 use spec::definition::Definition;
-use spec::retention::Policy;
+use spec::retention::{Error, Policy};
 
 use crate::Found;
 
@@ -12,18 +12,15 @@ const KEYS: [&str; 2] = ["select", "keep"];
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
-    let select = found.select(block, "indexes that it caps");
-    let keep = found.attribute(block, "keep", read::span);
-    if let Ok(None) = keep {
-        let fix = "Add a `keep` attribute with a span such as \"3d\"";
-        found.missing(block, &["keep"], fix.into());
-    }
-    let (Ok(()), Ok(select), Ok(Some(keep))) = (unknown, select, keep) else {
+    let select = found.select(block, "indexes that it caps", "site_a.**");
+    let fix = "Add a `keep` attribute with a span such as \"3d\"";
+    let keep = found.required(block, "keep", read::span, fix.into());
+    let (Ok(()), Ok(select), Ok(keep)) = (unknown, select, keep) else {
         return None;
     };
     match Policy::new(select, keep) {
         Ok(policy) => Some(Definition::Retention(policy)),
-        Err(error) => {
+        Err(error @ Error::Negative(_)) => {
             let at = block
                 .body
                 .attributes

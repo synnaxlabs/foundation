@@ -281,17 +281,33 @@ impl<'a> Found<'a> {
         }
     }
 
-    /// The `select` attribute of a policy block. When the block has none, it reports
-    /// `config.missing-attribute`, and `selects` completes the fix: "Add a `select`
-    /// attribute with the {selects}".
-    fn select(&mut self, block: &Block, selects: &str) -> Result<Selector, Reported> {
-        if let Some(select) = self.attribute(block, "select", read::selector)? {
-            return Ok(select);
-        }
+    /// The `select` attribute of a policy block, as [`Found::required`] reads it. The
+    /// fix is "Add a `select` attribute with the {selects}, such as "{example}"".
+    fn select(
+        &mut self,
+        block: &Block,
+        selects: &str,
+        example: &str,
+    ) -> Result<Selector, Reported> {
         let fix = format!(
-            "Add a `select` attribute with the {selects}, such as \"site_a.*\""
+            "Add a `select` attribute with the {selects}, such as \"{example}\""
         );
-        self.missing(block, &["select"], fix);
+        self.required(block, "select", read::selector, fix)
+    }
+
+    /// The attribute `key` of `block` as `read` reads it. When the block has none, it
+    /// reports `config.missing-attribute` with `fix`.
+    fn required<T>(
+        &mut self,
+        block: &Block,
+        key: &str,
+        read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
+        fix: String,
+    ) -> Result<T, Reported> {
+        if let Some(value) = self.attribute(block, key, read)? {
+            return Ok(value);
+        }
+        self.missing(block, &[key], fix);
         Err(Reported)
     }
 
@@ -1262,7 +1278,7 @@ mod tests {
                 at(0, 0),
                 "the `retention` block has no `select`",
                 "Add a `select` attribute with the indexes that it caps, such as \
-                 \"site_a.*\"",
+                 \"site_a.**\"",
             );
             let keep = refused(
                 "config.missing-attribute",
@@ -1308,7 +1324,8 @@ mod tests {
                 Err(vec![refused(
                     "document.bad-span",
                     at(0, 13),
-                    "cannot read the span \"3 days\": a span is not a number and a unit",
+                    "cannot read the span \"3 days\": a span is not a number and a \
+                     unit",
                     "Write a span such as \"250us\", \"1.5s\", or \"3d\"",
                 )])
             );

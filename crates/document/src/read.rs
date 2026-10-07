@@ -105,7 +105,14 @@ fn span_fix(error: time::Error) -> String {
             "Write a span such as \"250us\", \"1.5s\", or \"3d\"".into()
         }
         time::Error::Long => "Use a span from \"-106751d\" to \"106751d\"".into(),
-        _ => error.fix().into(),
+        time::Error::Fraction
+        | time::Error::Stamp
+        | time::Error::Date
+        | time::Error::Era
+        | time::Error::Range
+        | time::Error::Reversed
+        | time::Error::Zero
+        | time::Error::Period => error.fix().into(),
     }
 }
 
