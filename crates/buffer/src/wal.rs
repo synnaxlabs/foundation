@@ -56,8 +56,8 @@ fn window(body_max: usize) -> Option<u64> {
 }
 
 /// The smallest area with a largest record of `window` bytes. It holds three
-/// commits of one record in a row and the blocks that one wrap skips, so a steady
-/// load of one record in each commit gets no [`Full`].
+/// commits of one record in a row and the blocks that one wrap skips, so, when each
+/// commit trims, a steady load of one record in each commit gets no [`Full`].
 fn area_min(window: u64) -> u64 {
     4 * window
 }
@@ -960,9 +960,10 @@ mod tests {
         Layout::new(AREA, BODY_MAX).expect("the test sizes make a ring")
     }
 
-    /// A ring of `blocks` blocks, less than four of its largest record. No public
-    /// call makes one, so its tests build it from its fields.
-    fn under(blocks: u64) -> Layout {
+    /// A ring of `blocks` blocks that [`Layout::new`] refuses: less than four of its
+    /// largest record. No public call makes one, so its tests build it from its
+    /// fields.
+    fn refused(blocks: u64) -> Layout {
         assert!(blocks < BLOCKS, "{blocks} blocks are not under the minimum");
         Layout {
             area: blocks * 4096,
@@ -973,7 +974,7 @@ mod tests {
     /// A ring of 8 blocks, two of its largest record. The recorded cases of the
     /// properties ran on it, and replay what they found only on it.
     fn recorded() -> Layout {
-        under(8)
+        refused(8)
     }
 
     /// A ring of 32 blocks whose largest record takes 4, so the headroom of a trim
@@ -2024,7 +2025,7 @@ mod tests {
             fn four_records_less_one_block_refuse_no_record_of_a_steady_load(
                 lens in prop::collection::vec((bodies(), any::<bool>()), 0..400),
             ) {
-                prop_assert_eq!(singles(under(15), lens), None);
+                prop_assert_eq!(singles(refused(15), lens), None);
             }
         }
 
@@ -2036,9 +2037,9 @@ mod tests {
             let lens = [2 * ALIGN - HEADER_LEN, BODY_MAX, BODY_MAX, BODY_MAX];
             let load = || lens.iter().map(|len| (*len, false)).collect();
             let full = |needed, free| Some((3, Full { needed, free }));
-            assert_eq!(singles(under(13), load()), full(24576, 20480));
-            assert_eq!(singles(under(14), load()), full(28672, 24576));
-            assert_eq!(singles(under(15), load()), None);
+            assert_eq!(singles(refused(13), load()), full(24576, 20480));
+            assert_eq!(singles(refused(14), load()), full(28672, 24576));
+            assert_eq!(singles(refused(15), load()), None);
         }
 
         #[test]

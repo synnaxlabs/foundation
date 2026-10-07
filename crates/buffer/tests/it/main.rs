@@ -3013,6 +3013,23 @@ fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
 }
 
 #[test]
+fn a_header_with_an_area_under_four_records_is_unfit() {
+    run(157, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = 3 * BLOCK;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area,
+            body_max: BODY_MAX,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
+    });
+}
+
+#[test]
 fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     let area = u64::MAX - 4095;
     assert_eq!(

@@ -390,7 +390,8 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034791932,
   2026-10-07T09:12:31Z), and the boundaries and the minimum of `Layout::new`, built in
   #1276 (#1222,
-  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998,
+  2026-10-07T08:16:51Z).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -529,12 +530,12 @@ How to read this record:
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
-  is the offset modulo the area length. The area is at least twice the largest
-  record, so a ring that holds only its restart record takes any record (#637). A
-  ring whose head reaches the end of the offsets is full for good. A body is at most
-  `u32::MAX` bytes and at least one block less the record header (4087 bytes): a
-  record takes whole blocks, so a smaller one saves no disk and only holds less per
-  commit.
+  is the offset modulo the area length. The area is at least four times the largest
+  record (STORE TRIM, #1276; supersedes the two times of #637), so a ring that holds
+  only its restart record takes any record. A ring whose head reaches the end of the
+  offsets is full for good. A body is at most `u32::MAX` bytes and at least one block
+  less the record header (4087 bytes): a record takes whole blocks, so a smaller one
+  saves no disk and only holds less per commit.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
