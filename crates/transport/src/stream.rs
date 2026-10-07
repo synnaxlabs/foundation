@@ -357,6 +357,7 @@ mod tests {
     use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::task::{Context, Waker};
 
     use block::Block;
     use sim::Sim;
@@ -752,5 +753,53 @@ mod tests {
             seed: 0,
         };
         assert_eq!(sim.run(), Err(panicked));
+    }
+
+    #[test]
+    fn a_recv_polled_by_a_new_waker_wakes_that_one() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                sender.send(side.block(b"b")).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let read = incoming.receiver.recv().await;
+                assert_eq!(bytes(read), Ok(Some(b"a".to_vec())));
+                let mut read = pin!(incoming.receiver.recv());
+                let mut elsewhere = Context::from_waker(Waker::noop());
+                assert!(read.as_mut().poll(&mut elsewhere).is_pending());
+                assert_eq!(bytes(read.await), Ok(Some(b"b".to_vec())));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_half_shows_its_session_key() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (sender, receiver) = opened.expect("a stream");
+                for shown in [format!("{sender:?}"), format!("{receiver:?}")] {
+                    assert!(shown.contains("Session { key: "), "{shown}");
+                }
+            },
+            |side| async move {
+                drop(side.session.closed().await);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
     }
 }
