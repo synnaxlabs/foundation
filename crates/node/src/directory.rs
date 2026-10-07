@@ -16,9 +16,9 @@ pub(crate) fn shard(core: usize) -> PathBuf {
     PathBuf::from(format!("{SHARD}{core}"))
 }
 
-/// Records `cores` in the data directory when no count is there, and syncs it
-/// before any ring is made. Refuses a directory that records another count. With no
-/// record, rings up to `shard-<k>` are a record of `k + 1`.
+/// Records `cores` in the data directory when no count is there, and syncs the
+/// record before any ring is made. Refuses a directory that records another count.
+/// With no record, rings up to `shard-<k>` are a record of `k + 1`.
 pub(crate) async fn claim(
     files: &env::files::Files,
     cores: usize,
@@ -32,8 +32,11 @@ pub(crate) async fn claim(
         .collect();
     let recorded = !counts.is_empty();
     if !recorded {
-        let rings = names.iter().filter_map(|name| count(name, SHARD));
-        counts.extend(rings.max().map(|k| k + 1));
+        // No node has a shard of index `usize::MAX`, so that name is not a ring.
+        let rings = names
+            .iter()
+            .filter_map(|name| count(name, SHARD)?.checked_add(1));
+        counts.extend(rings.max());
     }
     // The smallest, so the error does not hang on the order of the list.
     let other = counts.iter().copied().filter(|&k| k != cores).min();
@@ -43,9 +46,9 @@ pub(crate) async fn claim(
     if !recorded {
         let record = PathBuf::from(format!("{RECORD}{cores}"));
         files.create_dir(&record).await.map_err(Error::Directory)?;
-        files.sync_dir(root).await.map_err(Error::Directory)?;
     }
-    Ok(())
+    // Also when the record is there: a crash may have left it unsynced.
+    files.sync_dir(root).await.map_err(Error::Directory)
 }
 
 /// The number after `prefix` in `name`, in plain decimal, so `shards-03` and

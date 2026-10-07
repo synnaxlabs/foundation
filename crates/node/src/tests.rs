@@ -835,6 +835,75 @@ mod directory {
         }
     }
 
+    /// No node has a shard of index `usize::MAX`, so that name is not a ring.
+    #[test]
+    fn a_ring_of_the_largest_index_is_not_a_ring() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let name = format!("shard-{}", usize::MAX);
+        let made = name.clone();
+        sim.run_on(&host, |host, _| async move {
+            host.files()
+                .create_dir(Path::new(&made))
+                .await
+                .expect("makes");
+        })
+        .expect("the run ends");
+        assert_eq!(run_on(&mut sim, &host), Ok(()));
+        let listed = listed(&mut sim, &host, "");
+        let made = ["shard-0", "shard-1", &name, "shards-2"];
+        assert_eq!(listed, made.map(PathBuf::from));
+    }
+
+    /// A crash at the sync of the record: a power cut loses the record, and a
+    /// process crash keeps it. The next start syncs the record before `shard-0`.
+    #[test]
+    fn a_crash_at_the_sync_of_the_record_leaves_it_whole_or_absent() {
+        use env::files::Operation::SyncDir;
+        let io = env::files::Error::Io {
+            path: PathBuf::new(),
+            operation: SyncDir,
+            code: 5,
+        };
+        for (crash, kept) in [
+            (sim::Crash::Power, &[][..]),
+            (sim::Crash::Process, &["shards-2"][..]),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new(""), SyncDir);
+            let e = run_on(&mut sim, &host);
+            assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
+            sim.crash(&host, crash);
+            let kept: Vec<PathBuf> = kept.iter().map(PathBuf::from).collect();
+            assert_eq!(listed(&mut sim, &host, ""), kept, "{crash:?}");
+            host.fail_file(Path::new(""), SyncDir);
+            let e = run_on(&mut sim, &host);
+            assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
+            let made = [PathBuf::from("shards-2")];
+            assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
+        }
+    }
+
+    /// A shard with no memory comes before a refused data directory in `join`.
+    #[test]
+    fn join_gives_a_shard_with_no_memory_over_a_refused_data_directory() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        record(&mut sim, &host, 3);
+        let refused = os::memory::Error::Refused;
+        let node = Node::start(config(&host, 1 << 20, refuse(1, refused)));
+        assert_eq!(sim.run(), Ok(()));
+        let e = node.join();
+        assert_eq!(
+            e,
+            Err(Error::Memory {
+                core: 1,
+                error: refused
+            })
+        );
+    }
+
     #[test]
     fn join_gives_a_refused_data_directory_over_a_shard_that_panicked() {
         for seed in 0..32 {

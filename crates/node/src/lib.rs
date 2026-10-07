@@ -43,7 +43,8 @@ pub struct Config<M> {
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
     /// Makes the files of the node's data directory. Each shard calls it once on its
     /// own thread, because a `Files` cannot leave the thread that made it. `node`
-    /// opens the buffer of shard `i` in directory `shard-<i>` inside them.
+    /// records the shard count in directory `shards-<n>` inside them, and opens the
+    /// buffer of shard `i` in directory `shard-<i>`.
     pub files: Arc<dyn Fn() -> env::files::Files + Send + Sync>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
