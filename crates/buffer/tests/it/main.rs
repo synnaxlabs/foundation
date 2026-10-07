@@ -109,21 +109,31 @@ impl Shard {
     }
 
     /// Opens a ring that holds bytes at `offset` that this build cannot read. The
-    /// open must give `Invalid` and leave the file as it was.
+    /// open must give `Invalid`, leave the file as it was, and not sync it.
     async fn open_invalid(&self, layout: Layout, offset: u64) {
         let before = self.memory.bytes(RING);
+        let syncs = self.memory.syncs();
         let opened = self.open(layout, &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Invalid { offset }));
+        assert_eq!(self.memory.syncs(), syncs, "the open synced the ring");
         assert!(
             self.memory.bytes(RING) == before,
             "the open changed the ring"
         );
     }
 
-    /// Puts `bytes` at `at` of the body of the record at `offset` of the area,
-    /// and fixes the record's CRC so that it still follows the record in the block
-    /// before it: a restart record, or a data record of one block.
+    /// Puts `bytes` at `at` of the body of the record at `offset` of the area, and
+    /// seals the record.
     fn tamper_record(&self, offset: u64, at: usize, bytes: &[u8]) {
+        let body = to_usize(AREA_START + offset) + 9;
+        self.memory.put(RING, body + at, bytes);
+        self.seal(offset);
+    }
+
+    /// Fixes the CRC of the record at `offset` of the area, so that it still follows
+    /// the record in the block before it: a restart record, or a data record of one
+    /// block.
+    fn seal(&self, offset: u64) {
         let file = self.memory.bytes(RING);
         let start = to_usize(AREA_START + offset);
         let u32_at = |at: usize| {
@@ -136,13 +146,26 @@ impl Shard {
             DATA => u32_at(before + 4),
             kind => panic!("no record of one block before {offset}: kind {kind}"),
         };
-        let mut body = file[start + 9..start + 9 + len].to_vec();
-        body[at..at + bytes.len()].copy_from_slice(bytes);
-        let mut crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
-        crc = crc32c::crc32c_append(crc, &file[start + 8..start + 9]);
-        crc = crc32c::crc32c_append(crc, &body);
+        let crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
+        let crc = crc32c::crc32c_append(crc, &file[start + 8..start + 9 + len]);
         self.memory.put(RING, start + 4, &crc.to_le_bytes());
-        self.memory.put(RING, start + 9, &body);
+    }
+
+    /// Makes a ring with a data record at `BLOCK` and one at `2 * BLOCK`.
+    async fn create_two_records(&self) {
+        let mut slots = Slots::new();
+        let buffer = self
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        for (first, stamp) in [(0, 30), (3, 60)] {
+            let parts = Parts::default();
+            buffer
+                .append([entry(1, a, Path::Live, first, 3, Some(stamp), parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
     }
 }
 
@@ -2129,32 +2152,23 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
     });
 }
 
-/// The open writes the header blocks and the record before the invalid one again.
+/// The open writes the header blocks and the records before the invalid one again.
 #[test]
 fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
     run(107, Memory::default(), |shard| async move {
-        let mut slots = Slots::new();
-        let buffer = shard
-            .open(layout(AREA, BODY_MAX), &mut slots)
-            .await
-            .expect("opens");
-        let a = slots.assign(key(1));
-        for (first, stamp) in [(0, 30), (3, 60)] {
-            buffer
-                .append([entry(
-                    1,
-                    a,
-                    Path::Live,
-                    first,
-                    3,
-                    Some(stamp),
-                    Parts::default(),
-                )])
-                .expect("queues");
-            buffer.committed().await.expect("commits");
-        }
-        drop(buffer);
+        shard.create_two_records().await;
         shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+    });
+}
+
+#[test]
+fn a_record_of_an_unknown_kind_is_invalid() {
+    run(109, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
+        shard.memory.put(RING, kind, &[4]);
+        shard.seal(2 * BLOCK);
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
     });
 }
