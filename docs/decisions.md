@@ -2398,9 +2398,10 @@ How to read this record:
   doc of `set_home`, and the four points that the plan did not state (a joint
   configuration, `Error::Pool`, the time to a stop in a forward, and `NoVote` before
   `NotMember`) are approved by the architect, 2026-10-07T20:29:07Z:
-  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The two
-  sentences that the doc of `set_home` got after that, on a late proposal and on what
-  `NoVote` reads, are approved in the ruling of 2026-10-07T20:58:20Z above.
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The
+  ruling of 2026-10-07T20:58:20Z above adds the sentence on a late proposal to that
+  doc. Its sentences on what `NoVote` and `NotMember` read supersede the last sentence
+  of the doc text in that comment ("The first two read what this node applied").
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
@@ -2438,12 +2439,14 @@ How to read this record:
   it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
   https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
   Supersedes, for `set_home`, the sentence that the calls that change the region stay
-  private: https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724.
-  The other calls that change the region and the change records stay private. The
-  surface is approved by the architect, 2026-10-07T16:24:54Z:
+  private. That sentence is the line "Private still" of the plan
+  (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
+  the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  surface as built, with the types that the caller builds and the sentence on the key of
-  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  other calls that change the region and the change records stay private. The surface
+  is approved in the same comment. The surface as built, with the types that the caller
+  builds and the sentence on the key of the transport, is approved by the architect,
+  2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order

@@ -557,7 +557,7 @@ where
 /// Sets node 1 as the home on `mesh`, and gives the result with the home after.
 async fn set(mesh: Mesh) -> (Result<(), Error>, Option<node::Key>) {
     let set = mesh.set_home(INDEX, key(1)).await;
-    (set, mesh.group.borrow().state.home(INDEX))
+    (set, mesh.watch(INDEX).next().await.unwrap())
 }
 
 #[test]
@@ -708,22 +708,29 @@ enum Refusal {
 fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
     let follower = |leader| Message::NotLeader { leader }.encode();
     let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
+    let reset = transport::Error::Reset { code: Code(0) };
     let cases = [
-        ("no leader", Refusal::Answer(follower(None))),
-        ("a leader", Refusal::Answer(follower(Some(key(3))))),
+        ("no leader", Refusal::Answer(follower(None)), Some(Ok(()))),
+        (
+            "a leader",
+            Refusal::Answer(follower(Some(key(3)))),
+            Some(Ok(())),
+        ),
         (
             "a `raft` message",
             Refusal::Answer(Message::Raft(beat).encode()),
+            Some(Ok(())),
         ),
-        ("a proposal", {
-            let change = home(1);
-            Refusal::Answer(Message::Propose { change }.encode())
-        }),
-        ("no message", Refusal::Answer(vec![0xff])),
-        ("an end", Refusal::End),
-        ("a reset", Refusal::Reset),
+        (
+            "a proposal",
+            Refusal::Answer(Message::Propose { change: home(1) }.encode()),
+            Some(Ok(())),
+        ),
+        ("no message", Refusal::Answer(vec![0xff]), Some(Ok(()))),
+        ("an end", Refusal::End, Some(Err(reset))),
+        ("a reset", Refusal::Reset, None),
     ];
-    for (case, refusal) in cases {
+    for (case, refusal, ended) in cases {
         let call = |_, mesh| set(mesh);
         let (set, (changes, gap, end)) = run(call, |mut leader| async move {
             let clock = leader.clock();
@@ -737,13 +744,12 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
             }
             let start = clock.now();
             let end = match refusal {
-                Refusal::Answer(_) => refused.end().await,
-                Refusal::End => Ok(()),
+                Refusal::Answer(_) | Refusal::End => Some(refused.end().await),
                 Refusal::Reset => {
                     let Asked { receiver, sender } = refused;
                     sender.reset(Code(16));
                     receiver.stop(Code(16));
-                    Ok(())
+                    None
                 }
             };
             let (second, mut asked) = leader.proposal().await;
@@ -754,8 +760,9 @@ fn a_proposal_that_the_leader_refuses_goes_again_after_one_tick() {
             ([first, second], gap, end)
         });
         assert_eq!(set, (Ok(()), Some(key(1))), "{case}");
-        // Node 1 ends its stream after each answer, also one that refuses.
-        assert_eq!(end, Ok(()), "{case}");
+        // Node 1 ends its stream after each answer, also one that refuses, and resets
+        // it when the leader ends with no answer.
+        assert_eq!(end, ended, "{case}");
         assert_eq!(changes, [home(1), home(1)], "{case}");
         let ms = gap.nanos() / Span::MILLISECOND.nanos();
         assert!(
