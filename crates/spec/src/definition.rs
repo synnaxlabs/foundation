@@ -102,6 +102,9 @@ impl Definition {
             Self::Connector(_) => Kind::Connector,
             Self::Region(_) => Kind::Region,
             Self::NodeSettings(_) => Kind::NodeSettings,
+            Self::Compression(_) => Kind::Compression,
+            Self::Placement(_) => Kind::Placement,
+            Self::Time(_) => Kind::Time,
         }
     }
 

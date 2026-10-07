@@ -16,6 +16,12 @@ pub enum Kind {
     Region,
     /// A node settings policy.
     NodeSettings,
+    /// A compression policy.
+    Compression,
+    /// A placement policy.
+    Placement,
+    /// A time policy.
+    Time,
 }
 
 impl Kind {
@@ -52,6 +58,9 @@ impl Kind {
             Self::Connector => "@connector",
             Self::Region => "@region",
             Self::NodeSettings => "@node_settings",
+            Self::Compression => "@compression",
+            Self::Placement => "@placement",
+            Self::Time => "@time",
         }
     }
 }
@@ -97,11 +106,14 @@ mod tests {
 
     use super::*;
 
-    const KINDS: [(Kind, &str); 4] = [
+    const KINDS: [(Kind, &str); 7] = [
         (Kind::Access, "@access"),
         (Kind::Connector, "@connector"),
         (Kind::Region, "@region"),
         (Kind::NodeSettings, "@node_settings"),
+        (Kind::Compression, "@compression"),
+        (Kind::Placement, "@placement"),
+        (Kind::Time, "@time"),
     ];
 
     fn name(text: &str) -> Name {
