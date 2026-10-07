@@ -160,7 +160,7 @@ pub struct Config {
     /// from its pool.
     pub buffer: Buffer,
     /// The node's clocks. Control leases expire on its monotonic clock. Stamp
-    /// checks, handoffs, stored entries, and readers read its mesh time.
+    /// checks, handoffs, and stored entries read its mesh time.
     pub clock: clock::Reader,
     /// The stamps each index accepts.
     pub limits: order::Limits,
@@ -653,6 +653,7 @@ fn record(
     groups: impl Iterator<Item = u32>,
     mesh: Stamp,
 ) -> Result<bool, Error> {
+    let pool = buffer.pool();
     let mut all = true;
     for group in groups {
         let (claim, entry) = session.claim(group);
@@ -660,8 +661,7 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let appended = match handoff::entry(buffer.pool(), handoff, entry, first, mesh)
-        {
+        let appended = match handoff::entry(pool, handoff, entry, first, mesh) {
             Ok(handoff) => buffer.append([handoff]),
             Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
                 all = false;
