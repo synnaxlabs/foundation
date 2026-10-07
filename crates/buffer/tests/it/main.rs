@@ -5,13 +5,14 @@
 
 mod memory;
 
+use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use block::{Block, Heap, Pool};
@@ -1320,21 +1321,6 @@ fn an_entry_past_the_last_seq_is_a_broken_invariant() {
 }
 
 #[test]
-fn a_zeroed_file_of_another_length_is_not_made_into_a_ring() {
-    run(10, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA + BLOCK).await;
-        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
-        assert_eq!(
-            opened.map(drop),
-            Err(Error::Length {
-                expected: AREA_START + AREA,
-                found: AREA_START + AREA + BLOCK,
-            })
-        );
-    });
-}
-
-#[test]
 fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
     run(107, Memory::default(), |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
@@ -1604,6 +1590,561 @@ fn a_kill_during_the_first_open_keeps_the_commits_of_the_next() {
         );
         ended
     });
+}
+
+/// Makes a durable ring file of `len` zero bytes on `node`, as an open that stops
+/// before its first checkpoint leaves it.
+fn create_unwritten(sim: &mut sim::Sim, node: &sim::node::Node, len: u64) {
+    let made = sim.run_on(node, move |node, _| async move {
+        let (files, dir) = (node.files(), FilePath::new(DIR));
+        files.create_dir(dir).await.expect("makes the directory");
+        let ring = files.open(FilePath::new(RING), Mode::Create { len }).await;
+        drop(ring.expect("makes the file"));
+        let root = files.sync_dir(FilePath::new("")).await;
+        root.expect("syncs the data directory");
+        files.sync_dir(dir).await.expect("syncs the directory");
+    });
+    made.expect("the file is made");
+}
+
+/// What the ring file holds before an open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Found {
+    /// No file.
+    Absent,
+    /// A file of this length with no checkpoint.
+    Unwritten(u64),
+    /// A file with a checkpoint.
+    Written,
+}
+
+/// Opens the ring on `node` with `layout`. Returns what the file held before the
+/// open, what the open gave, and the length of the file after it, 0 with no file.
+fn open_with(
+    sim: &mut sim::Sim,
+    node: &sim::node::Node,
+    layout: Layout,
+) -> (Found, Result<Layout, Error>, u64) {
+    let found = sim.run_on(node, move |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let (files, pool) = (node.files(), Rc::clone(&config.pool));
+        let found = match files.open(FilePath::new(RING), Mode::Read).await {
+            Ok(file) if file.len() < AREA_START => Found::Unwritten(file.len()),
+            Ok(file) => {
+                let blocks = pool.alloc(to_usize(AREA_START)).expect("a block");
+                let blocks = file.read_at(0, blocks).await.expect("reads");
+                let mut blocks = blocks.chunks(to_usize(BLOCK));
+                if blocks.any(|block| block.starts_with(b"FNDNRING")) {
+                    Found::Written
+                } else {
+                    Found::Unwritten(file.len())
+                }
+            }
+            Err(FileError::NotFound { .. }) => Found::Absent,
+            Err(error) => panic!("the ring file does not open: {error}"),
+        };
+        let config = Config { layout, ..config };
+        let buffer = Buffer::open(config, &mut Slots::new()).await;
+        let opened = buffer.map(|buffer| buffer.layout());
+        let file = files.open(FilePath::new(RING), Mode::Read).await;
+        (found, opened, file.map_or(0, |file| file.len()))
+    });
+    found.expect("the open ends")
+}
+
+/// An open that stops before its first checkpoint leaves a ring file with no
+/// header, or an empty one. The next open makes the ring again with its layout.
+#[test]
+fn a_ring_with_no_checkpoint_takes_the_layout_of_the_open() {
+    let other = layout(2 * AREA, 2 * BODY_MAX);
+    for len in [0, AREA_START, AREA_START + AREA, AREA_START + AREA + BLOCK] {
+        let (mut sim, node) = one_node(10);
+        create_unwritten(&mut sim, &node, len);
+        let found = open_with(&mut sim, &node, other);
+        let made = (Found::Unwritten(len), Ok(other), AREA_START + 2 * AREA);
+        assert_eq!(found, made);
+    }
+}
+
+/// An open makes a ring with no checkpoint again. A crash at any point of it leaves
+/// a ring that opens: with the layout of its checkpoint when it has one, or else
+/// with the layout of that open. The cuts leave each state that the remake goes
+/// through.
+#[test]
+fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
+    let (old, new) = (layout(2 * AREA, BODY_MAX), layout(AREA, BODY_MAX));
+    let lens = [old, new].map(|layout| AREA_START + layout.area());
+    for crash in [sim::Crash::Process, sim::Crash::Power] {
+        let mut left = BTreeSet::new();
+        each_cut(0..8, 5_000, |seed, cut| {
+            let mut ended = false;
+            for layout in [old, new] {
+                let (mut sim, node) = one_node(seed);
+                create_unwritten(&mut sim, &node, lens[0]);
+                ended = cut_an_open(&mut sim, &node, cut, crash);
+                let (found, opened, len) = open_with(&mut sim, &node, layout);
+                let at = format!("seed {seed}, {crash:?} at {cut} ns, {layout:?}");
+                assert!(found == Found::Written || !ended, "{at}");
+                let expected = if found == Found::Written { new } else { layout };
+                assert_eq!(opened, Ok(expected), "{at}");
+                assert_eq!(len, AREA_START + expected.area(), "{at}");
+                left.insert(found);
+            }
+            ended
+        });
+        let zero = lens.map(Found::Unwritten);
+        let all = [Found::Absent, Found::Written].into_iter().chain(zero);
+        assert_eq!(left, all.collect(), "{crash:?}");
+    }
+}
+
+/// A sim with `seed` and one node on it, whose disk holds the shard directory and
+/// `bytes` of files.
+fn node_with_disk(seed: u64, bytes: u64) -> (sim::Sim, sim::node::Node) {
+    let mut sim = sim::Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config {
+        disk_bytes: BLOCK + bytes,
+        ..sim::node::Config::default()
+    });
+    (sim, node)
+}
+
+/// The disk gives the room of a removed file back when the removal is durable. So a
+/// ring with no checkpoint is made again on a disk with no room for it and the new
+/// ring at once.
+#[test]
+fn a_ring_with_no_checkpoint_is_made_again_in_the_room_that_it_leaves() {
+    let new = layout(AREA, BODY_MAX);
+    let len = AREA_START + AREA;
+    for old in [len, len + AREA] {
+        let (mut sim, node) = node_with_disk(10, old + len / 2);
+        create_unwritten(&mut sim, &node, old);
+        let found = open_with(&mut sim, &node, new);
+        assert_eq!(found, (Found::Unwritten(old), Ok(new), len));
+    }
+}
+
+/// A crash at any point of the first open, or of an open that makes a ring with no
+/// checkpoint again, on a disk with room for one ring and not for two, leaves a ring
+/// that opens. A kill after the remove leaves a file with no name that keeps its room.
+#[test]
+fn a_crash_in_an_open_leaves_a_ring_that_opens_in_the_room_of_one() {
+    let new = layout(AREA, BODY_MAX);
+    let len = AREA_START + AREA;
+    for (crash, unwritten) in [
+        (sim::Crash::Process, false),
+        (sim::Crash::Process, true),
+        (sim::Crash::Power, false),
+        (sim::Crash::Power, true),
+    ] {
+        each_cut(0..8, 5_000, |seed, cut| {
+            let (mut sim, node) = node_with_disk(seed, len + len / 2);
+            if unwritten {
+                create_unwritten(&mut sim, &node, len);
+            }
+            let ended = cut_an_open(&mut sim, &node, cut, crash);
+            let opened = open_with(&mut sim, &node, new);
+            let at = format!("seed {seed}, {crash:?} at {cut} ns, {unwritten}");
+            assert_eq!((opened.1, opened.2), (Ok(new), len), "{at}");
+            ended
+        });
+    }
+}
+
+/// A failed remove of a ring with no checkpoint, or a failed sync of its directory
+/// after the remove, fails the open. The next open makes the ring again, also on a
+/// disk with no room for both files.
+#[test]
+fn a_failed_remove_of_a_ring_with_no_checkpoint_fails_the_open() {
+    let (other, len) = (layout(2 * AREA, BODY_MAX), AREA_START + AREA);
+    let faults = [
+        (RING, Operation::Remove, Found::Unwritten(len)),
+        (DIR, Operation::SyncDir, Found::Absent),
+    ];
+    for (path, operation, left) in faults {
+        let (mut sim, node) = node_with_disk(10, AREA_START + 2 * AREA + len / 2);
+        create_unwritten(&mut sim, &node, len);
+        node.fail_file(FilePath::new(path), operation);
+        let opened = sim.run_on(&node, move |node, tasks| async move {
+            let config = node_config(&node, tasks, DIR);
+            let config = Config {
+                layout: other,
+                ..config
+            };
+            Buffer::open(config, &mut Slots::new()).await.map(drop)
+        });
+        let error = FileError::Io {
+            path: PathBuf::from(path),
+            operation,
+            code: 5,
+        };
+        assert_eq!(opened.expect("the open ends"), Err(Error::Files(error)));
+        let found = open_with(&mut sim, &node, other);
+        assert_eq!(found, (left, Ok(other), AREA_START + 2 * AREA));
+    }
+}
+
+/// Two opens at once of a ring with no checkpoint, on a disk with room for one ring:
+/// one gets the ring and the other gets `Busy`. The entry that the first commits is
+/// there after a kill and an open.
+#[test]
+fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
+    let len = AREA_START + AREA;
+    for seed in 0..256 {
+        let (mut sim, node) = node_with_disk(seed, len + len / 2);
+        create_unwritten(&mut sim, &node, len);
+        let results = [1, 2].map(|index| {
+            let result = Arc::new(Mutex::new(None));
+            let (own, shared) = (node.clone(), Arc::clone(&result));
+            let name = format!("open-{index}");
+            drop(on_node(&node, &name, move |tasks| async move {
+                let give = |ended| *shared.lock().expect("no panic") = Some(ended);
+                let mut slots = Slots::new();
+                let config = node_config(&own, tasks, DIR);
+                let buffer = match Buffer::open(config, &mut slots).await {
+                    Ok(buffer) => buffer,
+                    Err(error) => return give(Err(error)),
+                };
+                let slot = slots.assign(key(index));
+                let parts = Parts::default();
+                buffer
+                    .append([entry(index, slot, Path::Live, 0, 3, Some(30), parts)])
+                    .expect("queues");
+                give(buffer.committed().await.map_err(Error::Files));
+                std::future::pending::<()>().await;
+            }));
+            result
+        });
+        sim.run_for(commits(4)).expect("the run goes on");
+        let gave = results.map(|result| result.lock().expect("no panic").take());
+        let one = [Some(Ok(())), Some(Err(busy()))];
+        let other = [Some(Err(busy())), Some(Ok(()))];
+        assert!(gave == one || gave == other, "seed {seed}: {gave:?}");
+        sim.crash(&node, sim::Crash::Process);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens again");
+            [1, 2].map(|index| {
+                buffer.tail(slots.assign(key(index)), Path::Live) == tail(3, Some(30))
+            })
+        });
+        let committed = gave.map(|ended| ended == Some(Ok(())));
+        assert_eq!(recovered, Ok(committed), "seed {seed}");
+    }
+}
+
+/// Drops an open of a ring with no checkpoint `after` nanoseconds into it, opens the
+/// ring again at once, commits one entry, kills the process, and opens the ring.
+/// Returns whether the entry is there, or `None` when the first open had ended or
+/// the second open or its commit failed.
+fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
+    let (mut sim, node) = one_node(seed);
+    create_unwritten(&mut sim, &node, AREA_START + AREA);
+    let committed = sim.run_on(&node, move |node, tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&node, tasks.clone(), DIR);
+        let mut first = Box::pin(Buffer::open(config, &mut slots));
+        let mut sleep = Box::pin(node.clock().sleep(Span::from_nanos(after)));
+        let ended = poll_fn(|cx| {
+            if first.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(true);
+            }
+            sleep.as_mut().poll(cx).map(|()| false)
+        })
+        .await;
+        drop(first);
+        if ended {
+            return None;
+        }
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots).await;
+        let buffer = buffer.ok()?;
+        let slot = slots.assign(key(1));
+        buffer
+            .append([entry(1, slot, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.ok()
+    });
+    committed.expect("the run ends")?;
+    sim.crash(&node, sim::Crash::Process);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens again");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    Some(recovered.expect("the last open ends") == tail(3, Some(30)))
+}
+
+/// A known defect, <https://github.com/synnaxlabs/foundation/issues/1310>: the
+/// remove of a dropped open can still run and remove the ring that the next open
+/// made, so a kill loses an entry that the next open committed. This pins the loss
+/// on 6 runs that hang on the delay of each file call before the drop. A change that
+/// moves those delays makes them keep the entry, and the defect stays: the search in
+/// the issue then finds the runs again.
+#[test]
+fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
+    let cases = [
+        (143_161, 70_000),
+        (150_046, 120_000),
+        (189_172, 80_000),
+        (231_911, 70_000),
+        (275_938, 140_000),
+        (359_697, 130_000),
+    ];
+    for (seed, after) in cases {
+        let kept = drop_an_open_then_commit(seed, after);
+        assert_eq!(kept, Some(false), "seed {seed}, drop at {after} ns");
+    }
+}
+
+/// Two opens at once of a ring that is not there, on a new node with `seed`. The
+/// first commits one entry with a commit span of 1 ns and drops its buffer. The second
+/// starts `gap` nanoseconds later with `layout` and keeps its buffer. Then a kill and
+/// an open. Returns what the first commit gave, what the second open gave (the tail
+/// of the entry), and the tail after the kill.
+fn commit_and_close_during_another_open(
+    seed: u64,
+    gap: i64,
+    layout: Layout,
+) -> (Result<(), Error>, Result<Tail, Error>, Tail) {
+    let (mut sim, node) = one_node(seed);
+    let committed = Arc::new(Mutex::new(None));
+    let opened = Arc::new(Mutex::new(None));
+    let (own, shared) = (node.clone(), Arc::clone(&committed));
+    drop(on_node(&node, "first", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = Config {
+            commit: Span::from_nanos(1),
+            ..node_config(&own, tasks, DIR)
+        };
+        let gave = async {
+            let buffer = Buffer::open(config, &mut slots).await?;
+            let slot = slots.assign(key(1));
+            buffer
+                .append([entry(1, slot, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.map_err(Error::Files)
+        }
+        .await;
+        *shared.lock().expect("no panic") = Some(gave);
+        std::future::pending::<()>().await;
+    }));
+    let (own, shared) = (node.clone(), Arc::clone(&opened));
+    drop(on_node(&node, "second", move |tasks| async move {
+        own.clock().sleep(Span::from_nanos(gap)).await;
+        let mut slots = Slots::new();
+        let config = Config {
+            layout,
+            ..node_config(&own, tasks, DIR)
+        };
+        let buffer = Buffer::open(config, &mut slots).await;
+        let slot = slots.assign(key(1));
+        let gave = match &buffer {
+            Ok(buffer) => Ok(buffer.tail(slot, Path::Live)),
+            Err(error) => Err(error.clone()),
+        };
+        *shared.lock().expect("no panic") = Some(gave);
+        std::future::pending::<()>().await;
+        drop(buffer);
+    }));
+    sim.run_for(commits(4)).expect("the run goes on");
+    let committed = committed.lock().expect("no panic").take();
+    let opened = opened.lock().expect("no panic").take();
+    let committed = committed.expect("the first commit ends");
+    let opened = opened.expect("the second open ends");
+    sim.crash(&node, sim::Crash::Process);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens again");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    (committed, opened, recovered.expect("the last open ends"))
+}
+
+/// Each seed and gap of a run where an open makes the ring, commits, and closes
+/// between the first look of a later open and its create.
+///
+/// The runs hang on the delay of each file call. After a change that moves those
+/// delays, the later open of a run can get `Busy`, and the tests of these runs fail:
+/// a search of the first 200,000 values of `seed` at these 3 gaps then finds such
+/// runs again.
+const CLOSED_BEFORE_THE_CREATE: [(u64, i64); 6] = [
+    (83_501, 100_000),
+    (4_232, 125_000),
+    (20_350, 125_000),
+    (21_616, 125_000),
+    (6_747, 150_000),
+    (30_651, 150_000),
+];
+
+/// An open that finds no ring makes one later, with `Mode::Create`. Another open can
+/// make the ring, commit, and close in between. The later open then recovers the
+/// entry, and the entry stays.
+#[test]
+fn an_open_at_once_with_one_that_commits_and_closes_keeps_the_commit() {
+    let kept = tail(3, Some(30));
+    for (seed, gap) in CLOSED_BEFORE_THE_CREATE {
+        let same = layout(AREA, BODY_MAX);
+        let found = commit_and_close_during_another_open(seed, gap, same);
+        let expected = (Ok(()), Ok(kept), kept);
+        assert_eq!(found, expected, "seed {seed}, gap {gap} ns");
+    }
+}
+
+/// As the test before this one, with another layout for the later open. Its create
+/// asks for its own length, so it fails with the `Length` of `env::files`, where an
+/// open after it takes the layout of the ring. The entry stays.
+#[test]
+fn an_open_with_another_layout_at_once_with_one_that_closes_gets_length() {
+    let kept = tail(3, Some(30));
+    let length = Error::Files(FileError::Length {
+        path: PathBuf::from(RING),
+        expected: AREA_START + 2 * AREA,
+        found: AREA_START + AREA,
+    });
+    for (seed, gap) in CLOSED_BEFORE_THE_CREATE {
+        let other = layout(2 * AREA, BODY_MAX);
+        let found = commit_and_close_during_another_open(seed, gap, other);
+        let expected = (Ok(()), Err(length.clone()), kept);
+        assert_eq!(found, expected, "seed {seed}, gap {gap} ns");
+    }
+}
+
+/// Three opens at once of a directory with no ring, on a disk of `disk` bytes. The
+/// sync of the root fails for the open that makes the ring, so its ring has no
+/// checkpoint. An open that passes commits one entry. Returns what each open gave,
+/// and the tail that an open after a kill recovers.
+fn three_opens_and_a_failed_sync(
+    seed: u64,
+    disk: u64,
+) -> ([Result<(), Error>; 3], Tail) {
+    let (mut sim, node) = node_with_disk(seed, disk);
+    node.fail_file(FilePath::new(""), Operation::SyncDir);
+    let results = [200_000, 75_000, 35_000].map(|gap| {
+        let result = Arc::new(Mutex::new(None));
+        let (own, shared) = (node.clone(), Arc::clone(&result));
+        drop(on_node(
+            &node,
+            &format!("open-{gap}"),
+            move |tasks| async move {
+                own.clock().sleep(Span::from_nanos(gap)).await;
+                let mut slots = Slots::new();
+                let gave = async {
+                    let config = node_config(&own, tasks, DIR);
+                    let buffer = Buffer::open(config, &mut slots).await?;
+                    let slot = slots.assign(key(1));
+                    let parts = Parts::default();
+                    buffer
+                        .append([entry(1, slot, Path::Live, 0, 3, Some(30), parts)])
+                        .expect("queues");
+                    buffer.committed().await.map_err(Error::Files)
+                }
+                .await;
+                *shared.lock().expect("no panic") = Some(gave);
+            },
+        ));
+        result
+    });
+    sim.run_for(commits(4)).expect("the run goes on");
+    let results = results.map(|result| result.lock().expect("no panic").take());
+    sim.crash(&node, sim::Crash::Process);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens again");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    (
+        results.map(|result| result.expect("each open ends")),
+        recovered.expect("the last open ends"),
+    )
+}
+
+/// A limit of opens at once. The first open removes the ring with no checkpoint that
+/// the third left. The second found no ring before, and its create runs before the
+/// directory sync of the first, while the removed ring keeps its room. So it gets
+/// `Full` on a disk with room for one ring and a half, where another open gets `Busy`
+/// on one with room for two. The commit of the open that passes stays.
+///
+/// The run hangs on the delay of each file call. After a change that moves those
+/// delays, the second open can get another result, and this test fails: a search of
+/// the first 20,000 values of `seed` then finds such runs again.
+#[test]
+fn an_open_at_once_with_a_remove_of_another_open_can_get_full() {
+    let len = AREA_START + AREA;
+    let kept = tail(3, Some(30));
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::new(),
+        operation: Operation::SyncDir,
+        code: 5,
+    });
+    let full = Error::Files(FileError::Full {
+        path: PathBuf::from(RING),
+    });
+    let tight = three_opens_and_a_failed_sync(218, len + len / 2);
+    assert_eq!(tight, ([Ok(()), Err(full), Err(failed.clone())], kept));
+    let wide = three_opens_and_a_failed_sync(218, 2 * len);
+    assert_eq!(wide, ([Err(busy()), Ok(()), Err(failed)], kept));
+}
+
+/// A failed read of the header blocks fails the open with its error and leaves the
+/// ring: the next open makes a ring that was not there, and recovers the entry of a
+/// ring with a checkpoint.
+#[test]
+fn a_failed_read_of_the_header_blocks_fails_the_open_and_keeps_the_ring() {
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::ReadAt,
+        code: 5,
+    });
+    for committed in [false, true] {
+        let (mut sim, node) = one_node(11);
+        if committed {
+            sim.run_on(&node, |node, tasks| async move {
+                let mut slots = Slots::new();
+                let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                    .await
+                    .expect("opens");
+                let slot = slots.assign(key(1));
+                let parts = Parts::default();
+                buffer
+                    .append([entry(1, slot, Path::Live, 0, 3, Some(30), parts)])
+                    .expect("queues");
+                buffer.committed().await.expect("commits");
+            })
+            .expect("the run ends");
+            sim.crash(&node, sim::Crash::Process);
+        }
+        node.fail_file(FilePath::new(RING), Operation::ReadAt);
+        let opened = sim.run_on(&node, |node, tasks| async move {
+            let config = node_config(&node, tasks, DIR);
+            Buffer::open(config, &mut Slots::new()).await.map(drop)
+        });
+        assert_eq!(opened, Ok(Err(failed.clone())), "committed: {committed}");
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens again");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        let kept = if committed {
+            tail(3, Some(30))
+        } else {
+            tail(0, None)
+        };
+        assert_eq!(recovered, Ok(kept), "committed: {committed}");
+    }
 }
 
 /// Starts a new ring on a node with `seed`, appends one entry, and kills the
@@ -1991,7 +2532,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
 }
 
 /// A failed sync of the ring's directory or of its parent fails the open. The next
-/// open makes the ring durable.
+/// open makes a durable ring.
 #[test]
 fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
     for dir in ["", DIR] {
@@ -2011,6 +2552,43 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
         let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
         assert_eq!(recovered, tail(3, Some(30)), "{dir:?}");
     }
+}
+
+/// A failed sync of the ring's directory at any point of a first open fails the open,
+/// before the create and after it. The next open makes the ring.
+#[test]
+fn a_failed_directory_sync_at_any_point_of_the_open_fails_it() {
+    let (new, len) = (layout(AREA, BODY_MAX), AREA_START + AREA);
+    let mut left = BTreeSet::new();
+    for at in (0..).step_by(5_000) {
+        let (mut sim, node) = one_node(1);
+        let result = Arc::new(Mutex::new(None));
+        let (own, shared) = (node.clone(), Arc::clone(&result));
+        drop(on_node(&node, "open", move |tasks| async move {
+            let config = node_config(&own, tasks, DIR);
+            let opened = Buffer::open(config, &mut Slots::new()).await.map(drop);
+            *shared.lock().expect("no panic") = Some(opened);
+            std::future::pending::<()>().await;
+        }));
+        sim.run_for(Span::from_nanos(at)).expect("the run goes on");
+        node.fail_file(FilePath::new(DIR), Operation::SyncDir);
+        sim.run_for(commits(2)).expect("the run goes on");
+        let opened = result.lock().expect("no panic").take();
+        if opened == Some(Ok(())) {
+            break;
+        }
+        let error = FileError::Io {
+            path: PathBuf::from(DIR),
+            operation: Operation::SyncDir,
+            code: 5,
+        };
+        assert_eq!(opened, Some(Err(Error::Files(error))), "fault at {at} ns");
+        sim.crash(&node, sim::Crash::Process);
+        let found = open_with(&mut sim, &node, new);
+        assert_eq!((found.1, found.2), (Ok(new), len), "fault at {at} ns");
+        left.insert(found.0);
+    }
+    assert_eq!(left, BTreeSet::from([Found::Absent, Found::Unwritten(len)]));
 }
 
 /// The open syncs the parent of a nested ring directory, not the data directory.
@@ -4019,8 +4597,9 @@ fn a_record_with_a_table_over_one_block_is_read() {
 }
 
 /// Commits one entry, appends a second, and cuts the power `cut` nanoseconds after
-/// a point at most 100 µs before the deadline of the second commit. Returns the
-/// sim, the node, and whether the second commit had ended.
+/// a point before the deadline of the second commit. That deadline is one commit
+/// span after the start of the first commit, whose write and sync take up to 100 µs
+/// each. Returns the sim, the node, and whether the second commit had ended.
 fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
     let (mut sim, node) = one_node(seed);
     let committed = Arc::new(AtomicBool::new(false));
@@ -4051,7 +4630,7 @@ fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, boo
             .expect("the run goes on");
     }
     committed.store(false, Ordering::Relaxed);
-    let rest = Span::from_nanos(COMMIT.nanos() - 10 * step + cut);
+    let rest = Span::from_nanos(COMMIT.nanos() - 25 * step + cut);
     sim.run_for(rest).expect("the run goes on");
     sim.crash(&node, sim::Crash::Power);
     (sim, node, committed.load(Ordering::Relaxed))
