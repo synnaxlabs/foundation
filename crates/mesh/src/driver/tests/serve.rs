@@ -103,12 +103,14 @@ where
     P: Future<Output: Send + 'static> + 'static,
 {
     let mesh = |node, tasks, incoming, _| mesh(node, tasks, incoming);
-    run_shared(create_pool, mesh, peer)
+    run_shared(0, create_pool, mesh, peer)
 }
 
-/// As [`run`], and the transport of node 1 has the pool that `pool` makes. `mesh` also
-/// gets it, so that a mesh can share it as on a shard.
+/// As [`run`], on run `seed` of the simulation, and the transport of node 1 has the
+/// pool that `pool` makes. `mesh` also gets it, so that a mesh can share it as on a
+/// shard.
 fn run_shared<M, P>(
+    seed: u64,
     pool: fn() -> Rc<Pool>,
     mesh: impl FnOnce(sim::node::Node, Tasks, Incoming, Rc<Pool>) -> M + Send + 'static,
     peer: impl FnOnce(Peer) -> P + Send + 'static,
@@ -117,7 +119,10 @@ where
     M: Future<Output: Send + 'static> + 'static,
     P: Future<Output: Send + 'static> + 'static,
 {
-    let mut sim = Sim::new(sim::Config::default());
+    let mut sim = Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
     let at = SocketAddr::new(nodes[0].addresses()[0], PORT);
     let served = Arc::new(Mutex::new(None));
@@ -641,6 +646,7 @@ fn serve_answers_a_proposal_when_the_pool_has_room_for_only_the_write() {
 #[test]
 fn serve_drops_the_block_of_the_proposal_before_the_group_writes() {
     let (served, answer) = run_shared(
+        0,
         small_pool,
         |node, tasks, incoming, pool| async move {
             let (mesh, first) = leader(&node, &tasks, Rc::clone(&pool)).await;
@@ -685,17 +691,37 @@ fn serve_gives_no_answer_when_the_pool_has_no_block_for_it() {
     assert_eq!(seen, codes(Code(0)));
 }
 
+// The group stops in the write of the entry of the proposal. By the draw of the disk,
+// the sync that fails keeps the bytes of the entry or not, so the stop is no refusal.
 #[test]
-fn serve_refuses_a_proposal_when_the_group_stops() {
-    let ((served, stop), seen) = run(
-        |node, tasks, incoming| async move {
-            let (mesh, _) = leader(&node, &tasks, create_pool()).await;
-            let stop = fail_sync(&node);
-            (mesh.serve(public(1), incoming).await, stop)
-        },
-        |peer| async move { stopped(peer, &[propose(3)]).await },
-    );
-    assert_eq!((served, seen), (Err(stop), codes(REFUSED)));
+fn serve_gives_no_code_of_the_mesh_when_the_group_stops() {
+    let mut homes = BTreeSet::new();
+    for seed in 0..16 {
+        let ((served, home), seen) = run_shared(
+            seed,
+            create_pool,
+            |node, tasks, incoming, _| async move {
+                let (mesh, _) = leader(&node, &tasks, create_pool()).await;
+                fail_sync(&node);
+                let served = mesh.serve(public(1), incoming).await;
+                drop(mesh);
+                let config = config(&node, &tasks, 1, &[1, 2], &[1]);
+                let mesh = Mesh::open(config).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                assert_eq!(watch.next().await, Ok(None));
+                (served, watch.next().await)
+            },
+            |peer| async move { stopped(peer, &[propose(3)]).await },
+        );
+        let text = "the group stopped: sync of log/log-0 failed with OS error 5";
+        assert_eq!(served.unwrap_err().to_string(), text);
+        assert_eq!(seen, codes(Code(0)));
+        homes.insert(home.unwrap());
+    }
+    // After a new open, the change applies on each disk that kept its entry.
+    let kept = Some(key(3));
+    assert!(homes.contains(&kept), "no disk kept the entry: {homes:?}");
+    assert!(homes.is_subset(&[Some(key(1)), kept].into()), "{homes:?}");
 }
 
 #[test]

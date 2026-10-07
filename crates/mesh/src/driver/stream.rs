@@ -26,11 +26,12 @@ impl Mesh {
     /// - [`Error::Spoofed`], [`Error::NotVoter`], [`Error::PeerNotVoter`],
     ///   [`Error::Grant`], and [`Error::Raft`] when the group refuses a message.
     /// - [`Error::Pool`] when the pool has no block: while the group waits to write its
-    ///   log, which refuses the message, or for the answer to a proposal, which the
-    ///   group took. A `raft` message that gets it on a one-way stream is dropped, and
-    ///   the stream goes on.
+    ///   log, which refuses the message, or for the answer to a proposal, which the peer
+    ///   then does not get, and the group can hold the entry of the proposal. A `raft`
+    ///   message that gets it on a one-way stream is dropped, and the stream goes on.
     /// - [`Error::Stream`] when the stream or its session fails.
-    /// - [`Error::Stopped`] when the group stopped.
+    /// - [`Error::Stopped`] when the group stopped. On a stream that goes both ways, the
+    ///   reply half then ends with no mesh code: the group can hold the entry.
     pub(crate) async fn serve(
         &self,
         peer: PublicKey,
@@ -79,6 +80,8 @@ impl Mesh {
     ) -> Result<(), Error> {
         let answer = match self.ask(peer, &mut receiver).await {
             Ok(answer) => answer.encode(),
+            // The group can stop in the write of the entry, so a stop is no refusal.
+            Err(error @ Error::Stopped(_)) => return Err(error),
             Err(error) => {
                 if let Some(code) = code(&error) {
                     sender.reset(code);
@@ -87,8 +90,8 @@ impl Mesh {
                 return Err(error);
             }
         };
-        // The group took the proposal, so no error from here is a refusal: a sender
-        // that drops ends the reply half with no code of the mesh.
+        // The group can hold the entry of the proposal, so no error from here is a
+        // refusal: a sender that drops ends the reply half with no code of the mesh.
         let mut block = self.pool.alloc(answer.len()).map_err(Error::Pool)?;
         block.copy_from_slice(&answer);
         sender.send(block.freeze()).await?;

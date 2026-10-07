@@ -40,8 +40,8 @@ pub(crate) enum Error {
     WrongKey,
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
     /// write of the log, the group takes no proposal and no message until the write
-    /// ends. For the answer to a forwarded proposal, the group took the proposal, and
-    /// the peer gets no answer.
+    /// ends. For the answer to a forwarded proposal, the peer gets no answer, and the
+    /// group can hold the entry of the proposal.
     Pool(block::Error),
     /// A message on a stream is the byte form of no message, or is not one that its
     /// stream carries. The stream stopped with code 2, but after the answer only the

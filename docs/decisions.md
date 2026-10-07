@@ -1886,18 +1886,25 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038303084). A message
   that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
   stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
-  a reply half with the same code. A group that stopped gives code 16 too. A `raft`
-  message that finds no block in the pool is not a refusal: the receiver drops it, the
-  stream goes on, and `raft` sends it again. The receiver holds no block while the group
-  writes the entry: it drops the block of the proposal before it gives the change to the
-  group, and takes the block of the answer after the answer. With no block for the
-  answer, the group took the proposal, and the reply half ends with no answer and no
-  mesh code. A reply half that ends with no answer and with no code 2 or 16 says nothing
-  about the change, and the peer forwards it again. Lost: the block of the answer first,
-  because a block held while the group writes can take the room that the write needs,
-  and only the end of the write frees it (decided by the architect,
+  a reply half with the same code. A group that stopped gives code 16 on a one-way
+  stream. On a stream that goes both ways it gives no mesh code: it can stop in the
+  write of the entry, which then applies after a new open. A `raft` message that finds
+  no block in the pool is not a refusal: the receiver drops it, the stream goes on, and
+  `raft` sends it again. The receiver holds no block while the group writes the entry:
+  it drops the block of the proposal before it gives the change to the group, and takes
+  the block of the answer after the answer. With no block for the answer, the peer gets
+  no answer: the group can hold the entry of the proposal. The reply half ends with no
+  answer and no mesh code. A reply half that ends with no answer and with no code 2 or
+  16 says nothing about the change, and the peer forwards it again. Lost: the block of
+  the answer first, because a block held while the group writes can take the room that
+  the write needs, and only the end of the write frees it (decided by the architect,
   2026-10-07T13:07:00Z:
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823). The
+  sentences on a group that stopped and on an answer with no block are from a later
+  ruling. Lost there: code 16 that says nothing about the change after a stop, because
+  code 16 carries no cause, so the peer cannot tell a stop from a refusal (decided by
+  the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458). The
   receiver does not check the class of a stream: the class sets only the priority of the
   sender (approved by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
