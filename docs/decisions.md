@@ -2629,10 +2629,14 @@ How to read this record:
   `shard-` or `shards-` is plain decimal that fits a `usize`: above zero for a
   record, and below `usize::MAX` for a ring. Any other name (`shards-03`,
   `shards-+3`, `shards-0`, `shard-<usize::MAX>`) is one the claim does not know, and
-  it ignores it, because no core count makes the claim write it. A count that no host
-  has, such as `shards-<usize::MAX>`, is still a record, and it refuses the start
-  (architect, #1214:
-  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6033877711). The
+  it ignores it, because no core count makes the node write it. A count that no host
+  has, such as `shards-<usize::MAX>`, is still a record, and the claim refuses the
+  start (decided by `laptop.architect-2`, 2026-10-07T08:16:03Z, #1214:
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6033877711, with
+  "node" for "claim" at 2026-10-07T16:47:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6042568803).
+  Supersedes the reason in
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887. The
   claim reads names only, so a file with such a name counts as a directory would.
   Decided by the architect, #1214:
   https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887, as on
