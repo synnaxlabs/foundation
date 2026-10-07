@@ -52,12 +52,14 @@ returns (`git worktree remove --force <path>`).
    its reviewers returns. It starts with the rating and summary from the `reviewer`'s
    report, as given (Rating). Then its reviewers, its range (`<from>..<head sha>`), and
    the confirmed findings, most severe first: file and line, what goes wrong, and the
-   fix. It ends with two lines. First `Deferred:` and `none`, or the issue of each
+   fix. It ends with three lines. First `Deferred:` and `none`, or the issue of each
    deferred finding, each with the link to the architect's OK in a risk crate. Then
    `Public surface:` and `none`, or each public item and crate dependency that the PR
    changes (the `architecture` report names them, and in a later round the `reviewer`
    report names those of its range), each with the link to the architect's approval
-   once it exists.
+   once it exists. A later round keeps each item of the round before it. Then
+   `Hot path:` as the `architecture` report gives it, or in a later round the
+   `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A deferral to an existing issue is a comment on that
@@ -103,6 +105,10 @@ Range: `<from>..<head sha>`
 Findings: <count, or none>
 
 <the findings, most severe first>
+
+Deferred: <none, or each issue>
+Public surface: <none, or each item and its approval>
+Hot path: <none, or each function>
 ```
 
 `Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
