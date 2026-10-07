@@ -2515,8 +2515,8 @@ How to read this record:
   and puts the path, which is internal to the node, in each user's data schema.
   `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
   data nothing. Decided by `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
-  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748;
-  amended 2026-10-07T08:18:10Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748; amended
+  2026-10-07T08:18:10Z:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167;
   corrected 2026-10-07T16:52:35Z:
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042660446).
