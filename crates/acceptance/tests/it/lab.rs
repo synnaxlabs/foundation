@@ -302,22 +302,22 @@ impl Lab {
         todo!("waits on #340")
     }
 
-    /// What the Influx store at `address` holds for `measurement`, the measurement of
-    /// the channel of that name, folded by [`Record::stored`].
+    /// What the Influx store at `address` holds for `channel`, folded by
+    /// [`Record::stored`].
     ///
     /// # Panics
     ///
     /// When no store is at `address`, no sample was written to the channel, or
     /// [`Record::stored`] panics.
-    pub(crate) fn stored(&self, address: &str, measurement: &str) -> Received {
+    pub(crate) fn stored(&self, address: &str, channel: &str) -> Received {
         let store = self
             .stores
             .get(address)
             .unwrap_or_else(|| panic!("lab failure: no Influx store at {address}"));
-        let record = self.records.get(measurement).unwrap_or_else(|| {
-            panic!("lab failure: no sample was written to {measurement}")
+        let record = self.records.get(channel).unwrap_or_else(|| {
+            panic!("lab failure: no sample was written to {channel}")
         });
-        record.stored(store, measurement)
+        record.stored(store)
     }
 
     /// Cuts every link between `a` and `b`. Datagrams in flight still arrive.
@@ -473,7 +473,9 @@ mod stored {
             .unwrap();
         lab.stores.insert("influx".into(), store);
         let record = Record {
+            connector: "influx".into(),
             index: "edge.time".into(),
+            measurement: "edge.value".into(),
             seqs: 7..10,
             stamp: Stamp::from_nanos(1_000),
             interval: Span::from_nanos(10),

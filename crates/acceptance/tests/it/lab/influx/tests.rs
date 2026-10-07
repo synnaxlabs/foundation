@@ -6,7 +6,9 @@ const FIRST: u64 = 100;
 
 fn record() -> Record {
     Record {
+        connector: "influx".into(),
         index: "edge.time".into(),
+        measurement: "edge.value".into(),
         seqs: FIRST..FIRST + 100,
         stamp: Stamp::from_nanos(1_000),
         interval: Span::from_nanos(10),
@@ -39,7 +41,7 @@ fn gap_line(seq: u64, count: i64) -> String {
 fn check(body: &str) -> Received {
     let mut store = Store::default();
     store.write(body.as_bytes()).unwrap();
-    record().stored(&store, "edge.value")
+    record().stored(&store)
 }
 
 mod stored {
@@ -259,6 +261,24 @@ mod stored {
                 samples: 2,
                 seqs: Some(FIRST..FIRST + 2),
                 contiguous: true,
+                gaps: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn reads_only_the_gap_lines_of_its_connector() {
+        let mirror = format!(
+            "foundation_gaps,connector=mirror,index=edge.time,path=live count=1i {}\n",
+            stamp(FIRST + 3)
+        );
+        let body = samples(FIRST..FIRST + 2) + &samples(FIRST + 3..FIRST + 4) + &mirror;
+        assert_eq!(
+            check(&body),
+            Received {
+                samples: 3,
+                seqs: Some(FIRST..FIRST + 4),
+                contiguous: false,
                 gaps: vec![],
             }
         );
@@ -489,7 +509,7 @@ mod connector {
             ops in proptest::collection::vec(op(), 0..60),
         ) {
             let (store, held) = run(&ops);
-            prop_assert_eq!(record().stored(&store, "edge.value"), truth(&held));
+            prop_assert_eq!(record().stored(&store), truth(&held));
         }
     }
 }

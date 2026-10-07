@@ -14,8 +14,13 @@ use super::{Gap, Received};
 /// `k as f64`.
 #[derive(Debug, Clone)]
 pub(crate) struct Record {
+    /// The name of the connector that writes the channel, the `connector` tag of its
+    /// gap lines.
+    pub connector: String,
     /// The name of the channel's index, the `index` tag of its gap lines.
     pub index: String,
+    /// The measurement of the channel's data lines.
+    pub measurement: String,
     pub seqs: Range<u64>,
     /// The stamp of the first sample.
     pub stamp: Stamp,
@@ -24,11 +29,11 @@ pub(crate) struct Record {
 }
 
 impl Record {
-    /// What `store` holds for the channel, with `measurement` as its data
-    /// measurement, folded by the rule of INFLUX SEQ AND GAPS:
+    /// What `store` holds for the channel, folded by the rule of INFLUX SEQ AND GAPS:
     /// - `samples` and `seqs`: the stored points, each mapped to its seq by its
     ///   stamp.
-    /// - `gaps`: the union of the seq ranges of the index's gap lines, minus the
+    /// - `gaps`: the union of the seq ranges of the gap lines of the connector and
+    ///   index, minus the
     ///   stored seqs, as maximal runs. `after` is the count of stored samples before
     ///   the run.
     /// - `contiguous`: no silent loss. Each seq from the first written seq to the
@@ -41,7 +46,7 @@ impl Record {
     /// written at its stamp, a gap line whose `path` is not `live` (backfill waits on
     /// #1270) or whose `count` is not a positive integer, or a gap range that starts
     /// below the first written seq.
-    pub(crate) fn stored(&self, store: &Store, measurement: &str) -> Received {
+    pub(crate) fn stored(&self, store: &Store) -> Received {
         let mut fold = Fold {
             next: self.seqs.start,
             ranges: self.ranges(store),
@@ -54,7 +59,7 @@ impl Record {
                 gaps: Vec::new(),
             },
         };
-        for point in store.points(measurement, &[]) {
+        for point in store.points(&self.measurement, &[]) {
             let k = self.sample(point.time);
             #[expect(
                 clippy::cast_precision_loss,
@@ -66,7 +71,8 @@ impl Record {
                     point.fields.values().collect::<Vec<_>>()[..],
                     [Field::Float(value)] if value.to_bits() == written.to_bits()
                 ),
-                "lab failure: {measurement} at {} holds {:?}, not {written}",
+                "lab failure: {} at {} holds {:?}, not {written}",
+                self.measurement,
                 point.time.nanos(),
                 point.fields
             );
@@ -75,11 +81,15 @@ impl Record {
         fold.end()
     }
 
-    /// The seq ranges of the index's gap lines, sorted, with each overlapping or
+    /// The seq ranges of the gap lines of the connector and index, sorted, with each
+    /// overlapping or
     /// touching pair merged.
     fn ranges(&self, store: &Store) -> Vec<Range<u64>> {
         let mut ranges: Vec<Range<u64>> = store
-            .points(gap::MEASUREMENT, &[("index", &self.index)])
+            .points(
+                gap::MEASUREMENT,
+                &[("connector", &self.connector), ("index", &self.index)],
+            )
             .map(|line| {
                 let path = line.tags.get("path").map(String::as_str);
                 assert!(
