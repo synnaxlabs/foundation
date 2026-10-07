@@ -399,9 +399,9 @@ impl Shard {
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
     /// whose bodies no record or no block of the pool holds; no seq moves for either.
-    /// A handoff with no room decides first: the frame is lost or gets
-    /// [`Error::Full`] before its size is checked. [`Error::Disk`] after a failed
-    /// commit.
+    /// A handoff with no room decides before the size: the frame is lost or gets
+    /// [`Error::Full`]. [`Error::Disk`] after a failed commit, before any other error
+    /// but [`Error::Resend`].
     ///
     /// # Panics
     ///
@@ -450,16 +450,15 @@ impl Shard {
         }
         // An empty append still reports a failed commit.
         let appended = room(self.buffer.append(entries.drain(..)));
-        let large =
-            matches!(made, Err(block::Error::TooLarge { .. })) && recorded == Ok(true);
-        let room =
-            recorded
-                .and(appended)
-                .and_then(|room| match (room && ready, path) {
-                    _ if large => Err(Error::Large),
-                    (false, Path::Backfill) => Err(Error::Full),
-                    (room, _) => Ok(room),
-                });
+        let room = match (recorded, appended, made, path) {
+            (Err(error), ..) | (Ok(_), Err(error), ..) => Err(error),
+            (Ok(true), Ok(_), Err(block::Error::TooLarge { .. }), _) => {
+                Err(Error::Large)
+            }
+            (Ok(true), Ok(true), Ok(()), _) => Ok(true),
+            (.., Path::Backfill) => Err(Error::Full),
+            (.., Path::Live) => Ok(false),
+        };
         match room {
             Ok(room) => Ok(spend(
                 &mut scratch.checks,
@@ -1158,6 +1157,29 @@ mod tests {
             .collect()
     }
 
+    /// A frame that no block of the shard holds: indexes 0 and 1 with stamps from
+    /// `first`, and the series of `more`. The shard's largest block is 1835008 bytes.
+    /// The writer's pool has larger blocks, and scattered values do not compress.
+    fn create_large(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
+        let len = 240_000;
+        let stamps: Vec<i64> = (first..).take(len).collect();
+        let values = scattered(len);
+        let mut series: Vec<(usize, &[i64])> = vec![(0, &stamps), (1, &values)];
+        series.extend_from_slice(more);
+        frame(&create_pool(4 * POOL), set, &series)
+    }
+
+    /// The error of a failed sync of the ring, which the commit of `shard` gives.
+    async fn failed_sync(shard: &Shard) -> env::files::Error {
+        let failed = env::files::Error::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(shard.committed().await, Err(failed.clone()));
+        failed
+    }
+
     /// One poll of `commit`.
     fn polled(commit: &mut Commit) -> Poll<Result<(), env::files::Error>> {
         Pin::new(commit).poll(&mut Context::from_waker(Waker::noop()))
@@ -1704,16 +1726,8 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            // The shard's largest block is 1835008 bytes. The writer's pool has larger
-            // blocks, and scattered values do not compress.
-            let writers = create_pool(4 * POOL);
-            let len = 240_000;
-            let stamps: Vec<i64> = (10..).take(len).collect();
-            let values = scattered(len);
             for (label, stamp) in [(LIVE, 300_000), (BACKFILL, 5)] {
-                let series: [(usize, &[i64]); 3] =
-                    [(0, &stamps), (1, &values), (2, &[stamp])];
-                let large = frame(&writers, &set, &series);
+                let large = create_large(&set, 10, &[(2, &[stamp])]);
                 assert_eq!(shard.write(a, label, large), Err(Error::Large));
                 let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
                 assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
@@ -1768,12 +1782,7 @@ mod tests {
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
             // The handoff is appended before the bodies, so the size is never checked.
             assert_eq!(shard.write(b, LIVE, large()), Ok(&[lost(0, 0, 600)][..]));
-            let len = 240_000;
-            let stamps: Vec<i64> = (1000..).take(len).collect();
-            let values = scattered(len);
-            let series: [(usize, &[i64]); 3] =
-                [(0, &stamps), (1, &values), (2, &[stamp])];
-            let huge = frame(&create_pool(4 * POOL), &set, &series);
+            let huge = create_large(&set, 1000, &[(2, &[stamp])]);
             assert_eq!(
                 shard.write(b, LIVE, huge),
                 Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
@@ -2164,17 +2173,14 @@ mod tests {
             test.node.fail_file(FilePath::new(RING), Operation::Sync);
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 1)][..]));
-            let failed = env::files::Error::Io {
-                path: PathBuf::from(RING),
-                operation: Operation::Sync,
-                code: 5,
-            };
-            assert_eq!(shard.committed().await, Err(failed.clone()));
+            let failed = failed_sync(&shard).await;
             let disk = Error::Disk(failed);
             assert_eq!(
                 disk.to_string(),
                 "a commit failed: sync of shard-0/ring failed with OS error 5"
             );
+            let resend = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            assert_eq!(shard.write(a, Label::Resend, resend), Err(Error::Resend));
             let write = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
             assert_eq!(shard.write(a, LIVE, write), Err(disk.clone()));
             let refused = frame(&test.pool, &set, &[(2, &[20])]);
@@ -2189,30 +2195,52 @@ mod tests {
     }
 
     #[test]
-    fn fails_a_frame_that_no_block_holds_after_a_failed_sync() {
+    fn fails_a_large_frame_after_a_failed_sync() {
+        /// Writes, on each path, a frame that no block holds and a frame that no
+        /// record holds. Each passes the order check of its path, so its size counts.
+        fn write(test: &Test, shard: &mut Shard, a: writer::Key, expected: &Error) {
+            let set = two_indexes();
+            for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
+                let no_block = create_large(&set, first, &[]);
+                let written = shard.write(a, label, no_block);
+                assert_eq!(written, Err(expected.clone()), "{label:?}");
+                let stamps: Vec<i64> = (first..first + 600).collect();
+                let series: [(usize, &[i64]); 2] = [(0, &stamps), (1, &scattered(600))];
+                let no_record = frame(&test.pool, &set, &series);
+                let written = shard.write(a, label, no_record);
+                assert_eq!(written, Err(expected.clone()), "{label:?}");
+            }
+        }
+
         run(112, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 2, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[500_000]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            shard.committed().await.expect("the commit ends");
+            write(&test, &mut shard, a, &Error::Large);
             test.node.fail_file(FilePath::new(RING), Operation::Sync);
-            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
-            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 1)][..]));
-            let failed = env::files::Error::Io {
-                path: PathBuf::from(RING),
-                operation: Operation::Sync,
-                code: 5,
-            };
-            assert_eq!(shard.committed().await, Err(failed.clone()));
-            let writers = create_pool(4 * POOL);
-            let len = 240_000;
-            let stamps: Vec<i64> = (100..).take(len).collect();
-            let values = scattered(len);
-            let series: [(usize, &[i64]); 2] = [(0, &stamps), (1, &values)];
-            for label in [LIVE, BACKFILL] {
-                let large = frame(&writers, &set, &series);
-                let disk = Error::Disk(failed.clone());
-                assert_eq!(shard.write(a, label, large), Err(disk), "{label:?}");
-            }
+            let second = frame(&test.pool, &set, &[(0, &[500_001]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, second), Ok(&[applied(0, 1, 1)][..]));
+            let failed = failed_sync(&shard).await;
+            write(&test, &mut shard, a, &Error::Disk(failed));
+        });
+    }
+
+    #[test]
+    fn refuses_a_large_backfill_frame_whose_handoff_finds_no_room() {
+        run(113, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let _a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let blocks = test.fill();
+            let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
+            let large = create_large(&set, 100, &[]);
+            assert_eq!(shard.write(b, BACKFILL, large), Err(Error::Full));
+            drop(blocks);
+            let large = create_large(&set, 100, &[]);
+            assert_eq!(shard.write(b, BACKFILL, large), Err(Error::Large));
         });
     }
 
