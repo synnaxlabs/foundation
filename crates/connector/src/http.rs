@@ -303,7 +303,7 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
     }
     // `http` takes any text after `]`; it is part of the host up to a `:`.
     let after = match text.strip_prefix('[') {
-        Some(_) => text.find(']').map_or(text.len(), |end| end + 1),
+        Some(_) => text.find(']').unwrap_or(text.len()),
         None => 0,
     };
     let (host, port) = match text[after..].find(':') {

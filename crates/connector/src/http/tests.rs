@@ -580,6 +580,7 @@ fn refuses_a_port_that_is_not_a_u16() {
         ("influx:+80", "+80"),
         ("influx:0", "0"),
         ("[fd00::2]:80x", "80x"),
+        ("[::]:80x", "80x"),
     ] {
         let error = refused(&format!("http://{authority}/"));
         assert!(
