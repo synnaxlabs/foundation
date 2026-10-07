@@ -7,11 +7,11 @@
 //! wait. A figure is per send over a round, and some sends in a burst cost more than
 //! others.
 //!
-//! A send reads the sim clock and wakes a sim task, which `os` does more cheaply, so
-//! the control does both per block. Compare a send with the control, or a build
-//! with another build, not with an `os` number. To compare two builds, run each
-//! several times in turn on one pinned core and compare p10 and p50: on a busy
-//! machine, p90 holds the preemptions.
+//! A send reads the clock and wakes a task, so the control does both per block. The sim
+//! and `os` costs for both differ: an `os` clock read costs several times a sim one.
+//! Compare a send with the control, or a build with another build, not with an `os`
+//! number. To compare two builds, run each several times in turn on one pinned core and
+//! compare p10 and p50: on a busy machine, p90 holds the preemptions.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
