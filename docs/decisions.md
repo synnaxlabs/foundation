@@ -2944,9 +2944,9 @@ How to read this record:
   fails the node (`Error::Panicked`). Tasks start in the order of their calls. A task
   that is given before the hub exists waits for it. A node that stops or fails before a
   task starts drops it unrun, and a stop drops each running task. The task runs on shard
-  0's thread, so it may hold values that are not `Send`, such as sessions.
-  `node` depends on `hub`, and `Node::interner` goes away: shard 0 builds the hub with
-  the interner when it comes back from the last shard. Decided by `laptop.architect-2`
+  0's thread, so it may hold values that are not `Send`, such as sessions. `node`
+  depends on `hub`, and `Node::interner` goes away: shard 0 builds the hub with the
+  interner when it comes back from the last shard. Decided by `laptop.architect-2`
   (2026-10-07T18:04:23Z):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
   `hub::Config` stays as it is, one interner by value for one shard, and sessions on
