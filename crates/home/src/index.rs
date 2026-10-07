@@ -77,7 +77,7 @@ impl Index {
         now: Monotonic,
         mesh: Stamp,
     ) -> Result<Accepted, Refusal> {
-        let permit = self.gate.check(key, now)?;
+        let permit = self.gate.check(key, now).map_err(Refusal::control)?;
         let mut stamps = stamps?;
         // A codec error comes first, so the vectors after an order error still decode.
         let mut order = Ok(self.order.check(path, mesh));
@@ -127,7 +127,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::pool;
+    use crate::common::create_pool;
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -142,7 +142,7 @@ mod tests {
                 data: &[],
             };
             Self {
-                pool: pool(4096),
+                pool: create_pool(4096),
                 set: Interner::new().intern(&[index]),
             }
         }
