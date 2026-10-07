@@ -10,6 +10,8 @@ mod datagram;
 )]
 mod hello;
 #[cfg(test)]
+mod packet;
+#[cfg(test)]
 mod pair;
 mod settings;
 mod stateless;
