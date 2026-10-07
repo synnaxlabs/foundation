@@ -44,8 +44,9 @@ pub struct Config<M> {
     /// Makes the files of one shard. `node` calls it on the thread that calls
     /// [`Node::start`], once for each shard in order of core, and runs the function
     /// it gives on that shard's thread, because a `Files` cannot leave the thread
-    /// that made it. `node` records the shard count in directory `shards-<n>` inside
-    /// the files, and opens the buffer of shard `i` in directory `shard-<i>`.
+    /// that made it. A shard that does not start drops its function unrun. `node`
+    /// records the shard count in directory `shards-<n>` inside the files, and opens
+    /// the buffer of shard `i` in directory `shard-<i>`.
     pub files: Box<dyn FnMut() -> Box<dyn FnOnce() -> env::files::Files + Send>>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
@@ -156,9 +157,9 @@ impl Node {
                 failed: Arc::clone(&failed),
             };
             let first = first.take();
-            let files = files();
+            let make = files();
             let main = move |tasks: env::tasks::Tasks| {
-                let files = files();
+                let files = make();
                 if let Some((mesh, wall, give)) = first {
                     let failed = Arc::clone(&open.failed);
                     tasks.spawn(async { mesh.run(wall).await });

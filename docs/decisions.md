@@ -2461,14 +2461,15 @@ How to read this record:
   on its own thread, because `Files` is `Rc`. A caller on the real OS makes each
   shard's disk with `os::files` before the start and joins its I/O thread after
   `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files`
-  only with a lock around a queue of disks. Decided by the architect, #1173:
-  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. `node` alone names
-  `shard-<i>`. `node::Config::entropy` gives the shards randomness. A ring that does
-  not open stops the node, and `join` gives `Error::Buffer` with the core, after
-  `Start` and `Memory` and before `Panicked`. A data directory made for another shard
-  count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
-  is the long-term path (#1077). Running the stored count on another core count lost:
-  it bends C2. Decided by the architect on #1062:
+  only with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
+  randomness. A ring that does not open stops the node, and `join` gives
+  `Error::Buffer` with the core, after `Start` and `Memory` and before `Panicked`. A
+  data directory made for another shard count, more or fewer, is refused before any
+  buffer opens (#1076); a reshard at start is the long-term path (#1077). Running the
+  stored count on another core count lost: it bends C2. Decided by the architect on
+  #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
   count is an empty directory `shards-<n>` in the data directory, made and synced
   before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the

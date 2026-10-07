@@ -592,6 +592,49 @@ mod buffer {
         assert_eq!(ran, [0, 1, 2]);
     }
 
+    /// Starts a node of 3 shards, after `faults` aim at its shards, with memory from
+    /// `memory`. Gives the calls of the files maker and the functions that ran.
+    fn made(faults: &[(usize, Fault)], memory: Memory) -> (usize, usize) {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 3);
+        for &(core, fault) in faults {
+            host.fail_shard(core, fault);
+        }
+        let ran = Arc::new(Mutex::new(0));
+        let made = Rc::new(RefCell::new(0));
+        let node = Node::start(Config {
+            files: {
+                let (host, ran, made) =
+                    (host.clone(), Arc::clone(&ran), Rc::clone(&made));
+                Box::new(move || {
+                    *made.borrow_mut() += 1;
+                    let (host, ran) = (host.clone(), Arc::clone(&ran));
+                    Box::new(move || {
+                        *ran.lock().unwrap() += 1;
+                        host.files()
+                    })
+                })
+            },
+            ..config(&host, 1 << 20, memory)
+        });
+        assert_eq!(sim.run(), Ok(()));
+        assert!(node.join().is_err());
+        (*made.borrow(), *ran.lock().unwrap())
+    }
+
+    /// `node` makes the files of a shard after its memory and before its start. A
+    /// shard that does not start drops its function unrun.
+    #[test]
+    fn a_shard_that_does_not_start_drops_its_files_unrun() {
+        let refused = refuse(1, os::memory::Error::Refused);
+        assert_eq!(made(&[], refused), (1, 1), "no memory");
+        assert_eq!(
+            made(&[(1, Fault::Start)], Box::new(heap)),
+            (2, 1),
+            "no start"
+        );
+    }
+
     /// A crash at any point of the claim and the first opens leaves a data directory
     /// that the next start opens.
     #[test]
