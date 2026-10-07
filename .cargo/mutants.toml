@@ -33,6 +33,9 @@ exclude_re = [
   # The boundary draw is a 64-bit hash against a multiple of 2^64. Equality needs a
   # draw that is an exact multiple of 2^16, so no input tells `<` from `<=`.
   'crates/spec/src/tree/chunker\.rs:.*replace < with <= in boundary',
+  # Each entry keeps only its first place, and an entry comes once per frame, so the
+  # last place never equals this one. #1648 removes this function.
+  'crates/delivery/src/readers/complete\.rs:.*replace > with >= in Places::size',
   # Ticks are unique, so no sector is written at the tick that a write started.
   'crates/sim/src/disk\.rs:.*replace > with >= in File::write',
   # The coin is fair: either side gives the same set of outcomes.
