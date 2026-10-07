@@ -2017,6 +2017,9 @@ How to read this record:
   (precedence in X22). Amended: the `home` field restores the recorded intent
   ("placement decides home", r8 Q8), which the bootstrap list left out (architect,
   #1150, https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+  `config` refuses a node with two roles with `config.role-overlap` at the last value in
+  source order that names it. A `copies` list is one value (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.

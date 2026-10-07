@@ -2,6 +2,7 @@
 //! kinds, and computes plans, explains, and exports.
 
 mod node_settings;
+mod placement;
 
 use std::collections::{BTreeMap, btree_map};
 
@@ -22,7 +23,10 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = for<'a> fn(&mut Found<'a>, &'a Block);
 
 /// Each kind of block, by keyword, and its check.
-const KINDS: [(&str, Check); 1] = [("node_settings", node_settings::check)];
+const KINDS: [(&str, Check); 2] = [
+    ("node_settings", node_settings::check),
+    ("placement", placement::check),
+];
 
 /// A checked definition and the label that names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,7 +462,7 @@ mod tests {
                 "config.unknown-block",
                 at(0, 0),
                 "`nodes` is not a kind of block",
-                "Use `node_settings`, or remove the block",
+                "Use `node_settings` or `placement`, or remove the block",
             )])
         );
     }
@@ -874,6 +878,268 @@ mod tests {
                 documents[file as usize].blocks.push(block);
             }
             prop_assert_eq!(check(&documents), Ok(expected));
+        }
+    }
+
+    mod placements {
+        use spec::placement::{Nodes, Policy};
+
+        use super::*;
+
+        const NAME_FIX: &str = "Write a name such as \"site_a.node_1\"";
+
+        fn name(text: &str) -> Name {
+            text.parse().unwrap()
+        }
+
+        fn nodes(home: Option<&str>, standby: Option<&str>, copies: &[&str]) -> Nodes {
+            Nodes {
+                home: home.map(name),
+                standby: standby.map(name),
+                copies: copies.iter().map(|copy| name(copy)).collect(),
+            }
+        }
+
+        fn reference(text: &str) -> Kind {
+            Kind::Reference(name(text))
+        }
+
+        /// A list of names, each at its own one-byte span from `offset` in file 0.
+        fn list(offset: u32, items: &[Kind]) -> Kind {
+            let items = (offset..).zip(items).map(|(offset, kind)| Value {
+                kind: kind.clone(),
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        /// A `placement` block in file 0 at offset 0, labeled `edge`.
+        fn placement(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(
+                0,
+                0,
+                "placement",
+                &["edge"],
+                attributes,
+            )])]
+        }
+
+        /// The one entry of a placement labeled `edge` that selects `edge.*`.
+        fn placed(nodes: Nodes) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(selector(&["edge.*"]), nodes).unwrap();
+            let entry = Entry {
+                definition: spec::definition::Definition::Placement(policy),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@placement"), entry)])
+        }
+
+        #[test]
+        fn reads_a_home() {
+            let documents =
+                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
+            assert_eq!(
+                check(&documents),
+                Ok(placed(nodes(Some("edge"), None, &[])))
+            );
+        }
+
+        #[test]
+        fn reads_each_role_alone_from_a_string_or_a_reference() {
+            for node in [string("n_1"), reference("n_1")] {
+                let cases = [
+                    ("home", nodes(Some("n_1"), None, &[])),
+                    ("standby", nodes(None, Some("n_1"), &[])),
+                    ("copies", nodes(None, None, &["n_1"])),
+                ];
+                for (role, nodes) in cases {
+                    let documents = placement(&[
+                        ("select", string("edge.*")),
+                        (role, node.clone()),
+                    ]);
+                    assert_eq!(check(&documents), Ok(placed(nodes)), "{role}");
+                }
+            }
+        }
+
+        #[test]
+        fn reads_every_role() {
+            let copies = list(50, &[string("n_3"), reference("n_4")]);
+            let documents = placement(&[
+                ("select", string("edge.*")),
+                ("home", string("n_1")),
+                ("standby", reference("n_2")),
+                ("copies", copies),
+            ]);
+            let nodes = nodes(Some("n_1"), Some("n_2"), &["n_3", "n_4"]);
+            assert_eq!(check(&documents), Ok(placed(nodes)));
+        }
+
+        #[test]
+        fn refuses_a_placement_without_select() {
+            let documents = placement(&[("home", string("edge"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.missing-attribute",
+                    at(0, 0),
+                    "the `placement` block has no `select`",
+                    "Add a `select` attribute with the connectors and indexes that it \
+                     places, such as \"site_a.*\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_placement_that_names_no_node() {
+            let empty = list(50, &[]);
+            for attributes in [
+                vec![("select", string("edge.*"))],
+                vec![("select", string("edge.*")), ("copies", empty)],
+            ] {
+                assert_eq!(
+                    check(&placement(&attributes)),
+                    Err(vec![refused(
+                        "config.missing-attribute",
+                        at(0, 0),
+                        "the `placement` block has no `home`, `standby`, or `copies`",
+                        "Add a `home`, `standby`, or `copies` attribute",
+                    )]),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        /// The `role-overlap` diagnostic for `node` at `span`.
+        fn overlap(node: &str, span: Option<Span>) -> Vec<Diagnostic> {
+            vec![refused(
+                "config.role-overlap",
+                span,
+                &format!("node {node} has more than one role in the placement"),
+                &format!("Keep {node} in one of `home`, `standby`, and `copies`"),
+            )]
+        }
+
+        #[test]
+        fn refuses_a_node_with_two_roles_at_its_last_value() {
+            let copies = || list(50, &[string("n_2"), string("n_1")]);
+            // After `select`, the value of role `i` is at offset `13 + 2i`.
+            let cases = [
+                (
+                    vec![("home", string("n_1")), ("standby", reference("n_1"))],
+                    15,
+                ),
+                (
+                    vec![("standby", string("n_1")), ("home", string("n_1"))],
+                    15,
+                ),
+                (vec![("home", string("n_1")), ("copies", copies())], 15),
+                (vec![("copies", copies()), ("home", string("n_1"))], 15),
+                (vec![("standby", string("n_1")), ("copies", copies())], 15),
+                (vec![("copies", copies()), ("standby", string("n_1"))], 15),
+                (
+                    vec![("copies", string("n_1")), ("standby", string("n_1"))],
+                    15,
+                ),
+                (
+                    vec![
+                        ("home", string("n_1")),
+                        ("copies", copies()),
+                        ("standby", string("n_1")),
+                    ],
+                    17,
+                ),
+            ];
+            for (roles, offset) in cases {
+                let mut attributes = vec![("select", string("edge.*"))];
+                attributes.extend(roles);
+                assert_eq!(
+                    check(&placement(&attributes)),
+                    Err(overlap("n_1", at(0, offset))),
+                    "{attributes:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn names_the_home_when_the_home_has_two_roles() {
+            let attributes = [
+                ("select", string("edge.*")),
+                ("home", string("n_1")),
+                ("standby", string("n_2")),
+                ("copies", list(50, &[string("n_2"), string("n_1")])),
+            ];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(overlap("n_1", at(0, 17)))
+            );
+        }
+
+        #[test]
+        fn refuses_a_node_value_that_is_not_a_name() {
+            let refused_name = |span, message: &str| {
+                Err(vec![refused("document.bad-name", span, message, NAME_FIX)])
+            };
+            let cases = [
+                (
+                    ("home", Kind::Integer(7)),
+                    refused_name(
+                        at(0, 13),
+                        "a name is a string or a reference, not an integer",
+                    ),
+                ),
+                (
+                    ("standby", Kind::Bool(true)),
+                    refused_name(
+                        at(0, 13),
+                        "a name is a string or a reference, not a bool",
+                    ),
+                ),
+                (
+                    ("copies", list(50, &[string("n_1"), Kind::Integer(7)])),
+                    refused_name(
+                        at(0, 51),
+                        "a name is a string or a reference, not an integer",
+                    ),
+                ),
+            ];
+            for (role, expected) in cases {
+                let attributes = [("select", string("edge.*")), role];
+                assert_eq!(check(&placement(&attributes)), expected, "{attributes:?}");
+            }
+        }
+
+        #[test]
+        fn refuses_a_name_that_name_refuses() {
+            let attributes = [("select", string("edge.*")), ("home", string("a..b"))];
+            let error = "a..b".parse::<Name>().unwrap_err();
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 13),
+                    &error.to_string(),
+                    error.fix(),
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_that_a_placement_does_not_have() {
+            let attributes = [
+                ("select", string("edge.*")),
+                ("home", string("edge")),
+                ("node", string("edge")),
+            ];
+            assert_eq!(
+                check(&placement(&attributes)),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 14),
+                    "`node` is not an attribute of the `placement` block",
+                    "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                )])
+            );
         }
     }
 }
