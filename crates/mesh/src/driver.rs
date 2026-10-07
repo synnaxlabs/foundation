@@ -478,8 +478,8 @@ struct Group {
     raft: Raft,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
-    // The session to each member that its task dialed, until a send on it fails or
-    // the group stops.
+    // The session to each member that its task dialed, until the session fails or the
+    // group stops.
     sessions: BTreeMap<node::Key, Session>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
     stopped: Rc<OnceCell<Stopped>>,

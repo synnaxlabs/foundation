@@ -2301,7 +2301,8 @@ How to read this record:
   messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881). The group
   holds the handle of the session to each member, and not the task, so that `set_home`
-  opens its stream on it: the task is the only one that dials (the plan of PR 4d,
+  (PR 4c-2 of #471) can open its stream on it: the task is the only one that dials (the
+  plan of PR 4d,
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037266854, approved
   by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A stop
