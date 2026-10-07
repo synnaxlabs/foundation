@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, btree_map};
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
-use types::name::Name;
+use spec::definition::Definition;
+use types::name::{Name, Selector};
 
 const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
 const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
@@ -18,8 +19,9 @@ const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
-/// The check of one kind of block.
-type Check = for<'a> fn(&mut Found<'a>, &'a Block);
+/// The check of one kind of block: its definition, or `None` after it reports why the
+/// block gives none.
+type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, by keyword, and its check.
 const KINDS: [(&str, Check); 1] = [("node_settings", node_settings::check)];
@@ -29,7 +31,7 @@ const KINDS: [(&str, Check); 1] = [("node_settings", node_settings::check)];
 #[non_exhaustive]
 pub struct Entry {
     /// The definition, as the spec tree stores it.
-    pub definition: spec::definition::Definition,
+    pub definition: Definition,
     /// Where the label is.
     pub label_span: Option<Span>,
 }
@@ -40,9 +42,10 @@ pub struct Entry {
 /// # Errors
 ///
 /// Every problem in the Documents, in the order of `documents`, then in source order.
-/// A value that a reader or a definition refuses gives only its first problem. A
-/// definition is checked as a whole (a policy's budgets, for example) only when each
-/// of its attributes is known and reads, and the ones it needs are there.
+/// A problem with no span has no defined place in that order. A value that a reader
+/// or a definition refuses gives only its first problem. A definition is checked as a
+/// whole (a policy's budgets, for example) only when each of its attributes is known
+/// and reads, and the ones it needs are there.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found::default();
     for document in documents {
@@ -60,7 +63,19 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
                 .iter()
                 .find(|(keyword, _)| *keyword == &*block.keyword)
             {
-                Some((_, check_block)) => check_block(&mut found, block),
+                Some((_, check_block)) => {
+                    let key = found.key(block);
+                    let definition = check_block(&mut found, block);
+                    if let (Some((key, label_span)), Some(definition)) =
+                        (key, definition)
+                    {
+                        let entry = Entry {
+                            definition,
+                            label_span,
+                        };
+                        found.entries.insert(key, entry);
+                    }
+                }
                 None => found.diagnostics.push(Diagnostic::new(
                     UNKNOWN_BLOCK,
                     block.keyword_span,
@@ -260,6 +275,20 @@ impl<'a> Found<'a> {
         }
     }
 
+    /// The `select` attribute of a policy block. When the block has none, it reports
+    /// `config.missing-attribute`, and `selects` completes the fix: "Add a `select`
+    /// attribute with the {selects}".
+    fn select(&mut self, block: &Block, selects: &str) -> Result<Selector, Reported> {
+        if let Some(select) = self.attribute(block, "select", read::selector)? {
+            return Ok(select);
+        }
+        let fix = format!(
+            "Add a `select` attribute with the {selects}, such as \"site_a.*\""
+        );
+        self.missing(block, &["select"], fix);
+        Err(Reported)
+    }
+
     /// Reports that `block` has none of the attributes `keys`.
     fn missing(&mut self, block: &Block, keys: &[&str], fix: String) {
         self.diagnostics.push(Diagnostic::new(
@@ -278,7 +307,6 @@ mod tests {
     use proptest::prelude::*;
     use spec::node_settings::Policy;
     use types::byte;
-    use types::name::Selector;
 
     use super::*;
 

@@ -1,44 +1,30 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
+use spec::definition::Definition;
 use spec::node_settings::{Error, Policy};
 
-use crate::{Entry, Found};
+use crate::Found;
 
 const ZERO_SIZE: Code = Code::new("config.zero-size");
 const KEYS: [&str; 3] = ["select", "disk", "pool"];
 
-/// Checks a `node_settings` block and adds its policy to the entries. An unknown
-/// attribute stops the budget check, because it may be a budget under a wrong key.
-pub(crate) fn check<'a>(found: &mut Found<'a>, block: &'a Block) {
-    let key = found.key(block);
+/// Checks a `node_settings` block and gives its policy. An unknown attribute stops the
+/// budget check, because it may be a budget under a wrong key.
+pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
-    let select = found.attribute(block, "select", read::selector);
+    let select = found.select(block, "nodes that it sets");
     let disk = found.attribute(block, "disk", read::size);
     let pool = found.attribute(block, "pool", read::size);
-    if matches!(select, Ok(None)) {
-        let fix = "Add a `select` attribute with the nodes that it sets, such as \
-                   \"site_a.*\"";
-        found.missing(block, &["select"], fix.into());
-    }
-    let (Ok(()), Ok(Some(select)), Ok(disk), Ok(pool)) = (unknown, select, disk, pool)
-    else {
-        return;
+    let (Ok(()), Ok(select), Ok(disk), Ok(pool)) = (unknown, select, disk, pool) else {
+        return None;
     };
     match Policy::new(select, disk, pool) {
-        Ok(policy) => {
-            if let Some((key, label_span)) = key {
-                let definition = spec::definition::Definition::NodeSettings(policy);
-                found.entries.insert(
-                    key,
-                    Entry {
-                        definition,
-                        label_span,
-                    },
-                );
-            }
+        Ok(policy) => Some(Definition::NodeSettings(policy)),
+        Err(error) => {
+            refuse(found, block, error);
+            None
         }
-        Err(error) => refuse(found, block, error),
     }
 }
 
