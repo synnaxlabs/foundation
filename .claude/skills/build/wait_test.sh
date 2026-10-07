@@ -1,9 +1,10 @@
 #!/bin/sh
 # Runs wait.sh against fixed GraphQL answers, then once against the API on merged
-# #1428 to check the query. A stub `gh` acts as gh does: on an answer with `errors`,
-# an HTTP error, or no network, it exits 1 and prints the body, if any. After the
-# answers run out, it gives a schema error "out of answers". A stub `sleep` returns
-# at once, and stops the script on its fifth call. Needs `jq`. Exit 1 on a failure.
+# #1428 to check the query. A stub `gh` acts as gh does: on an answer with an error
+# message, an HTTP error, or no network, it exits 1, prints the body, if any, and
+# prints the error on stderr; with no login, it exits 4. After the answers run out,
+# it fails with "out of answers". A stub `sleep` returns at once, and stops the
+# script on its fifth call. Needs `jq`. Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 gh=$(command -v gh)
@@ -15,14 +16,20 @@ cat > "$tmp/bin/gh" <<'STUB'
 n=$(($(cat "$STUB/calls") + 1))
 echo "$n" > "$STUB/calls"
 a=$STUB/$n.json
-[ -f "$a" ] ||
-  { echo '{"errors":[{"extensions":{"code":"x"},"message":"out of answers"}]}'
-    exit 1; }
+[ -f "$a" ] || { echo "gh: out of answers" >&2; exit 1; }
 case $(cat "$a") in
-  offline) exit 1 ;;
-  "http "*) cut -c6- "$a"; exit 1 ;;
+  offline) echo "error connecting to api.github.com" >&2; exit 1 ;;
+  "no login") echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+    exit 4 ;;
+  "http "*) cut -c6- "$a"; echo "gh: HTTP 502 (HTTP 502)" >&2; exit 1 ;;
 esac
-jq -e 'has("errors")' "$a" > /dev/null 2>&1 && { cat "$a"; exit 1; }
+# gh fails only on an error with a message.
+if jq -e '[.errors[]?.message | select(. != null and . != "")] | length > 0' \
+  "$a" > /dev/null 2>&1; then
+  cat "$a"
+  jq -r '"gh: " + .errors[0].message' "$a" >&2
+  exit 1
+fi
 while [ "$1" != --jq ]; do shift; done
 jq -r "$2" "$a"
 STUB
@@ -164,24 +171,48 @@ run "rate limited" 0 "#7 merged" 3 \
   '{"errors":[{"type":"RATE_LIMITED","message":"limit"}]}' "$merged"
 run "server timeout" 0 "#7 merged" 2 \
   '{"data":null,"errors":[{"message":"Something went wrong."}]}' "$merged"
-e='{"errors":[{"extensions":{"code":"undefinedField"},"message":"no field"}]}'
-run "wrong query" 1 "#7 has a query error: $e" 1 "$e"
-e='{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND"}]}'
-run "no such PR" 1 "#7 has a query error: $e" 1 "$e"
+stop="#7 cannot be read, gh failed 3 times:"
+run "three failed calls" 1 "$stop error connecting to api.github.com" 3 \
+  offline offline offline
+run "an answer resets the failures" 0 "#7 merged" 5 \
+  offline offline "$(pr OPEN)" offline "$merged"
+run "no login" 1 "$stop To get started with GitHub CLI, please run:  gh auth login" \
+  3 "no login" "no login" "no login"
+e='{"errors":[{"path":["query","nope"],"extensions":{"code":"undefinedField"},
+  "message":"Field '"'nope'"' does not exist on type '"'Query'"'"}]}'
+run "wrong query" 1 "$stop gh: Field 'nope' does not exist on type 'Query'" 3 \
+  "$e" "$e" "$e"
+e='{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND",
+  "path":["repository","pullRequest"],
+  "message":"Could not resolve to a PullRequest with the number of 7."}]}'
+run "no such PR" 1 \
+  "$stop gh: Could not resolve to a PullRequest with the number of 7." 3 \
+  "$e" "$e" "$e"
+run "error with no message" 1 "#7 closed" 1 \
+  "$(pr CLOSED | jq -c '. + {errors: [{type: "NOT_FOUND"}]}')"
+for n in abc "" 7x; do
+  echo 0 > "$tmp/calls"
+  got=$(STUB=$tmp PATH="$tmp/bin:$PATH" sh "$here/wait.sh" "$n" 2>&1)
+  check "PR number '$n'" $? "$got" "$(cat "$tmp/calls")" 2 \
+    "usage: wait.sh <PR number>" 0
+done
 run "waits at most five times" 143 "" 5 "$(pr OPEN)" "$(pr OPEN)" "$(pr OPEN)" \
   "$(pr OPEN)" "$(pr OPEN)"
 
 got=$(STUB=$tmp/live PATH="$tmp/live:$PATH" sh "$here/wait.sh" 1428)
 check "API on #1428" $? "$got" 1 0 "#1428 merged" 1
 # The jq reads each of these fields, and a fixture can give one that the query lost.
-fields=$(jq '.data.repository.pullRequest.commits.nodes[0].commit
-  .statusCheckRollup.contexts.nodes
+fields=$(jq '.data.repository.pullRequest | . as $pr
+  | all("mergeable", "reviewDecision", "isInMergeQueue", "autoMergeRequest";
+    . as $f | $pr | has($f))
+  and (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes
   | any(.[]; .__typename == "CheckRun")
-  and all(.[]; .__typename != "CheckRun" or ((.databaseId | type) == "number"
+  and all(.[]; .__typename != "CheckRun" or ((.name | type) == "string"
+    and has("conclusion") and (.databaseId | type) == "number"
     and (.checkSuite.workflowRun.databaseId | type) == "number"
     and (.checkSuite.workflowRun.workflow.name | type) == "string"
     and (.isRequired | type) == "boolean"))
-  and all(.[]; .__typename != "StatusContext" or (.state | type) == "string")' \
+  and all(.[]; .__typename != "StatusContext" or (.state | type) == "string"))' \
   "$tmp/live/1428.json")
 check "API on #1428 gives each field" 0 "$fields" 1 0 true 1
 exit $failed

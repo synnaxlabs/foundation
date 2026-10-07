@@ -1,14 +1,22 @@
 #!/bin/sh
 # Waits until pull request $1 merges or needs its author, then prints why it stopped.
 # Exit 0: merged. Exit 1: closed, a failed check, a canceled required check, a
-# conflict, requested changes, the PR left the merge queue, a wrong query, or no such
-# PR. It waits through any other error: network, HTTP, rate limit, or server timeout.
+# conflict, requested changes, the PR left the merge queue, or three failed gh calls
+# in a row, with gh's error. Exit 2: $1 is not a PR number. It waits through one or
+# two failed calls, so a network, HTTP, or rate limit error that clears in 4 minutes
+# does not stop it.
 #
 # Only the latest run of each workflow counts, and in it the latest run of each job,
 # so a new run or a rerun replaces the old one. A canceled run counts only on a
 # required check: the Review workflow cancels its own `gate` runs, and the `review`
 # status, not `gate`, is the required check.
 set -u
+case ${1-} in
+  '' | *[!0-9]*) echo "usage: wait.sh <PR number>" >&2; exit 2 ;;
+esac
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+trap 'exit 143' TERM
 q='query($n:Int!){repository(owner:"synnaxlabs",name:"foundation"){
   pullRequest(number:$n){state mergeable reviewDecision isInMergeQueue
   autoMergeRequest{enabledAt}
@@ -39,13 +47,14 @@ jq='.data.repository.pullRequest |
   elif .reviewDecision == "CHANGES_REQUESTED" then "has requested changes"
   elif .isInMergeQueue or .autoMergeRequest != null then "waiting"
   else "left the merge queue" end'
+failures=0
 while :; do
-  # When gh fails, it skips the jq and prints the answer body, if any.
-  if ! s=$(gh api graphql -F n="$1" -f query="$q" --jq "$jq" 2>/dev/null); then
-    case $s in
-      *'"extensions":{"code":'* | *'"type":"NOT_FOUND"'*) s="has a query error: $s" ;;
-      *) s=waiting ;;
-    esac
+  if s=$(gh api graphql -F n="$1" -f query="$q" --jq "$jq" 2>"$err"); then
+    failures=0
+  else
+    failures=$((failures + 1))
+    s=waiting
+    [ "$failures" -lt 3 ] || s="cannot be read, gh failed 3 times: $(cat "$err")"
   fi
   case $s in
     merged) echo "#$1 merged"; exit 0 ;;
