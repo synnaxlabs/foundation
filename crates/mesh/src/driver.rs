@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_with_no_block_for_a_write_stops_the_group() {
+    fn a_pool_with_no_block_of_one_sector_does_not_open() {
         solo(|node, tasks| async move {
             let budget = block::Config { budget: 0 };
             let memory = block::Heap::new(budget.reservation());
@@ -1183,18 +1183,12 @@ mod tests {
                 pool: Rc::new(Pool::new(budget, memory)),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
-            let mut watch = mesh.watch(INDEX);
-            assert_eq!(watch.next().await, Ok(None));
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-            // The log asks for a block of the whole record, which is under a sector.
             let cause = block::Error::TooLarge {
-                requested: 327,
+                requested: 512,
                 largest: 0,
             };
-            let stopped = Stopped::Write(log::Error::Pool(cause));
-            assert_eq!(watch.next().await, Err(Error::Stopped(stopped)));
+            let error = Error::Log(log::Error::Pool(cause));
+            assert_eq!(Mesh::open(config).await.err(), Some(error));
         });
     }
 
@@ -1306,6 +1300,7 @@ mod tests {
     #[test]
     fn a_power_cut_keeps_a_home_after_a_failed_sync_and_a_new_open() {
         let mut lost = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let mut sim = Sim::new(sim::Config {
                 seed: run,
@@ -1329,23 +1324,33 @@ mod tests {
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
-            let end = sim
+            let changes = sim
                 .run_on(&node, |node, _| async move {
                     let files = node.files();
                     let (_, stored) =
                         Log::open(files, LOG.into(), pool()).await.unwrap();
-                    let entry = stored.entries.last()?;
-                    let Data::Bytes(bytes) = &entry.data else {
-                        return None;
-                    };
-                    Change::decode(bytes).ok()
+                    let changes = stored.entries.into_iter().map(|entry| {
+                        let Data::Bytes(bytes) = entry.data else {
+                            return None;
+                        };
+                        Change::decode(&bytes).ok()
+                    });
+                    changes.collect::<Vec<_>>()
                 })
                 .unwrap();
+            if changes.contains(&Some(home(2))) {
+                gave = gave.saturating_add(1);
+            }
+            let end = changes.last().copied().flatten();
             if end != Some(home(3)) {
                 lost.push((run, end));
             }
         }
         assert_eq!(lost, [], "(run, the last change after the power cut)");
+        assert!(
+            gave > 16,
+            "runs in which the open gave the failed change: {gave}"
+        );
     }
 
     #[test]

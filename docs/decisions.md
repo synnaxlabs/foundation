@@ -146,7 +146,14 @@ How to read this record:
 - **S5** `Channel { key, name, kind: Kind }`, with
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
-  or virtual flag.
+  or virtual flag. Amended: no `name` field, because the name is the tree key, and
+  `Kind::Data(Data)` has private fields. An array or list of size 0 is valid: no
+  caller divides by its width, and a refusal, when one is needed, goes in
+  `sample::Type`, which every format reads. The spec numbers its scalar codes in its
+  own table, apart from STORED BODY, so a change to one format does not change the
+  other. Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
+  https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -1512,9 +1519,10 @@ How to read this record:
   torn one, is `Error::Corrupt`, and the node does not start. Open writes again, whole,
   the end file that it finds: the records as it read them, then zeros to the end of the
   file. So a torn record leaves nothing that a later open reads as a header. Each read
-  and each write of the open is whole sectors, so a header gets one write, and a pool
-  with no block of one sector is `Error::Pool`. Then it syncs the end file, the
-  directory, and its parent, because `raft` acts on what open gives and a crash can
+  and each write of the open is whole sectors, so a header gets one write. An open
+  with a pool whose largest block is less than one sector gives
+  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
+  the directory, and its parent, because `raft` acts on what open gives and a crash can
   leave any of them with no sync. The write is there because a read sees, from the
   cache, the writes that a failed sync of this boot lost, and a later sync does not
   write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
@@ -1563,9 +1571,15 @@ How to read this record:
   system refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. Nothing
-  bounds the proposals and the messages that the group takes in that time, and a record
-  that the pool can never hold waits with no end (#1091). A pool whose budget holds no
-  block (`TooLarge`) stops the group (the `Refused` wait decided by the architect:
+  bounds the proposals and the messages that the group takes in that time, and a write
+  whose blocks the pool can never hold at one time waits with no end (#1091). A free
+  block of a size with a block in use keeps its budget (#291), so a write can also wait
+  while the budget has room for its blocks: with no end when the block in use is its
+  own (#1091), and else until the other user of the pool drops its block (#1134). A pool
+  whose largest block is less than one sector does not open (MESH LOG), so no write
+  gives `TooLarge` and the group does not stop for it (decided by the architect:
+  https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
+  `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
@@ -2001,6 +2015,32 @@ How to read this record:
   would move the policy to other voters silently, and X26 could never fail), and the
   region from the directory (K2 makes the layout a default only; r3 rejected a
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
+  The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
+  `@node_settings`, `@compression` (compression section), `@placement` (S12), and
+  `@time`. No time keyword was on record (C6 shows `[[time]]`, and X36 replaced its
+  content), so the architect decided `time`. A connector has no segment: it is at its
+  own name, and its channels are its children (#758, 2.2, C8). A channel has no segment
+  either: it is at its own name (#756,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
+  check still applies to both names. A region record is at `<prefix>.@region` in the
+  parent's tree (#758). This is not an exception to X2: the region that holds the record
+  is the longest region prefix that contains `<prefix>`, other than `<prefix>` itself.
+  The root region has no record and no key: no parent records it (X3), and its voters
+  live only in its Raft config. The one place that maps a key to its region applies
+  this, so no caller tests for `@region`. Decided by the architect, #1001
+  (https://github.com/synnaxlabs/foundation/issues/1001#issuecomment-6031305302; #758
+  for the connector and the region). The kind is `spec::definition::Kind`, and the
+  module `spec::key` holds the whole key rule: the segments, the `@` rule, the bound,
+  `Kind::key`, and `key::Error`. Lost: a module `spec::kind`, because in `spec` "kind"
+  also names a connector's driver. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031286198 and
+  https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031290037).
+  `Kind::key` takes the label as text and checks it in this order: the bound
+  (`key::Error::Long`, the one length error for every kind, with `Name::MAX_BYTES` for a
+  connector), then the name (`key::Error::Name`), then the `@` rule. So the user gets
+  the true bound in one round. Lost: a `&Name` label, whose parse gives its own length
+  error with the wrong bound. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031559597).
 
 ### 1.12 Access, identity, and secrets
 
@@ -2608,9 +2648,9 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
-| Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
+| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
