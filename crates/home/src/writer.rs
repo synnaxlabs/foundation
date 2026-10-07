@@ -16,8 +16,9 @@ pub(crate) struct Writer {
     pub(crate) subject: Name,
     /// The writer's authority. The home does not cap it by access yet.
     pub(crate) authority: Authority,
-    /// How long the writer may go without a write to an index and keep control of
-    /// it, or `None` for no limit. A write to one index does not renew another.
+    /// The control lease, or `None` for no limit. The writer loses control of an
+    /// index when it has no group applied or lost there for this long. A group on
+    /// one index does not renew the lease on another.
     pub(crate) lease: Option<Span>,
     /// The key set of every frame the writer writes.
     pub(crate) set: Arc<KeySet>,

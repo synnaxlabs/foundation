@@ -771,17 +771,17 @@ mod tests {
         async fn unsynced(&self) -> Shard {
             let buffer = self.buffer(AREA, BODY_MAX, 4).await;
             // A clock that never runs never has mesh time.
-            let (_, mesh) = clock::Clock::new(self.clock.clone());
-            self.with(0, buffer, mesh)
+            let (_, reader) = clock::Clock::new(self.clock.clone());
+            self.with(0, buffer, reader)
         }
 
-        /// A shard of the number `shard` over `buffer`, with the clocks of `clock`.
-        fn with(&self, shard: u32, buffer: Buffer, clock: clock::Reader) -> Shard {
+        /// A shard of the number `shard` over `buffer`, with the clocks of `reader`.
+        fn with(&self, shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
             Shard::new(Config {
                 shard,
                 buffer,
                 pool: Rc::clone(&self.pool),
-                clock,
+                clock: reader,
                 limits: LIMITS,
             })
         }
@@ -1719,7 +1719,7 @@ mod tests {
     }
 
     #[test]
-    fn renews_the_lease_only_on_the_indexes_that_a_write_carries() {
+    fn does_not_renew_the_lease_of_an_index_that_a_write_does_not_hold() {
         run(90, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
@@ -1738,6 +1738,74 @@ mod tests {
                 shard.write(a, LIVE, second),
                 Ok(&[applied(0, 1, 1), refused(2, Refusal::Expired)][..])
             );
+        });
+    }
+
+    #[test]
+    fn does_not_renew_the_lease_of_an_index_before_the_one_that_a_write_holds() {
+        run(93, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = Writer {
+                lease: Some(Span::from_nanos(1_000_000)),
+                ..writer("a", 1, &set)
+            };
+            let a = shard.open_writer(a).expect("synced");
+            let wait = Span::from_nanos(600_000);
+            test.clock.sleep(wait).await;
+            let first = frame(&test.pool, &set, &[(2, &[10])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(2, 0, 1)][..]));
+            test.clock.sleep(wait).await;
+            let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(a, LIVE, second),
+                Ok(&[refused(0, Refusal::Expired), applied(2, 1, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn renews_the_lease_for_a_lost_group() {
+        run(91, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = Writer {
+                lease: Some(Span::from_nanos(1_000_000)),
+                ..writer("a", 1, &set)
+            };
+            let a = shard.open_writer(a).expect("synced");
+            let wait = Span::from_nanos(600_000);
+            test.clock.sleep(wait).await;
+            let live = frame(&test.pool, &set, &[(2, &[10])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, live), Ok(&[lost(2, 0, 1)][..]));
+            drop(blocks);
+            test.clock.sleep(wait).await;
+            let next = frame(&test.pool, &set, &[(2, &[20])]);
+            assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(2, 1, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn does_not_renew_the_lease_for_a_backfill_frame_that_finds_no_room() {
+        run(92, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = Writer {
+                lease: Some(Span::from_nanos(1_000_000)),
+                ..writer("a", 1, &set)
+            };
+            let a = shard.open_writer(a).expect("synced");
+            let wait = Span::from_nanos(600_000);
+            test.clock.sleep(wait).await;
+            let first = frame(&test.pool, &set, &[(2, &[1])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, BACKFILL, first), Err(Error::Full));
+            drop(blocks);
+            test.clock.sleep(wait).await;
+            let again = frame(&test.pool, &set, &[(2, &[1])]);
+            let expired = refused(2, Refusal::Expired);
+            assert_eq!(shard.write(a, BACKFILL, again), Ok(&[expired][..]));
         });
     }
 
