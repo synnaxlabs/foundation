@@ -300,7 +300,7 @@ impl Endpoint {
     ) -> Option<(Sender, Receiver)> {
         let sender = self.start(now, key, Dir::Bi, class)?;
         let reader = Reader::new(self.message_bytes_max);
-        let receiver = Receiver::new(sender.key(), class, reader);
+        let receiver = sender.receiver(class, reader);
         Some((sender, receiver))
     }
 
@@ -326,8 +326,8 @@ impl Endpoint {
     /// takes it. Leaves it while the stream holds part of an earlier message.
     /// `Ready` when the stream holds no message: it took all of `message`, or with
     /// `None`, all of the one before. Else `Pending`: write again after
-    /// [`Event::Writable`] to send the rest. `Pending` with nothing taken once the
-    /// connection drained. The streams that wait for the connection take turns, by
+    /// [`Event::Writable`] to send the rest. The streams that wait for the
+    /// connection take turns, by
     /// class with `Complete` ahead of `Latest` while it is owed bytes, then oldest
     /// first, so a write behind one waits.
     ///
@@ -337,8 +337,8 @@ impl Endpoint {
     /// Nothing of it is sent, and it stays in `message`. Then [`Error::Reset`] with
     /// `Code(0)` after an [`Endpoint::cancel`] reset the stream, and
     /// [`Error::Stopped`] when the peer stopped it; each later write gives it too.
-    /// The error of the connection's [`Event::Closed`] when it ended, until it
-    /// drains.
+    /// The error of the connection's [`Event::Closed`] once it ended, and
+    /// [`Error::Broken`] when the call finds a fault of the peer's.
     ///
     /// # Panics
     ///
@@ -354,24 +354,24 @@ impl Endpoint {
             stream::check_size(message.len(), sender.bytes_max())?;
         }
         let key = sender.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, _, _| {
-            streams.write(inner, sender, message)
-        })
+        self.streams(
+            now,
+            key,
+            sender.closed().cloned(),
+            |streams, inner, _, _| streams.write(inner, sender, message),
+        )
     }
 
     /// Puts `message` on the stream after the messages before it when the stream
     /// can take it now. Else gives it back with nothing of it sent: when the stream
     /// still holds part of an earlier message once it wrote what it could of it,
     /// when the send budget has no room for it or a stream that goes ahead of it
-    /// waits for room or its turn, or once the connection drained. The stream does
-    /// not wait for room for a message it gives back. Once taken, the stream sends
-    /// the rest of it by itself.
+    /// waits for room or its turn. The stream does not wait for room for a message
+    /// it gives back. Once taken, the stream sends the rest of it by itself.
     ///
     /// # Errors
     ///
     /// As [`Endpoint::write`]. Nothing of `message` is sent.
-    /// The error of the connection's [`Event::Closed`] when it ended, until it
-    /// drains.
     ///
     /// # Panics
     ///
@@ -386,24 +386,27 @@ impl Endpoint {
         stream::check_size(message.len(), sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
-        self.streams(now, key, (), |streams, inner, _, _| {
-            streams.try_write(inner, sender, &mut message)
-        })?;
+        self.streams(
+            now,
+            key,
+            sender.closed().cloned(),
+            |streams, inner, _, _| streams.try_write(inner, sender, &mut message),
+        )?;
         Ok(message)
     }
 
     /// Ends the stream after the messages written to it, the rest of the one in hand
     /// included. They arrive after the caller drops `sender`. A stream this side
     /// opened that ends before its first message never reaches the peer, and the
-    /// [`Receiver`] of a two-way one gets [`Error::Reset`] with code 0. Does nothing
-    /// once the connection drained.
+    /// [`Receiver`] of a two-way one gets [`Error::Reset`] with code 0.
     ///
     /// # Errors
     ///
     /// [`Error::Reset`] with `Code(0)` after an [`Endpoint::cancel`] reset the
     /// stream, and [`Error::Stopped`] when the peer stopped it; each later finish
-    /// gives it too. The error of the connection's [`Event::Closed`] when it ended,
-    /// until it drains.
+    /// gives it too.
+    /// The error of the connection's [`Event::Closed`] once it ended, and
+    /// [`Error::Broken`] when the call finds a fault of the peer's.
     ///
     /// # Panics
     ///
@@ -414,8 +417,8 @@ impl Endpoint {
         sender: &mut Sender,
     ) -> Result<(), Error> {
         sender.check_open();
-        let stream = sender.key();
-        self.streams(now, stream.connection, (), |streams, inner, _, _| {
+        let (stream, closed) = (sender.key(), sender.closed().cloned());
+        self.streams(now, stream.connection, closed, |streams, inner, _, _| {
             streams.finish(inner, stream.id)?;
             sender.end();
             Ok(())
@@ -427,14 +430,14 @@ impl Endpoint {
     /// `None` when the message may not have one now. `Ready(None)` after the last
     /// one, and on each call after that. `Pending` when no whole message is here yet
     /// ([`Event::Readable`] follows), when `take` gives no block (no event follows:
-    /// call again once it may give one), or once the connection drained.
+    /// call again once it may give one).
     ///
     /// # Errors
     ///
     /// - [`Error::Reset`] when the peer reset the stream. Each later read gives it
     ///   too.
-    /// - The error of the connection's [`Event::Closed`] when it ended, until it
-    ///   drains.
+    /// - The error of the connection's [`Event::Closed`] once it ended, and
+    ///   [`Error::Broken`] when the read finds a fault of the peer's.
     pub(crate) fn read(
         &mut self,
         now: Monotonic,
@@ -444,8 +447,8 @@ impl Endpoint {
         if let Some(ended) = receiver.ended() {
             return ended;
         }
-        let key = receiver.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
+        let (key, closed) = (receiver.key().connection, receiver.closed().cloned());
+        self.streams(now, key, closed, |streams, inner, pool, events| {
             streams.read(inner, receiver, |len| take(pool, len), events)
         })
     }
@@ -551,15 +554,14 @@ impl Endpoint {
     }
 
     /// Runs `call` on the streams of `key`'s connection with the pool and the event
-    /// queue, and drives the connection. Gives the error of the connection's
-    /// [`Event::Closed`] when it ended, and `ended` once it drained. A fault of the
-    /// peer's that `call` finds closes the connection: the caller gets it from
-    /// [`Event::Closed`], and this gives `ended`.
+    /// queue, and drives the connection. Gives `closed`, the error a handle of the
+    /// connection keeps of its [`Event::Closed`], when it ended. A fault of the
+    /// peer's that `call` finds closes the connection, and this gives it.
     fn streams<T>(
         &mut self,
         now: Monotonic,
         key: connection::Key,
-        ended: T,
+        closed: Option<Error>,
         call: impl FnOnce(
             &mut Streams,
             &mut noq_proto::Connection,
@@ -567,21 +569,18 @@ impl Endpoint {
             &mut VecDeque<Event>,
         ) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let now = self.instant(now);
-        let Some(connection) = find(&mut self.connections, key) else {
-            return Ok(ended);
-        };
-        if let Some(error) = connection.error() {
-            return Err(error.clone());
+        if let Some(error) = closed {
+            return Err(error);
         }
+        let now = self.instant(now);
+        let connection = find(&mut self.connections, key);
+        let connection =
+            connection.expect("invariant: a connection drains only after it closed");
         let Connection { inner, streams, .. } = connection;
-        let result = match call(streams, inner, &self.pool, &mut self.events) {
-            Err(Error::Broken { reason }) => {
-                self.events.extend(connection.fault(now, reason));
-                Ok(ended)
-            }
-            result => result,
-        };
+        let result = call(streams, inner, &self.pool, &mut self.events);
+        if let Err(Error::Broken { reason }) = &result {
+            self.events.extend(connection.fault(now, reason.clone()));
+        }
         self.drive(key.handle, now);
         result
     }

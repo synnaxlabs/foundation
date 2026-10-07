@@ -54,9 +54,8 @@ enum State {
     Accepting,
     /// The caller has the key.
     Open,
-    /// The caller has its [`Event::Closed`] with `error`, or never had the key
-    /// (`None`).
-    Ended { error: Option<Error> },
+    /// The caller has its [`Event::Closed`], or never had the key.
+    Ended,
 }
 
 impl Connection {
@@ -156,7 +155,7 @@ impl Connection {
                 let expected = match self.end() {
                     State::Dialing { expected } => Some(expected),
                     State::Open => None,
-                    State::Accepting | State::Ended { .. } => return,
+                    State::Accepting | State::Ended => return,
                 };
                 events.push_back(self.closed(error(reason, expected)));
             }
@@ -200,15 +199,7 @@ impl Connection {
 
     /// Whether the connection has not ended.
     pub(super) fn live(&self) -> bool {
-        !matches!(self.state, State::Ended { .. })
-    }
-
-    /// The error of the connection's [`Event::Closed`], once the caller has it.
-    pub(super) fn error(&self) -> Option<&Error> {
-        match &self.state {
-            State::Ended { error } => error.as_ref(),
-            _ => None,
-        }
+        !matches!(self.state, State::Ended)
     }
 
     /// Whether the handshake finished and the connection has not ended.
@@ -227,7 +218,7 @@ impl Connection {
         let known = match self.end() {
             State::Dialing { .. } | State::Open => true,
             State::Accepting => false,
-            State::Ended { .. } => {
+            State::Ended => {
                 panic!("invariant: a fault is found on a live connection")
             }
         };
@@ -250,8 +241,7 @@ impl Connection {
                     .close(now, VarInt::from_u32(code.0), Bytes::new());
                 Some(self.closed(Error::Closed { code }))
             }
-            // It keeps the error that the stream calls give.
-            State::Ended { .. } => None,
+            State::Ended => None,
             State::Accepting => {
                 panic!("invariant: the caller has no key for a connection it never got")
             }
@@ -276,15 +266,13 @@ impl Connection {
     /// gives the state it had.
     fn end(&mut self) -> State {
         self.datagrams = Received::default();
-        mem::replace(&mut self.state, State::Ended { error: None })
+        mem::replace(&mut self.state, State::Ended)
     }
 
-    /// Keeps `error` for the stream calls, and gives the ended connection's
+    /// Gives `error` to the stream calls, and gives the ended connection's
     /// [`Event::Closed`].
-    fn closed(&mut self, error: Error) -> Event {
-        self.state = State::Ended {
-            error: Some(error.clone()),
-        };
+    fn closed(&self, error: Error) -> Event {
+        self.streams.close(error.clone());
         Event::Closed {
             key: self.key,
             error,
