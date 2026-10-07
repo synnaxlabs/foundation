@@ -1421,7 +1421,9 @@ mod tests {
         }
     }
 
-    /// The half that `side`'s connection keeps of `sender`'s stream.
+    /// The half that `side`'s connection keeps of `sender`'s stream. Tests read it
+    /// for state no call shows: a header split across writes, the class a reply
+    /// counts in, and whether a sender holds part of a message.
     fn half<'a>(side: &'a mut Side, sender: &Sender) -> &'a Half {
         let key = sender.key();
         let connection =
@@ -3488,6 +3490,45 @@ mod tests {
     }
 
     #[test]
+    fn a_finish_after_the_writable_of_room_ends_the_stream_after_the_message() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let [first, mut second] = hold(&mut pair, shard);
+            free(&mut pair);
+            let now = pair.now();
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            let seen = pair.client.events.len();
+            pair.run(Duration::ZERO);
+            let writable = Event::Writable {
+                stream: second.key(),
+            };
+            assert!(got(&pair.client, seen, &writable));
+            let now = pair.now();
+            assert_eq!(pair.client.endpoint.finish(now, &mut second), Ok(()));
+            let server = key(&pair.server);
+            let (mut receivers, mut read, mut ended) = (Vec::new(), Vec::new(), false);
+            for _ in 0..100 {
+                pair.run(RUN);
+                receivers.extend(iter::from_fn(|| pair.server.endpoint.accept(server)));
+                let now = pair.now();
+                for incoming in &mut receivers {
+                    let receiver = &mut incoming.receiver;
+                    let (messages, end) = drain(&mut pair.server, now, receiver);
+                    if receiver.key().id == second.key().id {
+                        read.extend(messages);
+                        ended |= end;
+                    }
+                }
+                if ended {
+                    break;
+                }
+            }
+            assert_eq!((read, ended), (vec![vec![0xb; MESSAGE_MAX]], true));
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "a sender is used after finish")]
     fn a_write_after_finish_panics_before_it_checks_the_size() {
         testing::run(1, |shard| {
@@ -4079,6 +4120,78 @@ mod tests {
             let now = pair.now();
             let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
+        });
+    }
+
+    #[test]
+    fn a_sender_woken_and_stopped_in_one_drive_gets_one_writable() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut second, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let later = accept(&mut pair.server).receiver.key().id;
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let (now, message) = (pair.now(), Some(shard.block(b"b")));
+            let written = pair.client.endpoint.write(now, &second, &mut { message });
+            assert_eq!(written, Ok(Poll::Pending));
+            pair.run(RUN);
+            let earlier = accept(&mut pair.server).receiver.key().id;
+            assert_eq!(earlier, first.key().id);
+            // The packet that acks part of `first` wakes it, then stops it.
+            for id in [earlier, later] {
+                let stopped =
+                    pair.server.connection().recv_stream(id).stop(7u32.into());
+                stopped.expect("stopped");
+            }
+            let seen = pair.client.events.len();
+            pair.run(RUN);
+            let writable = |sender: &Sender| Event::Writable {
+                stream: sender.key(),
+            };
+            let given = events(&pair.client).split_off(seen);
+            assert_eq!(given, [&writable(&second), &writable(&first)]);
+        });
+    }
+
+    #[test]
+    fn a_sender_woken_in_the_drive_that_breaks_the_connection_gets_no_event() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut doomed = open_sender(&mut pair, Class::Complete);
+            let mut waiting = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut doomed, &[shard.block(b"a")]);
+            write(&mut pair.client, now, &mut waiting, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let doomed = accept(&mut pair.server).receiver.key().id;
+            accept(&mut pair.server);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let (now, message) = (pair.now(), Some(shard.block(b"b")));
+            let written = pair.client.endpoint.write(now, &waiting, &mut { message });
+            assert_eq!(written, Ok(Poll::Pending));
+            pair.run(RUN);
+            let earlier = accept(&mut pair.server).receiver.key().id;
+            // One packet: the first stop wakes `waiting`, the second breaks the
+            // connection.
+            let over = VarInt::from_u64(1 << 32).expect("a varint");
+            for (id, code) in [(earlier, 7u32.into()), (doomed, over)] {
+                let stopped = pair.server.connection().recv_stream(id).stop(code);
+                stopped.expect("stopped");
+            }
+            let seen = pair.client.events.len();
+            pair.run(RUN);
+            let given = events(&pair.client).split_off(seen);
+            let broke = Event::Closed {
+                key: key(&pair.client),
+                error: Error::Broken {
+                    reason: "a stop code over 32 bits: 4294967296".to_owned(),
+                },
+            };
+            assert_eq!(given, [&broke]);
         });
     }
 
