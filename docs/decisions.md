@@ -3427,7 +3427,7 @@ How to read this record:
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
 | r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
-| BENCH SPEND; the ARM RUNNER owner (the coordinator) | Test budget (5.5) |
+| BENCH SPEND; the coordinator as the session that rents and ends the ARM RUNNER hosts | Test budget (5.5) |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -4337,7 +4337,9 @@ with its cap and an automatic shutdown first. Only `laptop.monitor` rents and en
 machines, by "Cloud machines" in `docs/coordination.md`, and no other session holds AWS
 credentials (the person,
 https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
-2026-10-07T16:48:27Z). Supersedes: BENCH SPEND, the owner in ARM RUNNER.
+2026-10-07T16:48:27Z). Supersedes: BENCH SPEND, and the coordinator as the session that
+rents and ends the ARM RUNNER hosts. Those hosts stay under AWS CEILING, outside the
+test budget and "Cloud machines" steps 2, 3, and 6.
 
 ### 5.6 First phase
 
