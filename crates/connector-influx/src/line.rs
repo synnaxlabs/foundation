@@ -20,8 +20,8 @@ impl Measurement {
     /// # Errors
     ///
     /// - [`Error::Empty`] for an empty name, key, or tag value.
-    /// - [`Error::Character`] for one with a backslash, a newline, or a carriage
-    ///   return.
+    /// - [`Error::Character`] for one with a backslash, a newline, a carriage
+    ///   return, a tab, or NUL.
     /// - [`Error::Reserved`] for a name or key that starts with `_`, or a key
     ///   `time`.
     /// - [`Error::Comment`] for a name that starts with `#`.
@@ -143,7 +143,8 @@ impl Float {
 pub enum Error {
     /// An empty part.
     Empty(Part),
-    /// A name with a character that line protocol cannot carry.
+    /// A name with a character that no name may hold: a backslash, a newline, a
+    /// carriage return, a tab, or NUL.
     Character {
         /// The name.
         name: String,
@@ -187,8 +188,7 @@ impl fmt::Display for Error {
             Self::Empty(Part::FieldKey) => write!(f, "a field key is empty"),
             Self::Character { name, character } => write!(
                 f,
-                "the name {name:?} holds {character:?}, \
-                 which line protocol cannot carry"
+                "the name {name:?} holds {character:?}, which no name may hold"
             ),
             Self::Reserved(name) => {
                 write!(f, "InfluxDB keeps the name {name:?} for itself")
@@ -232,7 +232,10 @@ fn escape(
     if text.is_empty() {
         return Err(Error::Empty(part));
     }
-    if let Some(character) = text.chars().find(|c| matches!(c, '\\' | '\n' | '\r')) {
+    if let Some(character) = text
+        .chars()
+        .find(|c| matches!(c, '\\' | '\n' | '\r' | '\t' | '\0'))
+    {
         return Err(Error::Character {
             name: text.into(),
             character,
