@@ -516,6 +516,12 @@ How to read this record:
   takes the blocks of its entries (#795). It does not check `Limit::Block`, which
   depends on the pool. An entry has no part, one, or two; `append` takes them owned
   and drops them when it fails (#582).
+  `Layout::fit(len, body_max)` gives the largest ring whose file holds at most `len`
+  bytes, or `Small { len, min }` in file bytes, so a caller never learns the area
+  unit. Its `body_max` bounds panic, from the one check that `Layout::new` uses, and
+  `body_max` comes from a constant of `node`, never a config value; if it ever does,
+  the panic becomes an error first. Decided by the architect on #1166:
+  https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
