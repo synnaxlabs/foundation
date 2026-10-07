@@ -31,12 +31,15 @@ behavior. Never print a pointer. No `thread_local!` state.
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
 checks on each PR that agent-written tests catch real changes. A missed mutant fails CI.
 A mutant that makes a test hang (a timeout) counts as caught. Each run on a box runs in
-a cgroup with a memory cap: `systemd-run --user --scope -p MemoryMax=16G -p
-OOMPolicy=continue cargo mutants ...`. A mutant that allocates in a loop then dies
-alone, its test fails, and the run counts it as caught. With no cap, the mutant fills
-the box and the run stalls. Set `OOMPolicy=continue`, because the default of the user
-manager stops the whole scope. Never cap a run on a box with `prlimit --data`: it counts
-reserved memory, not touched pages (#803,
+a cgroup with a memory cap: `systemd-run --user --scope -p MemoryMax=<share> -p
+OOMPolicy=continue cargo mutants --jobs 4 ...`. The share is 20G on box1 and 10G on
+box2, and a session runs one mutants run at a time (`laptop.monitor`,
+https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6043431001,
+2026-10-07T17:40:51Z). A mutant that allocates in a loop then dies alone, its test
+fails, and the run counts it as caught. With no cap, the mutant fills the box and the
+run stalls. Set `OOMPolicy=continue`, because the default of the user manager stops the
+whole scope. Never cap a run on a box with `prlimit --data`: it counts reserved memory,
+not touched pages (#803,
 https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6009258555,
 2026-10-06T04:20:13Z). CI keeps it until each runner host has the cgroup cap (#899). An
 assertion on a private field is never the only kill. `.cargo/mutants.toml` lists the few
