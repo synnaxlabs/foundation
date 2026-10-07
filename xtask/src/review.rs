@@ -184,11 +184,7 @@ fn problems(
 /// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR.
 /// `performance` depends on what the code does, so no round requires it here.
 fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
-    let code = files.iter().map(Path::new).any(|f| {
-        f.extension().is_some_and(|e| e == "rs")
-            || f.file_name()
-                .is_some_and(|n| n == "Cargo.toml" || n == "Cargo.lock")
-    });
+    let code = files.iter().any(|f| history::code_path(f));
     if code && round.number <= 1 {
         vec!["reviewer", "architecture", "breaker"]
     } else if code {

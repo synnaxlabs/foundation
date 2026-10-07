@@ -54,8 +54,9 @@ impl<'a> History<'a> {
     /// The first line of code that `from..end` adds or removes, as a phrase: "changes
     /// code at `<file>:<line>`". A line of a `.rs` file is code unless, trimmed, it is
     /// empty or starts with `//`; each line of a `Cargo.toml` or `Cargo.lock` is
-    /// code. A moved file counts as removed and added. The line number is in `end` for
-    /// an added line and in `from` for a removed one.
+    /// code. A moved file counts as removed and added. A merge of the base splits the
+    /// range into parts: the line number is in the newer commit of the part it is in
+    /// for an added line, and in the older one for a removed one.
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
     /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
@@ -150,8 +151,7 @@ impl<'a> History<'a> {
                     String::from_utf8_lossy(path)
                 )
             })?;
-            let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
-            if let Some(line) = self.first_code(old, new, rust)? {
+            if let Some(line) = self.first_code(old, new, rust_path(path))? {
                 return Ok(Some(format!("changes code at `{path}:{line}`")));
             }
         }
@@ -279,7 +279,7 @@ impl<'a> History<'a> {
     ///
     /// # Errors
     ///
-    /// A failed `git merge-tree`, or output with no tree or a path that is not UTF-8.
+    /// A failed `git merge-tree`.
     fn merged(&self, first: &str, second: &str) -> Result<Merged, String> {
         let output = command(self.root)
             .arg(format!("--attr-source={EMPTY_TREE}"))
@@ -298,21 +298,16 @@ impl<'a> History<'a> {
             Some(1) => false,
             _ => return Err(failure("merge-tree", &output.stderr)),
         };
-        let text = String::from_utf8(output.stdout)
-            .map_err(|e| format!("git merge-tree: the output is not UTF-8: {e}"))?;
         // `<tree>NUL`, then `<path>NUL` for each conflicted path, then `NUL` and the
-        // messages, which are not read.
-        let mut fields = text.split('\0');
-        let tree = fields
-            .next()
-            .filter(|tree| !tree.is_empty())
-            .ok_or_else(|| {
-                format!("git merge-tree {first} {second}: no tree in the output")
-            })?;
-        let conflicts = fields.take_while(|path| !path.is_empty()).map(String::from);
+        // messages, which are not read: they can hold any bytes.
+        let mut fields = output.stdout.split(|&b| b == 0);
+        let tree = String::from_utf8_lossy(fields.next().unwrap_or_default());
+        let conflicts = fields
+            .take_while(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned());
         Ok(Merged {
             clean,
-            tree: tree.to_string(),
+            tree: tree.into_owned(),
             conflicts: conflicts.collect(),
         })
     }
@@ -342,18 +337,28 @@ struct Merged {
     clean: bool,
     /// The merged tree, with conflict markers in each file whose content conflicts.
     tree: String,
-    /// Each path with a conflict, in the order `git` gives.
+    /// Each path with a conflict, in the order `git` gives, with each byte that is not
+    /// UTF-8 replaced.
     conflicts: Vec<String>,
 }
 
-/// Whether a change to `path` can change code: a `.rs` file, a `Cargo.toml`, or a
-/// `Cargo.lock`.
-fn code_path(path: &str) -> bool {
-    let path = Path::new(path);
-    path.extension().is_some_and(|e| e == "rs")
-        || path
+/// Whether a change to `path`, a path as `git` gives it, can change code: a `.rs`
+/// file, a `Cargo.toml`, or a `Cargo.lock`.
+pub(super) fn code_path(path: &str) -> bool {
+    rust_path(path)
+        || Path::new(path)
             .file_name()
             .is_some_and(|n| n == "Cargo.toml" || n == "Cargo.lock")
+}
+
+/// Whether `path` is a `.rs` file as the pathspec `**/*.rs` matches it: also the file
+/// `.rs`, which has no extension to `Path`.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the pathspec matches case"
+)]
+fn rust_path(path: &str) -> bool {
+    path.ends_with(".rs")
 }
 
 /// A `git` command in `root` that reads no inherited `GIT_*` variable and no global

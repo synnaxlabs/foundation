@@ -260,14 +260,19 @@ fn needs_only_the_reviewer_for_a_diff_with_no_code() {
     let mut docs = record(vec![bot(&first)]);
     docs.files = vec!["docs/decisions.md".to_string(), "README.md".to_string()];
     assert_eq!(check(&docs), Vec::<String>::new());
-    docs.files.push("xtask/Cargo.toml".to_string());
-    assert_eq!(
-        check(&docs),
-        vec![
-            "review round 1 names no architecture, breaker, which this round requires."
-                .to_string()
-        ]
-    );
+    for code in ["xtask/Cargo.toml", "Cargo.lock", "a/.rs"] {
+        let mut record = record(vec![bot(&first)]);
+        record.files = [&docs.files[..], &[code.to_string()]].concat();
+        assert_eq!(
+            check(&record),
+            vec![
+                "review round 1 names no architecture, breaker, which this round \
+                 requires."
+                    .to_string()
+            ],
+            "{code}"
+        );
+    }
 }
 
 #[test]

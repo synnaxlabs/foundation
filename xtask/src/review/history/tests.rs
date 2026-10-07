@@ -446,7 +446,13 @@ fn a_merge_round_that_keeps_a_file_one_side_deleted_needs_the_breaker() {
 
 #[test]
 fn a_conflict_counts_only_in_a_code_file() {
-    for (file, code) in [("Cargo.toml", true), ("Cargo.lock", true), ("a.md", false)] {
+    let files = [
+        (".rs", true),
+        ("Cargo.toml", true),
+        ("Cargo.lock", true),
+        ("a.md", false),
+    ];
+    for (file, code) in files {
         let (repo, _) = Repo::with_pr(&format!("merge-file-{file}"));
         let end = repo.commit(file, "pr\n");
         repo.advance_main(file, "main\n");
@@ -463,6 +469,100 @@ fn a_conflict_counts_only_in_a_code_file() {
             code.then(|| format!("resolves a conflict in `{file}` in `{merge}`"));
         assert_eq!(repo.code_change(&end, &merge), Ok(found), "{file}");
     }
+}
+
+#[test]
+fn a_conflict_in_code_after_a_conflict_in_text_counts() {
+    let (repo, _) = Repo::with_pr("merge-two");
+    repo.commit("a.md", "base\n");
+    repo.advance_main("b.rs", "fn b() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    repo.commit("a.md", "pr\n");
+    let end = repo.commit("b.rs", "fn b() {}\nfn c() {}\n");
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "pr~2"]);
+    repo.commit("a.md", "main\n");
+    repo.git(&["rm", "--quiet", "b.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "rm b.rs"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    let merge = repo
+        .command()
+        .args(["merge", "--no-edit", "origin/main"])
+        .output()
+        .unwrap();
+    assert_eq!(merge.status.code(), Some(1), "{merge:?}");
+    std::fs::write(repo.dir.join("a.md"), "pr\n").unwrap();
+    repo.git(&["add", "a.md", "b.rs"]);
+    repo.git(&["commit", "--quiet", "--no-edit"]);
+    let merge = repo.head();
+    assert_eq!(
+        repo.code_change(&end, &merge),
+        Ok(Some(format!("resolves a conflict in `b.rs` in `{merge}`")))
+    );
+}
+
+#[test]
+fn the_file_named_dot_rs_is_rust() {
+    let (repo, end) = Repo::with_pr("dot-rs");
+    let docs = repo.commit(".rs", "// A.\n");
+    assert_eq!(repo.code_change(&end, &docs), Ok(None));
+    repo.commit(".rs", "// A.\nfn a() {}\n");
+    assert_eq!(
+        repo.code_change(&docs, &repo.head()),
+        Ok(Some("changes code at `.rs:2`".to_string()))
+    );
+}
+
+#[test]
+fn a_line_number_is_in_the_part_of_the_range_it_is_in() {
+    let (repo, end) = Repo::with_pr("merge-line");
+    repo.commit("a.rs", "fn a() {}\n");
+    repo.advance_main("c.txt", "main\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    repo.commit("a.rs", "// 1\n// 2\n// 3\nfn a() {}\n");
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reads_a_merge_whose_messages_are_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = Repo::new("merge-bytes");
+    let commit = |files: [(&[u8], &str); 2], parents: &[&str]| {
+        repo.git(&["read-tree", "--empty"]);
+        for (name, text) in files {
+            std::fs::write(repo.dir.join("blob"), text).unwrap();
+            let blob = repo.git(&["hash-object", "-w", "blob"]);
+            let info = [b"100644,", blob.as_bytes(), b",", name].concat();
+            let status = repo
+                .command()
+                .args(["update-index", "--add", "--cacheinfo"])
+                .arg(std::ffi::OsStr::from_bytes(&info))
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let tree = repo.git(&["write-tree"]);
+        let parents = parents.iter().flat_map(|p| ["-p", p]);
+        let args = [
+            &["commit-tree", &tree, "-m", "c"][..],
+            &parents.collect::<Vec<_>>(),
+        ];
+        repo.git(&args.concat())
+    };
+    let lines = |first: &str, last: &str| format!("{first}\n2\n3\n4\n5\n{last}\n");
+    let base = commit([(b"\xff.md", &lines("1", "6")), (b"y.md", "y\n")], &[]);
+    let main = commit([(b"\xff.md", &lines("1", "m")), (b"y.md", "m\n")], &[&base]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", &main]);
+    let end = commit([(b"\xff.md", &lines("p", "6")), (b"y.md", "p\n")], &[&base]);
+    let resolved = lines("p", "m");
+    let merge = commit([(b"\xff.md", &resolved), (b"y.md", "p\n")], &[&end, &main]);
+    assert_eq!(repo.code_change(&end, &merge), Ok(None));
+    assert_eq!(repo.reaches(&end, &merge), Ok(false));
 }
 
 #[test]
