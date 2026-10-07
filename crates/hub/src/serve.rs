@@ -14,7 +14,6 @@ use transport::{Class, Code};
 use types::channel::{self, Slot};
 use types::frame::Frame;
 use types::frame::key_set::KeySet;
-use types::hash;
 use wire::header::MALFORMED;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, Reply, UNKNOWN, ends};
 
@@ -226,7 +225,7 @@ async fn open(
     if class != wanted {
         return Err(Error::Class(class));
     }
-    let (mut slots, mut seen, mut index) = (Vec::new(), hash::Set::default(), None);
+    let (mut slots, mut index) = (Vec::new(), None);
     loop {
         let Some(message) = receiver.recv().await? else {
             return Ok(None);
@@ -246,9 +245,7 @@ async fn open(
             if key == of {
                 *slot = Some(assigned);
             }
-            if seen.insert(assigned) {
-                slots.push(assigned);
-            }
+            slots.push(assigned);
         }
         if last {
             break;
@@ -298,7 +295,7 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
 /// How a session sends each frame, through its places. It keeps its buffers across
 /// frames, so a frame allocates only its blocks.
 struct Out {
-    /// The slot of each place.
+    /// The slot of each place: of each listing in the open, repeats too.
     slots: Box<[Slot]>,
     index: Slot,
     /// The place of each entry of the frame's key set.
@@ -356,7 +353,7 @@ impl Out {
         self.places.resize(set.entries().len(), None);
         for (place, &slot) in self.slots.iter().enumerate() {
             if let Some(entry) = set.find(slot) {
-                self.places[entry] = Some(place);
+                self.places[entry].get_or_insert(place);
             }
         }
         self.by_place.fill(None);
@@ -517,6 +514,23 @@ mod tests {
         let head = out.lay(&narrow, &set);
         assert_eq!(laid(&out), [(0, 0..8, 8, 0), (1, 8..13, 13, 0)]);
         assert_eq!(head.series, 2);
+    }
+
+    /// A key listed twice has the place of its first listing, and the second listing
+    /// holds a place with no series.
+    #[test]
+    fn gives_a_series_the_place_of_its_first_listing() {
+        let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
+        let mut interner = Interner::new();
+        let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
+        let mut out = Out::new([index, a, index, b].into(), index);
+        let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
+        let head = out.lay(&frame, &set);
+        assert_eq!(
+            laid(&out),
+            [(0, 0..8, 8, 0), (1, 8..16, 16, 0), (3, 16..24, 24, 0)]
+        );
+        assert_eq!(head.series, 3);
     }
 
     #[test]
