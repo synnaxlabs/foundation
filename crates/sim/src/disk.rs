@@ -283,6 +283,9 @@ impl Disk {
         from: &Path,
         to: &Path,
     ) -> Result<(), Cause> {
+        if slashed(to) {
+            return Err(Cause::Code(NOT_DIRECTORY));
+        }
         let (from, to) = (segments(from), segments(to));
         let ((old, parent), Some((new, _))) = (
             from.split_last().expect("invariant: a rename is of a file"),
