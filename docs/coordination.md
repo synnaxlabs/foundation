@@ -132,11 +132,14 @@ USD a day for #1139. No other session holds AWS credentials. The person decided 
 1. A session that needs one asks `laptop.monitor` on its issue, then sends the link:
    the purpose, instance types, count, and hours. A request outside the budget goes to
    the person.
-2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15):
-   on-demand price per hour times count times lifetime, with the types, the issue, the
-   session that asked, and the end time. The sum of caps stays inside each limit: the
-   total, the day, and the #1139 day. At launch, it posts the instances on #15, and
-   sends the asking session the address of each and how to reach it.
+2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15), with
+   the types, the issue, and the session that asked. The cap is the price per hour
+   times count times the lifetime plus 10 minutes. The price is the on-demand price, or
+   for a spot instance its `MaxPrice` plus 0.03 USD for the disk and the address. The
+   sum of caps stays inside each limit: the total, the day, and the #1139 day. At
+   launch, it posts on #15 one line for each instance: the instance, type, issue,
+   session that asked, cap, and end time. It sends the asking session the address of
+   each and how to reach it.
 3. Every instance has the tags `project=foundation-bench` (or `foundation-test`) and
    `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
    termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
@@ -144,8 +147,12 @@ USD a day for #1139. No other session holds AWS credentials. The person decided 
 4. When the run ends, the asking session says so on its issue, then sends the link to
    `laptop.monitor`. `laptop.monitor` then terminates the instances, checks that no
    instance tagged `issue=<n>` still runs, and posts the actual hours on the ledger.
-5. For #1139, `laptop.monitor` runs the bench script of #1487 itself. Its spend watch
-   alerts on each instance that is not on #15.
+5. For #1139, `laptop.monitor` runs the bench script of #1487 itself, and
+   `box2.red-team` keeps the script. Each host ends itself within 120 minutes
+   (https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042420655,
+   2026-10-07T16:40:04Z). The script ends the host and posts its end line, so step 4
+   needs no message.
+6. The spend watch of `laptop.monitor` alerts on each instance that is not on #15.
 
 ## Messages
 
