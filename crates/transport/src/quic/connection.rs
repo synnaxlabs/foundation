@@ -235,12 +235,14 @@ impl Connection {
     ///
     /// When the caller does not have the key yet.
     pub(super) fn close(&mut self, now: Instant, code: Code) -> Option<Event> {
-        match self.end() {
+        match self.state {
             State::Dialing { .. } | State::Open => {
+                self.end();
                 self.inner
                     .close(now, VarInt::from_u32(code.0), Bytes::new());
                 Some(self.closed(Error::Closed { code }))
             }
+            // It keeps the error that the stream calls give.
             State::Ended { .. } => None,
             State::Accepting => {
                 panic!("invariant: the caller has no key for a connection it never got")
