@@ -134,12 +134,13 @@ state on `main`.
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
-  authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). Before it acts, `raft` checks the index a heartbeat or an append
-  answer names, the order of an append's entries, and that no entry is above the
-  append's term. A node that a change removed and that missed its release can win
-  an election once no voter has a lease, and lead until it commits the leave
-  (#483).
+  authenticates the sender and decides which nodes may send (RAFT SURFACE).
+  `Mesh::receive` refuses a message whose sender is not the peer that holds the
+  stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
+  `raft` checks the index a heartbeat or an append answer names, the order of an
+  append's entries, and that no entry is above the append's term. A node that a
+  change removed and that missed its release can win an election once no voter has
+  a lease, and lead until it commits the leave (#483).
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
@@ -148,17 +149,19 @@ state on `main`.
 - A node that may send to a group and lies could stop the group for good with one
   message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
-  VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
-  voter that lies can still break safety, because a false `AppendReply` counts as held,
-  so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed `AppendReply` is
-  #882.
+  VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
+  refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
+  A voter that lies can still break safety, because a false `AppendReply` counts as
+  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed
+  `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
   A second leader of a term whose leader it knows is `Error::SecondLeader`.
   `raft` counts the keys of a proof, and `mesh::claim` checks each signature
-  against the voter's public key. Until the driver (#471) runs that check before
-  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
+  against the voter's public key. `Mesh::receive` runs that check before `step`, and
+  `Mesh::serve` runs it for each `raft` message of a one-way stream. No node serves
+  mesh streams yet (#471). `raft/tests/it/hostile.rs` pins the refusal.
 - A voter that was down through a configuration change holds the old configuration
   and refuses a leader it cannot prove. It rejoins at the next election whose grants
   are a quorum of what it holds. When a second node fails before that, the group
