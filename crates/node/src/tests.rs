@@ -2077,12 +2077,14 @@ mod hub {
         assert_eq!(node.into_inner().unwrap().join(), Ok(()));
     }
 
+    /// `Node`'s derive is the one caller of `Queue`'s `Debug`, and `Queue` has no
+    /// `T: Debug` bound, so it cannot print its tasks.
     #[test]
     fn a_node_shows_its_queue_without_its_tasks() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let (_host, node) = node(&mut sim, 1);
         node.spawn(|_| async {});
-        assert!(format!("{node:?}").contains("queue: Queue }"), "{node:?}");
+        assert!(format!("{node:?}").contains("queue: Queue"), "{node:?}");
         node.stop();
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
