@@ -3396,12 +3396,9 @@ mod tests {
             let now = pair.now();
             let read = drain(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, (vec![b"a".to_vec()], false));
-            let mut reply = incoming.sender.expect("a two-way stream");
+            let reply = incoming.sender.expect("a two-way stream");
             let message = shard.block(b"b");
-            let written =
-                pair.server
-                    .endpoint
-                    .write(now, &mut reply, &mut Some(message));
+            let written = pair.server.endpoint.write(now, &reply, &mut Some(message));
             assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
         });
     }
