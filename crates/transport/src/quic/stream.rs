@@ -1405,7 +1405,7 @@ fn reset(inner: &mut noq_proto::Connection, id: StreamId, code: Code) {
 #[cfg(test)]
 mod tests {
     use std::iter;
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU32, NonZeroUsize};
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -4877,7 +4877,8 @@ mod tests {
                 for (sender, (_, waiting)) in senders.iter_mut().zip(&mut pending) {
                     if half(&mut pair.client, sender).claim.class != Class::Latest {
                         let now = pair.now();
-                        let flushed = pair.client.endpoint.write(now, sender, &mut None);
+                        let flushed =
+                            pair.client.endpoint.write(now, sender, &mut None);
                         assert!(flushed.is_ok(), "{flushed:?}");
                     }
                     send(pair, sender, waiting);
@@ -4923,14 +4924,33 @@ mod tests {
             assert_share(offer.read, bytes, 20);
         }
 
+        /// Streams for the link share test: at `MESSAGE_MAX`/16, the samples that its
+        /// `Latest` streams hold when QUIC gives credit are at least their share.
+        const STREAMS: u32 = 32;
+
         #[test]
         fn latest_that_offers_twice_its_share_shares_the_link_one_to_three() {
             for bytes in [MESSAGE_MAX / 4, MESSAGE_MAX / 8, MESSAGE_MAX / 16] {
                 testing::run(1, move |shard| {
-                    let mut pair = connected(shard);
-                    let classes = [Class::Latest, Class::Complete];
-                    let mut senders =
-                        classes.map(|class| open_sender(&mut pair, class));
+                    let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                    let sides = [
+                        (&mut pair.client, pair::CLIENT_KEY, pair::CLIENT_SHARD),
+                        (&mut pair.server, pair::SERVER_KEY, pair::SERVER_SHARD),
+                    ];
+                    for (side, private_key, index) in sides {
+                        let config = Config {
+                            streams_max: NonZeroU32::new(STREAMS).expect("not zero"),
+                            ..shard.config(private_key, Span::SECOND)
+                        };
+                        side.endpoint =
+                            Endpoint::new(&config, index, NonZeroUsize::MIN);
+                    }
+                    pair.dial(tls::public(&pair::SERVER_KEY));
+                    pair.run(RUN);
+                    let mut senders: Vec<Sender> = (1..STREAMS)
+                        .map(|_| open_sender(&mut pair, Class::Latest))
+                        .collect();
+                    senders.push(open_sender(&mut pair, Class::Complete));
                     let capacity = capacity(1 << 20);
                     assert_offered_share(
                         &mut pair,
