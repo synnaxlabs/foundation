@@ -144,9 +144,8 @@ impl Queue {
     /// Removes the read at `place` from the reads that wait for a block.
     fn remove(&mut self, now: Monotonic, place: Place) {
         let first = self.reads.keys().next() == Some(&place);
-        if self.reads.remove(&place).is_some() {
-            self.settle(now, first);
-        }
+        self.reads.remove(&place);
+        self.settle(now, first);
     }
 
     /// Ends the wait of each read of `connection`, and wakes each that waits for a
