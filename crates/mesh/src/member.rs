@@ -8,8 +8,8 @@ use types::node::PublicKey;
 use types::time::Span;
 
 use crate::bytes::{
-    ABSENT, PRESENT, put_count, put_key, put_name, take, take_count, take_key,
-    take_name, take_present,
+    ABSENT, PRESENT, put_channel, put_count, put_name, take, take_channel, take_name,
+    take_present, take_rising,
 };
 use crate::card;
 
@@ -34,18 +34,16 @@ impl Member {
         self.card.card().public_key
     }
 
-    /// Adds the one byte form of the record to `out`: the node key, the card, its
-    /// signature, the admission, a presence byte and then `ephemeral` in nanoseconds,
-    /// a count of status entries, and each entry in name order: the name behind a
-    /// length byte, then the channel key. Every number is 8 or 16 little-endian bytes.
+    /// Adds the one byte form of the record to `out`: the signed card, the admission,
+    /// a presence byte and then `ephemeral` as 8 little-endian bytes, signed, a count
+    /// of status entries as 8 little-endian bytes, and each entry in the byte order of
+    /// its name: the name behind a length byte, then the channel key.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+        expect(dead_code, reason = "the join answer of #336 is the first user")
     )]
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
-        put_key(self.card.key(), out);
-        self.card.card().encode(out);
-        out.extend(self.card.signature());
+        self.card.encode(out);
         out.extend(self.admission);
         match self.ephemeral {
             None => out.push(ABSENT),
@@ -55,9 +53,9 @@ impl Member {
             }
         }
         put_count(self.status.len(), out);
-        for (name, key) in &self.status {
+        for (name, &key) in &self.status {
             put_name(name, out);
-            out.extend(key.as_u128().to_le_bytes());
+            put_channel(key, out);
         }
     }
 
@@ -66,12 +64,10 @@ impl Member {
     /// `bytes` is then at no known place.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+        expect(dead_code, reason = "the join answer of #336 is the first user")
     )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
-        let key = take_key(bytes)?;
-        let card = card::Card::decode(bytes)?;
-        let card = card::Signed::check(key, card, take(bytes)?).ok()?;
+        let card = card::Signed::decode(bytes)?;
         let admission = take(bytes)?;
         let ephemeral = if take_present(bytes)? {
             Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?)))
@@ -79,17 +75,10 @@ impl Member {
             None
         };
         let mut status = BTreeMap::new();
-        for _ in 0..take_count(bytes)? {
-            let name = take_name(bytes)?;
-            if status
-                .last_key_value()
-                .is_some_and(|(last, _)| *last >= name)
-            {
-                return None;
-            }
-            let key = channel::Key::from_u128(u128::from_le_bytes(take(bytes)?));
-            status.insert(name, key);
-        }
+        take_rising(bytes, take_name, |name, bytes| {
+            status.insert(name, take_channel(bytes)?);
+            Some(())
+        })?;
         Some(Self {
             card,
             admission,

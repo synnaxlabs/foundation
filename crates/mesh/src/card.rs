@@ -6,7 +6,7 @@ use aws_lc_rs::signature::KeyPair;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
-use crate::bytes::{put_key, put_name, take, take_name};
+use crate::bytes::{put_key, put_name, take, take_key, take_name};
 use crate::ed25519;
 
 pub mod addresses;
@@ -115,6 +115,27 @@ impl Signed {
             card,
             signature,
         })
+    }
+
+    /// Adds the one byte form of the signed card to `out`: the node key as 16
+    /// little-endian bytes, the card, then the signature.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_key(self.key, out);
+        self.card.encode(out);
+        out.extend(self.signature);
+    }
+
+    /// Takes one signed card from the start of `bytes`. `None` when the bytes do not
+    /// start with what [`Signed::encode`] gives, or when the signature does not hold;
+    /// `bytes` is then at no known place.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        let key = take_key(bytes)?;
+        let card = Card::decode(bytes)?;
+        Self::check(key, card, take(bytes)?).ok()
     }
 
     /// The node that the card is signed for. The signature covers it.
