@@ -113,8 +113,7 @@ impl Mesh {
         };
         let group = Rc::new(RefCell::new(Group {
             raft: Raft::new(fixed, start)?,
-            members: config.members,
-            state: region::State::default(),
+            state: region::State::new(config.members),
             queues: BTreeMap::new(),
             stopped: Rc::default(),
             task: None,
@@ -146,7 +145,7 @@ impl Mesh {
     /// The member with `key` in this node's view of the region, or `None` when the
     /// region has no such member.
     pub(crate) fn member(&self, key: node::Key) -> Option<Member> {
-        self.group.borrow().members.get(&key).cloned()
+        self.group.borrow().state.member(key).cloned()
     }
 
     /// Gives the group `message`, which `peer` sent.
@@ -175,7 +174,8 @@ impl Mesh {
         let mut group = self.group.borrow_mut();
         group.running()?;
         let from = message.from;
-        if group.members.get(&from).map(Member::public_key) != Some(peer) {
+        let public_key = |key| group.state.member(key).map(Member::public_key);
+        if public_key(from) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
         let Voters { incoming, outgoing } = group.raft.voters();
@@ -183,7 +183,7 @@ impl Mesh {
         if request(&message.body) && !voter {
             return Err(Error::NotVoter { from });
         }
-        grant::check(&message, &group.members)?;
+        grant::check(&message, public_key)?;
         group.raft.step(message)?;
         group.wake();
         Ok(())
@@ -286,7 +286,6 @@ impl Drop for Watch {
 
 struct Group {
     raft: Raft,
-    members: BTreeMap<node::Key, Member>,
     state: region::State,
     queues: BTreeMap<node::Key, Queue>,
     // Why the group stopped. Each watch shares it, so the cause outlives the group.
@@ -1406,8 +1405,8 @@ mod tests {
     fn member_gives_the_record_of_a_member_and_none_for_another_node() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            assert_eq!(mesh.member(key(2)), Some(common::member(2, 2)));
-            assert_eq!(mesh.member(key(1)), Some(common::member(1, 1)));
+            assert_eq!(mesh.member(key(2)), Some(common::member(2)));
+            assert_eq!(mesh.member(key(1)), Some(common::member(1)));
             assert_eq!(mesh.member(key(9)), None);
         });
     }

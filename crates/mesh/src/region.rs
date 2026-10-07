@@ -6,14 +6,29 @@ use std::fmt;
 use types::{channel, node};
 
 use crate::bytes::put_key;
+use crate::member::Member;
 
-/// The region state that this node applied.
+/// The region state that this node holds: its members, and the homes that it applied.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct State {
+    members: BTreeMap<node::Key, Member>,
     homes: BTreeMap<channel::Key, node::Key>,
 }
 
 impl State {
+    /// A state with `members` and no home.
+    pub(crate) const fn new(members: BTreeMap<node::Key, Member>) -> Self {
+        Self {
+            members,
+            homes: BTreeMap::new(),
+        }
+    }
+
+    /// The member with `key`, or `None` when the region has no such member.
+    pub(crate) fn member(&self, key: node::Key) -> Option<&Member> {
+        self.members.get(&key)
+    }
+
     /// The home of `index`, or `None` when none is set.
     pub(crate) fn home(&self, index: channel::Key) -> Option<node::Key> {
         self.homes.get(&index).copied()

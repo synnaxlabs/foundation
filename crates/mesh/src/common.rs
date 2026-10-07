@@ -33,18 +33,17 @@ pub(crate) fn public(id: u8) -> PublicKey {
     PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
 }
 
-/// The record of node `id`, whose card holds and is signed with the key of node
-/// `holder`.
-pub(crate) fn member(id: u8, holder: u8) -> Member {
+/// The record of node `id`, with a card that the node signed.
+pub(crate) fn member(id: u8) -> Member {
     let card = Card {
         name: format!("plant.node{id}").parse().unwrap(),
-        public_key: public(holder),
+        public_key: public(id),
         seal_key: SealKey::new([9; 32]).unwrap(),
         addresses: Vec::new(),
         version: 1,
     };
     Member {
-        card: card::Signed::sign(key(id), card, &private(holder)),
+        card: card::Signed::sign(key(id), card, &private(id)),
         admission: [0; 64],
         expiry: None,
         status: BTreeMap::new(),
@@ -52,7 +51,7 @@ pub(crate) fn member(id: u8, holder: u8) -> Member {
 }
 
 pub(crate) fn members(ids: &[u8]) -> BTreeMap<node::Key, Member> {
-    ids.iter().map(|&id| (key(id), member(id, id))).collect()
+    ids.iter().map(|&id| (key(id), member(id))).collect()
 }
 
 /// A pool of 4 MiB.

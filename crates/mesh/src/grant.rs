@@ -2,7 +2,6 @@
 //! [`Claim`] with its node key: `foundation/grant/1`, the voter, the grant byte, the
 //! term, and the candidate.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
@@ -11,7 +10,6 @@ use types::node::{self, PrivateKey, PublicKey};
 
 use crate::bytes::{put_grant, put_key};
 use crate::ed25519;
-use crate::member::Member;
 
 const TAG: &[u8] = b"foundation/grant/1";
 
@@ -54,7 +52,8 @@ impl Signer {
 }
 
 /// Checks each signature that `message` carries against the public keys of the
-/// region's members.
+/// region's members. `public_key` gives the key of a member, and `None` for a node
+/// that is not one.
 ///
 /// # Errors
 ///
@@ -66,14 +65,14 @@ impl Signer {
 /// When a grant has no signature. A decoded message gives each grant one.
 pub(crate) fn check(
     message: &Message,
-    members: &BTreeMap<node::Key, Member>,
+    public_key: impl Fn(node::Key) -> Option<PublicKey>,
 ) -> Result<(), Error> {
     for (claim, signature) in message.claims() {
         let voter = claim.voter;
-        let member = members.get(&voter).ok_or(Error::NotMember { voter })?;
+        let public = public_key(voter).ok_or(Error::NotMember { voter })?;
         let Signature(bytes) =
             signature.expect("invariant: decode gives each grant a signature");
-        if !ed25519::holds(member.public_key(), &statement(&claim), &bytes) {
+        if !ed25519::holds(public, &statement(&claim), &bytes) {
             return Err(Error::Forged { voter });
         }
     }
@@ -121,7 +120,7 @@ fn statement(claim: &Claim) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use proptest::prelude::*;
     use proptest::sample::Index;
@@ -130,9 +129,19 @@ mod tests {
     use super::*;
     use crate::bytes::put_optional_proof;
     use crate::common::{
-        self, TERM, granted, key, member, members, message, reply_body, signature,
-        signer,
+        self, TERM, granted, key, message, public, reply_body, signature, signer,
     };
+
+    fn members(ids: &[u8]) -> BTreeMap<node::Key, PublicKey> {
+        ids.iter().map(|&id| (key(id), public(id))).collect()
+    }
+
+    fn check(
+        message: &Message,
+        members: &BTreeMap<node::Key, PublicKey>,
+    ) -> Result<(), Error> {
+        super::check(message, |voter| members.get(&voter).copied())
+    }
 
     fn proven() -> Message {
         common::proven(1, 2, Body::Heartbeat { commit: 0 })
@@ -273,7 +282,7 @@ mod tests {
     #[test]
     fn check_refuses_a_signature_of_another_voter_with_the_same_key() {
         let mut members = members(&[1, 2]);
-        members.insert(key(3), member(3, 2));
+        members.insert(key(3), public(2));
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::Forged { voter: key(3) });
@@ -331,7 +340,7 @@ mod tests {
     // message before `step`, as the driver does.
     struct Group {
         nodes: Vec<(Raft, Signer)>,
-        members: BTreeMap<node::Key, Member>,
+        members: BTreeMap<node::Key, PublicKey>,
         flight: Vec<Vec<u8>>,
         committed: Vec<Vec<Data>>,
     }
