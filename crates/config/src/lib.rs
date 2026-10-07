@@ -1324,30 +1324,39 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_placement_with_a_bad_home() {
-            let [mut documents] =
-                placement(&[("select", string("edge.*")), ("home", Kind::Integer(7))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.bad-name",
-                        at(0, 13),
-                        "a name is a string or a reference, not an integer",
-                        NAME_FIX,
-                    ),
-                    refused(
-                        "config.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
+        fn refuses_a_block_inside_a_placement_with_each_bad_attribute() {
+            let select = || ("select", string("edge.*"));
+            let cases = [
+                vec![],
+                vec![("home", string("edge"))],
+                vec![("select", Kind::Integer(7)), ("home", string("edge"))],
+                vec![select(), ("home", Kind::Integer(7))],
+                vec![select(), ("standby", Kind::Bool(true))],
+                vec![select(), ("copies", list(50, &[Kind::Integer(7)]))],
+                vec![select()],
+                vec![
+                    select(),
+                    ("home", string("n_1")),
+                    ("standby", string("n_1")),
+                ],
+            ];
+            for attributes in cases {
+                let Err(mut expected) = check(&placement(&attributes)) else {
+                    panic!("{attributes:?} is valid");
+                };
+                expected.push(refused(
+                    "config.unknown-block",
+                    at(0, 90),
+                    "the `placement` block cannot hold the `inner` block",
+                    "Remove it",
+                ));
+                let [mut documents] = placement(&attributes);
+                documents.blocks[0]
+                    .body
+                    .blocks
+                    .push(block(0, 90, "inner", &[], &[]));
+                assert_eq!(check(&[documents]), Err(expected), "{attributes:?}");
+            }
         }
     }
 
@@ -1561,29 +1570,34 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_retention_without_keep() {
-            let [mut documents] = retention(&[("select", string("edge.**"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "config.missing-attribute",
-                        at(0, 0),
-                        "the `retention` block has no `keep`",
-                        "Add a `keep` attribute with a span such as \"3d\"",
-                    ),
-                    refused(
-                        "config.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
+        fn refuses_a_block_inside_a_retention_with_each_bad_attribute() {
+            let select = || ("select", string("edge.**"));
+            let cases = [
+                vec![],
+                vec![("keep", string("3d"))],
+                vec![("select", Kind::Integer(7)), ("keep", string("3d"))],
+                vec![select()],
+                vec![select(), ("keep", Kind::Integer(3))],
+                vec![select(), ("keep", string("nope"))],
+                vec![select(), ("keep", string("-3d"))],
+            ];
+            for attributes in cases {
+                let Err(mut expected) = check(&retention(&attributes)) else {
+                    panic!("{attributes:?} is valid");
+                };
+                expected.push(refused(
+                    "config.unknown-block",
+                    at(0, 90),
+                    "the `retention` block cannot hold the `inner` block",
+                    "Remove it",
+                ));
+                let [mut documents] = retention(&attributes);
+                documents.blocks[0]
+                    .body
+                    .blocks
+                    .push(block(0, 90, "inner", &[], &[]));
+                assert_eq!(check(&[documents]), Err(expected), "{attributes:?}");
+            }
         }
     }
 }
