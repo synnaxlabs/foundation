@@ -1635,12 +1635,16 @@ How to read this record:
   `Ready::sign` gives each `None` the signature that the caller's closure makes for
   its claim, in the hard proof, in each message, and in each change this node wrote
   (in `entries`, in `committed`, and in each append), before the write and the
-  sends. The caller checks each pair that `Message::claims` gives before `step` and
+  sends. The caller checks each pair that `Raft::claims` gives before `step` and
   refuses a `None`: `step` keeps each signature as it came, so an unchecked `None`
-  of another voter reaches `Ready::sign`. `Message::claims` also gives each claim
-  of a change an append carries: its votes in the entry's term, then the change
-  (architect, #881,
-  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078).
+  of another voter reaches `Ready::sign`. `Raft::claims` gives the claims `step`
+  reads, in its order: the proof's grants, each link of the chain that `step` reads
+  (its votes in the link's term, then the change), each change an append carries
+  (its votes in the entry's term, then the change), then the sender's grant. It
+  gives no link of a message for a lower term or of a reply from a node that is not
+  a peer, which `step` does not check (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078 and
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -1650,17 +1654,29 @@ How to read this record:
   Every other message of a higher term needs a proof that fits its body (a `Vote`
   the sender's pre-votes, a `Heartbeat` or `Append` the sender's votes, a reply any
   proof of the term) whose voters are a quorum of this node's configuration in
-  force or last committed; else `Error::Unproven`, and nothing changes or is sent. A
-  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of
-  the term joins the proof its candidate carries. The known gap: a voter that was
-  down through a change holds the old configuration and refuses a leader whose votes
-  are no quorum of it until an election whose grants are. When a second node fails
-  first, the group waits for an operator, who wipes the voter and starts it with no
-  configuration (a node with no configuration proves anything). The chain of proofs over
-  configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
-  pins both, and the random runs skip exactly such a voter until #881. The first PR of
-  #881 gives each configuration entry the votes and the signature of the leader that
-  wrote it; the chain and its check are the second PR (architect, #881,
+  force or last committed, or of a configuration that the message's chain proves;
+  else `Error::Unproven`, and nothing changes or is sent. A leader claim in this
+  node's own term follows RAFT LOG. A late pre-vote or vote of the term joins the
+  proof its candidate carries. The chain: a message with a proof carries
+  `Message.chain`, the configuration entries of the sender's log below the message's
+  term, oldest first, each a `Link` (its position and its `Change`). A node whose
+  configuration the proof is no quorum of reads the chain from its first link above
+  its commit index, and stops at the first link whose configuration the proof is a
+  quorum of. Each link it reads must have a term below the message's, rise from the
+  position at the commit index or the last link read (the index rises, the term does
+  not fall), hold `Vote` votes, and hold votes of a quorum of the configuration it
+  trusts: the last link read of a lower term, else the node's last committed
+  configuration entry of a lower term, else the configuration before its entries.
+  The node keeps nothing from the chain: the leader's appends bring the entries. A
+  voter that was down through a change so follows the leader that the change elected,
+  and helps elect the next one (`raft/tests/it/behind.rs`). A node that took its
+  term through another node's chain answers a stale message with its hard proof and
+  its own chain, which can fall short of the sender's configuration: the sender then
+  stays in its term until the leader's chain moves it, and the random runs check that
+  a leader's heartbeat or append is never unproven (builder, #881, PR 2). The chain
+  excludes a leader that a change the node missed made a voter (#1096). The log
+  lists its configuration entries below a term with one forward scan; an index of
+  them waits for a measured scan on a log near its memory bound (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
   The advisor required a proof on every message and on each refusal, signatures
   only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks
@@ -1756,9 +1772,9 @@ How to read this record:
   `votes` of the leader that wrote the entry (its election proof as it held it at
   the write: a vote that arrives later joins the leader's proof, not an entry it
   already wrote), and the leader's `signature` of the entry (`None` until
-  `Ready::sign`). After the second PR of #881 (the chain), a node that missed the
-  change checks the entry with them before it counts a later proof against it, and
-  refuses a change whose votes are not `Vote` (architect, #881,
+  `Ready::sign`). A node that missed the change checks the entry with them as a link
+  of a chain before it counts a later proof against it, and refuses a link whose
+  votes are not `Vote` (RAFT SURFACE; architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
   A node uses the latest `Voters` entry in its log from the time it writes it;
   `Start.voters` is the configuration before `Start.entries`. A node that joins
@@ -1835,7 +1851,12 @@ How to read this record:
   the term, then the vote, the leader, and the proof, each behind a presence byte; the
   proof is a grant byte, the candidate, a count of voters, then each voter's key (16
   bytes) and signature (64 bytes) in rising key order (#750). A `raft` message on the
-  wire carries its proof in the same form, after the term and before the body. A
+  wire carries its proof in the same form, after the term and before the body, then
+  its chain: an 8-byte count of links, always present, then each link's position (8
+  bytes of term, 8 of index) and its change in the entry form below, from the
+  incoming keys to the signature. A link of a joint entry with 3 incoming, 3
+  outgoing, and 3 signed votes is 457 bytes (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579). A
   granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
   is the byte 0 alone. An entry is its term and index (8 bytes each), then a data
   byte: empty (0) alone; bytes (1), an 8-byte length, and the bytes; voters (2), the
@@ -1939,10 +1960,13 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each claim holds (`Error::Claim`). So a node with a
-  configuration refuses a leader that is not a voter of that configuration, when a
-  change that the node does not hold made that leader a voter. The node does not get the
-  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
+  (`Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
+  `Raft::claims` gives, so a link that the node does not read is not checked. So a
+  node with a configuration refuses a leader that is not a voter of that
+  configuration, when a change that the node does not hold made that leader a voter.
+  The node does not get the log from that leader (a known defect, #1096, that #1107
+  fixes). A leader that stays a voter through the change passes the check, and its
+  chain proves the change (RAFT SURFACE). A node with no
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242, 2026-10-07T04:20:40Z:

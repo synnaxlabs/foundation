@@ -159,16 +159,17 @@ state on `main`.
   `raft` counts the keys of a proof, and `mesh::claim` checks each signature
   against the voter's public key. Until the driver (#471) runs that check before
   `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
-- A voter that was down through a configuration change holds the old configuration
-  and refuses a leader it cannot prove. It rejoins at the next election whose grants
-  are a quorum of what it holds. When a second node fails before that, the group
-  waits for an operator: wipe the voter's state and start it with no configuration.
-  The chain of proofs over configuration entries closes it (#881, a release
-  blocker). Its first PR gives each configuration entry the votes and the signature
-  of the leader that wrote it (`raft::Change`); the chain and its check are the
-  second PR (architect, #881,
+- A voter that was down through a configuration change holds the old configuration.
+  The new leader's message carries the chain of configuration entries below its
+  term, each with the votes and the signature of the leader that wrote it
+  (`raft::Change`). The voter reads the chain up to the entry whose configuration
+  the leader's votes are a quorum of, checks each signature it reads, and follows
+  the leader; it keeps nothing from the chain. A forged link, or one whose votes are
+  no quorum of the configuration before it, is refused, and the voter does not
+  change (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
-  `raft/tests/it/behind.rs` pins both.
+  `raft/tests/it/behind.rs` and `mesh::claim` pin it. The chain does not cover a
+  leader that the missed change made a voter (#1096).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
