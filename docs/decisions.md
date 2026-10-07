@@ -610,7 +610,7 @@ How to read this record:
   bytes there, which `replica` stores and copy mode (X43) sends as they are (decided by
   the architect, #1064:
   https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642, worded in
-  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031177988). The
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031226370). The
   padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
   1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
   body at its `(tag, end)` pairs and panics on ends that do not fit. Copy mode runs
