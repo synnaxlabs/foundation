@@ -1772,12 +1772,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
   https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
   puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
-  the end of the record to its start, and then syncs one time.
-  Each block but the one at the end of the record ends at a multiple of the block size
-  in the file, so no two blocks share a sector. The block with the header is the last
-  that it writes, so a write that the pool stops (`Error::Pool`) leaves no header: the
-  log holds what it held, and the bytes of the stopped write stay after its end. Decided
-  by `laptop.architect` (2026-10-07T09:12:02Z):
+  the end of the record to its start, and then syncs one time. Each block but the one at
+  the end of the record ends at a multiple of the block size in the file, so no two
+  blocks share a sector. The block with the header is the last that it writes, so a
+  write that the pool stops (`Error::Pool`) leaves no header: the log holds what it
+  held, and the bytes of the stopped write stay after its end. Decided by
+  `laptop.architect` (2026-10-07T09:12:02Z):
   https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034784720. So a pool
   that opens holds each write. A write that a file call fails, or that its caller drops,
   poisons the log (`Error::Poisoned`), and a write that the pool stops does not. The
@@ -2127,6 +2127,13 @@ How to read this record:
   (precedence in X22). Amended: the `home` field restores the recorded intent
   ("placement decides home", r8 Q8), which the bootstrap list left out (architect,
   #1150, https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+  `config` refuses a node with two roles with `config.role-overlap` at the last value in
+  source order that names it. A `copies` list is one value (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151). A
+  placement that names no node is `config.empty-placement`, at the `copies` value when
+  the block has one, else at the block. `copies = []` next to a home or a standby is
+  valid (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037713864).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.

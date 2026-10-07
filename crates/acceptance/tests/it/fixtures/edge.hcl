@@ -10,3 +10,7 @@ channel "edge.value" {
   data_type = "f64"
   index = "edge.time"
 }
+placement "edge" {
+  select = "edge.*"
+  home = "edge"
+}
