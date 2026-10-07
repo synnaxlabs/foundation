@@ -13,7 +13,7 @@ const KEYS: [&str; 3] = ["select", "disk", "pool"];
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
-    let select = found.select(block, "nodes that it sets");
+    let select = found.select(block, "nodes that it sets", "site_a.*");
     let disk = found.attribute(block, "disk", read::size);
     let pool = found.attribute(block, "pool", read::size);
     let (Ok(()), Ok(select), Ok(disk), Ok(pool)) = (unknown, select, disk, pool) else {
