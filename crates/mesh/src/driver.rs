@@ -1252,19 +1252,19 @@ mod tests {
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
-            let last = sim
+            let end = sim
                 .run_on(&node, |node, _| async move {
                     let files = node.files();
                     let (_, stored) =
                         Log::open(files, LOG.into(), pool()).await.unwrap();
-                    let last = stored.entries.last()?;
-                    let Data::Bytes(bytes) = &last.data else {
+                    let entry = stored.entries.last()?;
+                    let Data::Bytes(bytes) = &entry.data else {
                         return None;
                     };
                     Change::decode(bytes).ok()
                 })
                 .unwrap();
-            if last != Some(home(3)) {
+            if end != Some(home(3)) {
                 lost.push(run);
             }
         }
