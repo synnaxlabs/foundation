@@ -27,8 +27,9 @@
 //! optional_key  := 0 | 1 key
 //! ```
 //!
-//! A `text` is a name. `document` is the canonical encoding of the connector config.
-//! The `names` of a list are in strict name order. A region has at least one voter.
+//! A `text` is a name, except a `unit`, which is the text of a [`Unit`]. `document`
+//! is the canonical encoding of the connector config. The `names` of a list are in
+//! strict name order. A region has at least one voter.
 //!
 //! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
 //! otherwise. The stored text has no `!`. Patterns keep the order and form written,
@@ -44,8 +45,7 @@
 //! A compression `mode` is 0 auto, 1 raw, or 2 max.
 //!
 //! A `data_type` is a scalar, an array, a list, a string, bytes, or quality, in that
-//! order from 0. A `scalar` numbers the variants of [`Scalar`] in order from 0. The
-//! `unit` of a data channel is the text of a [`Unit`].
+//! order from 0. A `scalar` numbers the variants of [`Scalar`] in order from 0.
 
 #![deny(
     clippy::indexing_slicing,
@@ -59,7 +59,7 @@ use std::{fmt, str};
 use document::encoding;
 use types::authority::Authority;
 use types::byte;
-use types::channel as key;
+use types::channel::Key;
 use types::name::{self, Name, Selector, Written};
 use types::sample::{self, Scalar};
 
@@ -171,9 +171,9 @@ impl Definition {
                     }
                 }
             }
-            Self::Channel(channel) => {
+            Self::Channel(definition) => {
                 out.push(CHANNEL);
-                put_channel(&mut out, channel);
+                channel(&mut out, definition);
             }
         }
         out
@@ -227,7 +227,7 @@ const fn mode_byte(mode: Mode) -> u8 {
     }
 }
 
-/// Every scalar, in the order of their bytes.
+/// Every scalar, in the order of their codes.
 const SCALARS: [Scalar; 14] = [
     Scalar::Bool,
     Scalar::I8,
@@ -252,28 +252,37 @@ const STRING: u8 = 3;
 const BYTES: u8 = 4;
 const QUALITY: u8 = 5;
 
-fn scalar(out: &mut Vec<u8>, scalar: Scalar) {
-    let at = SCALARS
-        .iter()
-        .position(|s| *s == scalar)
-        .expect("invariant: SCALARS holds every scalar");
-    out.push(u8::try_from(at).expect("invariant: SCALARS has fewer than 256 items"));
+/// The code of a scalar: its place in [`SCALARS`].
+const fn code(scalar: Scalar) -> u8 {
+    match scalar {
+        Scalar::Bool => 0,
+        Scalar::I8 => 1,
+        Scalar::I16 => 2,
+        Scalar::I32 => 3,
+        Scalar::I64 => 4,
+        Scalar::U8 => 5,
+        Scalar::U16 => 6,
+        Scalar::U32 => 7,
+        Scalar::U64 => 8,
+        Scalar::F32 => 9,
+        Scalar::F64 => 10,
+        Scalar::Stamp => 11,
+        Scalar::Span => 12,
+        Scalar::Uuid => 13,
+    }
 }
 
 fn data_type(out: &mut Vec<u8>, data_type: DataType) {
     match data_type {
         DataType::Sample(sample::Type::Scalar(element)) => {
-            out.push(SCALAR);
-            scalar(out, element);
+            out.extend_from_slice(&[SCALAR, code(element)]);
         }
         DataType::Sample(sample::Type::Array { element, len }) => {
-            out.push(ARRAY);
-            scalar(out, element);
+            out.extend_from_slice(&[ARRAY, code(element)]);
             out.extend_from_slice(&len.to_le_bytes());
         }
         DataType::Sample(sample::Type::List { element, max }) => {
-            out.push(LIST);
-            scalar(out, element);
+            out.extend_from_slice(&[LIST, code(element)]);
             out.extend_from_slice(&max.to_le_bytes());
         }
         DataType::Sample(sample::Type::String) => out.push(STRING),
@@ -282,9 +291,9 @@ fn data_type(out: &mut Vec<u8>, data_type: DataType) {
     }
 }
 
-fn put_channel(out: &mut Vec<u8>, channel: &Channel) {
-    put_key(out, channel.key);
-    match &channel.kind {
+fn channel(out: &mut Vec<u8>, definition: &Channel) {
+    key(out, definition.key);
+    match &definition.kind {
         channel::Kind::Index { error, control } => {
             out.push(0);
             optional_key(out, *error);
@@ -292,7 +301,7 @@ fn put_channel(out: &mut Vec<u8>, channel: &Channel) {
         }
         channel::Kind::Data(data) => {
             out.push(1);
-            put_key(out, data.index());
+            key(out, data.index());
             optional_key(out, data.quality());
             data_type(out, data.data_type());
             match data.unit() {
@@ -306,16 +315,16 @@ fn put_channel(out: &mut Vec<u8>, channel: &Channel) {
     }
 }
 
-fn put_key(out: &mut Vec<u8>, key: key::Key) {
+fn key(out: &mut Vec<u8>, key: Key) {
     out.extend_from_slice(&key.as_u128().to_le_bytes());
 }
 
-fn optional_key(out: &mut Vec<u8>, key: Option<key::Key>) {
-    match key {
+fn optional_key(out: &mut Vec<u8>, found: Option<Key>) {
+    match found {
         None => out.push(0),
-        Some(key) => {
+        Some(found) => {
             out.push(1);
-            put_key(out, key);
+            key(out, found);
         }
     }
 }
@@ -392,17 +401,17 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    fn key(&mut self) -> Result<key::Key, Error> {
+    fn key(&mut self) -> Result<Key, Error> {
         let at = self.at();
         let (&bytes, rest) = self
             .rest
             .split_first_chunk()
             .ok_or(Error::Truncated { at })?;
         self.rest = rest;
-        Ok(key::Key::from_u128(u128::from_le_bytes(bytes)))
+        Ok(Key::from_u128(u128::from_le_bytes(bytes)))
     }
 
-    fn optional_key(&mut self) -> Result<Option<key::Key>, Error> {
+    fn optional_key(&mut self) -> Result<Option<Key>, Error> {
         Ok(if self.flag()? {
             Some(self.key()?)
         } else {

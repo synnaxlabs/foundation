@@ -716,8 +716,15 @@ fn refuses_peers_out_of_order() {
     assert_eq!(Definition::decode(&bytes), Err(Error::Order { at }));
 }
 
-fn key(n: u128) -> key::Key {
-    key::Key::from_u128(n)
+fn key(n: u128) -> Key {
+    Key::from_u128(n)
+}
+
+#[test]
+fn codes_each_scalar_by_its_place() {
+    for (at, scalar) in SCALARS.into_iter().enumerate() {
+        assert_eq!(usize::from(code(scalar)), at);
+    }
 }
 
 /// The bytes of a channel, from its parts after the key and the kind byte.
@@ -1012,7 +1019,7 @@ fn data_type_strategy() -> impl Strategy<Value = DataType> {
 }
 
 fn channel_strategy() -> impl Strategy<Value = Definition> {
-    let key = any::<u128>().prop_map(key::Key::from_u128);
+    let key = any::<u128>().prop_map(Key::from_u128);
     let optional = prop::option::of(key.clone());
     let index = (optional.clone(), optional.clone())
         .prop_map(|(error, control)| channel::Kind::Index { error, control });
