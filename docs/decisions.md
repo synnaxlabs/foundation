@@ -642,7 +642,11 @@ How to read this record:
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
   size is checked only when the bodies are appended, after the handoffs: a frame whose
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
-  is known. Decided by the `write-path` builder (#191).
+  is known. Decided by the `write-path` builder (#191). After a failed commit, the home
+  gives `Disk` before it checks the size, so a frame that no record of the ring or no
+  block of the pool holds gets `Disk`, not `Large`, on either path (#1260). Decided by
+  `laptop.architect` (2026-10-07T09:21:07Z):
+  https://github.com/synnaxlabs/foundation/issues/1260#issuecomment-6034929252.
 - **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
   `clock::Reader` in its `Config`, in each call that needs them. One
   `clock::Reader::now` gives both at one instant, so a control lease and a stamp check
@@ -1290,11 +1294,12 @@ How to read this record:
   so neither class can take the share through the budget (#819). Lost: a connection per
   class, because four handshakes and four congestion controllers compete on one path
   (#55). Settled by the advisor and the coordinator under the person's delegation
-  (#789). A node resets a stream with the stop's code when the stop arrives. A peer
-  breaks the protocol when it sends another class byte, ends a stream inside a message,
-  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
-  The node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`.
+  (#789). A node resets a stream with the stop's code when the stop arrives, and frees
+  the stream's room in the send budget and its turn (#1308). A peer breaks the protocol
+  when it sends another class byte, ends a stream inside a message, sends a message over
+  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
+  the connection with application code 2^32 and the reason as text, and the caller gets
+  `Error::Broken`.
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A

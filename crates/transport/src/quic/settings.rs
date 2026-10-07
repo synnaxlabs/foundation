@@ -328,8 +328,8 @@ mod tests {
         let (now, key) = (pair.now(), pair.client.key.expect("a connection"));
         let client = &mut pair.client.endpoint;
         let opened = client.open_sender(now, key, Class::Command);
-        let mut sender = opened.expect("a stream");
-        let written = client.write(now, &mut sender, shard.block(b"ping"));
+        let sender = opened.expect("a stream");
+        let written = client.write(now, &sender, &mut Some(shard.block(b"ping")));
         assert_eq!(written, Ok(Poll::Ready(())));
         pair.run(Duration::from_millis(100));
         let (now, key) = (pair.now(), pair.server.key.expect("a connection"));
