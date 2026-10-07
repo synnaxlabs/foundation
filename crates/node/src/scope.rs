@@ -31,7 +31,7 @@ impl Scope {
     pub(crate) fn spawn(&mut self, future: Task) {
         let slot = Rc::new(RefCell::new(Running {
             future,
-            waker: None,
+            waker: Waker::noop().clone(),
         }));
         let run = Spawned {
             slot: Rc::downgrade(&slot),
@@ -51,7 +51,10 @@ impl Drop for Scope {
         // task ends when that poll returns.
         let wakers: Vec<Waker> = running
             .values()
-            .filter_map(|slot| slot.try_borrow_mut().ok()?.waker.take())
+            .filter_map(|slot| {
+                let mut running = slot.try_borrow_mut().ok()?;
+                Some(mem::replace(&mut running.waker, Waker::noop().clone()))
+            })
             .collect();
         // A future's drop may do anything, so it runs with no borrow held.
         drop(running);
@@ -67,7 +70,7 @@ type Slot = Rc<RefCell<Running>>;
 struct Running {
     future: Task,
     /// The waker of the future's task at its last poll.
-    waker: Option<Waker>,
+    waker: Waker,
 }
 
 /// What the executor holds of one running future.
@@ -86,10 +89,7 @@ impl Spawned {
         };
         let polled = {
             let mut running = slot.borrow_mut();
-            match &running.waker {
-                Some(waker) if waker.will_wake(cx.waker()) => {}
-                _ => running.waker = Some(cx.waker().clone()),
-            }
+            running.waker.clone_from(cx.waker());
             running.future.as_mut().poll(cx)
         };
         let Some(running) = self.running.upgrade() else {
@@ -184,6 +184,26 @@ mod tests {
         assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
         assert_eq!(Rc::strong_count(&held), 1);
         drop(scope);
+    }
+
+    #[test]
+    fn a_dropped_scope_wakes_the_waker_of_the_last_poll() {
+        let (mut scope, queued) = scope();
+        scope.spawn(Box::pin(pending()));
+        let mut task = take(&queued);
+        let (first, first_woken) = waker();
+        assert_eq!(
+            task.as_mut().poll(&mut Context::from_waker(&first)),
+            Poll::Pending
+        );
+        let (last, last_woken) = waker();
+        assert_eq!(
+            task.as_mut().poll(&mut Context::from_waker(&last)),
+            Poll::Pending
+        );
+        drop(scope);
+        assert_eq!(first_woken.0.load(Ordering::Relaxed), 0);
+        assert_eq!(last_woken.0.load(Ordering::Relaxed), 1);
     }
 
     /// Drops the scope in `owner` in its first poll, then gives `then`.
