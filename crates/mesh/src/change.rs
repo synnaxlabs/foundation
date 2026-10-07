@@ -175,7 +175,7 @@ impl From<Unknown> for Malformed {
 
 /// Bytes that are not a change of a kind that this build knows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unknown {
+pub enum Unknown {
     /// The bytes are empty.
     Empty,
     /// The kind byte names no change.

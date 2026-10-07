@@ -20,7 +20,7 @@ pub mod card;
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod change;
+pub mod change;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
@@ -39,16 +39,12 @@ mod ed25519;
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod entry;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the streams of #471 are the first user")
-)]
 mod error;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod log;
+pub mod log;
 mod member;
 #[cfg_attr(
     not(test),
@@ -65,4 +61,6 @@ pub mod status;
 pub mod testing;
 pub mod ticket;
 
+pub use driver::{Mesh, Watch};
+pub use error::Stopped;
 pub use member::Member;

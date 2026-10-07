@@ -128,7 +128,7 @@ impl From<transport::Error> for Error {
 
 /// Why a group stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Stopped {
+pub enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
     /// The committed change at `at` has 0 bytes or a kind that this build does not
@@ -157,3 +157,5 @@ impl fmt::Display for Stopped {
         }
     }
 }
+
+impl std::error::Error for Stopped {}
