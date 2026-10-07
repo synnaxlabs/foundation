@@ -503,7 +503,6 @@ impl Shard {
         slot: Slot,
         limit_bytes: u64,
     ) -> Result<reader::complete::Key, Error> {
-        // Its close reads mesh time.
         if self.now().is_none() {
             return Err(Error::Unsynced);
         }
@@ -524,8 +523,10 @@ impl Shard {
     ///
     /// If the shard does not carry `slot`, in a call that gives no error.
     pub fn open_latest(&mut self, slot: Slot) -> Result<reader::Key, Error> {
-        let (_, mesh) = self.now().ok_or(Error::Unsynced)?;
-        let session = self.readers.open_latest(self.place(slot), mesh).into();
+        if self.now().is_none() {
+            return Err(Error::Unsynced);
+        }
+        let session = self.readers.open_latest(self.place(slot)).into();
         Ok(reader::Key { slot, session })
     }
 
@@ -559,8 +560,7 @@ impl Shard {
     ///
     /// If the shard never gave `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
-        let (_, mesh) = self.time();
-        self.readers.close(self.place(key.slot), key.session, mesh);
+        self.readers.close(self.place(key.slot), key.session);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
