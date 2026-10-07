@@ -829,24 +829,37 @@ mod tests {
     mod receive {
         use super::*;
 
+        fn requests() -> [Body; 4] {
+            let last = Position::default();
+            [
+                Body::PreVote { last },
+                Body::Vote { last },
+                Body::Heartbeat { commit: 0 },
+                Body::Append {
+                    prev: last,
+                    entries: Vec::new(),
+                    commit: 0,
+                },
+            ]
+        }
+
+        fn replies() -> [Body; 5] {
+            let answer = Answer::Refused;
+            [
+                Body::PreVoteReply { answer },
+                Body::VoteReply { answer },
+                Body::HeartbeatReply,
+                Body::AppendReply { last: 0 },
+                Body::AppendReject { hint: 0 },
+            ]
+        }
+
         #[test]
         fn refuses_a_request_from_a_member_that_is_not_a_voter() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
-                let last = Position::default();
-                let entries = Vec::new();
-                let requests = [
-                    Body::PreVote { last },
-                    Body::Vote { last },
-                    Body::Heartbeat { commit: 0 },
-                    Body::Append {
-                        prev: last,
-                        entries,
-                        commit: 0,
-                    },
-                ];
                 let refused = Error::NotVoter { from: key(4) };
-                for body in requests {
+                for body in requests() {
                     let received = mesh.receive(public(4), message(4, 1, body));
                     assert_eq!(received, Err(refused.clone()));
                 }
@@ -864,15 +877,7 @@ mod tests {
         fn takes_a_reply_from_a_member_that_is_not_a_voter() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
-                let answer = Answer::Refused;
-                let replies = [
-                    Body::PreVoteReply { answer },
-                    Body::VoteReply { answer },
-                    Body::HeartbeatReply,
-                    Body::AppendReply { last: 0 },
-                    Body::AppendReject { hint: 0 },
-                ];
-                for body in replies {
+                for body in replies() {
                     let received = mesh.receive(public(4), message(4, 1, body));
                     assert_eq!(received, Ok(()));
                 }
@@ -906,12 +911,13 @@ mod tests {
                     spoofed.to_string(),
                     format!("a message names node {} {text}", key(2))
                 );
-                for body in [Body::Heartbeat { commit: 0 }, Body::HeartbeatReply] {
-                    let received = mesh.receive(public(9), message(9, 1, body));
+                for body in requests().into_iter().chain(replies()) {
+                    let stranger = message(9, 1, body.clone());
+                    let received = mesh.receive(public(9), stranger);
                     assert_eq!(received, Err(Error::Spoofed { from: key(9) }));
+                    let received = mesh.receive(public(3), message(2, 1, body));
+                    assert_eq!(received, Err(spoofed.clone()));
                 }
-                let reply = message(2, 1, Body::AppendReply { last: 0 });
-                assert_eq!(mesh.receive(public(3), reply), Err(spoofed.clone()));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
                 assert_eq!(term(&mesh), Term(0));
@@ -1216,6 +1222,53 @@ mod tests {
             let reply = message(2, 1, Body::HeartbeatReply);
             assert_eq!(mesh.receive(public(2), reply), Err(stopped));
         });
+    }
+
+    // A known defect (#1066): an open after a failed sync loses the records that it
+    // writes next. No run may lose the home.
+    #[test]
+    fn a_power_cut_loses_a_home_after_a_failed_sync_and_a_new_open() {
+        let mut lost = Vec::new();
+        for run in 0..64 {
+            let mut sim = Sim::new(sim::Config {
+                seed: run,
+                ..sim::Config::default()
+            });
+            let node = sim.node(sim::node::Config::default());
+            sim.run_on(&node, |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                lead(&mesh, &node.clock(), home(1)).await;
+                assert_eq!(watch.next().await, Ok(None));
+                assert_eq!(watch.next().await, Ok(Some(key(1))));
+                let stopped = fail_sync(&node);
+                mesh.propose(home(2)).unwrap();
+                assert_eq!(watch.next().await, Err(stopped));
+                drop(mesh);
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                lead(&mesh, &node.clock(), home(3)).await;
+                while watch.next().await.unwrap() != Some(key(3)) {}
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            let last = sim
+                .run_on(&node, |node, _| async move {
+                    let files = node.files();
+                    let (_, stored) =
+                        Log::open(files, LOG.into(), pool()).await.unwrap();
+                    let last = stored.entries.last()?;
+                    let Data::Bytes(bytes) = &last.data else {
+                        return None;
+                    };
+                    Change::decode(bytes).ok()
+                })
+                .unwrap();
+            if last != Some(home(3)) {
+                lost.push(run);
+            }
+        }
+        assert_eq!(lost, [6, 13, 39, 43, 46, 50, 52]);
     }
 
     #[test]
