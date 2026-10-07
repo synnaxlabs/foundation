@@ -2585,7 +2585,9 @@ How to read this record:
   `shards-+3`, `shards-0`, `shard-<usize::MAX>`) is one the claim does not know, and
   it ignores it, because no node can write it. The claim reads names only, so a file
   with such a name counts as a directory would. Decided by the architect, #1214:
-  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887. With
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887, as on
+  #1110 for `shards-0` and `shard-<usize::MAX>`:
+  https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. With
   no record, rings up to `shard-<k>` are a record of `k + 1`, so a data directory
   whose record a copy dropped is checked too; a crash cannot leave a ring with no
   record. Each start syncs the data directory before `shard-0`, also when the record
