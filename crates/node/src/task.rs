@@ -121,6 +121,10 @@ impl Inbox<Task> {
             }
             while let Poll::Ready(given) = self.poll(cx) {
                 for task in given {
+                    // A task body can stop the node.
+                    if stop.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(());
+                    }
                     let slot = Rc::new(RefCell::new(task(hub.clone())));
                     let run = Spawned {
                         slot: Rc::downgrade(&slot),

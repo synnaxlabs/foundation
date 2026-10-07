@@ -2036,4 +2036,44 @@ mod hub {
         };
         assert_eq!(node.join(), Err(Error::Panicked(shard)));
     }
+
+    /// A task given after a task whose body stops the node is dropped uncalled.
+    #[test]
+    fn a_task_given_after_a_body_that_stops_the_node_is_dropped_uncalled() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (_host, node) = node(&mut sim, 2);
+        let node = Arc::new(Mutex::new(node));
+        let stopper = Arc::clone(&node);
+        node.lock().unwrap().spawn(move |_| {
+            stopper.lock().unwrap().stop();
+            async {}
+        });
+        let after = probe(&node.lock().unwrap());
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(fate(&after), Fate::Dropped);
+        let node = Arc::try_unwrap(node).expect("one owner");
+        assert_eq!(node.into_inner().unwrap().join(), Ok(()));
+    }
+
+    /// A task that a body gives after it stops the node is dropped uncalled.
+    #[test]
+    fn a_task_given_by_a_body_after_it_stops_the_node_is_dropped_uncalled() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (_host, node) = node(&mut sim, 2);
+        let node = Arc::new(Mutex::new(node));
+        let stopper = Arc::clone(&node);
+        let after = Arc::new(Mutex::new(None));
+        let out = Arc::clone(&after);
+        node.lock().unwrap().spawn(move |_| {
+            let node = stopper.lock().unwrap();
+            node.stop();
+            *out.lock().unwrap() = Some(probe(&node));
+            async {}
+        });
+        assert_eq!(sim.run(), Ok(()));
+        let after = after.lock().unwrap().take().expect("the body ran");
+        assert_eq!(fate(&after), Fate::Dropped);
+        let node = Arc::try_unwrap(node).expect("one owner");
+        assert_eq!(node.into_inner().unwrap().join(), Ok(()));
+    }
 }
