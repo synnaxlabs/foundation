@@ -328,16 +328,43 @@ impl Disk {
             }
         }
         for inode in old.into_values().filter(|inode| !new.contains(inode)) {
-            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
-                file.durable = false;
-                self.collect(inode);
-            }
+            self.forget(inode);
         }
         Ok(())
     }
 
-    /// Makes the entry at `path` durable. Only a power cut follows it, which frees a
-    /// file that the old durable entry of the name kept.
+    /// Ends the durable entry that kept `inode`, and frees it when it is a file that
+    /// nothing else keeps.
+    fn forget(&mut self, inode: u64) {
+        if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+            file.durable = false;
+            self.collect(inode);
+        }
+    }
+
+    /// Whether a [`Mode::Create`] open of `path` makes its file: `path` names no
+    /// entry in a directory, or a file with no bytes.
+    pub(crate) fn makes(&self, path: &Path) -> bool {
+        let segments = segments(path);
+        let Some((name, parent)) = segments.split_last().filter(|_| !slashed(path))
+        else {
+            return false;
+        };
+        let Ok(key) = self.dir(parent) else {
+            return false;
+        };
+        let Inode::Dir(dir) = &self.inodes[&key] else {
+            unreachable!("invariant: inode {key} is a directory");
+        };
+        match dir.entries.get(*name).map(|inode| &self.inodes[inode]) {
+            None => true,
+            Some(Inode::File(file)) => file.len == 0,
+            Some(Inode::Dir(_)) => false,
+        }
+    }
+
+    /// Makes the entry at `path` durable, and frees the file that its old durable entry
+    /// kept when nothing else keeps it, as [`Disk::sync_dir`] does.
     pub(crate) fn commit(&mut self, path: &Path) {
         let segments = segments(path);
         let (name, parent) = segments.split_last().expect("invariant: a file path");
@@ -346,8 +373,11 @@ impl Disk {
         };
         let dir = self.dir_mut(key);
         let inode = dir.entries[*name];
-        dir.durable.insert(name.into(), inode);
+        let old = dir.durable.insert(name.into(), inode);
         self.file(inode).durable = true;
+        if let Some(old) = old.filter(|&old| old != inode) {
+            self.forget(old);
+        }
     }
 
     /// Cuts the power, as [`Disk::crash`] says.

@@ -1932,17 +1932,23 @@ mod tests {
     }
 
     /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
-    /// and no record, then cuts the power.
+    /// and no record, then cuts the power. With no bytes, the cut is in its create.
     fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
         sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len };
-            drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            if len > 0 {
+                let mode = Mode::Create { len };
+                drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            }
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        if len == 0 {
+            create_with_no_bytes(sim, node, &file("log-1"));
+        } else {
+            sim.crash(node, Crash::Power);
+        }
     }
 
     /// The files of a log after `create_spare`.
@@ -2025,8 +2031,18 @@ mod tests {
                     opened.ok().map(|file| file.len())
                 })
                 .unwrap();
-            if len == Some(0) {
-                return;
+            match len {
+                Some(0) => return,
+                Some(_) => {
+                    let whole = path.to_owned();
+                    sim.run_on(node, move |node, _| async move {
+                        node.files().remove(&whole).await.unwrap();
+                        let dir = whole.parent().expect("a file in a directory");
+                        node.files().sync_dir(dir).await.unwrap();
+                    })
+                    .unwrap();
+                }
+                None => {}
             }
         }
         panic!("64 power crashes in a create left no {}", path.display());

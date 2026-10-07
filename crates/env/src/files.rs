@@ -69,8 +69,7 @@ impl Files {
     ///   the file with [`Mode::Write`] or [`Mode::Create`]. A handle holds it until it
     ///   drops and its calls end, in this process or another.
     /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length that
-    ///   is not empty. It treats an empty file that is there as missing and allocates
-    ///   it, because a crash between the create and the allocation leaves one.
+    ///   is not empty.
     /// - [`Error::Full`] when the disk has no room for the file that
     ///   [`Mode::Create`] allocates.
     /// - [`Error::Io`] for other failures.
@@ -630,9 +629,10 @@ impl fmt::Display for Operation {
 /// }
 /// ```
 pub trait Driver {
-    /// Opens the file at `path`. [`Mode::Create`] makes a missing file, or a file with
-    /// no bytes, `len` zeroed bytes, and opens any other file that is there as it is.
-    /// A create that gives [`Error::Full`]
+    /// Opens the file at `path`. [`Mode::Create`] makes a missing file with `len`
+    /// zeroed bytes. It treats an empty file that is there as missing and allocates
+    /// it, because a crash between the create and the allocation leaves one. It opens
+    /// any other file that is there as it is. A create that gives [`Error::Full`]
     /// leaves no file at `path` and keeps no blocks. Another error can leave an empty
     /// file at `path`, as a crash can. It makes the allocation durable before it ends
     /// (`os`: `fallocate`, then `fsync` the file), so a `sync_dir` alone makes the file
