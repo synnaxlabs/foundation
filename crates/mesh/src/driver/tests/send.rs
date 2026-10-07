@@ -130,7 +130,8 @@ fn create_config(node: &sim::node::Node, tasks: &Tasks, pool: Rc<Pool>) -> Confi
 }
 
 /// Runs `mesh` on node 1 and `peer` on node 2 for 30 s, and gives what `peer`
-/// returned. Node 2 takes a message of at most `limit` bytes.
+/// returned. Node 2 takes a message of at most `limit` bytes, and node 1 sends at
+/// most `limit` bytes that node 2 did not read.
 fn run<M, P>(
     limit: usize,
     mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
@@ -155,6 +156,7 @@ where
         let pool = create_pool();
         let config = transport::Config {
             message_bytes_max: NonZeroUsize::new(limit).unwrap(),
+            window_bytes: limit,
             ..transport_config(&node, &tasks, 2, Rc::clone(&pool))
         };
         let transport = bind(&node, PORT, config);
@@ -261,6 +263,69 @@ fn a_message_that_the_pool_has_no_block_for_drops_and_its_stream_stays() {
     assert_eq!(more, [false; 2]);
 }
 
+#[test]
+fn a_stream_keeps_its_place_while_the_pool_has_no_block_for_its_header() {
+    let mesh = |node: sim::node::Node, tasks: Tasks| async move {
+        let pool = small_pool();
+        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let _mesh = Mesh::open(config).await.unwrap();
+        let blocks = fill(&pool);
+        node.clock().sleep(seconds(6)).await;
+        drop(blocks);
+        pending::<()>().await;
+    };
+    let (early, first, more) = run(LIMIT, mesh, |peer| async move {
+        let session = peer.session().await;
+        let clock = peer.node.clock();
+        let early = within(&clock, seconds(2), pin!(session.accept())).await;
+        let mut receiver = stream(&session).await;
+        let first = next(&mut receiver).await;
+        (early.is_some(), first, peer.more(&session).await)
+    });
+    assert!(!early, "a stream came while the pool had no block");
+    assert_eq!(first, Ok(Some(pre_vote())));
+    assert_eq!(more, [false; 2]);
+}
+
+#[test]
+fn a_task_that_waits_in_a_dial_holds_no_block() {
+    solo(|node, tasks| async move {
+        let pool = small_pool();
+        let free = fill(&pool).len();
+        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let _mesh = Mesh::open(config).await.unwrap();
+        node.clock().sleep(seconds(3)).await;
+        assert_eq!(fill(&pool).len(), free);
+    });
+}
+
+#[test]
+fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
+    solo(|node, tasks| async move {
+        let config = create_config(&node, &tasks, create_pool());
+        let mesh = Mesh::open(config).await.unwrap();
+        let voters = Voters {
+            incoming: [1, 2, 4].map(key).into(),
+            outgoing: IDS.map(key).into(),
+        };
+        let at = Position {
+            term: common::TERM,
+            index: 1,
+        };
+        let data = Data::Voters(voters);
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: vec![Entry { at, data }],
+            commit: 0,
+        };
+        assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+        node.clock().sleep(seconds(10)).await;
+        let group = mesh.group.borrow();
+        let waiting = group.queues.get(&key(4)).map(|queue| queue.messages.len());
+        assert_eq!(waiting, Some(0));
+    });
+}
+
 /// Whether node 2, which takes a message of at most `limit` bytes, got the entry of
 /// 2000 bytes that node 1 proposed as the leader, and what `Peer::more` gave after 16
 /// messages.
@@ -326,6 +391,13 @@ async fn assert_ended(clock: &Clock, transport: Rc<Transport>) {
     pending::<()>().await;
 }
 
+/// Stops the group of `mesh`: the write of the term of a heartbeat fails.
+fn stop(node: &sim::node::Node, mesh: &Mesh) {
+    fail_sync(node);
+    let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+    mesh.receive(public(2), heartbeat).unwrap();
+}
+
 #[test]
 fn each_task_that_sends_ends_when_the_mesh_drops() {
     assert_ends(|node, tasks| async move {
@@ -345,9 +417,58 @@ fn each_task_that_sends_ends_when_the_group_stops() {
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(2)).await;
-        fail_sync(&node);
-        let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-        mesh.receive(public(2), heartbeat).unwrap();
+        stop(&node, &mesh);
         assert_ended(&node.clock(), transport).await;
+    });
+}
+
+/// Asserts that the session of node 2 ends with code 0 when `end` ran on the mesh
+/// of node 1, whose task for node 2 waits in a send then: node 2 reads nothing
+/// after the first append of node 1.
+fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
+    end: impl FnOnce(sim::node::Node, Mesh) -> E + Send + 'static,
+) {
+    let mesh = |node: sim::node::Node, tasks: Tasks| async move {
+        let config = create_config(&node, &tasks, create_pool());
+        let transport = Rc::clone(&config.transport);
+        let mesh = Mesh::open(config).await.unwrap();
+        let clock = node.clock();
+        {
+            // Node 1 serves node 2 only until it leads: no task holds the mesh after.
+            let mut serving = pin!(accept(mesh.clone(), transport, tasks.clone()));
+            let mut leading = pin!(lead(&mesh, &clock, home(1)));
+            poll_fn(|cx| {
+                let _ = serving.as_mut().poll(cx);
+                leading.as_mut().poll(cx)
+            })
+            .await;
+        }
+        clock.sleep(seconds(10)).await;
+        let group = mesh.group.borrow();
+        let waiting = group.queues.get(&key(2)).map(|queue| queue.messages.len());
+        drop(group);
+        assert!(waiting > Some(1), "the task of node 2 does not wait");
+        end(node, mesh).await;
+        pending::<()>().await;
+    };
+    let closed = run(1472, mesh, |peer| async move {
+        let session = peer.session().await;
+        let mut receiver = stream(&session).await;
+        drop(peer.elect(&mut receiver).await);
+        session.closed().await
+    });
+    assert_eq!(closed, transport::Error::PeerClosed { code: Code(0) });
+}
+
+#[test]
+fn a_task_that_waits_in_a_send_ends_when_the_mesh_drops() {
+    assert_ends_in_a_send(|_, mesh| async move { drop(mesh) });
+}
+
+#[test]
+fn a_task_that_waits_in_a_send_ends_when_the_group_stops() {
+    assert_ends_in_a_send(|node, mesh| async move {
+        stop(&node, &mesh);
+        pending::<()>().await;
     });
 }

@@ -158,7 +158,8 @@ impl Mesh {
             proposals: Vec::new(),
             slots: 0,
             waits: None,
-            senders: None,
+            fresh: Vec::new(),
+            starter: None,
         }));
         let weak = Rc::downgrade(&group);
         config
@@ -322,8 +323,15 @@ impl Mesh {
     /// # Errors
     ///
     /// [`Error::Stopped`] when the group stopped.
+    #[cfg(test)]
     pub(crate) async fn outgoing(&self, to: node::Key) -> Result<raft::Message, Error> {
-        poll_fn(|cx| self.group.borrow_mut().outgoing(to, cx)).await
+        poll_fn(|cx| {
+            let mut group = self.group.borrow_mut();
+            group.running()?;
+            group.queues.entry(to).or_default();
+            group.outgoing(to, cx).map(Ok)
+        })
+        .await
     }
 }
 
@@ -399,8 +407,10 @@ struct Group {
     slots: u64,
     // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
-    // The task that starts the sender of each new queue, while it waits.
-    senders: Option<Waker>,
+    // Each member that got its queue since `Senders::run` last took this.
+    fresh: Vec<node::Key>,
+    // The task of `Senders::run`, while it waits for a new queue.
+    starter: Option<Waker>,
 }
 
 impl Group {
@@ -433,37 +443,40 @@ impl Group {
         }
     }
 
-    // Queues each message for its member.
+    // Queues each message for its member. Only this makes the queue of a member,
+    // and `Senders::run` then starts the one task that reads it.
     fn send(&mut self, messages: Vec<raft::Message>) {
         for message in messages {
             let queue = self.queues.entry(message.to).or_insert_with(|| {
-                self.senders.take().into_iter().for_each(Waker::wake);
+                self.fresh.push(message.to);
+                self.starter.take().into_iter().for_each(Waker::wake);
                 Queue::default()
             });
             queue.push(message);
         }
     }
 
+    // The queue of the member `to`, for the task that reads it.
+    fn queue(&mut self, to: node::Key) -> &mut Queue {
+        let queue = self.queues.get_mut(&to);
+        queue.expect("invariant: a task reads the queue that started it")
+    }
+
     // The next message for the member `to`.
-    fn outgoing(
-        &mut self,
-        to: node::Key,
-        cx: &Context<'_>,
-    ) -> Poll<Result<raft::Message, Error>> {
-        self.running()?;
-        let queue = self.queues.entry(to).or_default();
+    fn outgoing(&mut self, to: node::Key, cx: &Context<'_>) -> Poll<raft::Message> {
+        let queue = self.queue(to);
         let Some(message) = queue.messages.pop_front() else {
             queue.waker = Some(cx.waker().clone());
             return Poll::Pending;
         };
-        Poll::Ready(Ok(message))
+        Poll::Ready(message)
     }
 
     // Wakes each task that sends, so that it ends.
     fn wake_senders(&mut self) {
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
-        waiting.chain(self.senders.take()).for_each(Waker::wake);
+        waiting.chain(self.starter.take()).for_each(Waker::wake);
     }
 
     // Applies each change in `committed`, and wakes the watches when a home moves.
@@ -539,7 +552,8 @@ impl Proposal {
 #[derive(Default)]
 struct Queue {
     messages: VecDeque<raft::Message>,
-    // The task that waits in `Mesh::outgoing`.
+    // The one task that reads this queue, while it waits for a message or in a send
+    // of one.
     waker: Option<Waker>,
 }
 
