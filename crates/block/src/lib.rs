@@ -97,16 +97,17 @@ const fn class_footprint(index: usize) -> usize {
 /// Bytes that a block with a payload of `len` bytes takes from its pool: the header
 /// plus the payload of the smallest size class that holds `len`. Payloads step by
 /// 64 bytes up to 256, then by a quarter of the lower power of two, so the payload
-/// is at most 64 bytes or a quarter of `len` above it.
-///
-/// # Panics
-///
-/// If `len` passes the largest payload, 2 GiB.
+/// is at most 64 bytes or a quarter of `len` above it. Gives `usize::MAX` when `len`
+/// passes the largest payload, 2 GiB: no pool holds such a block, so every budget
+/// refuses it.
 #[must_use]
 pub const fn footprint(len: usize) -> usize {
     let index = class_of(len);
-    assert!(index < CLASSES_MAX, "no size class holds that many bytes");
-    class_footprint(index)
+    if index < CLASSES_MAX {
+        class_footprint(index)
+    } else {
+        usize::MAX
+    }
 }
 
 /// The start of a pool's memory. Any thread that drops a block reaches it.
@@ -1048,15 +1049,14 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "no size class holds that many bytes")]
-        fn panics_above_the_largest_payload() {
-            assert_eq!(footprint((1 << 31) + 1), 0);
+        fn is_the_largest_class_at_the_largest_payload() {
+            assert_eq!(footprint(1 << 31), HEADER + (1 << 31));
         }
 
         #[test]
-        #[should_panic(expected = "no size class holds that many bytes")]
-        fn panics_at_the_largest_length() {
-            assert_eq!(footprint(usize::MAX), 0);
+        fn saturates_above_the_largest_payload() {
+            assert_eq!(footprint((1 << 31) + 1), usize::MAX);
+            assert_eq!(footprint(usize::MAX), usize::MAX);
         }
 
         proptest! {

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use env::thread;
 use sim::shard::Fault;
+use types::byte::Size;
 use types::time::Span;
 
 use crate::{Config, Error, Node};
@@ -14,6 +15,9 @@ struct Run {
     host: sim::node::Node,
     node: Node,
 }
+
+/// A disk budget of two rings of 64 MiB, with their header blocks.
+const DISK: Size = Size::from_bytes(2 * (8192 + (64 << 20)));
 
 type Memory = Box<dyn FnMut(usize) -> Result<block::Heap, os::memory::Error>>;
 
@@ -40,7 +44,8 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
     })
 }
 
-/// The seams of `host`, with a pool budget of `budget` from `memory`.
+/// The seams of `host`, with a pool budget of `budget` from `memory`, and a disk
+/// budget of [`DISK`].
 fn config(
     host: &sim::node::Node,
     budget: usize,
@@ -60,6 +65,7 @@ fn config(
             })
         },
         entropy: host.entropy(),
+        disk: DISK,
     }
 }
 
@@ -354,7 +360,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!("{config:?}"),
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
-             budget: 4096, entropy: {entropy:?}, .. }}"
+             budget: 4096, entropy: {entropy:?}, disk: {DISK:?}, .. }}"
         )
     );
 }
@@ -387,7 +393,19 @@ fn a_host_that_cannot_pin_starts_shards_on_no_core() {
 /// Starts a node on `host`, runs it for an hour, stops it, and gives what `join`
 /// gives.
 fn run_on(sim: &mut sim::Sim, host: &sim::node::Node) -> Result<(), Error> {
-    let node = Node::start(config(host, 1 << 20, Box::new(heap)));
+    run_on_disk(sim, host, DISK.bytes())
+}
+
+/// As [`run_on`], with a disk budget of `disk`.
+fn run_on_disk(
+    sim: &mut sim::Sim,
+    host: &sim::node::Node,
+    disk: u64,
+) -> Result<(), Error> {
+    let node = Node::start(Config {
+        disk: Size::from_bytes(disk),
+        ..config(host, 1 << 20, Box::new(heap))
+    });
     assert_eq!(sim.run_for(Span::HOUR), Ok(()));
     node.stop();
     assert_eq!(sim.run(), Ok(()));
@@ -411,6 +429,50 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
         cores: NonZeroUsize::new(cores).unwrap(),
         ..sim::node::Config::default()
     })
+}
+
+/// `join` gives the node's own failure, else the first shard error by core, else the
+/// first panic by core, and joins every shard.
+#[test]
+fn join_gives_errors_in_order_of_precedence() {
+    let panicked = |core: usize| thread::Panicked {
+        name: format!("shard-{core}"),
+    };
+    let memory = Error::Memory {
+        core: 2,
+        error: os::memory::Error::Refused,
+    };
+    let shards = |stored: usize| Error::Shards { stored, cores: 3 };
+    let mut joined = 0;
+    let all = [
+        (Err(panicked(0)), Some(shards(2))),
+        (Ok(()), Some(shards(4))),
+    ];
+    let all = all.into_iter().inspect(|_| joined += 1);
+    assert_eq!(crate::error(Some(memory.clone()), all), Err(memory));
+    assert_eq!(joined, 2);
+    let cases = [
+        (
+            vec![(Err(panicked(0)), None), (Ok(()), Some(shards(2)))],
+            shards(2),
+        ),
+        (
+            vec![(Ok(()), Some(shards(2))), (Ok(()), Some(shards(4)))],
+            shards(2),
+        ),
+        (
+            vec![
+                (Ok(()), None),
+                (Err(panicked(1)), None),
+                (Err(panicked(2)), None),
+            ],
+            Error::Panicked(panicked(1)),
+        ),
+    ];
+    for (shards, error) in cases {
+        assert_eq!(crate::error(None, shards.into_iter()), Err(error));
+    }
+    assert_eq!(crate::error(None, [(Ok(()), None)].into_iter()), Ok(()));
 }
 
 mod buffer {
@@ -440,8 +502,8 @@ mod buffer {
                 clock: host.clock(),
                 tasks,
                 entropy: host.entropy(),
-                layout: ::buffer::Layout::new(crate::AREA, crate::BODY_MAX)
-                    .expect("the ring sizes of node make a ring"),
+                layout: ::buffer::Layout::new(64 << 20, crate::BODY_MAX)
+                    .expect("the test sizes make a ring"),
                 commit: crate::COMMIT,
             };
             let mut slots = Slots::new();
@@ -546,15 +608,108 @@ mod buffer {
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
         }
-        let len = sim
-            .run_on(&host, |host, _| async move {
-                let ring = Path::new("shard-1/ring");
-                let file = host.files().open(ring, env::files::Mode::Read).await;
-                file.expect("the ring opens").len()
-            })
-            .expect("the run ends");
         // Two header blocks of 4 KiB, then the area.
-        assert_eq!(len, 8192 + (64 << 20));
+        assert_eq!(ring_len(&mut sim, &host, 1), 8192 + (64 << 20));
+    }
+
+    /// The length of the ring file of shard `core` of `host`.
+    fn ring_len(sim: &mut sim::Sim, host: &sim::node::Node, core: usize) -> u64 {
+        sim.run_on(host, move |host, _| async move {
+            let ring = PathBuf::from(format!("shard-{core}/ring"));
+            let file = host.files().open(&ring, env::files::Mode::Read).await;
+            file.expect("the ring opens").len()
+        })
+        .expect("the run ends")
+    }
+
+    /// A ring file of an area of 8 MiB, with its two header blocks.
+    const RING: u64 = 8192 + (8 << 20);
+
+    /// Each part is a ring and 4095 bytes, and shard 0 takes one byte more: whole
+    /// blocks only.
+    #[test]
+    fn each_ring_takes_its_part_of_the_disk_budget_and_shard_0_the_rest() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let disk = 2 * (RING + 4095) + 1;
+        assert_eq!(run_on_disk(&mut sim, &host, disk), Ok(()));
+        assert_eq!(ring_len(&mut sim, &host, 0), RING + 4096);
+        assert_eq!(ring_len(&mut sim, &host, 1), RING);
+    }
+
+    /// A ring already there keeps its size, larger or smaller than its new part.
+    #[test]
+    fn a_restart_with_another_disk_budget_opens_the_rings_at_their_sizes() {
+        for (first, ring, then) in
+            [(2 * RING, RING, 4 * RING), (4 * RING, 2 * RING, 2 * RING)]
+        {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            assert_eq!(run_on_disk(&mut sim, &host, first), Ok(()));
+            assert_eq!(run_on_disk(&mut sim, &host, then), Ok(()), "{then}");
+            for core in 0..2 {
+                let len = ring_len(&mut sim, &host, core);
+                assert_eq!(len, ring, "shard-{core} at {then}");
+            }
+        }
+    }
+
+    /// With one least ring no part holds a ring; one byte short of two, shard 0's part
+    /// fits and shard 1's does not. Two least rings start.
+    #[test]
+    fn a_disk_budget_that_holds_no_ring_on_each_shard_starts_no_shard() {
+        let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
+        let min = Size::from_bytes(4_227_072);
+        let cases = [(smallest, "2064KiB"), (2 * smallest - 1, "4227071B")];
+        for (bytes, shown) in cases {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let disk = Size::from_bytes(bytes);
+            let node = Node::start(Config {
+                disk,
+                ..config(&host, 1 << 20, Box::new(heap))
+            });
+            assert_eq!(host.shard_starts(), [], "{shown}");
+            assert_eq!(sim.run(), Ok(()));
+            let e = node.join().unwrap_err();
+            assert_eq!(
+                e,
+                Error::Disk {
+                    disk,
+                    cores: 2,
+                    min
+                },
+                "{shown}"
+            );
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "the disk budget {shown} holds no ring on each of 2 shards; it \
+                     needs at least 4128KiB"
+                )
+            );
+        }
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(run_on_disk(&mut sim, &host, 2 * smallest), Ok(()));
+    }
+
+    /// The core count comes from the host. With 2^43 cores no `u64` budget holds a
+    /// ring on each shard, the largest too, so `min` is the largest budget.
+    #[test]
+    fn a_least_disk_budget_past_a_u64_is_the_largest_budget() {
+        let cores = 1_usize << 43;
+        let min = Size::from_bytes(u64::MAX);
+        for disk in [Size::from_bytes(1 << 30), min] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, cores);
+            let node = Node::start(Config {
+                disk,
+                ..config(&host, 1 << 20, Box::new(heap))
+            });
+            assert_eq!(host.shard_starts(), []);
+            assert_eq!(node.join(), Err(Error::Disk { disk, cores, min }));
+        }
     }
 
     /// `node` calls the maker on the start thread just before it starts each shard,
@@ -593,8 +748,12 @@ mod buffer {
     }
 
     /// Starts a node of 3 shards, after `faults` aim at its shards, with memory from
-    /// `memory`. Gives the calls of the files maker and the functions that ran.
-    fn made(faults: &[(usize, Fault)], memory: Memory) -> (usize, usize) {
+    /// `memory`. Gives the result of `join`, the calls of the files maker, and the
+    /// functions that ran.
+    fn made(
+        faults: &[(usize, Fault)],
+        memory: Memory,
+    ) -> (Result<(), Error>, usize, usize) {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 3);
         for &(core, fault) in faults {
@@ -618,21 +777,62 @@ mod buffer {
             ..config(&host, 1 << 20, memory)
         });
         assert_eq!(sim.run(), Ok(()));
-        assert!(node.join().is_err());
-        (*made.borrow(), *ran.lock().unwrap())
+        (node.join(), *made.borrow(), *ran.lock().unwrap())
     }
 
     /// `node` makes the files of a shard after its memory and before its start. A
     /// shard that does not start drops its function unrun.
     #[test]
     fn a_shard_that_does_not_start_drops_its_files_unrun() {
-        let refused = refuse(1, os::memory::Error::Refused);
-        assert_eq!(made(&[], refused), (1, 1), "no memory");
-        assert_eq!(
-            made(&[(1, Fault::Start)], Box::new(heap)),
-            (2, 1),
-            "no start"
-        );
+        let error = os::memory::Error::Refused;
+        let memory = Err(Error::Memory { core: 1, error });
+        assert_eq!(made(&[], refuse(1, error)), (memory, 1, 1), "no memory");
+        let start = Err(Error::Start(thread::Error::Start {
+            name: "shard-1".into(),
+            reason: "injected".into(),
+        }));
+        let made = made(&[(1, Fault::Start)], Box::new(heap));
+        assert_eq!(made, (start, 2, 1), "no start");
+    }
+
+    #[test]
+    fn a_stop_before_the_opens_makes_no_ring() {
+        let mut run = start(7, 3, &[]);
+        run.node.stop();
+        assert_eq!(run.sim.run(), Ok(()));
+        assert_eq!(run.node.join(), Ok(()));
+        assert_eq!(listed(&mut run.sim, &run.host, ""), Vec::<PathBuf>::new());
+    }
+
+    /// A stop at any point of the claim and the opens ends each step that started
+    /// and starts no other, so the data directory holds the claim and the rings of
+    /// the first shards, each whole. A stop between the claim and the first open
+    /// leaves the claim alone.
+    #[test]
+    fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
+        let all = ["shard-0", "shard-1", "shard-2", "shards-3"].map(PathBuf::from);
+        let mut seen = [false; 5];
+        for step in 0..200 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 3);
+            let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+            let after = Span::from_nanos(step * 10_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()), "at {after:?}");
+            assert_eq!(node.join(), Ok(()), "at {after:?}");
+            let listed = listed(&mut sim, &host, "");
+            let rings = listed.len().saturating_sub(1);
+            let made: Vec<PathBuf> = if listed.is_empty() {
+                Vec::new()
+            } else {
+                all[..rings].iter().chain(&all[3..]).cloned().collect()
+            };
+            assert_eq!(listed, made, "at {after:?}");
+            seen[listed.len()] = true;
+            assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
+        }
+        assert_eq!(seen[1..], [true; 4], "a stop after each step");
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -726,16 +926,21 @@ mod buffer {
         }
     }
 
+    /// A shard that panics as it starts stops the node before shard 1 starts its
+    /// open, so `join` gives the panic.
     #[test]
-    fn join_gives_a_ring_that_did_not_open_over_a_shard_that_panicked() {
+    fn a_shard_that_panics_before_an_open_skips_it() {
         for seed in 0..32 {
             let e = refused(seed, 3, 1, &[(2, Fault::Panic)]);
-            assert_eq!(e, opened(1), "seed {seed}");
+            let panicked = thread::Panicked {
+                name: "shard-2".into(),
+            };
+            assert_eq!(e, Error::Panicked(panicked), "seed {seed}");
         }
     }
 
     #[test]
-    fn join_gives_a_shard_that_could_not_start_over_a_ring_that_did_not_open() {
+    fn a_shard_that_cannot_start_skips_a_ring_that_would_not_open() {
         for seed in 0..32 {
             let e = refused(seed, 3, 1, &[(2, Fault::Start)]);
             let start = thread::Error::Start {
@@ -785,10 +990,11 @@ mod directory {
     }
 
     /// With more than one record of another count, the error gives the smallest, in
-    /// any order of the list.
+    /// any order of the list. `shards-10` lists before `shards-3`.
     #[test]
     fn the_smallest_other_count_is_the_stored_one() {
-        for (records, stored) in [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4)] {
+        let cases = [(&[5, 3][..], 3), (&[3, 5], 3), (&[2, 4], 4), (&[10, 3], 3)];
+        for (records, stored) in cases {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
             for &k in records {
@@ -853,6 +1059,29 @@ mod directory {
         }
     }
 
+    /// The count of rings with no record is one over the largest index, in any order
+    /// of the list. `shard-10` lists before `shard-9`.
+    #[test]
+    fn the_largest_ring_gives_the_count() {
+        let (stored, cores) = (11, 2);
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, cores);
+        sim.run_on(&host, |host, _| async move {
+            let files = host.files();
+            for name in ["shard-10", "shard-9"] {
+                files.create_dir(Path::new(name)).await.expect("makes");
+            }
+        })
+        .expect("the run ends");
+        let e = run_on(&mut sim, &host).unwrap_err();
+        assert_eq!(e, Error::Shards { stored, cores });
+        assert_eq!(
+            e.to_string(),
+            "the data directory holds 11 shards, but this node starts 2; start it \
+             on 11 cores"
+        );
+    }
+
     #[test]
     fn a_failed_file_call_of_the_claim_stops_the_node_before_any_ring() {
         use env::files::Operation::{CreateDir, List, SyncDir};
@@ -913,6 +1142,78 @@ mod directory {
         assert_eq!(listed, made.map(PathBuf::from));
     }
 
+    /// A count in plain decimal that does not fit a `usize` is not a ring and not a
+    /// record.
+    #[test]
+    fn a_count_that_does_not_fit_a_usize_is_not_a_count() {
+        let over = u128::try_from(usize::MAX).expect("fits") + 1;
+        for prefix in ["shard", "shards"] {
+            let name = format!("{prefix}-{over}");
+            let made = name.clone();
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            sim.run_on(&host, move |host, _| async move {
+                host.files()
+                    .create_dir(Path::new(&made))
+                    .await
+                    .expect("makes");
+            })
+            .expect("the run ends");
+            assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
+            let mut made = ["shard-0", "shard-1", &name, "shards-2"];
+            made.sort_unstable();
+            let made = made.map(PathBuf::from);
+            assert_eq!(listed(&mut sim, &host, ""), made, "{name}");
+        }
+    }
+
+    /// The largest count that fits: a record of `usize::MAX`, and a ring of index
+    /// `usize::MAX - 1` with no record.
+    #[test]
+    fn the_largest_count_that_fits_is_a_count() {
+        for name in [
+            format!("shards-{}", usize::MAX),
+            format!("shard-{}", usize::MAX - 1),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let made = name.clone();
+            sim.run_on(&host, move |host, _| async move {
+                host.files()
+                    .create_dir(Path::new(&made))
+                    .await
+                    .expect("makes");
+            })
+            .expect("the run ends");
+            let refused = Err(Error::Shards {
+                stored: usize::MAX,
+                cores: 2,
+            });
+            assert_eq!(run_on(&mut sim, &host), refused, "{name}");
+        }
+    }
+
+    /// The claim reads names only, so a file with the name of a record or a ring
+    /// counts.
+    #[test]
+    fn a_file_named_as_a_count_is_a_count() {
+        for name in ["shards-3", "shard-2"] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            sim.run_on(&host, move |host, _| async move {
+                let mode = env::files::Mode::Create { len: 0 };
+                let file = host.files().open(Path::new(name), mode).await;
+                file.expect("makes").close().await;
+            })
+            .expect("the run ends");
+            let refused = Err(Error::Shards {
+                stored: 3,
+                cores: 2,
+            });
+            assert_eq!(run_on(&mut sim, &host), refused, "{name}");
+        }
+    }
+
     /// A crash at the sync of the record: a power cut loses the record, and a
     /// process crash keeps it. The next start syncs the record before `shard-0`.
     #[test]
@@ -943,12 +1244,12 @@ mod directory {
         }
     }
 
-    /// A shard with no memory comes before a refused data directory in `join`.
+    /// A shard with no memory stops the node before the claim starts, so the claim
+    /// records no shard count.
     #[test]
-    fn join_gives_a_shard_with_no_memory_over_a_refused_data_directory() {
+    fn a_shard_with_no_memory_skips_the_claim() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        record(&mut sim, &host, 3);
         let refused = os::memory::Error::Refused;
         let node = Node::start(config(&host, 1 << 20, refuse(1, refused)));
         assert_eq!(sim.run(), Ok(()));
@@ -960,10 +1261,21 @@ mod directory {
                 error: refused
             })
         );
+        assert_eq!(listed(&mut sim, &host, ""), Vec::<PathBuf>::new());
     }
 
+    /// A claim that started before a shard panicked runs to its end, and `join` gives
+    /// its error over the panic. A panic before the claim skips it.
     #[test]
     fn join_gives_a_refused_data_directory_over_a_shard_that_panicked() {
+        let shards = Error::Shards {
+            stored: 2,
+            cores: 3,
+        };
+        let panicked = Error::Panicked(thread::Panicked {
+            name: "shard-2".into(),
+        });
+        let mut seen = [false; 2];
         for seed in 0..32 {
             let mut sim = sim::Sim::new(sim::Config {
                 seed,
@@ -981,14 +1293,13 @@ mod directory {
             };
             panics(&mut run);
             let e = run.node.join().unwrap_err();
-            assert_eq!(
-                e,
-                Error::Shards {
-                    stored: 2,
-                    cores: 3
-                },
-                "seed {seed}"
-            );
+            let claimed = e == shards;
+            assert!(claimed || e == panicked, "seed {seed}: {e:?}");
+            seen[usize::from(claimed)] = true;
         }
+        assert_eq!(
+            seen, [true; 2],
+            "a panic before and after the claim started"
+        );
     }
 }
