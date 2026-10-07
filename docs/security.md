@@ -164,7 +164,11 @@ state on `main`.
   are a quorum of what it holds. When a second node fails before that, the group
   waits for an operator: wipe the voter's state and start it with no configuration.
   The chain of proofs over configuration entries closes it (#881, a release
-  blocker). `raft/tests/it/behind.rs` pins both.
+  blocker). Its first PR gives each configuration entry the votes and the signature
+  of the leader that wrote it (`raft::Change`); the chain and its check are the
+  second PR (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  `raft/tests/it/behind.rs` pins both.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -298,6 +302,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |

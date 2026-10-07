@@ -10,6 +10,8 @@ use raft::{
 };
 use types::node;
 
+use crate::network::change;
+
 const ELECTION: u32 = 10;
 
 const REFUSED: Body = Body::PreVoteReply {
@@ -131,7 +133,7 @@ fn configs(entries: &[Entry]) -> Vec<Voters> {
     entries
         .iter()
         .filter_map(|entry| match &entry.data {
-            Data::Voters(voters) => Some(voters.clone()),
+            Data::Voters(change) => Some(change.voters.clone()),
             Data::Empty | Data::Bytes(_) => None,
         })
         .collect()
@@ -688,7 +690,7 @@ pub(crate) fn joining() -> (Raft, Raft) {
                 },
                 Entry {
                     at: at(2),
-                    data: Data::Voters(joint.clone()),
+                    data: change(key(1), joint.clone()),
                 },
             ],
             commit: 1,
@@ -738,7 +740,7 @@ fn a_new_node_that_holds_the_leave_follows_a_leader_elected_before_the_change() 
         incoming: joint.incoming.clone(),
         ..Voters::default()
     };
-    let entries = [Data::Empty, Data::Voters(joint), Data::Voters(left)]
+    let entries = [Data::Empty, change(key(1), joint), change(key(1), left)]
         .into_iter()
         .zip(1..)
         .map(|(data, index)| Entry {
