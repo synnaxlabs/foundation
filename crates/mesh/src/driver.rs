@@ -39,10 +39,10 @@ pub(crate) struct Config {
     pub(crate) key: node::Key,
     /// This node's private key. It signs the node's grants.
     pub(crate) private_key: PrivateKey,
-    /// Each member of the region, this node included. A member's peer proves the
-    /// public key of its card, and that key signs the member's grants. Each card must
-    /// be signed for its key here: `open` does not check it (#1259).
-    pub(crate) members: BTreeMap<node::Key, Member>,
+    /// Each member of the region, this node included, one record for each node. A
+    /// member's peer proves the public key of its card, and that key signs the member's
+    /// grants.
+    pub(crate) members: Vec<Member>,
     /// The voters before the first entry of the log, the same at each open. Each is a
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
@@ -79,14 +79,16 @@ impl Mesh {
     ///
     /// # Errors
     ///
+    /// - [`Error::Duplicate`] when two of `config.members` name one node.
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
+        let state = region::State::new(config.members).map_err(Error::Duplicate)?;
         let signer = Signer::new(config.key, &config.private_key);
-        match config.members.get(&config.key) {
+        match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
             Some(own) if !signer.owns(own.public_key()) => {
                 return Err(Error::WrongKey);
@@ -94,7 +96,7 @@ impl Mesh {
             Some(_) => {}
         }
         let mut voters = config.voters.iter();
-        if let Some(&key) = voters.find(|key| !config.members.contains_key(key)) {
+        if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
@@ -114,7 +116,7 @@ impl Mesh {
         };
         let group = Rc::new(RefCell::new(Group {
             raft: Raft::new(fixed, start)?,
-            state: region::State::new(config.members),
+            state,
             queues: BTreeMap::new(),
             stopped: Rc::default(),
             task: None,
@@ -477,6 +479,8 @@ mod tests {
     use env::net::udp::{self, Meta, Transmit};
     use raft::{Answer, Hard, Term};
     use sim::{Crash, Sim, link};
+    use transport::Address;
+    use types::node::SealKey;
 
     use super::*;
     use crate::card;
@@ -545,6 +549,17 @@ mod tests {
         voters: &[u8],
     ) -> Result<Mesh, Error> {
         Mesh::open(config(node, tasks, id, members, voters)).await
+    }
+
+    /// The record of node `id` with the card of node `signer` at `version`, which
+    /// `signer` signed.
+    fn record(id: u8, signer: u8, version: u64) -> Member {
+        let mut card = common::member(signer).card.card().clone();
+        card.version = version;
+        Member {
+            card: card::Signed::sign(key(id), card, &private(signer)),
+            ..common::member(id)
+        }
     }
 
     /// A pool of one page.
@@ -1196,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_with_no_block_for_a_write_stops_the_group() {
+    fn a_pool_with_no_block_of_one_sector_does_not_open() {
         solo(|node, tasks| async move {
             let budget = block::Config { budget: 0 };
             let memory = block::Heap::new(budget.reservation());
@@ -1204,17 +1219,12 @@ mod tests {
                 pool: Rc::new(Pool::new(budget, memory)),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
-            let mut watch = mesh.watch(INDEX);
-            assert_eq!(watch.next().await, Ok(None));
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             let cause = block::Error::TooLarge {
-                requested: 1,
+                requested: 512,
                 largest: 0,
             };
-            let stopped = Stopped::Write(log::Error::Pool(cause));
-            assert_eq!(watch.next().await, Err(Error::Stopped(stopped)));
+            let error = Error::Log(log::Error::Pool(cause));
+            assert_eq!(Mesh::open(config).await.err(), Some(error));
         });
     }
 
@@ -1323,11 +1333,10 @@ mod tests {
         });
     }
 
-    // A known defect (#1066): an open after a failed sync loses the records that it
-    // writes next. No run may lose the home. The draws of `sim` choose the runs.
     #[test]
-    fn a_power_cut_loses_a_home_after_a_failed_sync_and_a_new_open() {
-        let (mut kept, mut lost) = (0, 0);
+    fn a_power_cut_keeps_a_home_after_a_failed_sync_and_a_new_open() {
+        let mut lost = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let mut sim = Sim::new(sim::Config {
                 seed: run,
@@ -1351,27 +1360,33 @@ mod tests {
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
-            let end = sim
+            let changes = sim
                 .run_on(&node, |node, _| async move {
                     let files = node.files();
                     let (_, stored) =
                         Log::open(files, LOG.into(), create_pool()).await.unwrap();
-                    let entry = stored.entries.last()?;
-                    let Data::Bytes(bytes) = &entry.data else {
-                        return None;
-                    };
-                    Change::decode(bytes).ok()
+                    let changes = stored.entries.into_iter().map(|entry| {
+                        let Data::Bytes(bytes) = entry.data else {
+                            return None;
+                        };
+                        Change::decode(&bytes).ok()
+                    });
+                    changes.collect::<Vec<_>>()
                 })
                 .unwrap();
-            if end == Some(home(3)) {
-                kept += 1;
-            } else {
-                assert_eq!(end, Some(home(1)), "run {run}");
-                lost += 1;
+            if changes.contains(&Some(home(2))) {
+                gave = gave.saturating_add(1);
+            }
+            let end = changes.last().copied().flatten();
+            if end != Some(home(3)) {
+                lost.push((run, end));
             }
         }
-        assert_ne!(lost, 0, "no run lost the home");
-        assert_ne!(kept, 0, "each run lost the home");
+        assert_eq!(lost, [], "(run, the last change after the power cut)");
+        assert!(
+            gave > 16,
+            "runs in which the open gave the failed change: {gave}"
+        );
     }
 
     #[test]
@@ -1440,21 +1455,65 @@ mod tests {
         });
     }
 
-    // `open` does not check that a card is signed for its key in `members` (#1259).
     #[test]
-    fn open_takes_a_card_that_is_signed_for_another_key() {
-        solo(|node, tasks| async move {
-            let mut config = config(&node, &tasks, 1, &[1, 2], &[1]);
-            config.members.insert(key(2), common::member(3));
-            let mesh = Mesh::open(config).await.unwrap();
-            let given = mesh.member(key(2)).unwrap();
-            assert_eq!(given, common::member(3));
-            let card = given.card.card().clone();
-            assert_eq!(
-                card::Signed::check(key(2), card, *given.card.signature()).err(),
-                Some(card::Forged { node: key(2) }),
-            );
-        });
+    fn member_gives_the_record_that_its_card_names_for_each_order_of_the_records() {
+        let orders = [
+            [1, 2, 3],
+            [1, 3, 2],
+            [2, 1, 3],
+            [2, 3, 1],
+            [3, 1, 2],
+            [3, 2, 1],
+        ];
+        for order in orders {
+            solo(move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &order, &[1]).await.unwrap();
+                for id in IDS {
+                    let member = Some(common::member(id));
+                    assert_eq!(mesh.member(key(id)), member, "{order:?}");
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn open_refuses_two_records_of_one_node() {
+        let admitted = Member {
+            admission: [1; 64],
+            ..common::member(2)
+        };
+        let mut card = record(2, 3, 2).card.card().clone();
+        card.seal_key = SealKey::new([8; 32]).unwrap();
+        let address = Address::Udp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4100));
+        card.addresses = card::addresses::Addresses::new(vec![address]).unwrap();
+        let other = Member {
+            card: card::Signed::sign(key(2), card, &private(3)),
+            admission: [1; 64],
+            expiry: Some(Span::MILLISECOND),
+            status: [("clock.offset".parse().unwrap(), INDEX)].into(),
+        };
+        let cases = [
+            ("an equal record", record(2, 2, 1)),
+            ("another version", record(2, 2, 2)),
+            ("another signer", record(2, 3, 1)),
+            ("another admission", admitted),
+            ("another record in each field", other),
+        ];
+        for (case, second) in cases {
+            for at in [0, 3] {
+                let second = second.clone();
+                solo(move |node, tasks| async move {
+                    let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
+                    config.members.insert(at, second);
+                    let opened = Mesh::open(config).await.err();
+                    let duplicate = Some(Error::Duplicate(key(2)));
+                    assert_eq!(opened, duplicate, "{case} at {at}");
+                    assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+                });
+            }
+        }
+        let text = format!("node {} has two member records", key(2));
+        assert_eq!(Error::Duplicate(key(2)).to_string(), text);
     }
 
     #[test]

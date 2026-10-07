@@ -28,6 +28,8 @@ pub(crate) enum Error {
     Grant(grant::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// Two member records name one node.
+    Duplicate(node::Key),
     /// This node's private key is not the key of its member.
     WrongKey,
     /// The group stopped.
@@ -51,6 +53,7 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::Duplicate(key) => write!(f, "node {key} has two member records"),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
