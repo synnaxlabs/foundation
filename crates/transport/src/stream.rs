@@ -16,6 +16,23 @@ use crate::quic;
 /// stream.
 const CANCELLED: Error = Error::Reset { code: Code(0) };
 
+/// Bytes of a block to send, then zeros.
+///
+/// ```
+/// use transport::stream::Part;
+///
+/// // A series of 5 bytes at offset 64, padded to 8.
+/// let series = Part { range: 64..69, zeros: 3 };
+/// assert_eq!(series.range.len() + usize::from(series.zeros), 8);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    /// The bytes of the block to send.
+    pub range: Range<usize>,
+    /// The zero bytes to send after them, at most 7.
+    pub zeros: u8,
+}
+
 /// The sending half of a stream. Dropping it without [`finish`](Self::finish) resets
 /// the stream with `Code(0)`, so the peer never reads a cut-off stream as complete.
 /// Dropping it after `finish` lets delivery go on.
@@ -140,66 +157,72 @@ impl Sender {
         todo!("#68")
     }
 
-    /// Sends one message: the bytes of `ranges` of `block`, in order. A range may end
-    /// up to 7 bytes past the block's length; the stream sends zeros for those bytes.
-    /// The stream holds `block` until the carrier takes the message, and copies no
-    /// byte of it before then. Waits, returns, and resets on drop as
+    /// Sends one message: for each of `parts`, in order, the bytes of its range of
+    /// `block`, then its zeros. The stream holds `block` until the carrier takes the
+    /// message, and copies no byte of it before then. It never sends a byte of
+    /// `block` outside the ranges. Waits, returns, and resets on drop as
     /// [`send`](Self::send).
     ///
     /// # Errors
     ///
     /// As [`send`](Self::send). [`Error::TooLarge`] when the sum of the range lengths
-    /// is over the peer's message limit.
+    /// and the zeros is over the peer's message limit.
     ///
     /// # Panics
     ///
     /// When called after [`finish`](Self::finish), or when a range starts after its
-    /// end or ends more than 7 bytes past the block.
+    /// end, ends past the block, or has more than 7 zeros.
     ///
     /// ```
-    /// use transport::{Error, stream::Sender};
+    /// use transport::Error;
+    /// use transport::stream::{Part, Sender};
     ///
     /// async fn series(sender: &mut Sender, frame: block::Block) -> Result<(), Error> {
-    ///     sender.send_ranges(frame, &[0..8, 64..72]).await
+    ///     let parts = [
+    ///         Part { range: 0..8, zeros: 0 },
+    ///         Part { range: 64..69, zeros: 3 },
+    ///     ];
+    ///     sender.send_parts(frame, &parts).await
     /// }
     /// ```
-    pub async fn send_ranges(
+    pub async fn send_parts(
         &mut self,
         block: Block,
-        ranges: &[Range<usize>],
+        parts: &[Part],
     ) -> Result<(), Error> {
         self.stream.as_mut().ok_or(CANCELLED)?;
-        drop((block, ranges));
+        drop((block, parts));
         todo!("#68")
     }
 
-    /// [`send_ranges`](Self::send_ranges) when the stream can take the message now,
-    /// as [`try_send`](Self::try_send): gives `block` back, with nothing sent, when it
+    /// [`send_parts`](Self::send_parts) when the stream can take the message now, as
+    /// [`try_send`](Self::try_send): gives `block` back, with nothing sent, when it
     /// cannot.
     ///
     /// # Errors
     ///
-    /// As [`send_ranges`](Self::send_ranges).
+    /// As [`send_parts`](Self::send_parts).
     ///
     /// # Panics
     ///
-    /// As [`send_ranges`](Self::send_ranges).
+    /// As [`send_parts`](Self::send_parts).
     ///
     /// ```
     /// use block::Block;
-    /// use transport::{Error, stream::Sender};
+    /// use transport::Error;
+    /// use transport::stream::{Part, Sender};
     ///
     /// fn live(sender: &mut Sender, frame: Block) -> Result<Option<Block>, Error> {
-    ///     sender.try_send_ranges(frame, &[0..8])
+    ///     sender.try_send_parts(frame, &[Part { range: 0..8, zeros: 0 }])
     /// }
     /// ```
-    pub fn try_send_ranges(
+    pub fn try_send_parts(
         &mut self,
         block: Block,
-        ranges: &[Range<usize>],
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
         self.stream.as_mut().ok_or(CANCELLED)?;
-        drop((block, ranges));
+        drop((block, parts));
         todo!("#68")
     }
 

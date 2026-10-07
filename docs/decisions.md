@@ -1207,14 +1207,16 @@ How to read this record:
   and a state that only a foreign peer reaches. `Endpoint::write` gives
   `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
   writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
-  FRAME). A sender can send one message from ranges of one block (`send_ranges`,
-  `try_send_ranges`), with one count change for each message. A range may end up to 7
-  bytes past the block, and the stream sends zeros for those bytes: it never reads
-  memory past the block's length, which can hold another channel's data. A receiver
-  can receive into its own buffer (`recv_into`). A message longer than the buffer gives
-  `Error::TooLarge` and stays queued, and so does a message whose future drops; HUB
-  WIRE makes that `TooLarge` a broken session, not a size probe (architect, #1197:
-  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
+  FRAME). A sender can send one message from parts of one block (`send_parts`,
+  `try_send_parts`), with one count change for each message. A `stream::Part` is a range
+  of the block, then at most 7 zeros. The stream never sends a byte of the block outside
+  the ranges, because those bytes can hold stale data of another channel; the padding is
+  zeros, which `hub` computes from FRAME LAYOUT. A receiver can receive into its own
+  buffer (`recv_into`). A message longer than the buffer gives `Error::TooLarge` and
+  stays queued, and so does a message whose future drops; HUB WIRE makes that `TooLarge`
+  a broken session, not a size probe (architect, #1197:
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738 and
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575).
   Proposed by `network` in #55; approved by the coordinator on PR #407. The
   budgets: proposed by `network` in #228. The room order: approved by the advisor on
   #611. The hello: proposed by `network` in #55; settled by the advisor and the
