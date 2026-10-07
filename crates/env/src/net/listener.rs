@@ -21,8 +21,8 @@ pub trait Driver: Send {
 
     /// Accepts the next stream, with the rules of
     /// [`Listener::poll_accept`](super::Listener::poll_accept). An error leaves the
-    /// listener usable. The stream has the options of [`tcp::Listen::options`], and no
-    /// thread yet.
+    /// listener usable, unless the listener is broken. The stream has the options of
+    /// [`tcp::Listen::options`], and no thread yet.
     fn poll_accept(
         &mut self,
         cx: &mut Context<'_>,

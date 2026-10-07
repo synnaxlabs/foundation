@@ -200,8 +200,8 @@ impl Drop for Running<'_> {
 }
 
 // SAFETY: every block comes from `System`, and each method keeps the contract of the
-// `System` call it makes. `realloc` is the trait's own, which calls `alloc` and
-// `dealloc`.
+// `System` call it makes. `realloc` is the trait's own, which allocates, copies, and
+// frees, because the scan of a free must read the old block.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
