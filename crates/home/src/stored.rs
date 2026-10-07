@@ -40,7 +40,7 @@ pub(crate) fn entry(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
-    last: Option<Stamp>,
+    last: Stamp,
     stored_at: Stamp,
 ) -> Result<Entry, block::Error> {
     let Some((entry, _)) = frame.ends().next() else {
@@ -58,7 +58,7 @@ pub(crate) fn entry(
         first: range.seq,
         len: range.count,
         stored_at,
-        last,
+        last: Some(last),
         tag: TAG,
         parts: parts.into(),
     })
@@ -318,7 +318,7 @@ mod tests {
             draft.set_count(1, 2);
             draft.set_seq(1, 40);
             let frame = draft.freeze(Path::Backfill);
-            let last = Some(Stamp::from_nanos(7));
+            let last = Stamp::from_nanos(7);
             let stored_at = Stamp::from_nanos(9);
 
             let entry = entry(&pool, &frame, &set, last, stored_at).expect("room");
@@ -330,7 +330,7 @@ mod tests {
             );
             assert_eq!(
                 (entry.stored_at, entry.last, entry.tag),
-                (stored_at, last, 0)
+                (stored_at, Some(last), 0)
             );
             let parts: Vec<_> = entry.parts.into_iter().collect();
             let body = body(&pool, &frame, &set).expect("room");
@@ -351,7 +351,13 @@ mod tests {
             while let Ok(block) = heads.alloc(COUNT) {
                 held.push(block);
             }
-            drop(entry(&heads, &frame, &set, None, Stamp::from_nanos(0)));
+            drop(entry(
+                &heads,
+                &frame,
+                &set,
+                Stamp::from_nanos(0),
+                Stamp::from_nanos(0),
+            ));
         }
     }
 
