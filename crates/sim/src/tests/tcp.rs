@@ -1526,3 +1526,155 @@ fn a_late_ack_from_a_reset_stream_resets_no_newer_stream_on_its_pair() {
     assert_eq!(take(&client), Ok(b"y".to_vec()));
     ran.unwrap();
 }
+
+const EIO: Net = Net::Io { code: 5 };
+
+/// One accept, which gives the peer of the stream.
+async fn try_accept(listener: &mut Listener) -> Result<SocketAddr, Net> {
+    poll_fn(|cx| listener.poll_accept(cx))
+        .await
+        .map(|tcp| tcp.peer())
+}
+
+/// Fails the listener of `b` on port 4433 `faults` times after two connects from `a`
+/// reach its backlog, then gives what each of three accepts that do not wait give: the
+/// port of the peer, or the error.
+fn accepts_after(faults: usize) -> Vec<Option<Result<u16, Net>>> {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    start(&a, "client", move |node| async move {
+        let _first = connect(&node, remote, options()).await.unwrap();
+        let _second = connect(&node, remote, options()).await.unwrap();
+        pending::<()>().await;
+    });
+    sim.run_for(millis(5)).unwrap();
+    for _ in 0..faults {
+        b.fail_listener(remote);
+    }
+    let accepts = start(&b, "server", move |_| async move {
+        let mut accepts = Vec::new();
+        for _ in 0..3 {
+            let accept = poll_once(try_accept(&mut listener)).await;
+            accepts.push(accept.map(|peer| peer.map(|peer| peer.port())));
+        }
+        accepts
+    });
+    sim.run_for(millis(1)).unwrap();
+    take(&accepts)
+}
+
+#[test]
+fn a_failed_listener_gives_its_backlog_then_eio() {
+    let (first, second) = (Some(Ok(49_152)), Some(Ok(49_153)));
+    assert_eq!(accepts_after(0), [first.clone(), second.clone(), None]);
+    assert_eq!(accepts_after(1), [first, second, Some(Err(EIO))]);
+}
+
+#[test]
+fn a_second_fault_on_a_listener_does_nothing() {
+    assert_eq!(accepts_after(2), accepts_after(1));
+}
+
+#[test]
+fn an_accept_that_waits_wakes_with_the_fault() {
+    let (mut sim, _a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let accepts = start(&b, "server", move |_| async move {
+        [
+            try_accept(&mut listener).await,
+            try_accept(&mut listener).await,
+        ]
+    });
+    sim.run_for(millis(1)).unwrap();
+    b.fail_listener(at(&b, 4433));
+    sim.run_for(millis(1)).unwrap();
+    assert_eq!(take(&accepts), [Err(EIO), Err(EIO)]);
+}
+
+#[test]
+fn a_connect_to_a_failed_listener_is_refused() {
+    let (end, remote) = refused(|b| {
+        let listener = listen(b, 4433);
+        b.fail_listener(at(b, 4433));
+        Some(listener)
+    });
+    assert_eq!(end, (legs(2), Some(Net::Refused { remote })));
+}
+
+#[test]
+fn a_connect_in_its_handshake_at_the_fault_is_reset_and_never_accepted() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let accepted = start(&b, "server", move |_| async move {
+        try_accept(&mut listener).await
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await?;
+        read(&mut tcp, 1).await
+    });
+    sim.run_for(Span::from_nanos(delay().nanos() * 3 / 2))
+        .unwrap();
+    b.fail_listener(remote);
+    sim.run().unwrap();
+    assert_eq!(take(&accepted), Err(EIO));
+    assert_eq!(take(&client), Err(Net::Reset { remote }));
+}
+
+#[test]
+fn a_stream_that_a_failed_listener_accepted_still_works() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        let bytes = read(&mut tcp, 4).await.unwrap();
+        write_all(&mut tcp, &bytes).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+    });
+    let remote = at(&b, 4433);
+    let echo = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(5)).await;
+        write_all(&mut tcp, b"ping").await.unwrap();
+        read(&mut tcp, 4).await
+    });
+    sim.run_for(millis(2)).unwrap();
+    b.fail_listener(remote);
+    sim.run().unwrap();
+    assert_eq!(take(&echo), Ok(b"ping".to_vec()));
+}
+
+#[test]
+fn a_listener_bound_after_a_failed_listener_drops_works() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let remote = at(&b, 4433);
+    let failed = listen(&b, 4433);
+    b.fail_listener(remote);
+    drop(failed);
+    let mut listener = listen(&b, 4433);
+    let peer = start(&b, "server", move |_| async move {
+        try_accept(&mut listener).await
+    });
+    start(&a, "client", move |node| async move {
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(1)).await;
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&peer), Ok(at(&a, 49_152)));
+}
+
+#[test]
+#[should_panic(expected = "no TCP listener of node 0 is bound at 10.0.0.1:4433")]
+fn a_fault_where_no_listener_is_bound_panics() {
+    let (_sim, a, _b) = pair(0, link::Config::default());
+    a.fail_listener(at(&a, 4433));
+}
+
+#[test]
+#[should_panic(expected = "no TCP listener of node 0 is bound at 10.0.0.2:4433")]
+fn a_fault_on_a_listener_of_another_node_panics() {
+    let (_sim, a, b) = pair(0, link::Config::default());
+    let _b = listen(&b, 4433);
+    a.fail_listener(at(&b, 4433));
+}

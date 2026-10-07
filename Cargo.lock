@@ -1864,6 +1864,7 @@ dependencies = [
  "counting",
  "divan",
  "proptest",
+ "rustc-hash",
 ]
 
 [[package]]
