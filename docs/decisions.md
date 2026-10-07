@@ -3262,3 +3262,9 @@ minimal `hub` (one writer and one reader session). Access, config files, and fai
 wait until its acceptance scenario passes. The plan and owners are on #462. The person
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
+
+**STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
+scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
+for one hour, and the `acceptance` tests run both disk budgets. It runs beside FIRST
+SLICE, which keeps priority. The person decided on 2026-10-06 ("Yes that is fine I
+approve", relayed by `monitor`).
