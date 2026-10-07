@@ -215,11 +215,11 @@ pub enum Error {
 impl Error {
     /// What to do instead: a sentence with no final period.
     #[must_use]
-    pub const fn fix(&self) -> &'static str {
+    pub const fn fix(self) -> &'static str {
         match self {
             Self::Syntax => {
-                "Write the type with exact case, and a space only after the comma of a \
-                 list"
+                "Use one of the forms that the message names, with exact case and a space \
+                 only after the comma of a list"
             }
             Self::Element => {
                 "Use a scalar as the element, such as f32[3] or list<u8, 16>"
@@ -358,8 +358,8 @@ mod tests {
                 Error::Syntax,
                 "expected a sample type such as f64, f32[3], list<u8, 16>, string, or \
                  bytes",
-                "Write the type with exact case, and a space only after the comma of a \
-                 list",
+                "Use one of the forms that the message names, with exact case and a space \
+                 only after the comma of a list",
             ),
             (
                 Error::Element,
