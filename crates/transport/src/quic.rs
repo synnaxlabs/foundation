@@ -331,10 +331,10 @@ impl Endpoint {
         message: Block,
     ) -> Result<Poll<()>, Error> {
         sender.check_unfinished();
+        sender.check_size(&message)?;
         let key = sender.key().connection;
         self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
             sender.check();
-            sender.check_size(&message)?;
             sender.load(message);
             streams.flush(inner, sender, events)
         })

@@ -3120,6 +3120,16 @@ mod tests {
                 assert!(endpoint.accept(key).is_none());
                 let flushed = endpoint.flush(now, &mut sender);
                 assert_eq!(flushed, ended.clone().map(|()| Poll::Pending));
+                let large = Error::TooLarge {
+                    bytes: MESSAGE_MAX + 1,
+                    bytes_max: MESSAGE_MAX,
+                };
+                let over = shard.block(&vec![1; MESSAGE_MAX + 1]);
+                let written = endpoint.write(now, &mut sender, over.clone());
+                assert_eq!(written, Err(large.clone()));
+                let given = try_write(&mut pair.client, now, &mut other, over);
+                assert_eq!(given, Err(large));
+                let endpoint = &mut pair.client.endpoint;
                 let written = endpoint.write(now, &mut sender, shard.block(b"a"));
                 assert_eq!(written, ended.clone().map(|()| Poll::Pending));
                 assert!(!sender.holds());
@@ -3192,6 +3202,18 @@ mod tests {
                     .endpoint
                     .write(now, &mut sender, shard.block(b"a")),
             );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "a sender holds part of a message")]
+    fn a_finish_while_the_sender_holds_part_of_a_message_panics() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut sender);
+            let now = pair.now();
+            drop(pair.client.endpoint.finish(now, &mut sender));
         });
     }
 
