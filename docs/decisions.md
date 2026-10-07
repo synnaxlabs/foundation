@@ -2430,15 +2430,17 @@ How to read this record:
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
   crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
-  `Status`, until the join answer of #336 gives them a caller (MESH REGION). Decided by
-  `laptop.architect` (2026-10-07T22:33:29Z), which supersedes the sentence on
-  `Unsynced` and `Status` of the approval below:
-  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563. `open`
-  does not check that the transport proves the key of
-  `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
-  `Debug` text of a `Config` does not show the private key. The calls that change the
-  region and the change records stay private. The surface is approved by the architect,
-  2026-10-07T16:24:54Z:
+  `Status`: no public call reads the one or gives the two. The join answer of #336
+  decides, with its caller, how a node gets the mesh time for a stamp and where a
+  refusal goes (MEMBER RECORD). Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, in
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
+  sentence on `Unsynced` and `Status`. `open` does not check that the transport proves
+  the key of `Config.private_key`, because `Transport` has no call that gives its key
+  (#1587). The `Debug` text of a `Config` does not show the private key. The calls that
+  change the region and the change records stay private. The surface is approved by the
+  architect, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   surface as built, with the types that the caller builds and the sentence on the key of
   the transport, is approved by the architect, 2026-10-07T19:55:12Z:
@@ -2586,12 +2588,15 @@ How to read this record:
   stamp at every replay. A voter with no mesh time with a known error at or after the
   Unix epoch stamps no join: a guess at the expiry is the case that the later edge
   stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
-  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. Until the
-  join answer of #336 calls it, the stamp is crate-private: it takes the mesh time as
-  an argument and gives its own two refusals, so `mesh::Config` has no mesh time and
-  `mesh::Error` has no case for a join that no voter stamps. Decided by
-  `laptop.architect` (2026-10-07T22:33:29Z):
-  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563. So a
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. The stamp
+  is crate-private. Until the join answer of #336 calls it, it takes the mesh time as an
+  argument and gives its own type, `driver::Unstamped`, so `mesh::Config` has no mesh
+  time and `mesh::Error` has no case for a join that no voter stamps. #336 decides with
+  its caller whether such a join goes out of `Mesh` as an `Error`, or back to the node
+  as a stop code or an answer. Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, for the type that `stamp` gives, the `Error::Unsynced` of
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
   region whose voters all have an unknown clock error admits no node by ticket, and the
   operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
   Windows node with a peer of known error. Decided by `laptop.director`

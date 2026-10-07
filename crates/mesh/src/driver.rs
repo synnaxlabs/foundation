@@ -432,6 +432,8 @@ impl fmt::Display for Unstamped {
     }
 }
 
+impl std::error::Error for Unstamped {}
+
 /// A watch of the home of one index.
 pub struct Watch {
     group: Weak<RefCell<Group>>,
