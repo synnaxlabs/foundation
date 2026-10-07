@@ -33,8 +33,8 @@ pub struct Card {
     pub public_key: PublicKey,
     /// The key that callers seal secret values to.
     pub seal_key: SealKey,
-    /// Where to dial the node. An IPv6 address has no flow info and no scope: each
-    /// means something only on the node that sets it.
+    /// Where to dial the node, at most 32. An IPv6 address has no flow info and no
+    /// scope: each means something only on the node that sets it.
     pub addresses: Vec<Address>,
     /// 1 for the node's first card; each later card is higher.
     pub version: u64,
@@ -596,8 +596,16 @@ mod tests {
         bytes.extend([0, 4, 10, 0, 0, 1, 0x04, 0x10]);
         bytes.extend(version);
         assert_eq!(decoded(&bytes), None);
+    }
+
+    #[test]
+    fn decode_refuses_a_large_count_before_it_takes_an_address() {
+        let mut bytes = encoded(&many(32));
         bytes[75..83].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert_eq!(decoded(&bytes), None);
+        let mut rest = bytes.as_slice();
+        assert_eq!(Card::decode(&mut rest), None);
+        // `rest` shows how many bytes decode took: none past the count.
+        assert_eq!(rest.len(), bytes.len() - 83);
     }
 
     #[test]
