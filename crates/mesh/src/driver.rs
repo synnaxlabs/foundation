@@ -1554,7 +1554,12 @@ mod tests {
             };
             let data = Data::Voters(Voters::default());
             let entries = [Entry { at, data }];
-            log.write(None, &entries).await.unwrap();
+            let hard = Hard {
+                term: Term(1),
+                vote: Some(key(1)),
+                ..Hard::default()
+            };
+            log.write(Some(hard.clone()), &entries).await.unwrap();
             drop(log);
             let refused = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
             assert_eq!(refused, Error::Raft(raft::Error::NoVoters));
@@ -1565,7 +1570,7 @@ mod tests {
             let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
                 .await
                 .unwrap();
-            let wrote = (Hard::default(), entries.to_vec());
+            let wrote = (hard, entries.to_vec());
             assert_eq!((stored.hard, stored.entries), wrote);
         });
     }
