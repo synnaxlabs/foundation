@@ -26,7 +26,7 @@ use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
 use crate::bytes::{
-    put_optional_key, put_optional_proof, take, take_key, take_present, take_proof,
+    put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
 
@@ -586,17 +586,17 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         NO_HARD => {}
         HARD => {
             let term = Term(u64::from_le_bytes(take(body)?));
-            let vote = if take_present(body)? {
+            let vote = if take_bool(body)? {
                 Some(take_key(body)?)
             } else {
                 None
             };
-            let leader = if take_present(body)? {
+            let leader = if take_bool(body)? {
                 Some(take_key(body)?)
             } else {
                 None
             };
-            let proof = if take_present(body)? {
+            let proof = if take_bool(body)? {
                 Some(take_proof(body)?)
             } else {
                 None
