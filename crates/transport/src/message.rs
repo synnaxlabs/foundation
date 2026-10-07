@@ -561,7 +561,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            // Private: a heap count mixes this buffer with packet buffers.
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held.buffer, vec![9; 8]);
             let read = reader
                 .read(
@@ -666,7 +666,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 10);
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // Private: a heap count mixes this buffer with packet buffers.
+            // Private: no heap count is exact in a binary with a test harness.
             assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message[..10]);
             assert_eq!(reader.held.buffer.capacity(), 1_024);
@@ -692,7 +692,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // Private: a heap count mixes this buffer with packet buffers.
+            // Private: no heap count is exact in a binary with a test harness.
             assert!(reader.held.chunks.is_empty());
             assert_eq!(reader.held.buffer, message);
             drop(held);
@@ -703,7 +703,7 @@ mod tests {
 
         #[test]
         fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
-            // Private: it pins the bound itself. `tests/chunks.rs` pins its effect.
+            // Private: no heap count is exact in a binary with a test harness.
             let mut held = Held::default();
             for byte in 0..CHUNKS_MAX {
                 held.push(100, Bytes::from(vec![u8::try_from(byte).expect("a byte")]));

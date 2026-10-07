@@ -30,6 +30,11 @@ const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
 /// The bytes of the pattern, longer than a packet.
 const PATTERN: usize = 4096;
+/// A message that comes in 64 chunks in this sim, a full list that the read never
+/// copies.
+const FULL: usize = 83_600;
+/// A message that comes in 65 chunks in this sim, one past a full list.
+const PAST: usize = 84_900;
 /// Where the pattern starts in a long message. A packet carries between 1000 and
 /// 1472 bytes of a message, so the pattern lies past its first 64 packets and inside
 /// its first 128: only a second copy of a full list holds it.
@@ -45,7 +50,7 @@ type Out = (Poll<Result<Option<Vec<u8>>, Error>>, u64);
 
 fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
-    for (len, at, copies) in [(20_000, 0, 0), (240_000, SECOND, 1)] {
+    for (len, at, copies) in [(FULL, 0, 0), (PAST, 0, 1), (240_000, SECOND, 1)] {
         let (read, freed) = run(&pattern, len, at);
         let Poll::Ready(Ok(Some(read))) = read else {
             panic!("{len} bytes: the read gave {read:?}");
