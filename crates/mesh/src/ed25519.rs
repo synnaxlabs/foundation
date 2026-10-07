@@ -1,12 +1,19 @@
 //! The Ed25519 calls that the signed records of `mesh` share.
 
-use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey};
+use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use types::node::{PrivateKey, PublicKey};
 
 /// The key pair of `private`.
 pub(crate) fn pair(private: &PrivateKey) -> Ed25519KeyPair {
     Ed25519KeyPair::from_seed_unchecked(&private.0)
         .expect("invariant: any 32 bytes are an Ed25519 private key")
+}
+
+/// The public half of `pair`.
+pub(crate) fn public(pair: &Ed25519KeyPair) -> PublicKey {
+    let bytes = pair.public_key().as_ref().try_into();
+    PublicKey::new(bytes.expect("invariant: an Ed25519 public key is 32 bytes"))
+        .expect("invariant: the public half of a private key is not of small order")
 }
 
 /// Signs `statement` with `pair`.
