@@ -3102,7 +3102,9 @@ How to read this record:
   Supersedes
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
   sentence on a dropped call: `laptop.architect-2`, 2026-10-07T16:23:52Z
-  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6042117395). Lost:
+  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6042117395).
+  Supersedes the drop sentence of
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Lost:
   "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
