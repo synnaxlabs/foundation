@@ -489,8 +489,8 @@ impl Shard {
     /// samples after the commit that holds it, while the bytes it has spent are
     /// below its credit: a frame spends its [`Frame::charge`]. The first such frame
     /// that finds the credit spent is a miss: the reader gets neither it nor a later
-    /// frame, no grant changes that, and no call reports it. The home does not read
-    /// a missed frame back from disk yet. Close the reader and open a new one. The
+    /// frame, no grant changes that, and [`behind`](Self::behind) reports it. The home
+    /// does not read a missed frame back from disk yet. Close the reader and open a new one. The
     /// new one starts at the live tail of its open, so the frames from the miss to
     /// there reach neither reader.
     ///
@@ -547,9 +547,8 @@ impl Shard {
     }
 
     /// Whether the complete reader `key` missed a live frame, so it gets no later
-    /// one: it has no credit for the frame, or it opened past a frame no longer in
-    /// memory. [`woken`](Self::woken) names it once when it misses one with no frame
-    /// waiting. `false` for a closed reader.
+    /// one, as it had no credit for the frame. [`woken`](Self::woken) names it once
+    /// when it misses one with no frame waiting. `false` for a closed reader.
     ///
     /// # Panics
     ///

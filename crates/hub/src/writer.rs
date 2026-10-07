@@ -37,7 +37,8 @@ pub enum Error {
     Unknown(Name),
     /// The home does not write samples of the channel's type yet.
     Type {
-        /// The first channel of such a type.
+        /// A channel of such a type: of several, the one the home finds first, which
+        /// need not be the first in [`Config::channels`].
         name: Name,
         /// The channel's type.
         data_type: Type,

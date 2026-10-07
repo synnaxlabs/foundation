@@ -817,7 +817,7 @@ fn poll_flagged<F: Future>(next: Pin<&mut F>) -> (Poll<F::Output>, Arc<Flag>) {
 }
 
 #[test]
-fn wakes_and_ends_a_waiting_complete_reader_that_misses_a_frame() {
+fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_its_next_call() {
     for seed in 0..32 {
         run_on(seed, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
@@ -826,16 +826,10 @@ fn wakes_and_ends_a_waiting_complete_reader_that_misses_a_frame() {
             write_samples(&mut writer, now, PAST_WINDOW);
             let charge = reader.next().await.expect("a frame").view.charge();
             assert!(charge > WINDOW, "{charge} bytes spend the window");
-            let mut next = pin!(reader.next());
-            let (polled, flag) = poll_flagged(next.as_mut());
-            assert!(polled.is_pending(), "no frame waits");
+            // The reader holds the frame, so the window has no room for the next.
             write_samples(&mut writer, now + PAST_WINDOW, 1);
             test.clock.sleep(SETTLE).await;
-            assert!(flag.0.load(Ordering::Relaxed), "the miss wakes the reader");
-            let Poll::Ready(Err(ended)) = poll_once(next) else {
-                panic!("the reader ends");
-            };
-            assert_behind(&ended);
+            assert_behind(&reader.next().await.expect_err("the reader missed a frame"));
         });
     }
 }
@@ -1022,5 +1016,31 @@ fn opens_a_reader_at_the_first_poll() {
         let mut complete = opening.await.expect("opens");
         test.clock.sleep(SETTLE).await;
         assert!(poll_once(complete.next()).is_pending());
+    });
+}
+
+#[test]
+fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_window() {
+    run_on(1, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write_samples(&mut writer, now, 80_000);
+        let first = reader.next().await.expect("a frame").view.charge();
+        assert!(first < WINDOW, "{first} bytes are under the window");
+        let a = {
+            let mut next = pin!(reader.next());
+            assert!(poll_once(next.as_mut()).is_pending(), "no frame waits");
+            write_samples(&mut writer, now + 80_000, 50_000);
+            write_samples(&mut writer, now + 130_000, 1);
+            test.clock.sleep(SETTLE).await;
+            next.await.expect("a frame").view.charge()
+        };
+        assert!(
+            a + 4096 < WINDOW,
+            "{a} bytes and one sample are under the window"
+        );
+        let b = reader.next().await.map(|received| received.view.charge());
+        assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }

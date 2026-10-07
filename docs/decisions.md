@@ -632,8 +632,8 @@ How to read this record:
   latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
   does not count the commit task. `next` gives a `types::frame::View` of the reader's
   channels and their index (M2), never the frame. The view borrows the reader, which
-  releases the frame at the next call, so the grant at the next take follows CREDIT
-  RULES; a caller that keeps data copies it. A session that ends gives `reader::Ended`.
+  releases the frame at the next call, and grants credit for it there (CREDIT
+  RULES); a caller that keeps data copies it. A session that ends gives `reader::Ended`.
   `Hub::define` stands. A writer on a channel of a type the home does not write gets
   `writer::Error::Type` with the channel's name (HOME TYPE REFUSAL). Decided by the
   architect, #1133

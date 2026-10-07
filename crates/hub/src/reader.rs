@@ -110,7 +110,7 @@ pub struct Reader {
 #[derive(Debug)]
 struct Credit {
     key: ::home::reader::complete::Key,
-    /// The charge of each frame taken.
+    /// The charge of each frame that the caller took and gave back.
     taken_bytes: u64,
 }
 
@@ -175,7 +175,13 @@ impl Reader {
         reason = "the interner holds the key set of each frame a writer made"
     )]
     pub async fn next(&mut self) -> Result<Received<'_>, Ended> {
-        self.frame = None;
+        if let Some(frame) = self.frame.take()
+            && let Some(credit) = &mut self.credit
+        {
+            credit.taken_bytes += frame.charge();
+            let limit = credit.taken_bytes + WINDOW;
+            self.state.borrow_mut().home.grant(credit.key, limit);
+        }
         let frame = poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
@@ -186,11 +192,6 @@ impl Reader {
             }
             if let Some(frame) = state.home.take(self.key) {
                 self.streak += 1;
-                if let Some(credit) = &mut self.credit {
-                    // The limit rises only for frames the caller took before.
-                    state.home.grant(credit.key, credit.taken_bytes + WINDOW);
-                    credit.taken_bytes += frame.charge();
-                }
                 return Poll::Ready(Ok(frame));
             }
             if let Some(credit) = &self.credit

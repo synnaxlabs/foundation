@@ -130,8 +130,9 @@ impl Hub {
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
-    /// name that no channel has, then [`writer::Error::Home`] when the home refuses
-    /// the writer.
+    /// name that no channel has, then [`writer::Error::Type`] for a channel of a type
+    /// that the home does not write, else [`writer::Error::Home`] when the home
+    /// refuses the writer.
     #[expect(
         clippy::unused_async,
         clippy::unused_async_trait_impl,
@@ -147,7 +148,8 @@ impl Hub {
     /// Opens a reader session on `channels`, which share one index, as
     /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, as a
     /// view of only `channels` and their index. A complete reader gets each live frame
-    /// written after the returned future resolves.
+    /// written after the returned future resolves, until it misses one
+    /// ([`reader::Mode::Complete`]).
     ///
     /// # Errors
     ///
@@ -169,7 +171,8 @@ impl Hub {
 }
 
 impl State {
-    /// Wakes each reader that the home names as having a frame to take.
+    /// Wakes each reader that the home names as having a frame to take or a miss to
+    /// report.
     fn wake(&mut self) {
         self.home.woken(&mut self.woken);
         for key in &self.woken {
