@@ -1863,16 +1863,17 @@ How to read this record:
   names one sample of an index (X31), and InfluxDB keys a point by measurement, tag
   set, and time, so a resend stores each sample once. Each run of explicit gaps
   before a sample is one line,
-  `foundation_gaps,connector=<connector>,index=<index> count=<n>i <stamp>`: `<stamp>`
-  is the stamp of the first sample after the gaps, and `count` is the number of seqs
-  from the first trimmed seq up to that sample. The gap line goes in the request of
-  that sample, and the position is acked only after InfluxDB confirms it (B3). The
-  count is signed, because InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two
-  connectors that write one index to one database from replacing each other's gap
-  lines. Until a later sample comes, the connector keeps one gap per index. After a
-  restart the buffer reports the gap again (READER RULES), so a lost gap line is sent
-  again. The measurement name is fixed, and the kind check (#1153) refuses it as a
-  data measurement.
+  `foundation_gaps,connector=<connector>,index=<index>,path=<path> count=<n>i <stamp>`:
+  `<path>` is `live` or `backfill` (amendment below), `<stamp>` is the stamp of the
+  first sample after the gaps, and `count` is the number of seqs from the first trimmed
+  seq up to that sample. The gap line goes in the request of that sample, and the
+  position is acked only after InfluxDB confirms it (B3). The count is signed, because
+  InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two connectors that write one
+  index to one database from replacing each other's gap lines. Until a later sample
+  comes, the connector keeps one gap per index and path. After a restart the buffer
+  reports the gap again (READER RULES), so a lost gap line is sent again. The
+  measurement name is fixed, and the kind check (#1153) refuses it as a data
+  measurement.
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
   reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
   `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
@@ -1901,22 +1902,20 @@ How to read this record:
   Amended (2026-10-07, #1151): with #1270 (M2), the connector is a recording reader and
   writes the samples of both paths (A6, A8). Until then it reads the live path only. A
   stamp names one sample of an index on each path (X31). The connector keeps one gap per
-  index and path. Each gap line is
-  `foundation_gaps,connector=<connector>,index=<index>,path=<path> count=<n>i <stamp>`,
-  with `<path>` `live` or `backfill`, so a live gap line and a backfill gap line at one
-  stamp stay two points, and the sum of `count` stays an upper bound on the loss. Before
-  #1270 the path is always `live`, so the format does not change at M2. Data lines get
-  no `path` tag, so a live sample and a backfill sample of one index at one stamp are
-  one point, and the later write sets its fields. The fold takes the path of a gap line
-  from its tag, and `seq(stamp)` on that path from the write record. A data point whose
-  stamp the write record holds on both paths of one index is a lab failure (panic),
-  because the lab cannot tell which seq the point holds, so the property test writes no
-  such stamp. A separate test reads the points of the simulated InfluxDB and pins the
-  overwrite. Lost: a `path` tag on data lines, which makes two series for each channel
-  and puts the path, which is internal to the node, in each user's data schema. So the
-  earlier of two samples of one index at one stamp is lost, with no gap line.
-  `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
-  data nothing. Decided by `laptop.architect-2` on #1151
+  index and path. The `path` tag of a gap line keeps a live gap line and a backfill gap
+  line at one stamp as two points, so the sum of `count` stays an upper bound on the
+  loss. Before #1270 the path is always `live`, so the format does not change at M2.
+  Data lines get no `path` tag, so a live sample and a backfill sample of one index at
+  one stamp are one point, and the later write sets its fields. The fold takes the path
+  of a gap line from its tag, and `seq(stamp)` on that path from the write record. A
+  data point whose stamp the write record holds on both paths of one index is a lab
+  failure (panic), because the lab cannot tell which seq the point holds, so the
+  property test writes no such stamp. A separate test reads the points of the simulated
+  InfluxDB and pins the overwrite. Lost: a `path` tag on data lines, which makes two
+  series for each channel and puts the path, which is internal to the node, in each
+  user's data schema. So the earlier of two samples of one index at one stamp is lost,
+  with no gap line. `foundation_gaps` is Foundation's own measurement, so its `path` tag
+  costs the user's data nothing. Decided by `laptop.architect-2` on #1151
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748,
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
