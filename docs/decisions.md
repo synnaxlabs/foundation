@@ -463,13 +463,16 @@ How to read this record:
   disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
   reads, which reads each record twice, and windows held until the walk ends, which
   takes memory up to the area. Decided by the architect (#1049,
-  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). A
-  file with no checkpoint is no case of its own: the open makes it again (#1254), so the
-  walk after the first checkpoint reads a zero area and ends. This supersedes the case
-  "on a file with no header" of
-  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971. Each
-  statement about a record holds only when no CRC gives a false match. Decided by the
-  architect (#1049, the same comment).
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). A file
+  with no checkpoint is no case of its own: the open makes it again (#1254), so the walk
+  after the first checkpoint reads a zero area and ends. This supersedes the case "on a
+  file with no header" of
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971. Decided
+  by the architect (#1286,
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034555756,
+  2026-10-07T08:58:30Z). Each statement about a record holds only when no CRC gives a
+  false match. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
   `Unaligned` says that the header block that the open takes holds a tail off a block
   boundary, and gives that tail. An open that gives `Unaligned` also leaves the ring as
   read. The open does not check the tail of the other block. `Invalid` names a record
