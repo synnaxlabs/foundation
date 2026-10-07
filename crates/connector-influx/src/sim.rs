@@ -349,7 +349,7 @@ impl Column {
     }
 
     fn set(&mut self, at: usize, field: Field) {
-        let at = u16::try_from(at).expect("a chunk holds at most CHUNK points");
+        let at = index(at);
         let slot = self.points.binary_search(&at);
         if let Err(i) = slot {
             insert(&mut self.points, i, at);
@@ -358,8 +358,8 @@ impl Column {
     }
 
     fn get(&self, at: usize) -> Option<Field> {
-        let at = u16::try_from(at).ok()?;
-        self.values.get(self.points.binary_search(&at).ok()?)
+        let i = self.points.binary_search(&index(at)).ok()?;
+        Some(self.values.get(i))
     }
 
     /// Moves the points at index `half` or later into a new column, `half` indexes
@@ -368,7 +368,7 @@ impl Column {
         let from = self
             .points
             .partition_point(|&point| usize::from(point) < half);
-        let half = u16::try_from(half).expect("a chunk holds at most CHUNK points");
+        let half = index(half);
         Self {
             points: split(&mut self.points, from)
                 .into_iter()
@@ -396,14 +396,15 @@ impl Values {
         }
     }
 
-    fn get(&self, i: usize) -> Option<Field> {
-        match self {
+    fn get(&self, i: usize) -> Field {
+        let field = match self {
             Self::Float(values) => values.get(i).copied().map(Field::Float),
             Self::Integer(values) => values.get(i).copied().map(Field::Integer),
             Self::Unsigned(values) => values.get(i).copied().map(Field::Unsigned),
             Self::Boolean(values) => values.get(i).copied().map(Field::Boolean),
             Self::String(values) => values.get(i).cloned().map(Field::String),
-        }
+        };
+        field.expect("a column holds a value for each point")
     }
 
     fn split(&mut self, from: usize) -> Self {
@@ -415,6 +416,10 @@ impl Values {
             Self::String(values) => Self::String(split(values, from)),
         }
     }
+}
+
+fn index(at: usize) -> u16 {
+    u16::try_from(at).expect("a chunk holds at most CHUNK points")
 }
 
 fn put<T>(values: &mut Vec<T>, slot: Result<usize, usize>, value: T) {
