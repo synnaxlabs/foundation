@@ -18,7 +18,9 @@ exclude_re = [
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes these lines.
   'crates/transport/src/datagram\.rs:',
-  'crates/transport/src/stream\.rs:.*Sender::(try_send|send_parts|try_send_parts)\b',
+  'crates/transport/src/stream\.rs:.*Sender::try_send\b',
+  'crates/transport/src/stream\.rs:.*Sender::send_parts\b',
+  'crates/transport/src/stream\.rs:.*Sender::try_send_parts\b',
   'crates/transport/src/stream\.rs:.*Receiver::recv_into\b',
   'crates/transport/src/session\.rs:.*Session::datagrams\b',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.

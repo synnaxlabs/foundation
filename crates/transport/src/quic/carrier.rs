@@ -935,23 +935,20 @@ mod tests {
     }
 
     #[test]
-    fn a_dial_dropped_after_it_connected_closes_with_code_0() {
+    fn a_dial_dropped_in_its_handshake_never_shows_at_accept() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        testing::carrier(&server, SERVER, |carrier, _| async move {
-            let session = carrier.accept().await.expect("a session");
-            let closed = Error::PeerClosed { code: Code(0) };
-            assert_eq!(session.closed().await, closed);
+        testing::carrier(&server, SERVER, |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+            drop(carrier);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             {
                 let mut dial = pin!(carrier.connect(public(&SERVER), at));
                 assert!(poll_once(dial.as_mut()).await.is_none());
-                // The task connects while the dial is not polled.
-                node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             }
-            // The shard drops the task, and the close with it, when this ends.
-            node.clock().sleep(Span::MILLISECOND).await;
+            node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            assert!(poll_once(pin!(carrier.accept())).await.is_none());
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -1091,10 +1088,11 @@ mod tests {
             node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             // The close's drain ends in the pause, before the keep-alive.
             drop(session);
+            // The drop's wake waits in the pause too, so it cannot drain the
+            // endpoint early.
+            drop(carrier);
             node.pause(spans(Span::MILLISECOND, 150));
             node.clock().sleep(spans(Span::MILLISECOND, 151)).await;
-            drop(carrier);
-            node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(socket(&node).err(), None);
         });
         assert_eq!(sim.run_for(spans(Span::MILLISECOND, 40)), Ok(()));
