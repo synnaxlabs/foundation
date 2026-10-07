@@ -134,6 +134,10 @@ the check names the one it finds. A head that is the range end plus clean merges
 base needs no new round. A red-team PR labeled `oracle` also needs the director's
 verdict with the line ``Director: approved at `<sha>` `` at the head.
 
+Never edit the `Reviewers:`, `Range:`, `Findings:`, or `Breaker:` line of a posted round
+comment. A reviewer that ran later, or a new count, is a new round comment: the check
+reads only the current text, so an edit hides what ran and when.
+
 ## Second round
 
 In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that
