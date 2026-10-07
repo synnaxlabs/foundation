@@ -1187,7 +1187,9 @@ How to read this record:
   budget is the peer's `window_bytes`. A value over what the node can count counts as
   the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
-  `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
+  `message_bytes_max` below 1472 (architect, #1198:
+  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it,
+  or resets. A peer whose QUIC
   transport parameters cannot take this node's whole hello at once (no one-way stream,
   or a stream or connection window under the hello) also breaks it, with the reason `a
   peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
