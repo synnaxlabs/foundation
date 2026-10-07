@@ -183,6 +183,11 @@ impl Hub {
     ///
     /// The [`serve::Error`] that ended the session. The stream stops with the code
     /// that HUB WIRE gives for it, except after [`serve::Error::Stream`].
+    ///
+    /// # Panics
+    ///
+    /// When the session sends a frame: `transport` cannot yet send a message in parts
+    /// (#68).
     pub async fn serve(
         &self,
         incoming: transport::stream::Incoming,
