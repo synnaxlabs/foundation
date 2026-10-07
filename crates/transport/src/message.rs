@@ -121,7 +121,7 @@ impl Reader {
     /// `admit` again only when it refused, and `take` only for a whole message.
     /// After an error inside a message's body, the reader holds no bytes of the
     /// message. After any other error, it holds at most the bytes of a length prefix,
-    /// on no heap.
+    /// in the reader itself, not on the heap.
     ///
     /// # Errors
     ///
