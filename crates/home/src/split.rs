@@ -86,9 +86,8 @@ impl Scratch {
         set: &'a KeySet,
         mut draft: Draft,
     ) -> Split<'a> {
-        assert_eq!(
-            draft.key_set(),
-            set.key(),
+        assert!(
+            draft.key_set() == set.key(),
             "the frame is of key set {}, not of key set {}",
             draft.key_set().get(),
             set.key().get()
