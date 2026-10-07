@@ -1069,6 +1069,12 @@ mod tests {
         Log::open(node.files(), DIR.into(), odd_pool()).await
     }
 
+    #[test]
+    fn a_block_is_the_most_whole_sectors_that_the_pool_gives() {
+        assert_eq!(chunk(&odd_pool()), 3 * SECTOR);
+        assert_eq!(chunk(&pool()), CHUNK);
+    }
+
     // The header of the second record is at bytes 1,770 to 1,804, in one sector and
     // across byte 1,792. An open that writes zeros on it in two writes can leave
     // half of it after its failed sync and a power cut.
