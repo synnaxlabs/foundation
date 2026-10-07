@@ -1815,11 +1815,21 @@ mod tests {
     // the one the next record needs.
     #[test]
     fn removes_a_file_with_no_record_after_the_end() {
+        removes_a_spare(512);
+    }
+
+    #[test]
+    fn removes_an_empty_file_after_the_end() {
+        removes_a_spare(0);
+    }
+
+    /// A spare file of `len` bytes after `log-0`, which holds one record.
+    fn removes_a_spare(len: u64) {
         let (mut sim, node) = sim(0);
-        sim.run_on(&node, |node, _| async move {
+        sim.run_on(&node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len: 512 };
+            let mode = Mode::Create { len };
             drop(node.files().open(&file("log-1"), mode).await.unwrap());
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
@@ -1838,6 +1848,46 @@ mod tests {
             })
             .unwrap();
         assert_eq!(expected.entries.len(), 2);
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    /// The name and the length of each file of the log.
+    async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
+        let mut lens = Vec::new();
+        for name in node.files().list(Path::new(DIR)).await.unwrap() {
+            let path = Path::new(DIR).join(&name);
+            let len = node.files().open(&path, Mode::Read).await.unwrap().len();
+            lens.push((name, len));
+        }
+        lens
+    }
+
+    #[test]
+    fn an_empty_first_file_is_an_empty_log() {
+        let (mut sim, node) = sim(0);
+        sim.run_on(&node, |node, _| async move {
+            node.files().create_dir(Path::new(DIR)).await.unwrap();
+            let mode = Mode::Create { len: 0 };
+            drop(node.files().open(&file("log-0"), mode).await.unwrap());
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+            node.files().sync_dir(Path::new("")).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        sim.run_on(&node, |node, _| async move {
+            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), 0)]);
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored, Stored::default());
+            log.write(None, &[bytes(1, 10)]).await.unwrap();
+            drop(log);
+            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), SEGMENT)]);
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, 10)],
+        };
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
@@ -1978,13 +2028,7 @@ mod tests {
                 let (mut log, _) = open(&node).await.unwrap();
                 log.write(None, &[bytes(1, LARGE)]).await.unwrap();
                 drop(log);
-                let mut files = Vec::new();
-                for name in node.files().list(Path::new(DIR)).await.unwrap() {
-                    let path = Path::new(DIR).join(&name);
-                    let len = node.files().open(&path, Mode::Read).await.unwrap().len();
-                    files.push((name, len));
-                }
-                files
+                lens(&node).await
             })
             .unwrap();
         let len = wide(encode(0, None, &[bytes(1, LARGE)]).len());
