@@ -1039,10 +1039,12 @@ impl Streams {
         }
         if half.holds() {
             half.rest = Rest::Finish;
-        } else {
-            self.senders.remove(&id);
-            finish(inner, id);
+            if self.sending.start(inner, half).is_pending() {
+                return Ok(());
+            }
         }
+        self.senders.remove(&id);
+        finish(inner, id);
         Ok(())
     }
 
@@ -3418,6 +3420,42 @@ mod tests {
             }
             let expected: Vec<_> = (0..count).map(|i| vec![i; MESSAGE_MAX]).collect();
             assert_eq!((read, ended), (expected, true));
+        });
+    }
+
+    #[test]
+    fn a_finish_after_writable_ends_the_stream_after_the_held_message() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let count = fill(&mut pair, shard, &mut sender);
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            let (mut read, mut ended) =
+                drain(&mut pair.server, now, &mut incoming.receiver);
+            assert!(!ended);
+            pair.run(RUN);
+            let writable = Event::Writable {
+                stream: sender.key(),
+            };
+            assert!(events(&pair.client).contains(&&writable));
+            let now = pair.now();
+            assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
+            for _ in 0..100 {
+                pair.run(RUN);
+                let now = pair.now();
+                let messages;
+                (messages, ended) =
+                    drain(&mut pair.server, now, &mut incoming.receiver);
+                read.extend(messages);
+                if ended {
+                    break;
+                }
+            }
+            let expected: Vec<_> = (0..count).map(|i| vec![i; MESSAGE_MAX]).collect();
+            assert_eq!((read.len(), ended), (expected.len(), true));
+            assert_eq!(read, expected);
         });
     }
 
