@@ -48,9 +48,10 @@ impl Status {
         }
     }
 
-    /// Takes what [`Status::encode`] gives. `None` when the names are not in rising
-    /// order, or when the count is over 64, before any entry is read.
+    /// Takes what [`Status::encode`] gives. `None` when the count is over 64, before
+    /// any entry is read, or when the names are not in rising order.
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        // Needs no check of `new`: the count is checked first.
         let mut count = *bytes;
         if take_count(&mut count)? > u64::from(MAX) {
             return None;
@@ -64,7 +65,7 @@ impl Status {
     }
 }
 
-/// More than 64 status entries.
+/// More than 64 status entries. Text: "{count} status entries, more than 64".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Many {
     /// The number of entries.
