@@ -1,7 +1,8 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
-//! make none once each session got a frame. An ack makes none, and no call on a closed
-//! key of either mode makes one. This binary has no test harness: the count covers each
+//! make none once each session got a frame, nor a release that wakes sessions that
+//! missed a frame. An ack makes none, and no call on a closed key of either mode makes
+//! one. This binary has no test harness: the count covers each
 //! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -37,6 +38,7 @@ fn main() {
     };
     latest(&frame);
     complete(&frame);
+    missed(&frame);
 }
 
 fn latest(frame: &impl Fn() -> Frame) {
@@ -81,14 +83,9 @@ fn latest(frame: &impl Fn() -> Frame) {
 
 fn complete(frame: &impl Fn() -> Frame) {
     let mut readers = Readers::new(0);
-    let open = |readers: &mut Readers, live: u64| {
-        let start = Start::At(Position {
-            live,
-            backfill: None,
-        });
-        readers.open(Reader::Unnamed, start, u64::MAX).key
-    };
-    let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers, 0)).collect();
+    let mut keys: Vec<_> = (0..SESSIONS)
+        .map(|_| open(&mut readers, 0, u64::MAX))
+        .collect();
     let mut seq = 0;
     assert_eq!(
         flow(&mut readers, &keys, frame, &mut seq),
@@ -107,7 +104,7 @@ fn complete(frame: &impl Fn() -> Frame) {
         "each round takes two frames from and wakes every session"
     );
 
-    keys.push(open(&mut readers, seq));
+    keys.push(open(&mut readers, seq, u64::MAX));
     let (delivered, allocations) = ALLOCATOR.count(|| {
         (0..2)
             .map(|_| flow(&mut readers, &keys, frame, &mut seq))
@@ -141,6 +138,40 @@ fn complete(frame: &impl Fn() -> Frame) {
         readers.floor(),
         Some(position),
         "each ack reached its session"
+    );
+}
+
+/// Opens a complete session at live seq `live` with credit for `limit_bytes`.
+fn open(readers: &mut Readers, live: u64, limit_bytes: u64) -> complete::Key {
+    let start = Start::At(Position {
+        live,
+        backfill: None,
+    });
+    readers.open(Reader::Unnamed, start, limit_bytes).key
+}
+
+fn missed(frame: &impl Fn() -> Frame) {
+    let mut readers = Readers::new(0);
+    let warm = [open(&mut readers, 0, u64::MAX)];
+    let mut seq = 0;
+    for _ in 0..2 {
+        flow(&mut readers, &warm, frame, &mut seq);
+    }
+    let keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers, seq, 0)).collect();
+    let (woken, allocations) =
+        ALLOCATOR.count(|| flow(&mut readers, &warm, frame, &mut seq));
+    assert_eq!(
+        allocations, 0,
+        "a release that wakes a missed session allocated"
+    );
+    assert_eq!(
+        woken,
+        SESSIONS + 3,
+        "the warm session takes two frames, and the release wakes each session"
+    );
+    assert!(
+        keys.iter().all(|&key| readers.behind(key)),
+        "each session missed"
     );
 }
 

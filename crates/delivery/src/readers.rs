@@ -169,7 +169,8 @@ impl Readers {
     /// Starts a complete session with credit for `limit_bytes` since it opens, its
     /// first grant. A named reader's open session in either mode is taken over. A
     /// session that starts below a live frame that memory no longer holds gets no live
-    /// frame.
+    /// frame: it is [`behind`](Readers::behind) at once, and no [`Readers::release`]
+    /// names it.
     ///
     /// # Panics
     ///
@@ -1397,6 +1398,15 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0);
             readers.grant(complete::Key(1), 10);
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 1 was never open")]
+        fn behind_panics_on_a_session_never_open() {
+            let mut readers = Readers::new(0);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            let behind = readers.behind(complete::Key(1));
+            unreachable!("behind is {behind}");
         }
 
         #[test]
