@@ -3373,10 +3373,10 @@ mod tests {
     fn open_refuses_a_private_key_that_is_not_the_key_of_the_member() {
         solo(|node, tasks| async move {
             let config = Config {
-                private_key: private(2),
-                ..config(&node, &tasks, 1, &IDS, &[])
+                key: key(1),
+                ..config(&node, &tasks, 2, &IDS, &[])
             };
-            assert_eq!(Mesh::start(config).await.err(), Some(Error::WrongKey));
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
             let text = "the private key of this node is not the key of its member";
             assert_eq!(Error::WrongKey.to_string(), text);

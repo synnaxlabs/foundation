@@ -2418,8 +2418,9 @@ How to read this record:
   region and the change records stay private. The surface is approved by the architect,
   2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  surface as built, with the types that the caller builds and the sentence on the key of
-  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  surface as built, with the types that the caller builds and the sentence that `open`
+  does not check the key of the transport (superseded above), is approved by the
+  architect, 2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order

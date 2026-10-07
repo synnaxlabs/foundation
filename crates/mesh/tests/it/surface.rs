@@ -179,6 +179,15 @@ fn open_panics_on_a_private_key_that_its_transport_does_not_prove() {
 }
 
 #[test]
+fn open_gives_wrong_key_when_the_transport_proves_the_private_key() {
+    solo(|node, tasks| async move {
+        let mut config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
+        config.private_key = PrivateKey([3; 32]);
+        assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
+    });
+}
+
+#[test]
 fn a_region_with_two_records_of_one_node_does_not_open() {
     solo(|node, tasks| async move {
         let mut config = create_config(&node, &tasks);
