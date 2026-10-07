@@ -2242,18 +2242,31 @@ mod tests {
             let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
             let writers = create_pool(4 * POOL);
             let small = |stamp: i64| frame(&writers, &set, &[(0, &[stamp]), (1, &[1])]);
+            // On each path: a frame of one sample, a frame that the order check
+            // refuses, and a frame that no block holds.
             let mut write = |state: &str| {
-                for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
-                    let written = shard.write(b, label, small(first));
-                    assert_eq!(written, Err(disk.clone()), "{state} {label:?}");
-                    let large = create_large(&set, first, &[]);
-                    let written = shard.write(b, label, large);
-                    assert_eq!(written, Err(disk.clone()), "{state} {label:?} large");
+                for (label, first, refused) in
+                    [(LIVE, 600_000, 100), (BACKFILL, 100, 500_000)]
+                {
+                    let frames =
+                        [small(first), small(refused), create_large(&set, first, &[])];
+                    for (at, draft) in frames.into_iter().enumerate() {
+                        let written = shard.write(b, label, draft);
+                        assert_eq!(
+                            written.as_ref(),
+                            Err(&disk),
+                            "{state}, {label:?}, {at}"
+                        );
+                    }
                 }
             };
             write("the append of the handoff fails");
+            // The size of the handoff to b: a block for it, and none for the frame.
+            let room = test.pool.alloc(2).expect("a block");
             let _blocks = test.fill();
             write("no block holds the handoff");
+            drop(room);
+            write("no block holds the frame");
         });
     }
 
