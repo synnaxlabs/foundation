@@ -43,6 +43,11 @@ pub(crate) enum Error {
     /// ends. For the answer to a forwarded proposal, the group did not see the
     /// proposal.
     Pool(block::Error),
+    /// A message on a stream is the byte form of no message, or is not one that its
+    /// stream carries. The stream stopped with code 2.
+    Malformed,
+    /// A stream of a peer, or its session, failed.
+    Stream(transport::Error),
     /// The group stopped.
     Stopped(Stopped),
 }
@@ -76,6 +81,8 @@ impl fmt::Display for Error {
             Self::Pool(cause) => {
                 write!(f, "the pool has no block for the mesh now: {cause}")
             }
+            Self::Malformed => f.write_str("a message on a mesh stream is not valid"),
+            Self::Stream(cause) => write!(f, "a mesh stream failed: {cause}"),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
         }
     }
@@ -98,6 +105,12 @@ impl From<raft::Error> for Error {
 impl From<grant::Error> for Error {
     fn from(error: grant::Error) -> Self {
         Self::Grant(error)
+    }
+}
+
+impl From<transport::Error> for Error {
+    fn from(error: transport::Error) -> Self {
+        Self::Stream(error)
     }
 }
 

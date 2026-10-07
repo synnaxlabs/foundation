@@ -1828,12 +1828,27 @@ How to read this record:
   writes one answer on its reply half, and then both halves end. So a proposal and its
   answers name no sender and carry no request number (#779): a request number makes the
   node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
-  and HUB WIRE already answers on the stream that asks. A two-way stream whose first
-  message is not a proposal, or a proposal on a one-way stream, breaks the protocol, and
-  the receiver ends the stream with code 2 (`wire::header::MALFORMED`) (decided by the
-  architect, 2026-10-07T08:15:18Z:
-  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
-  has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
+  and HUB WIRE already answers on the stream that asks. A stream breaks the protocol
+  when a message is the byte form of no message, when a one-way stream carries a
+  proposal or an answer, when a two-way stream does not start with a proposal, or when
+  it carries a second message. The receiver stops the stream with code 2
+  (`wire::header::MALFORMED`), the code that HUB WIRE gives for a broken protocol rule
+  (decided by the architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025, and
+  2026-10-07T09:42:17Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035294122, point 3).
+  A second message comes after the answer, and a reset takes back an answer that the
+  peer does not have yet. So there the receiver stops only the half that it reads. A
+  message that the group refuses (MESH DRIVER) changes nothing, and the receiver stops
+  the stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER). A
+  group that stopped gives code 16 too. A `raft` message that finds no block in the pool
+  is not a refusal: the receiver drops it, the stream goes on, and `raft` sends it
+  again. The receiver takes the block of an answer before it gives the proposal to the
+  group, so a refusal for memory changes nothing. The receiver does not check the class
+  of a stream: the class sets only the priority of the sender (approved by the
+  architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
+  message has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
   messages share the byte form of an entry. Decided by `consensus`, approved by the
   coordinator (#471).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the

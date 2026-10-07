@@ -26,6 +26,8 @@ use crate::member::Member;
 use crate::message::Message;
 use crate::region::{self, Change, Malformed, Refused};
 
+mod stream;
+
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
@@ -59,9 +61,10 @@ pub(crate) struct Config {
     pub(crate) entropy: Entropy,
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
-    /// Gives the blocks of the log's reads and writes. A write that finds the pool
-    /// full, or that the system refuses memory for, waits: the group takes, sends, and
-    /// applies nothing until that write ends.
+    /// Gives the blocks of the log's reads and writes, and of each answer to a
+    /// forwarded proposal. A write that finds the pool full, or that the system refuses
+    /// memory for, waits: the group takes, sends, and applies nothing until that write
+    /// ends.
     pub(crate) pool: Rc<Pool>,
 }
 
@@ -74,6 +77,7 @@ pub(crate) struct Config {
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
+    pool: Rc<Pool>,
 }
 
 impl Mesh {
@@ -105,6 +109,7 @@ impl Mesh {
         if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
+        let pool = Rc::clone(&config.pool);
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
         let start = Start {
             hard: stored.hard,
@@ -135,7 +140,7 @@ impl Mesh {
         config
             .tasks
             .spawn(run(weak, log, signer, config.clock, config.entropy));
-        Ok(Self { group })
+        Ok(Self { group, pool })
     }
 
     /// A watch of the home of `index`.
@@ -1265,6 +1270,8 @@ mod tests {
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
         });
     }
+
+    mod serve;
 
     mod answer {
         use super::*;
