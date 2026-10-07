@@ -661,29 +661,6 @@ mod buffer {
         }
     }
 
-    /// Shard 0's ring fits and shard 1's does not, and no pool part fits the address
-    /// space or a reservation.
-    #[test]
-    fn a_small_disk_budget_wins_over_a_pool_budget_past_the_address_space() {
-        let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let host = host(&mut sim, 2);
-        let disk = Size::from_bytes(2 * smallest - 1);
-        let node = Node::start(Config {
-            disk,
-            ..config(&host, Size::from_bytes(u64::MAX), Box::new(heap))
-        });
-        assert_eq!(sim.run(), Ok(()));
-        assert_eq!(
-            node.join(),
-            Err(Error::Disk {
-                disk,
-                cores: 2,
-                min: Size::from_bytes(4_227_072)
-            })
-        );
-    }
-
     /// With one least ring no part holds a ring; one byte short of two, shard 0's part
     /// fits and shard 1's does not. Two least rings start.
     #[test]

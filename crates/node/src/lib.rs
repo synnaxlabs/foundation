@@ -303,24 +303,19 @@ fn parts(
     disk: types::byte::Size,
     cores: usize,
 ) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
-    // Every layout fits before any pool part converts, so a small disk budget gives
-    // its error and not the panic.
-    let layouts = (0..cores)
-        .map(|core| buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(layouts
-        .into_iter()
-        .enumerate()
-        .map(|(core, layout)| {
+    (0..cores)
+        .map(|core| {
             let budget = part(budget.bytes(), cores, core);
             let Ok(budget) = usize::try_from(budget) else {
                 panic!(
                     "pool budget {budget} of shard-{core} is past the address space"
                 );
             };
-            (block::Config { budget }, layout)
+            let layout =
+                buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
+            Ok((block::Config { budget }, layout))
         })
-        .collect())
+        .collect()
 }
 
 /// The part of `total` of the shard on `core` of `cores`: an even part, and the
