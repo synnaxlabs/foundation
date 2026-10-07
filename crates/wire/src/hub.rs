@@ -254,8 +254,7 @@ impl Reply {
 }
 
 /// The run of keys after an open, in the open's order. A series of the session has
-/// the place of its channel's first key in the run, from 0. The index, when the run
-/// does not hold it, has place [`Open::channels`](crate::hub::Open::channels).
+/// the place of its channel's first key in the run, from 0.
 pub mod keys {
     use std::slice;
 
