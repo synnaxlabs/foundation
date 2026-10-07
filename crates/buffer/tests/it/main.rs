@@ -131,10 +131,14 @@ impl Shard {
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
-    /// the record before it, a restart record or a data record. The records of the
-    /// ring must start at 0 of the area.
+    /// the record before it, a restart record or a data record. The tail of the ring
+    /// must be at 0 of the area.
     fn seal(&self, offset: u64) {
         let file = self.memory.bytes(RING);
+        for block in [0, to_usize(BLOCK)] {
+            let tail = &file[block + TAIL_AT..block + TAIL_AT + 8];
+            assert_eq!(tail, [0; 8], "the tail of the ring is not at 0");
+        }
         let u32_at = |at: usize| {
             u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
         };
@@ -2220,6 +2224,17 @@ fn seal_refuses_the_first_record_of_the_area() {
     run(112, Memory::default(), |shard| async move {
         shard.create_two_records().await;
         shard.seal(0);
+    });
+}
+
+/// With a tail past 0, the record before in the file can be a newer record.
+#[test]
+#[should_panic(expected = "the tail of the ring is not at 0")]
+fn seal_refuses_a_ring_with_a_moved_tail() {
+    run(117, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.tamper(TAIL_AT, &(2 * BLOCK).to_le_bytes());
+        shard.seal(2 * BLOCK);
     });
 }
 
