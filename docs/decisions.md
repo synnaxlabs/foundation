@@ -692,7 +692,7 @@ How to read this record:
   no checkpoint and has not yet synced the directory. The open does not look again,
   because no caller opens one directory two times at once. A dropped open can leave its
   remove in flight, and a later open of the same directory in the process can lose its
-  ring (#1310). It syncs the directory before each create of a ring, because a disk
+  ring (#1441). It syncs the directory before each create of a ring, because a disk
   gives the room of a removed file back only then, and a kill after the remove leaves
   such a file: the remake needs room for the larger of the two files, not for both.
   `Length` stays for a ring with a checkpoint whose length does not fit its header, and
@@ -3150,9 +3150,19 @@ How to read this record:
   round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
   trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
   any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
-  added. An earlier round's skip is taken as written, since a rebase can drop its range
-  from the clone. An earlier round in the fixed format that does not parse fails. A
-  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  added. A merge of the base in the range counts only by its resolution: a conflict that
+  `git merge-tree` finds between its parents in a `.rs`, `Cargo.toml`, or `Cargo.lock`
+  file is a code change. The rest of the range is read from the tree that
+  `git merge-tree` makes of its start and the newest base commit that its end holds,
+  not from its start: the base's code does not count, and text that the range changes
+  and the base moves into a code file does. Text from an earlier round that the base
+  moves into a code file does not yet count (#1496). A conflict in this tree in a code
+  file is a code change, also one that leaves no markers, and so is an end that holds
+  more than one newest base commit. Found by the director at 2026-10-07T14:50:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed
+  by #1451. An earlier round's skip is taken as written, since a rebase can drop its
+  range from the clone. An earlier round in the fixed format that does not parse fails.
+  A red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
   status is `success` on `merge_group`. Decided by the director on #1169
   (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
   in messages on #1193.
@@ -3287,6 +3297,20 @@ How to read this record:
   `Full` promises no file; a flock, stat, or name check error after `openat` can leave
   the empty file that the create made. Lost: a promise that any failed create leaves no
   file it made.
+  Amended (2026-10-07, #1310): a call of `Files` whose future drops can still run. A
+  remove left so removes what the path names when it ends. Count the room of a
+  removed file as used until `sync_dir` on its directory ends, and while a handle holds
+  the file (#1301). Lost: `File::remove`, a remove through the write handle, which the
+  handle rule would cover with `Busy`; after #1441 it had no caller. Decided by
+  `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
+  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245).
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
+  sentence on a dropped call: `laptop.architect-2`, 2026-10-07T16:23:52Z
+  (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6042117395).
+  Supersedes the drop sentence of
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Lost:
+  "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -3570,7 +3594,20 @@ How to read this record:
   can hold bytes the program never wrote, such as padding or the spare capacity of a
   `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
   and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
-  3605); when Rust has one, `freed_holding` uses it and the exception goes.
+  3605); when Rust has one, `freed_holding` uses it and the exception goes. A binary
+  that bounds the memory of a structure holds `counting::Bytes`, one atomic count of
+  the bytes it holds; a binary holds one counting allocator, `Allocator` or `Bytes`.
+  `Allocator` does not keep that count: a benchmark must not pay for a count that only
+  a test reads, or its baseline moves with no product change, as
+  `transport/benches/send.rs` did (+4.2% to +11.2% at p50). Lost: `Allocator` keeps
+  `held` (that cost in each counting binary); a `bool` at construction (a branch on
+  each allocation and free, and a `held` that must panic when it is false);
+  `Allocator<const HELD: bool>` (no branch, but `Allocator<true>` says nothing at the
+  call site, and no caller needs both counts in one binary). Decided by
+  `laptop.architect` on 2026-10-07T16:28:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242).
+  Supersedes the `held` part of
+  https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190.
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
@@ -4403,7 +4440,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
-| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
