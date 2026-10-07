@@ -129,6 +129,7 @@ pub(crate) struct Series<'a> {
 /// If `body` is shorter than its header. The iterator panics on an unknown kind or
 /// scalar, and on ends that do not fit the series bytes. Bytes from another node must
 /// be checked before they reach `read`.
+#[cfg_attr(not(test), expect(dead_code, reason = "a read is the first user"))]
 pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
     let Some(count) = body.first_chunk() else {
         panic!("the stored body of {} bytes has no count", body.len());

@@ -13,10 +13,6 @@ pub mod order;
 pub mod reader;
 mod shard;
 mod split;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the read of an entry is the first user")
-)]
 mod stored;
 pub mod writer;
 

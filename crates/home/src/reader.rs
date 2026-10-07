@@ -1,4 +1,4 @@
-//! The readers of a shard's indexes, and which of them to wake.
+//! The keys of the open readers of a shard.
 
 use std::mem;
 use std::ops::Range;

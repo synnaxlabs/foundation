@@ -43,9 +43,9 @@ use crate::{handoff, order, split, stored};
 /// #     node: sim::node::Node,
 /// #     tasks: env::tasks::Tasks,
 /// # ) -> Result<(), Error> {
-/// #     let (clock, reader) = clock::Clock::new(node.clock());
+/// #     let (driver, clock) = clock::Clock::new(node.clock());
 /// #     let wall = node.wall();
-/// #     tasks.spawn(async move { clock.run(wall).await });
+/// #     tasks.spawn(async move { driver.run(wall).await });
 /// #     let (stamps, values) = (Key::from_u128(1), Key::from_u128(2));
 /// #     let mut slots = Slots::new();
 /// #     let mut interner = Interner::new();
@@ -77,7 +77,7 @@ use crate::{handoff, order, split, stored};
 /// #         commit: Span::from_nanos(10_000_000),
 /// #     };
 /// #     let buffer = Buffer::open(config, &mut slots).await?;
-/// #     while reader.now().mesh.is_none() {
+/// #     while clock.now().mesh.is_none() {
 /// #         node.clock().sleep(Span::from_nanos(1)).await;
 /// #     }
 /// use home::{Config, Outcome, Shard, order, writer};
@@ -88,7 +88,7 @@ use crate::{handoff, order, split, stored};
 /// let mut shard = Shard::new(Config {
 ///     shard: 0,
 ///     buffer,
-///     clock: reader,
+///     clock,
 ///     limits: order::Limits {
 ///         earliest: Stamp::from_nanos(1),
 ///         ahead: Span::from_nanos(1_000_000_000),
@@ -154,7 +154,8 @@ pub struct Shard {
 /// What a shard is built from.
 #[derive(Debug)]
 pub struct Config {
-    /// The shard's number on its node. Each writer key the shard gives carries it.
+    /// The shard's number on its node. Each writer key the shard gives carries it,
+    /// so it must differ for each shard of the node.
     pub shard: u32,
     /// The shard's buffer. Index frames, stored headers, and handoff bodies come
     /// from its pool.
@@ -289,8 +290,8 @@ impl Shard {
         }
     }
 
-    /// Carries the index at `slot`, with an empty gate. Each path continues from its
-    /// tail in the buffer.
+    /// Carries the index at `slot`, with no writer in control. Each path continues
+    /// from its tail in the buffer.
     ///
     /// # Panics
     ///
@@ -473,8 +474,13 @@ impl Shard {
     }
 
     /// The first seq on `path` of the index at `slot` that is not on disk. A writer's
-    /// range is stored when this passes its end.
+    /// range is stored when this is at least its `seq + count`.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`.
     pub fn stored(&self, slot: Slot, path: Path) -> u64 {
+        self.place(slot);
         self.buffer.durable(slot, path).seq
     }
 
@@ -1184,6 +1190,29 @@ mod tests {
                 (header[46], body.to_vec())
             })
             .collect()
+    }
+
+    /// Asserts that `call` panics on a shard that does not carry the index at
+    /// slot 3.
+    fn check_not_carried(seed: u64, call: fn(&mut Shard)) {
+        let (mut sim, _handle) = start(seed, move |test| async move {
+            call(&mut test.shard(AREA).await);
+        });
+        assert_eq!(
+            sim.run(),
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "the shard does not carry the index at Slot(3)".into(),
+                seed,
+            })
+        );
+    }
+
+    #[test]
+    fn panics_at_stored_of_an_index_it_does_not_carry() {
+        check_not_carried(100, |shard| {
+            shard.stored(Slot::new(3), Path::Live);
+        });
     }
 
     #[test]
@@ -2461,6 +2490,37 @@ mod tests {
         }
 
         #[test]
+        fn gives_frames_to_a_reader_of_each_mode_opened_with_no_mesh_time() {
+            run(98, |test| async move {
+                let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+                let (clock, mesh) = clock::Clock::new(test.clock.clone());
+                let mut shard = Shard::new(Config {
+                    shard: 0,
+                    buffer,
+                    clock: mesh.clone(),
+                    limits: LIMITS,
+                });
+                shard.carry(Slot::new(0));
+                shard.carry(Slot::new(2));
+                let complete = complete(&mut shard, Slot::new(0));
+                let latest = latest(&mut shard, Slot::new(0));
+                let wall = test.node.wall();
+                test.tasks.spawn(async move { clock.run(wall).await });
+                while mesh.now().mesh.is_none() {
+                    test.clock.sleep(Span::from_nanos(1)).await;
+                }
+                let set = two_indexes();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(woken(&mut shard), [latest]);
+                assert_eq!(taken(&mut shard, latest, 0), [seq(0, 1)]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [complete]);
+                assert_eq!(taken(&mut shard, complete, 0), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
         fn takes_nothing_from_a_closed_reader_and_closes_it_again() {
             run(96, |test| async move {
                 let set = two_indexes();
@@ -2907,19 +2967,17 @@ mod tests {
         }
 
         #[test]
-        fn panics_at_the_open_of_a_reader_of_an_index_it_does_not_carry() {
-            let (mut sim, _handle) = start(29, |test| async move {
-                let mut shard = test.shard(AREA).await;
-                latest(&mut shard, Slot::new(3));
+        fn panics_at_the_open_of_a_latest_reader_of_an_index_it_does_not_carry() {
+            check_not_carried(29, |shard| {
+                shard.open_latest(Slot::new(3));
             });
-            assert_eq!(
-                sim.run(),
-                Err(sim::Error::Panicked {
-                    thread: DIR.into(),
-                    message: "the shard does not carry the index at Slot(3)".into(),
-                    seed: 29,
-                })
-            );
+        }
+
+        #[test]
+        fn panics_at_the_open_of_a_complete_reader_of_an_index_it_does_not_carry() {
+            check_not_carried(99, |shard| {
+                shard.open_complete(Slot::new(3), CREDIT);
+            });
         }
 
         #[test]
