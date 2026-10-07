@@ -2,6 +2,8 @@
 
 use types::sample::Scalar;
 
+pub mod hub;
+
 // Append only: the first byte of each input in `oracles/fuzz/codec_series` and
 // `oracles/fuzz/codec_encoder` is an index into this table.
 const SCALARS: [Scalar; 14] = [
@@ -73,15 +75,4 @@ where
         Ok(&value),
         "{printed:?} does not read back"
     );
-}
-
-/// The stream messages in a hub input: each is a length byte and then that many bytes.
-/// The last message ends with the input.
-pub fn messages(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    std::iter::from_fn(move || {
-        let (&len, rest) = bytes.split_first()?;
-        let (message, rest) = rest.split_at(usize::from(len).min(rest.len()));
-        bytes = rest;
-        Some(message)
-    })
 }
