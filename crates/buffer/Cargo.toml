@@ -20,5 +20,9 @@ sim = { path = "../sim" }
 name = "alloc"
 harness = false
 
+[[test]]
+name = "fit"
+harness = false
+
 [lints]
 workspace = true

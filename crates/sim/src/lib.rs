@@ -108,6 +108,7 @@ pub struct Sim {
     scheduler: Rng,
     /// Gives each new node its entropy stream.
     streams: Rng,
+    taken: u64,
 }
 
 impl Sim {
@@ -135,6 +136,7 @@ impl Sim {
             futures: Rc::default(),
             scheduler,
             streams,
+            taken: 0,
         }
     }
 
@@ -280,6 +282,11 @@ impl Sim {
         self.drive(None)
     }
 
+    /// MEASUREMENT ONLY (#1149): the steps of every run so far.
+    pub fn steps(&self) -> u64 {
+        self.taken
+    }
+
     /// Starts a shard named `run_on`, with no core, on `node` that runs `body`, runs
     /// until every thread of every node has ended, and returns what `body` gave.
     /// `body` gets the node and the shard's tasks. Every call names its shard
@@ -374,6 +381,7 @@ impl Sim {
                 max: self.config.steps_max,
                 seed: self.config.seed,
             })?;
+            self.taken += 1;
             match next {
                 Next::Poll => self.step()?,
                 Next::Advance(at) => {
