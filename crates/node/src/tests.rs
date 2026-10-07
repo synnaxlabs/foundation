@@ -295,7 +295,7 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
     let part = usize::try_from(budget.bytes() / 3).unwrap();
-    assert_eq!(part * 3 + 2, (9 << 20) + 2);
+    assert_eq!(part * 3 + 2, usize::try_from(budget.bytes()).unwrap());
     let reservation = |budget| block::Config { budget }.reservation();
     assert_eq!(
         *calls.lock().unwrap(),
@@ -659,6 +659,29 @@ mod buffer {
                 assert_eq!(len, ring, "shard-{core} at {then}");
             }
         }
+    }
+
+    /// Shard 0's ring fits and shard 1's does not, and no pool part fits the address
+    /// space or a reservation.
+    #[test]
+    fn a_small_disk_budget_wins_over_a_pool_budget_past_the_address_space() {
+        let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let disk = Size::from_bytes(2 * smallest - 1);
+        let node = Node::start(Config {
+            disk,
+            ..config(&host, Size::from_bytes(u64::MAX), Box::new(heap))
+        });
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(
+            node.join(),
+            Err(Error::Disk {
+                disk,
+                cores: 2,
+                min: Size::from_bytes(4_227_072)
+            })
+        );
     }
 
     /// With one least ring no part holds a ring; one byte short of two, shard 0's part
