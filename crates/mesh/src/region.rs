@@ -342,8 +342,8 @@ impl fmt::Display for Malformed {
             Self::Unknown(unknown) => unknown.fmt(f),
             Self::Body { kind, length } => write!(
                 f,
-                "a change of kind {kind} and {length} bytes is not in the byte form of its \
-                 kind"
+                "a change of kind {kind} and {length} bytes \
+                 is not in the byte form of its kind"
             ),
         }
     }

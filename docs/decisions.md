@@ -1871,7 +1871,8 @@ How to read this record:
   check them again (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
   reverses the map of the ruling below). The key of a member is the key that its card's
-  signature covers, and `open` refuses two members with one key (`Error::Duplicate`).
+  signature covers, and `open` refuses a member that the region cannot hold, or two
+  members with one key (`Error::Member`, with the `region::Unfit`).
   The signature does not show that the node owns its public key. The admission does, and
   `Join` (#336) refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
