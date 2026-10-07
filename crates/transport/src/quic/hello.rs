@@ -297,9 +297,15 @@ mod tests {
         })
     }
 
+    /// A varint length over 1 byte.
+    fn wide() -> impl Strategy<Value = usize> {
+        prop_oneof![Just(2), Just(4), Just(8)]
+    }
+
     /// A value near the limits, or any varint.
     fn value() -> impl Strategy<Value = u64> {
         prop_oneof![
+            0_u64..64,
             0_u64..3_000,
             Just(1_471),
             Just(1_472),
@@ -451,7 +457,7 @@ mod tests {
                 3 => (
                     prop_oneof![0_u64..4, unknown()],
                     value(),
-                    prop::array::uniform2(prop_oneof![Just(1), Just(2), Just(4), Just(8)]),
+                    prop::array::uniform2(prop_oneof![Just(1), wide()]),
                     any::<prop::sample::Index>(),
                 )
                     .prop_map(|(id, value, lens, at)| {
@@ -464,7 +470,7 @@ mod tests {
             lens in prop_oneof![
                 3 => Just(vec![]),
                 1 => prop::collection::vec(
-                    prop_oneof![27 => Just(1), 1 => Just(2), 1 => Just(4), 1 => Just(8)],
+                    prop_oneof![9 => Just(1), 1 => wide()],
                     224,
                 ),
             ],
@@ -576,6 +582,17 @@ mod tests {
             message_bytes_max: 1_500,
         };
         assert_eq!(Hello::decode(&bytes), Ok(hello));
+        let mut bytes = vec![0x00, 0x40, 0x05, 0x01];
+        bytes.extend(long(7));
+        assert_eq!(
+            Hello::decode(&bytes),
+            fault("a hello with a message_bytes_max of 7, below 1472")
+        );
+        let bytes = [0x00, 0x40, 0x05, 0x01, 0x45, 0xc0];
+        assert_eq!(
+            Hello::decode(&bytes),
+            fault("a hello with window_bytes 5 below message_bytes_max 1472")
+        );
     }
 
     #[test]
