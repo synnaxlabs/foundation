@@ -382,6 +382,10 @@ mod tests {
             Hello::decode(&encode(&[(0, 1_471), (1, 1_472)])),
             fault("a hello with window_bytes 1471 below message_bytes_max 1472")
         );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 1_472), (1, 2_000)])),
+            fault("a hello with window_bytes 1472 below message_bytes_max 2000")
+        );
         let hello = Hello {
             window_bytes: 1_472,
             message_bytes_max: 1_472,
