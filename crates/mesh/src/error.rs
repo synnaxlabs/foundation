@@ -44,7 +44,8 @@ pub(crate) enum Error {
     /// the peer gets no answer.
     Pool(block::Error),
     /// A message on a stream is the byte form of no message, or is not one that its
-    /// stream carries. The stream stopped with code 2.
+    /// stream carries. The stream stopped with code 2, but after the answer only the
+    /// half that `serve` reads stopped.
     Malformed,
     /// A stream of a peer, or its session, failed.
     Stream(transport::Error),

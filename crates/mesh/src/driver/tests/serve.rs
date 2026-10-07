@@ -13,6 +13,8 @@ use super::*;
 const MALFORMED: Code = Code(2);
 /// The code of a stream with a message that the mesh refused.
 const REFUSED: Code = Code(16);
+/// Half of the shortest election timeout.
+const HALF: Span = Span::from_nanos(5 * TICK.nanos());
 
 /// A transport of node `id` at [`PORT`] of `node`, with `pool`.
 fn create_transport(
@@ -244,8 +246,9 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
                 let mesh = Mesh::open(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
                 // The group did not see the heartbeat after the refused message:
-                // its reply comes after the write of the term.
-                node.clock().sleep(seconds(1)).await;
+                // its reply comes after the write of the term. The wait is
+                // shorter than each election timeout.
+                node.clock().sleep(HALF).await;
                 assert!(quiet(&mesh, 2).await);
                 served
             },
@@ -279,7 +282,7 @@ fn serve_stops_a_one_way_stream_at_a_message_that_it_does_not_carry() {
             |node, tasks, incoming| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let served = mesh.serve(public(2), incoming).await;
-                node.clock().sleep(seconds(1)).await;
+                node.clock().sleep(HALF).await;
                 assert!(quiet(&mesh, 2).await);
                 served
             },
@@ -504,7 +507,8 @@ fn serve_gives_the_cause_when_the_peer_stopped_the_reply_half() {
             peer.settle().await;
             peer.send(&mut sender, &propose(3)).await;
             sender.finish().unwrap();
-            peer.settle().await;
+            // Node 1 leads and serves first: the session lives until then.
+            peer.node.clock().sleep(seconds(10)).await;
         },
     );
     let cause = transport::Error::Stopped { code: Code(40) };
