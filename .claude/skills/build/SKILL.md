@@ -102,6 +102,9 @@ take the next issue meanwhile.
 ## Rules
 
 - Never weaken an oracle. Add tests freely.
+- Never sit idle on a wait. When your work needs a PR that is in the merge queue,
+  build on its head and rebase when it merges. While a ruling is pending, build the
+  parts it does not touch.
 - In `acceptance`, a scenario that cannot run yet is `#[ignore = "waits on #<n>"]`.
   Never delete or weaken a scenario to make it pass.
 - A new third-party dependency needs the person's approval and an entry in
@@ -111,4 +114,6 @@ take the next issue meanwhile.
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling
   to the crate's section of `docs/decisions.md` in your PR, with who decided and the
   comment link.
+- Send the architect only a change to the public surface or to the meaning of a ruling.
+  A fix of wording or links in a ruling needs no new approval.
 - Before you stop, comment your state on the issue: done, next step, open questions.

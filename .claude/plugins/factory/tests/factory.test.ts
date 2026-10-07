@@ -18,7 +18,12 @@ const inbox = (from: string, body: object) =>
 async function boot(
   $: any,
   on: any,
-  opts: { name?: string; busy?: boolean; store?: Record<string, unknown> } = {},
+  opts: {
+    name?: string
+    busy?: boolean
+    store?: Record<string, unknown>
+    roster?: object
+  } = {},
 ) {
   const published: { topic: string; body: any }[] = []
   const started: string[] = []
@@ -39,7 +44,7 @@ async function boot(
   mock.env(on, { HOME: '/h', ...(name ? { FACTORY_NAME: name } : {}) })
   const clock = mock.clock(on, { now: 1_000_000 })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
-  on('fs.read', () => ({ value: JSON.stringify(ROSTER) }))
+  on('fs.read', () => ({ value: JSON.stringify(opts.roster ?? ROSTER) }))
   on('store.get', (_: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: any, e: any) => {
     store.set(e.key, e.value)
@@ -285,6 +290,18 @@ test('caps message turns at 30 an hour', async ($, on) => {
   await w.clock.advance(HOUR_MS)
   await w.until(() => w.started.length === 31)
   expect(w.started[30]).toBe(`fmsg m30 from ${PEER}: hi`)
+  await w.settle()
+})
+
+test('takes the cap of a session from turnCaps in the roster', async ($, on) => {
+  const w = await boot($, on, { roster: { ...ROSTER, turnCaps: { [ME]: 2 } } })
+  for (let i = 0; i < 2; i++) {
+    w.feed(inbox(PEER, { id: `m${i}`, text: 'hi' }))
+    await w.until(() => w.started.length === i + 1)
+  }
+  w.feed(inbox(PEER, { id: 'm2', text: 'hi' }))
+  await w.until(() => w.statuses.some(s => s.includes('capped at 2 turns an hour')))
+  expect(w.started.length).toBe(2)
   await w.settle()
 })
 
