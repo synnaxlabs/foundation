@@ -46,6 +46,7 @@ fn main() {
         writeln!(line, "m value={k} {}", 1_000_000 + (k ^ 1))
     });
     between();
+    wide();
     check(
         "a full chunk, then the rest newest first",
         POINTS,
@@ -69,6 +70,23 @@ fn main() {
             writeln!(line, "m value={k} {time}")
         },
     );
+}
+
+/// One point with 255 fields, then points of one field before it, so each split
+/// moves the wide point's columns. Long keys make an empty column cost much.
+fn wide() {
+    for live in [POINTS - 1, 0] {
+        let name = format!("255 fields at write {live}, the rest 1 field before it");
+        check(&name, POINTS, BUDGET, |k, line| {
+            if k == live {
+                let all: Vec<_> = (0..255)
+                    .map(|key| format!("plant_a_line_3_hydraulic_psi_{key}=1"))
+                    .collect();
+                return writeln!(line, "m {} {}", all.join(","), 10 * POINTS);
+            }
+            writeln!(line, "m plant_a_line_3_hydraulic_psi_0={k} {}", k + 1)
+        });
+    }
 }
 
 /// The orders that write a time between two stored times, in a full chunk.

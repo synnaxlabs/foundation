@@ -301,16 +301,21 @@ impl Chunk {
         self.set(at, fields);
     }
 
-    /// Moves the later half of the points into a new chunk.
+    /// Moves the later half of the points into a new chunk. Each half keeps only the
+    /// columns that hold one of its points.
     fn split(&mut self) -> Self {
         let half = self.times.len() / 2;
+        let mut columns = BTreeMap::new();
+        self.columns.retain(|key, column| {
+            let later = column.split(half);
+            if !later.points.is_empty() {
+                columns.insert(key.clone(), later);
+            }
+            !column.points.is_empty()
+        });
         Self {
             times: split(&mut self.times, half),
-            columns: self
-                .columns
-                .iter_mut()
-                .map(|(key, column)| (key.clone(), column.split(half)))
-                .collect(),
+            columns,
         }
     }
 }
