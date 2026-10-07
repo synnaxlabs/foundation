@@ -71,9 +71,10 @@ or the findings. A later push needs a new approval.
 ## The bar
 
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
-  in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. When an
-  audit shows a gap, change the rule in one small PR, and send the link to
-  `laptop.monitor`, who gets the person's approval.
+  in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. Collect
+  the rule changes from your audits in one rule PR, and keep only one open at a time.
+  Send its link to `laptop.monitor` once a day, with a full set of rules, so that the
+  person approves them together.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
   merged PR, performance findings after merge, acceptance scenarios passing, and review
   rounds per PR.
