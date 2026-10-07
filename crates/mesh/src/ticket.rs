@@ -452,6 +452,15 @@ mod tests {
                 at: EXPIRY
             })
         );
+        let after = Stamp::from_nanos(EXPIRY.nanos() + 1);
+        assert_eq!(
+            record.admit(&card, &ticket(7).admission(&card), after),
+            Err(Refused::Expired {
+                public_key: public(7),
+                expiry: EXPIRY,
+                at: after
+            })
+        );
         assert_eq!(
             record.admit(&card, &ticket(7).admission(&card), BEFORE_EXPIRY),
             Ok(())
