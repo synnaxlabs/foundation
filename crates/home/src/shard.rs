@@ -209,9 +209,9 @@ pub enum Outcome {
         range: frame::Range,
     },
     /// A live group with samples found no room in the ring or the pool. Its seq is a
-    /// gap in the log. The gap is durable only when a later entry of the index, with
-    /// samples or a handoff, is on disk. A restart before that gives the next frame the
-    /// same seq.
+    /// gap in the log. The gap is durable only when a later live entry of the index,
+    /// with samples or a handoff, is on disk. A restart before that gives the next
+    /// frame the same seq.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -2413,6 +2413,42 @@ mod tests {
                 shard.write(b, LIVE, next),
                 Ok(&[applied(0, 2, 1)][..]),
                 "the handoff on disk made the lost range durable"
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn continues_at_a_lost_range_after_a_power_cut_after_a_backfill_entry() {
+        let (mut sim, node) = create_node(122);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 1, 1)][..]));
+            drop(blocks);
+            // A backfill entry of index 0 with samples goes to disk.
+            let later = frame(&test.pool, &set, &[(0, &[5]), (1, &[5])]);
+            assert_eq!(shard.write(a, BACKFILL, later), Ok(&[applied(0, 0, 1)][..]));
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+            assert_eq!(
+                shard.write(a, LIVE, next),
+                Ok(&[applied(0, 1, 1)][..]),
+                "only a live entry moves the live stored mark"
             );
         })
         .expect("the run after the cut ends");
