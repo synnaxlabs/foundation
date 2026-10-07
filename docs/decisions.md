@@ -1459,9 +1459,12 @@ How to read this record:
   (decided by the architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
-  sends again. A write that gets no block from the pool does not stop the group, because
-  a full pool is a normal state (MEMORY BOUNDS): the task writes the same `Ready` again
-  at each tick, and until then no message leaves and nothing applies. A group stops when
+  sends again. A write that finds the pool full (`block::Error::Exhausted`) does not
+  stop the group, because a full pool is a normal state (MEMORY BOUNDS): the task writes
+  the same `Ready` again at each tick, and until then no message leaves, nothing
+  applies, and the group gets no tick. Nothing bounds the proposals and the messages
+  that the group takes in that time, and a record that the pool can never hold waits
+  with no end (#1091). Each other error of the pool stops the group. A group stops when
   a write of the log fails, when a committed entry is not a change that this build
   reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with the
   first cause, and a watch gives it also after each `Mesh` drops. A stopped group does

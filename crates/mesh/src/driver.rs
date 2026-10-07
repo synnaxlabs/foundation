@@ -53,8 +53,8 @@ pub(crate) struct Config {
     pub(crate) entropy: Entropy,
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
-    /// Gives the blocks of the log's reads and writes. A write that gets no block
-    /// waits: the group sends and applies nothing until a block is free.
+    /// Gives the blocks of the log's reads and writes. A write that finds the pool
+    /// full waits: the group sends and applies nothing until a block is free.
     pub(crate) pool: Rc<Pool>,
 }
 
@@ -423,7 +423,7 @@ async fn run(
         // A full pool is a normal state, so the same write runs again at each tick.
         let written = loop {
             match log.write(ready.hard.clone(), &ready.entries).await {
-                Err(log::Error::Pool(_)) => {}
+                Err(log::Error::Pool(block::Error::Exhausted { .. })) => {}
                 written => break written,
             }
             (&mut tick).await;
@@ -459,6 +459,7 @@ mod tests {
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
 
+    use block::testing::Scarce;
     use env::files::{self, Operation};
     use env::net::udp::{self, Meta, Transmit};
     use raft::{Answer, Hard, Term};
@@ -1142,6 +1143,77 @@ mod tests {
             drop(held);
             let reply = mesh.outgoing(key(2)).await.unwrap();
             assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+        });
+    }
+
+    #[test]
+    fn a_group_gets_no_tick_while_its_write_waits_for_a_block() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let held = fill(&pool);
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            // Longer than each election timeout.
+            node.clock()
+                .sleep(Span::from_nanos(TICK.nanos() * 30))
+                .await;
+            drop(held);
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            node.clock().sleep(TICK).await;
+            assert!(quiet(&mesh, 2).await);
+            assert!(quiet(&mesh, 3).await);
+        });
+    }
+
+    #[test]
+    fn a_pool_with_no_block_for_a_write_stops_the_group() {
+        solo(|node, tasks| async move {
+            let budget = block::Config { budget: 0 };
+            let memory = block::Heap::new(budget.reservation());
+            let config = Config {
+                pool: Rc::new(Pool::new(budget, memory)),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            let cause = block::Error::TooLarge {
+                requested: 1,
+                largest: 0,
+            };
+            let stopped = Stopped::Write(log::Error::Pool(cause));
+            assert_eq!(watch.next().await, Err(Error::Stopped(stopped)));
+        });
+    }
+
+    #[test]
+    fn memory_that_the_system_refuses_stops_the_group() {
+        solo(|node, tasks| async move {
+            let budget = block::Config { budget: 4 << 20 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &IDS, &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            switch.refuse();
+            let _held = fill(&pool);
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            let cause = block::Error::Refused { requested: 327 };
+            let stopped = Stopped::Write(log::Error::Pool(cause));
+            assert_eq!(watch.next().await, Err(Error::Stopped(stopped)));
         });
     }
 
