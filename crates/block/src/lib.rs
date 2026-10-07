@@ -238,11 +238,11 @@ impl Pool {
         }
     }
 
-    /// Creates a pool on heap memory with the settings of `config`.
+    /// Creates a pool on [`Heap`] memory with the settings of `config`.
     ///
     /// # Panics
     ///
-    /// If [`Config::reservation`] panics, or the heap cannot allocate it.
+    /// If [`Config::reservation`] panics, or the heap cannot allocate that many bytes.
     #[must_use]
     pub fn heap(config: Config) -> Self {
         let heap = Heap::new(config.reservation());
@@ -1000,6 +1000,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(target_pointer_width = "64")]
         #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
         fn panics_when_it_does_not_fit_in_a_usize() {
             assert_eq!(Config { budget: usize::MAX }.reservation(), 0);
@@ -1110,6 +1111,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(target_pointer_width = "64")]
         #[should_panic(
             expected = "heap memory of 18446744073709551615 bytes is too large"
         )]
@@ -1139,6 +1141,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(target_pointer_width = "64")]
         #[should_panic(expected = "heap memory of 9223372036854775807 bytes is too")]
         fn panics_when_the_padded_layout_is_too_large() {
             drop(Heap::new(isize::MAX as usize));
@@ -1146,6 +1149,7 @@ mod tests {
 
         #[test]
         #[cfg_attr(miri, ignore = "Miri stops at an allocation it cannot make")]
+        #[cfg(target_pointer_width = "64")]
         #[should_panic(expected = "heap memory of 9223372036854775743 bytes is too")]
         fn panics_when_the_padded_layout_fits_but_cannot_be_allocated() {
             drop(Heap::new(isize::MAX as usize - ALIGN));
@@ -1174,6 +1178,7 @@ mod tests {
             }
 
             #[test]
+            #[cfg(target_pointer_width = "64")]
             #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
             fn panics_when_the_reservation_does_not_fit_in_a_usize() {
                 drop(Pool::heap(Config { budget: usize::MAX }));

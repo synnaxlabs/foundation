@@ -2932,9 +2932,9 @@ How to read this record:
   the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
   above `block` tests a refused commit through its production path (#591).
   `Pool::heap(config)` makes a pool on a `Heap` of `Config::reservation` bytes, so a
-  caller that wants heap memory does not size it. `Pool::new` stays for a caller that
-  injects its memory: `node` and `testing::Scarce` (decided by the architect,
-  2026-10-07T08:55:57Z, #1294:
+  caller that wants heap memory does not size it. `Pool::new` stays for injected
+  memory, such as `os::memory::Memory` in `node` and `testing::Scarce` in a test
+  (decided by the architect, 2026-10-07T08:55:57Z, #1294:
   https://github.com/synnaxlabs/foundation/issues/1294#issuecomment-6034509040).
 - **SHARD POOLS (2026-10-06)** `Node::start` makes one `block::Pool` for each shard
   and moves it into the shard, which drops it (M4). Each of `n` shards gets
