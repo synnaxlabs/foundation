@@ -1207,24 +1207,26 @@ How to read this record:
   and a state that only a foreign peer reaches. `Endpoint::write` gives
   `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
   writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
-  FRAME). A sender can send one message from parts of one block (`send_parts`,
-  `try_send_parts`), with one count change for each message. A `stream::Part` is a range
-  of the block, then at most 7 zeros. The stream never sends a byte of the block outside
-  the ranges, because those bytes can hold stale data of another channel; the padding is
-  zeros, which `hub` computes from FRAME LAYOUT. Lost: a range that runs past the
-  series, because it sends stale block bytes; a pad rule in the stream, because it puts
-  the hub layout in `transport` and is wrong for a series split across messages
-  (architect, #1197:
+  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
+  budgets: proposed by `network` in #228. The room order: approved by the advisor on
+  #611. The hello: proposed by `network` in #55; settled by the advisor and the
+  coordinator under the person's delegation (#55). A sender can send one message from
+  parts of one block (`send_parts`, `try_send_parts`), and the budgets count it as one
+  message, of the sum of its parts. A `stream::Part` is a range of the block, then at
+  most 7 zeros. The stream never sends a byte of the block outside the ranges, because
+  those bytes can hold stale data of another channel; the padding is zeros, which `hub`
+  computes from FRAME LAYOUT. Lost: a range that runs past the series, because it sends
+  stale block bytes; a pad rule in the stream, because it puts the hub layout in
+  `transport` and is wrong for a series split across messages (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575, after
   HUB WIRE
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). A
   receiver can receive into its own buffer (`recv_into`). A message longer than the
   buffer gives `Error::TooLarge` and stays queued, and so does a message whose future
-  drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe (architect,
-  #1197). Proposed by `network` in #55; approved by the coordinator on PR #407. The
-  budgets: proposed by `network` in #228. The room order: approved by the advisor on
-  #611. The hello: proposed by `network` in #55; settled by the advisor and the
-  coordinator under the person's delegation (#55).
+  drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe. Lost: the
+  `Message` type of the proposal, because it changes `send` and `try_send` for each
+  caller and must own its ranges (architect, #1197:
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
