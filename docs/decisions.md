@@ -1881,14 +1881,21 @@ How to read this record:
   would move the policy to other voters silently, and X26 could never fail), and the
   region from the directory (K2 makes the layout a default only; r3 rejected a
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
-  The `<kind>` segment of each of the seven kinds: `@access`, `@connector`, `@region`,
-  `@node_settings`, `@compression`, `@placement`, and `@time`. Each is the kind's HCL
-  keyword: `compression` (compression section), `placement` (S12), and `time`, which
-  the architect decided here (C6 shows `[[time]]`, and X36 replaced its content). The
-  kind is `spec::definition::Kind`, and the module `spec::key` holds the whole key rule:
-  the segments, the `@` rule, the bound, `Kind::key`, and `key::Error`. Lost: a module
-  `spec::kind`, because in `spec` "kind" also names a connector's driver. Decided by the
-  architect, #1109
+  The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
+  `@node_settings`, `@compression` (compression section), `@placement` (S12), and
+  `@time`. No time keyword was on record (C6 shows `[[time]]`, and X36 replaced its
+  content), so the architect decided `time`. A connector has no segment: it is at its
+  own name, and its channels are its children (#758, 2.2, C8). The `@` check still
+  applies to its name. A region record is at `<prefix>.@region` in the parent's tree
+  (#758). This is not an exception to X2: the region that holds the record is the
+  longest region prefix that contains `<prefix>`, other than `<prefix>` itself. The root
+  region has no parent and holds its own record. The one place that maps a key to its
+  region applies this, so no caller tests for `@region`. Decided by the architect,
+  #1001 (https://github.com/synnaxlabs/foundation/issues/1001#issuecomment-6031305302;
+  #758 for the connector and the region). The kind is `spec::definition::Kind`, and the
+  module `spec::key` holds the whole key rule: the segments, the `@` rule, the bound,
+  `Kind::key`, and `key::Error`. Lost: a module `spec::kind`, because in `spec` "kind"
+  also names a connector's driver. Decided by the architect, #1109
   (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031286198 and
   https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031290037).
 

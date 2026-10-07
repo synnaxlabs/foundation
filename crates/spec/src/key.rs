@@ -8,7 +8,8 @@ use crate::definition::Kind;
 
 impl Kind {
     /// The tree key of a definition of this kind with the label `label`:
-    /// `<label>.@<kind>`, where `<kind>` is [`Kind::as_str`].
+    /// `<label>.@<kind>`, where `<kind>` is [`Kind::as_str`], or `label` itself for a
+    /// connector, which is at its own name.
     ///
     /// # Errors
     ///
@@ -21,21 +22,31 @@ impl Kind {
         reason = "a checked label and a kind segment always make a name"
     )]
     pub fn key(self, label: &Name) -> Result<Name, Error> {
-        let kind = self.as_str();
-        let most = Name::MAX_BYTES.saturating_sub(kind.len()).saturating_sub(2);
-        if label.as_str().len() > most {
-            return Err(Error::Long { most });
+        let segment = match self {
+            Self::Connector => None,
+            _ => Some(self.as_str()),
+        };
+        if let Some(segment) = segment {
+            let most = Name::MAX_BYTES
+                .saturating_sub(segment.len())
+                .saturating_sub(2);
+            if label.as_str().len() > most {
+                return Err(Error::Long { most });
+            }
         }
         if label.reserved() {
             return Err(Error::Reserved);
         }
-        Ok(format!("{label}.@{kind}").parse().expect(
-            "a short label that is not reserved and a kind segment make a name",
-        ))
+        Ok(match segment {
+            None => label.clone(),
+            Some(segment) => format!("{label}.@{segment}").parse().expect(
+                "a short label that is not reserved and a kind segment make a name",
+            ),
+        })
     }
 
-    /// The name of the kind, such as `node_settings`: the segment of its tree key and
-    /// the keyword a file format names it with.
+    /// The name of the kind, such as `node_settings`: the keyword a file format names
+    /// it with, and the segment of its tree key. A connector's key has no segment.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -93,9 +104,9 @@ mod tests {
 
     use super::*;
 
-    const KINDS: [(Kind, &str); 7] = [
+    /// Each kind with a segment.
+    const KINDS: [(Kind, &str); 6] = [
         (Kind::Access, "@access"),
-        (Kind::Connector, "@connector"),
         (Kind::Region, "@region"),
         (Kind::NodeSettings, "@node_settings"),
         (Kind::Compression, "@compression"),
@@ -112,6 +123,19 @@ mod tests {
         for (kind, segment) in KINDS {
             assert_eq!(format!("@{}", kind.as_str()), segment);
         }
+        assert_eq!(Kind::Connector.as_str(), "connector");
+    }
+
+    #[test]
+    fn keys_a_connector_at_its_own_name() {
+        let longest = name(&"a".repeat(Name::MAX_BYTES));
+        for label in [name("site_a.modbus"), longest] {
+            assert_eq!(Kind::Connector.key(&label), Ok(label));
+        }
+        assert_eq!(
+            Kind::Connector.key(&name("site_a.@modbus")),
+            Err(Error::Reserved)
+        );
     }
 
     #[test]
