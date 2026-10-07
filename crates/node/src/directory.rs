@@ -18,7 +18,8 @@ pub(crate) fn shard(core: usize) -> PathBuf {
 
 /// Records `cores` in the data directory when no count is there, and syncs the
 /// record before any ring is made. Refuses a directory that records another count.
-/// With no record, rings up to `shard-<k>` are a record of `k + 1`.
+/// With no record, rings up to `shard-<k>` are a record of `k + 1`. Reads names
+/// only, so a file named as a record or a ring counts as one.
 pub(crate) async fn claim(
     files: &env::files::Files,
     cores: usize,
@@ -51,8 +52,8 @@ pub(crate) async fn claim(
     files.sync_dir(root).await.map_err(Error::Directory)
 }
 
-/// The number after `prefix` in `name`, in plain decimal, so `shards-03` and
-/// `shards-+3` give none.
+/// The number after `prefix` in `name`, in plain decimal that fits a `usize`, so
+/// `shards-03`, `shards-+3`, and `shards-18446744073709551616` give none.
 fn count(name: &Path, prefix: &str) -> Option<usize> {
     let rest = name.to_str()?.strip_prefix(prefix)?;
     let count = rest.parse::<usize>().ok()?;
