@@ -493,7 +493,7 @@ mod tests {
     use crate::card;
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::message::Message;
-    use crate::region::{Join, Malformed, Refused};
+    use crate::region::{Join, Malformed, Unfit};
     use crate::ticket::Options;
 
     const IDS: [u8; 3] = [1, 2, 3];
@@ -1565,7 +1565,7 @@ mod tests {
                     config.members.insert(at, second);
                     let opened = Mesh::open(config).await.err();
                     let duplicate =
-                        Some(Error::Member(Refused::Duplicate { key: key(2) }));
+                        Some(Error::Member(Unfit::Duplicate { key: key(2) }));
                     assert_eq!(opened, duplicate, "{case} at {at}");
                     assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
                 });
@@ -1573,7 +1573,7 @@ mod tests {
         }
         let text = format!("node {} is already a member", key(2));
         assert_eq!(
-            Error::Member(Refused::Duplicate { key: key(2) }).to_string(),
+            Error::Member(Unfit::Duplicate { key: key(2) }).to_string(),
             text
         );
     }

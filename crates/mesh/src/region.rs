@@ -38,11 +38,9 @@ impl State {
     ///
     /// # Errors
     ///
-    /// [`Refused::Reserved`], [`Refused::Outside`], or [`Refused::Long`] when the
-    /// region cannot hold a member, and [`Refused::Duplicate`], [`Refused::Taken`], or
-    /// [`Refused::Reused`] when two of `members` have one key, one name, or one status
-    /// channel key.
-    pub(crate) fn new(region: Name, members: Vec<Member>) -> Result<Self, Refused> {
+    /// [`Unfit`] when the region cannot hold a member, such as when two of `members`
+    /// have one key.
+    pub(crate) fn new(region: Name, members: Vec<Member>) -> Result<Self, Unfit> {
         let mut state = Self {
             region,
             members: BTreeMap::new(),
@@ -134,7 +132,7 @@ impl State {
     ) -> Result<(), Refused> {
         if !options.prefix.starts_with(&self.region) {
             return Err(Refused::Outside {
-                name: options.prefix,
+                prefix: options.prefix,
                 region: self.region.clone(),
             });
         }
@@ -152,13 +150,13 @@ impl State {
         &self,
         card: &card::Signed,
         status: &BTreeMap<Name, channel::Key>,
-    ) -> Result<Vec<String>, Refused> {
+    ) -> Result<Vec<String>, Unfit> {
         let name = &card.card().name;
         if name.reserved() {
-            return Err(Refused::Reserved { name: name.clone() });
+            return Err(Unfit::Reserved { name: name.clone() });
         }
         if !name.starts_with(&self.region) {
-            return Err(Refused::Outside {
+            return Err(Unfit::Outside {
                 name: name.clone(),
                 region: self.region.clone(),
             });
@@ -167,35 +165,35 @@ impl State {
         for status in status.keys() {
             // Two names joined by a dot fail to parse only on length.
             let Ok(full) = format!("{name}.{status}").parse::<Name>() else {
-                return Err(Refused::Long {
+                return Err(Unfit::Long {
                     name: name.clone(),
                     status: status.clone(),
                 });
             };
             if full.reserved() {
-                return Err(Refused::Reserved { name: full });
+                return Err(Unfit::Reserved { name: full });
             }
             names.push(full);
         }
         let key = card.key();
         if self.members.contains_key(&key) {
-            return Err(Refused::Duplicate { key });
+            return Err(Unfit::Duplicate { key });
         }
         let mut lower = Vec::with_capacity(names.len());
         for name in names {
             let folded = name.as_str().to_ascii_lowercase();
             if let Some(&holder) = self.names.get(&folded) {
-                return Err(Refused::Taken { name, key: holder });
+                return Err(Unfit::Taken { name, key: holder });
             }
             if lower.contains(&folded) {
-                return Err(Refused::Taken { name, key });
+                return Err(Unfit::Taken { name, key });
             }
             lower.push(folded);
         }
         let mut keys = BTreeSet::new();
         for &key in status.values() {
             if self.status.contains(&key) || !keys.insert(key) {
-                return Err(Refused::Reused { key });
+                return Err(Unfit::Reused { key });
             }
         }
         Ok(lower)
@@ -366,38 +364,8 @@ impl std::error::Error for Malformed {}
 pub(crate) enum Refused {
     /// The card of a `Join` is forged.
     Forged(card::Forged),
-    /// A segment of a member's name, or of the name of one of its status channels,
-    /// starts with `@`.
-    Reserved {
-        /// The name.
-        name: Name,
-    },
-    /// The name of a member's status channel, `<name>.<status>`, is longer than
-    /// [`Name::MAX_BYTES`].
-    Long {
-        /// The member's name.
-        name: Name,
-        /// The status name under it.
-        status: Name,
-    },
-    /// The node of a member is already a member.
-    Duplicate {
-        /// The node.
-        key: node::Key,
-    },
-    /// A member's name, or the name of one of its status channels, equals a name that
-    /// a member holds, ignoring ASCII case.
-    Taken {
-        /// The name.
-        name: Name,
-        /// The member that holds it, or the node itself when it holds the name twice.
-        key: node::Key,
-    },
-    /// A status channel key of a member is held by a member, or twice by this one.
-    Reused {
-        /// The status channel key.
-        key: channel::Key,
-    },
+    /// The region cannot hold the member that a `Join` admits.
+    Unfit(Unfit),
     /// No ticket with the public key of a `Join` is recorded.
     Unknown {
         /// The public key.
@@ -410,25 +378,97 @@ pub(crate) enum Refused {
         /// The public key.
         public_key: PublicKey,
     },
-    /// A member's name, or the prefix of a `Ticket` change, is not under the region's
-    /// prefix.
+    /// The prefix of a `Ticket` change is not under the region's prefix.
     Outside {
-        /// The name or the prefix.
-        name: Name,
+        /// The ticket's prefix.
+        prefix: Name,
         /// The region's prefix.
         region: Name,
     },
+}
+
+impl From<Unfit> for Refused {
+    fn from(unfit: Unfit) -> Self {
+        Self::Unfit(unfit)
+    }
 }
 
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Forged(forged) => forged.fmt(f),
+            Self::Unfit(unfit) => unfit.fmt(f),
+            Self::Unknown { public_key } => {
+                write!(f, "no ticket {public_key} is recorded")
+            }
+            Self::Ticket(refused) => refused.fmt(f),
+            Self::Recorded { public_key } => {
+                write!(f, "ticket {public_key} is already recorded")
+            }
+            Self::Outside { prefix, region } => {
+                write!(f, "the prefix {prefix} is not under the region {region}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Why the region cannot hold a member: a founding member, or the node of a `Join`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Unfit {
+    /// A segment of the member's name, or of the name of one of its status channels,
+    /// starts with `@`.
+    Reserved {
+        /// The name.
+        name: Name,
+    },
+    /// The member's name is not under the region's prefix.
+    Outside {
+        /// The member's name.
+        name: Name,
+        /// The region's prefix.
+        region: Name,
+    },
+    /// The name of a status channel of the member, `<name>.<status>`, is longer than
+    /// [`Name::MAX_BYTES`].
+    Long {
+        /// The member's name.
+        name: Name,
+        /// The status name under it.
+        status: Name,
+    },
+    /// The node is already a member.
+    Duplicate {
+        /// The node.
+        key: node::Key,
+    },
+    /// The member's name, or the name of one of its status channels, equals a name
+    /// that a member holds, ignoring ASCII case.
+    Taken {
+        /// The name.
+        name: Name,
+        /// The member that holds it, or the node itself when it holds the name twice.
+        key: node::Key,
+    },
+    /// A status channel key of the member is held by a member, or twice by this one.
+    Reused {
+        /// The status channel key.
+        key: channel::Key,
+    },
+}
+
+impl fmt::Display for Unfit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::Reserved { name } => write!(
                 f,
                 "the name {name} has a segment that starts with `@`, which is reserved \
                  for Foundation"
             ),
+            Self::Outside { name, region } => {
+                write!(f, "the name {name} is not under the region {region}")
+            }
             Self::Long { name, status } => write!(
                 f,
                 "the status channel {name}.{status} is longer than {} bytes",
@@ -441,21 +481,11 @@ impl fmt::Display for Refused {
             Self::Reused { key } => {
                 write!(f, "the status channel key {key} is already in use")
             }
-            Self::Unknown { public_key } => {
-                write!(f, "no ticket {public_key} is recorded")
-            }
-            Self::Ticket(refused) => refused.fmt(f),
-            Self::Recorded { public_key } => {
-                write!(f, "ticket {public_key} is already recorded")
-            }
-            Self::Outside { name, region } => {
-                write!(f, "the name {name} is not under the region {region}")
-            }
         }
     }
 }
 
-impl std::error::Error for Refused {}
+impl std::error::Error for Unfit {}
 
 #[cfg(test)]
 mod tests {
@@ -545,7 +575,7 @@ mod tests {
     #[test]
     fn new_refuses_two_members_with_one_key() {
         let error = State::new(name("plant"), members(&[1, 2, 1])).unwrap_err();
-        assert_eq!(error, Refused::Duplicate { key: node(1) });
+        assert_eq!(error, Unfit::Duplicate { key: node(1) });
         assert_eq!(
             error.to_string(),
             format!("node {} is already a member", node(1))
@@ -558,7 +588,7 @@ mod tests {
         reserved[1].card = signed(2, "plant.@changes");
         assert_eq!(
             State::new(name("plant"), reserved),
-            Err(Refused::Reserved {
+            Err(Unfit::Reserved {
                 name: name("plant.@changes")
             })
         );
@@ -566,7 +596,7 @@ mod tests {
         outside[1].card = signed(2, "factory.node2");
         assert_eq!(
             State::new(name("plant"), outside),
-            Err(Refused::Outside {
+            Err(Unfit::Outside {
                 name: name("factory.node2"),
                 region: name("plant")
             })
@@ -575,7 +605,7 @@ mod tests {
         long[1].status = BTreeMap::from([(long_status(256 - 12), index(1))]);
         assert_eq!(
             State::new(name("plant"), long).unwrap_err(),
-            Refused::Long {
+            Unfit::Long {
                 name: name("plant.node2"),
                 status: long_status(256 - 12),
             }
@@ -611,7 +641,7 @@ mod tests {
         assert_eq!(
             state.apply(record(8, options("plants.edge", false))),
             Err(Refused::Outside {
-                name: name("plants.edge"),
+                prefix: name("plants.edge"),
                 region: name("plant")
             })
         );
@@ -682,7 +712,7 @@ mod tests {
         let before = state.clone();
         assert_eq!(
             state.apply(Change::Join(Box::new(join(7, 1, "plant.edge.a")))),
-            Err(Refused::Duplicate { key: node(1) })
+            Err(Unfit::Duplicate { key: node(1) }.into())
         );
         assert_eq!(state, before);
         let admitted = state.apply(Change::Join(Box::new(join(7, 3, "plant.edge.a"))));
@@ -708,9 +738,10 @@ mod tests {
         let before = state.clone();
         assert_eq!(
             apply_join(&mut state, join(8, 3, "plant.@changes")),
-            Err(Refused::Reserved {
+            Err(Unfit::Reserved {
                 name: name("plant.@changes")
-            })
+            }
+            .into())
         );
         assert_eq!(state, before);
         assert_eq!(state.ticket(public(8)).map(|record| record.uses), Some(0));
@@ -726,18 +757,20 @@ mod tests {
         reserved.status = BTreeMap::from([(name("@changes"), index(9))]);
         assert_eq!(
             apply_join(&mut state, reserved),
-            Err(Refused::Reserved {
+            Err(Unfit::Reserved {
                 name: name("plant.@changes")
-            })
+            }
+            .into())
         );
         assert_eq!(state, before);
         let mut deep = join(8, 3, "plant");
         deep.status = BTreeMap::from([(name("disk.@a"), index(9))]);
         assert_eq!(
             apply_join(&mut state, deep),
-            Err(Refused::Reserved {
+            Err(Unfit::Reserved {
                 name: name("plant.disk.@a")
-            })
+            }
+            .into())
         );
         assert_eq!(apply_join(&mut state, join(8, 3, "plant")), Ok(None));
     }
@@ -750,10 +783,11 @@ mod tests {
         let before = state.clone();
         assert_eq!(
             apply_join(&mut state, join(7, 3, "plants.edge")),
-            Err(Refused::Outside {
+            Err(Unfit::Outside {
                 name: name("plants.edge"),
                 region: name("plant")
-            })
+            }
+            .into())
         );
         assert_eq!(state, before);
     }
@@ -767,10 +801,11 @@ mod tests {
         long.status = BTreeMap::from([(long_status(256 - 13), index(9))]);
         assert_eq!(
             apply_join(&mut state, long),
-            Err(Refused::Long {
+            Err(Unfit::Long {
                 name: name("plant.edge.a"),
                 status: long_status(256 - 13),
-            })
+            }
+            .into())
         );
         assert_eq!(state, before);
         let mut longest = join(7, 3, "plant.edge.a");
@@ -805,10 +840,11 @@ mod tests {
         for (join, taken, holder) in cases {
             assert_eq!(
                 apply_join(&mut state, join),
-                Err(Refused::Taken {
+                Err(Unfit::Taken {
                     name: name(taken),
                     key: node(holder)
-                })
+                }
+                .into())
             );
             assert_eq!(state, before);
         }
@@ -835,10 +871,11 @@ mod tests {
         for (join, taken) in cases {
             assert_eq!(
                 apply_join(&mut state, join),
-                Err(Refused::Taken {
+                Err(Unfit::Taken {
                     name: name(taken),
                     key: node(3)
-                })
+                }
+                .into())
             );
             assert_eq!(state, before);
         }
@@ -853,10 +890,11 @@ mod tests {
         let join = with_status(join(8, 3, "plant.a"), &[("Disk", 20), ("disk", 21)]);
         assert_eq!(
             apply_join(&mut state, join),
-            Err(Refused::Taken {
+            Err(Unfit::Taken {
                 name: name("plant.a.disk"),
                 key: node(3)
-            })
+            }
+            .into())
         );
         assert_eq!(state, before);
     }
@@ -872,7 +910,7 @@ mod tests {
         for (join, key) in [(held, 20), (twice, 21)] {
             assert_eq!(
                 apply_join(&mut state, join),
-                Err(Refused::Reused { key: index(key) })
+                Err(Unfit::Reused { key: index(key) }.into())
             );
             assert_eq!(state, before);
         }
@@ -884,7 +922,7 @@ mod tests {
         taken[1].card = signed(2, "plant.NODE1");
         assert_eq!(
             State::new(name("plant"), taken),
-            Err(Refused::Taken {
+            Err(Unfit::Taken {
                 name: name("plant.NODE1"),
                 key: node(1)
             })
@@ -894,7 +932,7 @@ mod tests {
         reused[1].status = BTreeMap::from([(name("disk"), index(20))]);
         assert_eq!(
             State::new(name("plant"), reused),
-            Err(Refused::Reused { key: index(20) })
+            Err(Unfit::Reused { key: index(20) })
         );
     }
 
@@ -915,38 +953,42 @@ mod tests {
             (forged, Refused::Forged(card::Forged { node: node(1) })),
             (
                 join(7, 1, "plant.@a"),
-                Refused::Reserved {
+                Unfit::Reserved {
                     name: name("plant.@a"),
-                },
+                }
+                .into(),
             ),
             (
                 outside,
-                Refused::Outside {
+                Unfit::Outside {
                     name: name("plants.edge.a"),
                     region: name("plant"),
-                },
+                }
+                .into(),
             ),
             (
                 long,
-                Refused::Long {
+                Unfit::Long {
                     name: name("plant.edge.a"),
                     status: long_status(256 - 13),
-                },
+                }
+                .into(),
             ),
             (
                 join(8, 1, "plant.edge.a"),
-                Refused::Duplicate { key: node(1) },
+                Unfit::Duplicate { key: node(1) }.into(),
             ),
             (
                 with_status(join(7, 3, "plant.node2"), &[("disk", 9), ("x", 9)]),
-                Refused::Taken {
+                Unfit::Taken {
                     name: name("plant.node2"),
                     key: node(2),
-                },
+                }
+                .into(),
             ),
             (
                 with_status(join(8, 3, "plant.edge.a"), &[("disk", 9), ("x", 9)]),
-                Refused::Reused { key: index(9) },
+                Unfit::Reused { key: index(9) }.into(),
             ),
         ];
         let before = state.clone();
@@ -965,33 +1007,36 @@ mod tests {
                 format!("the card of node {} is forged", node(3)),
             ),
             (
-                Refused::Reserved {
+                Unfit::Reserved {
                     name: name("plant.@changes"),
-                },
+                }
+                .into(),
                 "the name plant.@changes has a segment that starts with `@`, which is \
                  reserved for Foundation"
                     .to_owned(),
             ),
             (
-                Refused::Long {
+                Unfit::Long {
                     name: name("plant.a"),
                     status: name("disk"),
-                },
+                }
+                .into(),
                 "the status channel plant.a.disk is longer than 255 bytes".to_owned(),
             ),
             (
-                Refused::Duplicate { key: node(1) },
+                Unfit::Duplicate { key: node(1) }.into(),
                 format!("node {} is already a member", node(1)),
             ),
             (
-                Refused::Taken {
+                Unfit::Taken {
                     name: name("plant.a"),
                     key: node(1),
-                },
+                }
+                .into(),
                 format!("the name plant.a is taken by node {}", node(1)),
             ),
             (
-                Refused::Reused { key: index(9) },
+                Unfit::Reused { key: index(9) }.into(),
                 format!("the status channel key {} is already in use", index(9)),
             ),
             (
@@ -1007,11 +1052,19 @@ mod tests {
                 format!("ticket {key7} is already recorded"),
             ),
             (
-                Refused::Outside {
+                Unfit::Outside {
                     name: name("plants.edge"),
                     region: name("plant"),
-                },
+                }
+                .into(),
                 "the name plants.edge is not under the region plant".to_owned(),
+            ),
+            (
+                Refused::Outside {
+                    prefix: name("plants.edge"),
+                    region: name("plant"),
+                },
+                "the prefix plants.edge is not under the region plant".to_owned(),
             ),
         ];
         for (refused, text) in cases {

@@ -3,7 +3,7 @@ use std::fmt;
 use raft::Position;
 use types::node;
 
-use crate::region::{Malformed, Refused};
+use crate::region::{Malformed, Unfit};
 use crate::{grant, log};
 
 /// Why a mesh call failed.
@@ -29,7 +29,7 @@ pub(crate) enum Error {
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
     /// The region cannot hold a member record of the config.
-    Member(Refused),
+    Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
     /// The group stopped.
