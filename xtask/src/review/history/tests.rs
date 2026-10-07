@@ -64,8 +64,8 @@ impl Repo {
         History::new(&self.dir, "origin/main").reaches(end, head)
     }
 
-    fn comments_only(&self, from: &str, end: &str) -> Result<bool, String> {
-        History::new(&self.dir, "origin/main").comments_only(from, end)
+    fn code_change(&self, from: &str, end: &str) -> Result<Option<String>, String> {
+        History::new(&self.dir, "origin/main").code_change(from, end)
     }
 }
 
@@ -159,26 +159,107 @@ fn names_the_git_failure_for_an_unknown_head() {
 }
 
 #[test]
-fn a_range_of_comment_lines_is_comments_only() {
+fn a_range_of_comment_and_blank_lines_changes_no_code() {
     let (repo, from) = Repo::with_pr("comments");
     let code = repo.commit("a.rs", "/// A.\nfn a() {}\n");
-    assert_eq!(repo.comments_only(&from, &code), Ok(false));
-    let docs = repo.commit("a.rs", "/// A, wrapped.\n  // B.\nfn a() {}\n");
-    assert_eq!(repo.comments_only(&code, &docs), Ok(true));
+    let docs = repo.commit("a.rs", "/// A, wrapped.\n\n  // B.\nfn a() {}\n\n");
+    assert_eq!(repo.code_change(&code, &docs), Ok(None));
     let text = repo.commit("b.txt", "fn b() {}\n");
-    assert_eq!(repo.comments_only(&code[..7], &text[..7]), Ok(true));
+    assert_eq!(repo.code_change(&code[..7], &text[..7]), Ok(None));
     let removed = repo.commit("a.rs", "fn a() {}\n");
-    assert_eq!(repo.comments_only(&text, &removed), Ok(true));
-    let blank = repo.commit("a.rs", "fn a() {}\n\n");
-    assert_eq!(repo.comments_only(&removed, &blank), Ok(false));
-    let renamed = repo.commit("a.rs", "fn b() {}\n\n");
-    assert_eq!(repo.comments_only(&blank, &renamed), Ok(false));
+    assert_eq!(repo.code_change(&text, &removed), Ok(None));
+    assert_eq!(repo.code_change(&removed, &removed), Ok(None));
+    assert_eq!(
+        repo.code_change(&from, &code),
+        Ok(Some("changes code at `a.rs:2`".to_string()))
+    );
 }
 
 #[test]
-fn a_range_that_names_no_commit_is_not_comments_only() {
+fn names_the_first_line_of_code_that_a_range_changes() {
+    let (repo, _) = Repo::with_pr("code");
+    let from = repo.commit("a.rs", "// A.\nfn a() {}\n\nfn b() {}\n");
+    repo.commit("c.rs", "fn c() {}\n");
+    let end = repo.commit("a.rs", "// A, B.\nfn a() {}\n\nfn d() {}\n");
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `a.rs:4`".to_string()))
+    );
+    let deleted = repo.commit("a.rs", "// A, B.\nfn a() {}\n\n");
+    assert_eq!(
+        repo.code_change(&end, &deleted),
+        Ok(Some("changes code at `a.rs:4`".to_string()))
+    );
+    std::fs::remove_file(repo.dir.join("c.rs")).unwrap();
+    repo.git(&["commit", "--quiet", "-am", "rm"]);
+    assert_eq!(
+        repo.code_change(&deleted, &repo.head()),
+        Ok(Some("changes code at `c.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_range_that_names_no_commit_has_that_text() {
     let (repo, end) = Repo::with_pr("unnamed");
-    assert_eq!(repo.comments_only("deadbeef", &end), Ok(false));
-    assert_eq!(repo.comments_only(&end, "HEAD"), Ok(false));
-    assert_eq!(repo.comments_only(&end, &end), Ok(true));
+    assert_eq!(
+        repo.code_change("deadbeef", &end),
+        Ok(Some("has `deadbeef`, which names no commit".to_string()))
+    );
+    assert_eq!(
+        repo.code_change(&end, "HEAD"),
+        Ok(Some("has `HEAD`, which names no commit".to_string()))
+    );
+}
+
+#[test]
+fn counts_lines_to_the_first_line_of_code() {
+    let (repo, _) = Repo::with_pr("count");
+    let empty = repo.commit("a.rs", "");
+    let added = repo.commit("a.rs", "// A.\n\nfn a() {}\n");
+    assert_eq!(
+        repo.code_change(&empty, &added),
+        Ok(Some("changes code at `a.rs:3`".to_string()))
+    );
+    assert_eq!(
+        repo.code_change(&added, &empty),
+        Ok(Some("changes code at `a.rs:3`".to_string()))
+    );
+}
+
+#[test]
+fn a_moved_file_and_a_manifest_change_code() {
+    let (repo, _) = Repo::with_pr("moved");
+    std::fs::create_dir_all(repo.dir.join("tests/data")).unwrap();
+    let from = repo.commit("tests/oracle.rs", "#[test]\nfn holds() {}\n");
+    repo.git(&["mv", "tests/oracle.rs", "tests/data/oracle.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "move"]);
+    assert_eq!(
+        repo.code_change(&from, &repo.head()),
+        Ok(Some("changes code at `tests/data/oracle.rs:1`".to_string()))
+    );
+    let from = repo.head();
+    std::fs::create_dir_all(repo.dir.join("crates/a")).unwrap();
+    let toml = repo.commit("crates/a/Cargo.toml", "# A comment.\n");
+    assert_eq!(
+        repo.code_change(&from, &toml),
+        Ok(Some("changes code at `crates/a/Cargo.toml:1`".to_string()))
+    );
+    let lock = repo.commit("Cargo.lock", "\n");
+    assert_eq!(
+        repo.code_change(&toml, &lock),
+        Ok(Some("changes code at `Cargo.lock:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_colored_diff_config_does_not_hide_code() {
+    let (repo, from) = Repo::with_pr("color");
+    repo.git(&["config", "color.diff", "always"]);
+    repo.git(&["config", "diff.noprefix", "false"]);
+    repo.git(&["config", "diff.renames", "copies"]);
+    let code = repo.commit("a.rs", "fn a() {}\n");
+    assert_eq!(
+        repo.code_change(&from, &code),
+        Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
 }

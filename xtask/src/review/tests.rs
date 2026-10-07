@@ -53,7 +53,9 @@ fn check(record: &Record) -> Vec<String> {
         record,
         HEAD,
         &|end| Ok(HEAD.starts_with(end)),
-        &|from, _| Ok(from == COMMENTS),
+        &|from, _| {
+            Ok((from != COMMENTS).then(|| "changes code at `a.rs:2`".to_string()))
+        },
     )
     .unwrap()
 }
@@ -68,6 +70,49 @@ fn passes_the_last_round_of_1089() {
         check(&record(vec![earlier, bot(ROUND)])),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn passes_1089_with_its_rounds_before_the_fixed_format() {
+    let first = bot(
+        "## Review round 1\n\nConfirmed findings, most severe first.\n\n\
+                     1. **`Checked::new` overflows the stack**.",
+    );
+    let second = bot("## Review round 2\n\nReviewer and breaker on \
+                      `8a33cd71^..c0261dd1`. No correctness defect.");
+    assert_eq!(
+        check(&record(vec![first, second, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn skips_an_earlier_quote_of_the_format() {
+    let quote =
+        bot("The format:\n\n```\n## Review round <n>\n\nReviewers: reviewer\n```");
+    assert_eq!(
+        check(&record(vec![quote, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn reads_the_range_of_the_last_round_only() {
+    let skipped = ROUND
+        .replace(COMMENTS, "940140aa")
+        .replace("round 3", "round 2");
+    let last = later("reviewer, breaker");
+    assert_eq!(
+        check(&record(vec![bot(&skipped), bot(&last)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn exits_by_the_result() {
+    assert_eq!(exit(Ok(Vec::new())), ExitCode::SUCCESS);
+    assert_eq!(exit(Ok(vec!["a".to_string()])), ExitCode::FAILURE);
+    assert_eq!(exit(Err("gh: down".to_string())), ExitCode::from(2));
 }
 
 #[test]
@@ -122,11 +167,14 @@ fn fails_a_round_with_findings() {
     );
 }
 
-/// `ROUND` as a later round of a code PR whose range changes code.
+/// `ROUND` as a later round of a code PR that does not skip `breaker`.
 fn later(reviewers: &str) -> String {
     ROUND
         .replace("Reviewers: reviewer", &format!("Reviewers: {reviewers}"))
-        .replace(COMMENTS, "940140aa")
+        .replace(
+            "Breaker: skipped, the range changes no `.rs` line but comments\n",
+            "",
+        )
 }
 
 #[test]
@@ -142,11 +190,24 @@ fn fails_a_code_pr_whose_round_names_no_breaker() {
 }
 
 #[test]
-fn a_breaker_skip_needs_a_range_of_comments_only() {
+fn a_breaker_skip_on_a_range_that_changes_code_fails() {
     let code = ROUND.replace(COMMENTS, "940140aa");
     assert_eq!(
         check(&record(vec![bot(&code)])),
-        vec!["review round 3 names no breaker, which this round requires.".to_string()]
+        vec![
+            "review round 3 skips `breaker`, but its range changes code at `a.rs:2`."
+                .to_string()
+        ]
+    );
+    let named = code.replace("Reviewers: reviewer", "Reviewers: reviewer, breaker");
+    assert_eq!(check(&record(vec![bot(&named)])), Vec::<String>::new());
+    let first = code.replace("round 3", "round 1");
+    assert_eq!(
+        check(&record(vec![bot(&first)])),
+        vec![
+            "review round 1 names no architecture, breaker, which this round requires."
+                .to_string()
+        ]
     );
 }
 
@@ -324,7 +385,7 @@ fn a_red_team_pr_with_no_oracle_label_needs_no_approval() {
 fn returns_a_failure_to_read_history() {
     let failed = |_: &str| Err("git rev-parse: bad".to_string());
     assert_eq!(
-        problems(&record(vec![bot(ROUND)]), HEAD, &failed, &|_, _| Ok(true)),
+        problems(&record(vec![bot(ROUND)]), HEAD, &failed, &|_, _| Ok(None)),
         Err("git rev-parse: bad".to_string())
     );
     let failed = |_: &str, _: &str| Err("git diff: bad".to_string());

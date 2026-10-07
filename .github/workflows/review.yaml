@@ -38,6 +38,19 @@ jobs:
         run: |
           gh api "repos/$GH_REPO/statuses/$SHA" -f state=success -f context=review \
             -f description="The review was done when the PR entered the queue."
+      # Pending first, so a step that fails never leaves an earlier `success`.
+      - if: github.event_name != 'merge_group'
+        env:
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -z "$HEAD" ]; then
+            HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          fi
+          echo "HEAD=$HEAD" >> "$GITHUB_ENV"
+          gh api "repos/$GH_REPO/statuses/$HEAD" -f state=pending -f context=review \
+            -f description="The review check runs." \
+            -f target_url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
       - if: github.event_name != 'merge_group'
         uses: actions/checkout@v4
         with:
@@ -49,11 +62,7 @@ jobs:
       - if: github.event_name != 'merge_group'
         env:
           PR: ${{ github.event.pull_request.number || github.event.issue.number }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ -z "$HEAD" ]; then
-            HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-          fi
           git fetch --quiet origin "refs/pull/$PR/head"
           code=0
           cargo xtask review "$PR" "$HEAD" || code=$?

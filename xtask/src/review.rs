@@ -11,6 +11,9 @@ use crate::field;
 
 mod history;
 
+/// The first change of code in a range `<from>..<end>`, as a phrase, or `None`.
+type CodeChange<'a> = &'a dyn Fn(&str, &str) -> Result<Option<String>, String>;
+
 /// The account that posts each round comment and each director verdict. Comments by
 /// other accounts never count.
 const BOT: &str = "synnax-foundation-factory[bot]";
@@ -37,6 +40,9 @@ struct Comment {
 struct Round {
     number: u32,
     reviewers: BTreeSet<String>,
+    /// The round has the line `Breaker: skipped`: a later round may skip `breaker`
+    /// when its range changes only comment and blank lines of `.rs` files.
+    breakerless: bool,
     from: String,
     end: String,
     findings: u32,
@@ -58,9 +64,14 @@ pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
             &record,
             head,
             &|end| history.reaches(end, head),
-            &|from, end| history.comments_only(from, end),
+            &|from, end| history.code_change(from, end),
         )
     });
+    exit(found)
+}
+
+/// Prints each problem or the failure in `found`, and gives the exit code of `run`.
+fn exit(found: Result<Vec<String>, String>) -> ExitCode {
     match found {
         Ok(problems) if problems.is_empty() => ExitCode::SUCCESS,
         Ok(problems) => {
@@ -79,13 +90,15 @@ pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
 /// The problems with the review in `record` at `head`: each round must name the
 /// reviewers it requires, and the last round must find nothing and end at `head`.
 /// `reaches` reports whether a commit (a SHA or its prefix) reaches `head` through
-/// clean merges of the base, and `comments_only` whether a range changes only comment
-/// lines of `.rs` files.
+/// clean merges of the base. A later round may skip `breaker` when the range of the
+/// last round changes no code; an earlier round's skip is taken as written.
+/// `code_change` gives the first change of a `.rs` line that
+/// is not a comment or blank in a range, as a phrase, or `None`.
 fn problems(
     record: &Record,
     head: &str,
     reaches: &dyn Fn(&str) -> Result<bool, String>,
-    comments_only: &dyn Fn(&str, &str) -> Result<bool, String>,
+    code_change: CodeChange<'_>,
 ) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     let rounds: Vec<_> = record
@@ -100,18 +113,32 @@ fn problems(
              the format of .claude/skills/review/SKILL.md, \"Round comment\"."
         ));
     }
-    for round in &rounds {
+    for (i, round) in rounds.iter().enumerate() {
         let round = match round {
             Ok(round) => round,
+            // An earlier round that does not parse predates the fixed format.
+            Err(_) if i + 1 < rounds.len() => continue,
             Err(e) => {
                 problems.push(e.clone());
                 continue;
             }
         };
-        let missing: Vec<&str> = required(round, &record.files, comments_only)?
+        let mut missing: Vec<&str> = required(round, &record.files)
             .into_iter()
             .filter(|name| !round.reviewers.contains(*name))
             .collect();
+        if round.number > 1 && round.breakerless && missing.contains(&"breaker") {
+            missing.retain(|name| *name != "breaker");
+            // A rebase can drop the range of an earlier round from the clone. The last
+            // round's range is in it, since its end must reach the head.
+            let last = i + 1 == rounds.len();
+            if last && let Some(change) = code_change(&round.from, &round.end)? {
+                problems.push(format!(
+                    "review round {} skips `breaker`, but its range {change}.",
+                    round.number
+                ));
+            }
+        }
         if !missing.is_empty() {
             problems.push(format!(
                 "review round {} names no {}, which this round requires.",
@@ -147,28 +174,21 @@ fn problems(
 
 /// The reviewers that `round` must name for a PR that changes `files`, by REVIEW
 /// TIERS in `docs/decisions.md`: on round 1, `reviewer`, plus `architecture` and
-/// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR
-/// unless the range changes only comment lines. `performance` depends on what the
-/// code does, so no round requires it here.
-fn required(
-    round: &Round,
-    files: &[String],
-    comments_only: &dyn Fn(&str, &str) -> Result<bool, String>,
-) -> Result<Vec<&'static str>, String> {
+/// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR.
+/// `performance` depends on what the code does, so no round requires it here.
+fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
     let code = files.iter().map(Path::new).any(|f| {
         f.extension().is_some_and(|e| e == "rs")
             || f.file_name()
                 .is_some_and(|n| n == "Cargo.toml" || n == "Cargo.lock")
     });
-    Ok(if !code {
-        vec!["reviewer"]
-    } else if round.number <= 1 {
+    if code && round.number <= 1 {
         vec!["reviewer", "architecture", "breaker"]
-    } else if comments_only(&round.from, &round.end)? {
-        vec!["reviewer"]
-    } else {
+    } else if code {
         vec!["reviewer", "breaker"]
-    })
+    } else {
+        vec!["reviewer"]
+    }
 }
 
 /// A problem when no director verdict by the bot has the line
@@ -206,7 +226,9 @@ fn round(body: &str) -> Option<Result<Round, String>> {
         )));
     };
     let (mut reviewers, mut range, mut findings) = (None, None, None);
+    let mut breakerless = false;
     for line in lines {
+        breakerless |= line.starts_with("Breaker: skipped");
         if let Some(value) = line.strip_prefix("Reviewers: ") {
             reviewers.get_or_insert(value);
         } else if let Some(value) = line.strip_prefix("Range: ") {
@@ -244,6 +266,7 @@ fn round(body: &str) -> Option<Result<Round, String>> {
                 .split(',')
                 .map(|r| r.trim().trim_matches('`').to_string())
                 .collect(),
+            breakerless,
             from: from.to_string(),
             end: end.to_string(),
             findings,

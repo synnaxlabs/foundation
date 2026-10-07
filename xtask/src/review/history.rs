@@ -43,40 +43,70 @@ impl<'a> History<'a> {
         Ok(true)
     }
 
-    /// Reports whether each `.rs` line that `from..end` changes, trimmed, starts with
-    /// `//`. `from` and `end` are SHAs or prefixes of at least 7 digits; text that
-    /// names no single commit gives `false`.
+    /// The first line of code that `from..end` adds or removes, as a phrase: "changes
+    /// code at `<file>:<line>`". A line of a `.rs` file is code unless, trimmed, it is
+    /// empty or starts with `//`; each line of a `Cargo.toml` or `Cargo.lock` is
+    /// code. A moved file counts as removed and added. The line number is in `end` for
+    /// an added line and in `from` for a removed one. `None` when no line is code.
+    /// `from` and `end` are SHAs or prefixes of at least 7 digits; text that names no
+    /// single commit gives the phrase "has `<text>`, which names no commit".
     ///
     /// # Errors
     ///
     /// A failed `git` command.
-    pub(crate) fn comments_only(&self, from: &str, end: &str) -> Result<bool, String> {
-        let (Some(from), Some(end)) = (self.named(from)?, self.named(end)?) else {
-            return Ok(false);
+    pub(crate) fn code_change(
+        &self,
+        from: &str,
+        end: &str,
+    ) -> Result<Option<String>, String> {
+        let unnamed = |text: &str| format!("has `{text}`, which names no commit");
+        let Some(from_sha) = self.named(from)? else {
+            return Ok(Some(unnamed(from)));
+        };
+        let Some(end_sha) = self.named(end)? else {
+            return Ok(Some(unnamed(end)));
         };
         let diff = self.git(&[
             "diff",
             "--no-ext-diff",
+            "--no-color",
+            "--no-prefix",
+            "--no-renames",
             "--unified=0",
-            &from,
-            &end,
+            &from_sha,
+            &end_sha,
             "--",
-            "*.rs",
+            ":(glob)**/*.rs",
+            ":(glob)**/Cargo.toml",
+            ":(glob)**/Cargo.lock",
         ])?;
+        let (mut old, mut new) = ("", "");
+        let (mut old_line, mut new_line) = (0, 0);
         let mut hunk = false;
         for line in diff.lines() {
             if line.starts_with("diff ") {
                 hunk = false;
-            } else if line.starts_with("@@") {
+            } else if !hunk && let Some(path) = line.strip_prefix("--- ") {
+                old = path;
+            } else if !hunk && let Some(path) = line.strip_prefix("+++ ") {
+                new = path;
+            } else if let Some(header) = line.strip_prefix("@@ ") {
                 hunk = true;
-            } else if hunk
-                && let Some(changed) = line.strip_prefix(['+', '-'])
-                && !changed.trim().starts_with("//")
-            {
-                return Ok(false);
+                (old_line, new_line) = starts(header)
+                    .ok_or_else(|| format!("git diff: a bad hunk header `{line}`"))?;
+            } else if hunk && let Some(text) = line.strip_prefix('-') {
+                if code(old, text) {
+                    return Ok(Some(format!("changes code at `{old}:{old_line}`")));
+                }
+                old_line += 1;
+            } else if hunk && let Some(text) = line.strip_prefix('+') {
+                if code(new, text) {
+                    return Ok(Some(format!("changes code at `{new}:{new_line}`")));
+                }
+                new_line += 1;
             }
         }
-        Ok(true)
+        Ok(None)
     }
 
     /// The full SHA of the commit that `text` names when it is a SHA or a prefix of at
@@ -156,6 +186,24 @@ impl<'a> History<'a> {
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
+}
+
+/// Whether `text`, a changed line of the file at `path`, is code: any line of a file
+/// that is not `.rs`, and a `.rs` line that, trimmed, is not empty or a comment.
+fn code(path: &str, text: &str) -> bool {
+    let text = text.trim();
+    let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
+    !rust || !(text.is_empty() || text.starts_with("//"))
+}
+
+/// The first old and new line numbers of a hunk header `-<a>[,<n>] +<b>[,<m>] @@`.
+fn starts(header: &str) -> Option<(u32, u32)> {
+    let mut parts = header.split(' ');
+    let mut start = |sign| {
+        let part: &str = parts.next()?.strip_prefix(sign)?;
+        part.split(',').next()?.parse().ok()
+    };
+    Some((start('-')?, start('+')?))
 }
 
 fn failure(command: &str, stderr: &[u8]) -> String {

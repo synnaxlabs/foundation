@@ -88,8 +88,8 @@ Findings: <count, or none>
 
 `Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
 skips `breaker` adds the line
-``Breaker: skipped, the range changes no `.rs` line but comments``. The check requires
-`breaker` unless each `.rs` line that the range changes, trimmed, starts with `//`. A
+``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
+range: each `.rs` line it adds or removes, trimmed, must be empty or start with `//`. A
 head that is the range end plus clean merges of the base needs no new round. A red-team
 PR labeled `oracle` also needs the director's verdict with the line
 ``Director: approved at `<sha>` `` at the head.
