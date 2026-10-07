@@ -307,6 +307,7 @@ fn answers_a_content_encoding_with_415_and_stores_nothing() {
     let requests = vec![
         encoded(&["gzip"], "m v=1 1"),
         encoded(&["identity", "gzip"], "m v=3 3"),
+        encoded(&["identity, gzip"], "m v=4 4"),
         encoded(&["Identity"], "m v=2 2"),
     ];
     let refused = answer(
@@ -315,7 +316,34 @@ fn answers_a_content_encoding_with_415_and_stores_nothing() {
     );
     assert_eq!(
         network.send(vec![requests]),
-        [refused.clone(), refused, answer(StatusCode::NO_CONTENT, "")]
+        [
+            refused.clone(),
+            refused.clone(),
+            refused,
+            answer(StatusCode::NO_CONTENT, "")
+        ]
     );
     assert_eq!(network.times("m"), [2]);
+}
+
+#[test]
+fn stores_a_content_encoding_list_of_identity_only() {
+    let mut network = Network::new();
+    let encoded = |value: &'static str, body| {
+        let mut request = network.post("/write?db=edge", body);
+        let value = HeaderValue::from_static(value);
+        request.headers_mut().append(CONTENT_ENCODING, value);
+        request
+    };
+    let requests = vec![
+        encoded("identity, IDENTITY", "m v=1 1"),
+        encoded("identity,", "m v=2 2"),
+        encoded("", "m v=3 3"),
+    ];
+    let stored = answer(StatusCode::NO_CONTENT, "");
+    assert_eq!(
+        network.send(vec![requests]),
+        [stored.clone(), stored.clone(), stored]
+    );
+    assert_eq!(network.times("m"), [1, 2, 3]);
 }

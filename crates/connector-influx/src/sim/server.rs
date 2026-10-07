@@ -53,13 +53,15 @@ fn route(
             format!("{} takes POST, not {method}", uri.path()),
         );
     }
-    let encoding = (request.headers().get_all(CONTENT_ENCODING).iter())
-        .map(|value| String::from_utf8_lossy(value.as_bytes()))
-        .find(|value| !value.eq_ignore_ascii_case("identity"));
-    if let Some(encoding) = encoding {
+    let lines = request.headers().get_all(CONTENT_ENCODING).iter();
+    let refused = (lines.flat_map(|line| line.as_bytes().split(|&byte| byte == b',')))
+        .map(<[u8]>::trim_ascii)
+        .find(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case(b"identity"));
+    if let Some(coding) = refused {
+        let coding = String::from_utf8_lossy(coding);
         return reply(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            format!("the store decodes no content-encoding, not {encoding:?}"),
+            format!("the store decodes no content-encoding, not {coding:?}"),
         );
     }
     let query = |key: &str| {
