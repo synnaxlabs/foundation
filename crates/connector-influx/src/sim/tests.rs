@@ -73,6 +73,15 @@ fn gives_the_points_in_time_order() {
 }
 
 #[test]
+fn a_point_outlives_the_tags_that_found_it() {
+    let store = stored("m,a=b v=1 10\n");
+    let points: Vec<Point> = store
+        .points("m", &[("a", String::from("b").as_str())])
+        .collect();
+    assert_eq!(points[0].tags, &BTreeMap::from([("a".into(), "b".into())]));
+}
+
+#[test]
 fn gives_only_the_points_with_each_tag() {
     let store = stored("m,a=1,b=2 v=1 10\nm,a=1 v=1 20\nm v=1 30\n");
     assert_eq!(times(&store, "m", &[("a", "1"), ("b", "2")]), [10]);
@@ -132,7 +141,7 @@ fn stores_a_leading_tab_and_a_tab_in_a_string() {
 }
 
 #[test]
-fn refuses_a_bare_tab_and_nul_in_a_measurement() {
+fn refuses_a_bare_tab_or_nul_in_a_name() {
     const TAKE: &str = "A generic parsing error occurred: TakeWhile1";
     for (line, message) in [
         ("m\tx v=1 10", TAKE),
@@ -299,9 +308,19 @@ fn refuses_a_key_that_comes_twice() {
 }
 
 #[test]
-fn a_type_conflict_in_one_line_stores_no_kind() {
-    let mut store = Store::default();
-    store.write(b"m v=1,v=1i 10\n").unwrap_err();
+fn a_key_twice_with_two_types_stores_no_kind() {
+    let (mut store, error) = refused("m v=1,v=1i 10\n");
+    assert_eq!(
+        error,
+        Error::Duplicate {
+            line: "m v=1,v=1i 10".into(),
+            key: "v".into(),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        r#"the line "m v=1,v=1i 10" has the key "v" more than once"#
+    );
     store.write(b"m v=1 20\n").unwrap();
     assert_eq!(times(&store, "m", &[]), [20]);
 }

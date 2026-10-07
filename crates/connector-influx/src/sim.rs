@@ -1,5 +1,5 @@
 //! A simulated InfluxDB store for tests. It parses with the line protocol parser of
-//! InfluxDB 3, so a writer bug and a parser bug cannot hide each other.
+//! InfluxDB 3, so it does not share a mistake with our writer.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -8,23 +8,23 @@ use std::str::Utf8Error;
 use influxdb_line_protocol::{FieldValue, ParsedLine};
 use types::time::Stamp;
 
-/// The first and last time that InfluxDB stores, in nanoseconds since the Unix
-/// epoch.
+/// The first and last time that InfluxDB stores, in nanoseconds since the Unix epoch.
 const TIMES: std::ops::RangeInclusive<i64> = i64::MIN + 2..=i64::MAX - 1;
 
-/// A simulated InfluxDB. A point is named by its measurement, tag set, and time, and
-/// a later write of the same point replaces the fields that it sets.
+/// A simulated InfluxDB. A point is named by its measurement, tag set, and time, and a
+/// later write of the same point replaces the fields that it sets.
 ///
-/// It keeps the InfluxDB rules that a writer must keep: the syntax, the time range,
-/// the reserved names, one use of each key, finite floats, and one type for each
-/// field. It stores a `u` integer, which InfluxDB 1 OSS refuses.
-#[derive(Clone, Debug, Default)]
+/// It keeps the InfluxDB rules that a writer must keep: the syntax, the time range, the
+/// reserved names, one use of each key, finite floats, and one type for each field.
+/// Where InfluxDB versions differ, it keeps the strictest rule, but it stores a `u`
+/// integer, which InfluxDB 1 OSS refuses.
+#[derive(Debug, Default)]
 pub struct Store {
     measurements: BTreeMap<String, Measurement>,
 }
 
 /// The points and field types of one measurement.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct Measurement {
     points: BTreeMap<(Stamp, Tags), Fields>,
     kinds: BTreeMap<String, Kind>,
@@ -34,14 +34,14 @@ type Tags = BTreeMap<String, String>;
 type Fields = BTreeMap<String, Field>;
 
 impl Store {
-    /// Stores each line of `body`. Like InfluxDB, it stores each valid line, also
-    /// after a line that is not valid. It splits lines, and skips blank lines and
-    /// comments, as InfluxDB 3 does.
+    /// Stores each line of `body`. Like InfluxDB, it stores each valid line, also after
+    /// a line that is not valid. It splits lines, and skips blank lines and comments,
+    /// as InfluxDB 3 does.
     ///
     /// # Errors
     ///
-    /// [`Error::Utf8`] for a body that is not UTF-8, and then no line is stored.
-    /// Else the error of the first line that is not valid:
+    /// [`Error::Utf8`] for a body that is not UTF-8, and then no line is stored. Else
+    /// the error of the first line that is not valid:
     /// - [`Error::Parse`] for a line that does not parse.
     /// - [`Error::Time`] for a line with no time, or a time that InfluxDB does not
     ///   store.
@@ -58,6 +58,7 @@ impl Store {
         let body = std::str::from_utf8(body).map_err(|error| Error::Utf8 { error })?;
         let mut first = None;
         for text in influxdb_line_protocol::split_lines(body) {
+            // `text` is one line: `split_lines` does not split its own line again.
             let Some(parsed) = influxdb_line_protocol::parse_lines(text).next() else {
                 continue;
             };
@@ -78,13 +79,13 @@ impl Store {
     pub fn points<'a>(
         &'a self,
         measurement: &str,
-        tags: &'a [(&str, &str)],
+        tags: &[(&str, &str)],
     ) -> impl Iterator<Item = Point<'a>> {
         self.measurements
             .get(measurement)
             .into_iter()
             .flat_map(|measurement| &measurement.points)
-            .filter(|((_, held), _)| {
+            .filter(move |((_, held), _)| {
                 tags.iter().all(|&(key, value)| {
                     held.get(key).is_some_and(|stored| stored == value)
                 })
@@ -129,7 +130,7 @@ impl Store {
         for (key, value) in &parsed.field_set {
             let key = key.as_str();
             check(key)?;
-            let field = Field::from(value);
+            let field = field(value);
             if let Field::Float(float) = field
                 && float.is_infinite()
             {
@@ -211,15 +212,13 @@ impl Field {
     }
 }
 
-impl From<&FieldValue<'_>> for Field {
-    fn from(value: &FieldValue<'_>) -> Self {
-        match value {
-            FieldValue::F64(float) => Self::Float(*float),
-            FieldValue::I64(integer) => Self::Integer(*integer),
-            FieldValue::U64(unsigned) => Self::Unsigned(*unsigned),
-            FieldValue::Boolean(boolean) => Self::Boolean(*boolean),
-            FieldValue::String(string) => Self::String(string.as_str().into()),
-        }
+fn field(value: &FieldValue<'_>) -> Field {
+    match value {
+        FieldValue::F64(float) => Field::Float(*float),
+        FieldValue::I64(integer) => Field::Integer(*integer),
+        FieldValue::U64(unsigned) => Field::Unsigned(*unsigned),
+        FieldValue::Boolean(boolean) => Field::Boolean(*boolean),
+        FieldValue::String(string) => Field::String(string.as_str().into()),
     }
 }
 
@@ -272,8 +271,8 @@ pub enum Error {
         /// The time in the line, or `None` when it has none.
         time: Option<i64>,
     },
-    /// The line uses a name or key that InfluxDB keeps for itself: the key `time`,
-    /// or one that starts with `_`.
+    /// The line uses a name or key that InfluxDB keeps for itself: the key `time`, or
+    /// one that starts with `_`.
     Reserved {
         /// The line.
         line: String,

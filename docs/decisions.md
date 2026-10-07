@@ -1905,24 +1905,27 @@ How to read this record:
   a name or key that starts with `_`; a key more than once in tags and fields together;
   a float that parses to infinity; and a field whose type differs from the type stored
   for that key in the measurement, also across shards, where InfluxDB 1 checks each
-  shard only. Each refusal is a typed `sim::Error` variant. The InfluxDB 3 parser also
-  refuses some lines that InfluxDB 1 stores, such as a tab in a measurement name; the
-  writer refuses them too. It splits lines, and skips blank lines and comments, as
-  InfluxDB 3 does, so a writer that writes a measurement name with a leading `#` loses
-  that line with no error; a test that reads the points sees the loss. It stores a `u`
-  integer, which InfluxDB 1 OSS refuses, until the writer stops writing `u` (#1210).
-  Lost: a store that gives a time to a line with none, and one that takes a type
-  conflict, as each hides a writer bug; and a test that a line is refused if and only if
-  the writer refuses its input, as the writer also refuses some names that InfluxDB
-  stores, such as a backslash or NUL, so the two sets differ by design. Decided by the
-  architect (`laptop.architect-2`), #1151
-  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032723969), and in
-  the review of #1239
+  shard only. Each refusal is a typed `sim::Error` variant. `write` stores each valid
+  line, also after a line that is not valid, and returns the first error; a body that is
+  not UTF-8 gives `Error::Utf8`, and nothing is stored. Where InfluxDB versions differ,
+  the store keeps the strictest rule. The InfluxDB 3 parser also refuses some lines that
+  InfluxDB 1 stores, such as a tab in a measurement name; the writer refuses them too.
+  It splits lines, and skips blank lines and comments, as InfluxDB 3 does, so a writer
+  that writes a measurement name with a leading `#` loses that line with no error; a
+  test that reads the points sees the loss. It stores a `u` integer, which InfluxDB 1
+  OSS refuses, until the writer stops writing `u` (#1210). Lost: a store that gives a
+  time to a line with none, and one that takes a type conflict, as each hides a writer
+  bug; and a test that a line is refused if and only if the writer refuses its input, as
+  the writer also refuses some names that InfluxDB stores, such as a backslash or NUL,
+  so the two sets differ by design. Decided by the architect (`laptop.architect-2`),
+  #1151 (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032723969),
+  and in the review of #1239
   (https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032923332,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032970676,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033050251,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033093344,
-  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033140752).
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033140752,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033409699).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
