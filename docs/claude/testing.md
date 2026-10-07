@@ -143,20 +143,21 @@ Oracles live in `oracles/`: simulation invariants, P1 targets and benchmark base
 conformance suites, and fuzz inputs. Committed proptest failure files
 (`proptest-regressions/` in each crate) are oracles too (r16 58). People own them.
 Agents add to them freely and never weaken them. Weakening means a removed test or
-assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
-or proptest failure file. A change to the bytes of a fuzz input deletes the old input:
-keep the old file and add the new bytes as a new file. Each target's corpus,
+assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input or
+proptest failure file. A change to the bytes of a fuzz input deletes the old input: keep
+the old file and add the new bytes as a new file. Each target's corpus,
 `oracles/fuzz/<target>/`, is its own oracle, and only a byte string that `main` held
-counts. When a PR renames or splits a target, the corpus of each target that replaces it
-is the same oracle. A move that keeps the bytes in that oracle is not a deletion. A byte
-string that only a PR branch held, such as the old bytes of an input that a PR adds and
-then changes before it merges, was never an oracle. A PR deletes an input when a byte
-string that `oracles/fuzz/<target>/` holds at its merge base with `main`
-(`git merge-base origin/main HEAD`) is in no file of `oracles/fuzz/<target>/`, or of the
-corpus of a target that replaces it, at its head. An audit of `main` takes each state
-that `git log --first-parent origin/main -- oracles/fuzz/<target>` lists: a byte string
-that `oracles/fuzz/<target>/` holds in one state, and that neither it nor the corpus of
-a target that replaces it holds on `origin/main`, was deleted
+counts. When a PR renames or splits a target, an input of its corpus may move to the
+corpus of a target that replaces it. Such a move, or a move inside one corpus, keeps the
+bytes and is not a deletion. A byte string that only a PR branch held, such as the old
+bytes of an input that a PR adds and then changes before it merges, was never an oracle.
+A PR deletes an input when a byte string that `oracles/fuzz/<target>/` holds at its
+merge base with `main` (`git merge-base origin/main HEAD`) is in no file of
+`oracles/fuzz/<target>/`, or of the corpus of a target that replaces it, at its head. An
+audit of `main` takes each state that
+`git log --first-parent origin/main -- oracles/fuzz/<target>` lists: a byte string that
+`oracles/fuzz/<target>/` holds in one state, and that neither it nor the corpus of a
+target that replaces it holds on `origin/main`, was deleted
 (https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500,
 2026-10-07T19:46:25Z).
 
