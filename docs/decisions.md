@@ -3383,7 +3383,7 @@ How to read this record:
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
 | r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
-| Retention trims a held sample: RETENTION (#895), READER RULES (2026-10-04), HANDOFF RECORD (#191) | RETENTION, READER RULES, STORE TRIM |
+| Retention trims a held sample: the trim clauses of #895 (6032219156), of the READER RULES floor (#89), and of HANDOFF RECORD (#402) | RETENTION, READER RULES, HANDOFF RECORD, STORE TRIM |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
