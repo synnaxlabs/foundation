@@ -1089,6 +1089,16 @@ mod tests {
             4 => body().prop_map(Op::Append),
             1 => any::<u32>().prop_map(Op::Reopen),
             2 => (0..4usize).prop_map(Op::Release),
+        ];
+        prop::collection::vec(op, 0..40)
+    }
+
+    /// Appends, reopens, and trims. The recorded cases of [`ops`] keep their
+    /// meaning because it has no trim.
+    fn trims() -> impl Strategy<Value = Vec<Op>> {
+        let op = prop_oneof![
+            4 => body().prop_map(Op::Append),
+            1 => any::<u32>().prop_map(Op::Reopen),
             2 => prop::option::of(0..4usize).prop_map(Op::Trim),
         ];
         prop::collection::vec(op, 0..40)
@@ -2068,6 +2078,16 @@ mod tests {
                 prop_assert_eq!(data, ring.data());
                 prop_assert_eq!(cursor.at, ring.head);
                 prop_assert_eq!(cursor.at.offset, ring.writer.head());
+            }
+
+            /// A walk from the tail of any trim finds the records after it.
+            #[test]
+            fn walks_from_the_tail_of_a_trim(ops in trims()) {
+                let mut ring = Ring::new();
+                run(&mut ring, &ops);
+                let (data, cursor) = walk(&ring.area, ring.tail).expect("a valid ring");
+                prop_assert_eq!(data, ring.data());
+                prop_assert_eq!(cursor.at, ring.head);
             }
 
             /// A crash leaves any subset of the sectors of the last
