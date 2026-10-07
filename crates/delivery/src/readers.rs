@@ -1798,6 +1798,21 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn gives_a_named_reader_that_resumes_no_frame_after_one_its_close_dropped() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
+            readers.queue(&frames.frame(1), 0..1);
+            readers.close_named(key, at(0));
+            let later = readers
+                .open(named("a", 10), resume(live(9)), 10 * CHARGE)
+                .key;
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), []);
+            assert_eq!(taken(&mut readers, later), []);
+        }
+
+        #[test]
         fn drops_the_queued_frames_when_a_latest_session_takes_over_the_last() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
