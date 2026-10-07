@@ -443,12 +443,12 @@ async fn compete(
     for round in 0..WARMUP + ROUNDS {
         let tally = Tally::new(classes.clone(), premise);
         let tally = RefCell::new(tally);
-        let mut sends: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
+        let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
         for (at, sender) in senders.iter_mut().enumerate() {
             let blocks = (0..share).map(|_| filled(pool, scenario.bytes)).collect();
-            sends.push(Box::pin(send_each(sender, blocks, at, &tally)));
+            futures.push(Box::pin(send_each(sender, blocks, at, &tally)));
         }
-        join(sends).await;
+        join(futures).await;
         let tally = tally.into_inner();
         let sends: u64 = tally.sent.iter().sum();
         assert!(
@@ -478,12 +478,12 @@ async fn compete(
             scenario.name,
         );
     }
-    let mut sent = mem::take(&mut *accepted.lock().expect("not poisoned"));
+    let mut got = mem::take(&mut *accepted.lock().expect("not poisoned"));
     let mut asked = classes.clone();
-    for list in [&mut sent, &mut asked] {
+    for list in [&mut got, &mut asked] {
         list.sort_by_key(|&class| classes.iter().position(|&listed| listed == class));
     }
-    assert_eq!(sent, asked, "the classes {} sends on", scenario.name);
+    assert_eq!(got, asked, "the classes {} sends on", scenario.name);
     nanos.sort_unstable_by(f64::total_cmp);
     Measured {
         name: scenario.name.to_owned(),
