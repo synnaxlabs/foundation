@@ -1184,13 +1184,16 @@ How to read this record:
   on this node is the cause `Error::Unroutable` in `Error::Unreachable`, so
   `Endpoint::connect` keeps its invariant panic. A broken socket ends the dial with
   `Error::Network`. Rejected: the carrier maps noq-proto's invalid address to an error
-  (each later carrier would need its own check), and no new variant (a bad address would
-  look like a timeout). Decided by the architect:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879. An attempt
-  that connected before the break still wins, and its session ends with
-  `Error::Network`, as `accept` gives such a session. Proposed by the `transport`
-  builder in review of #1067, so the result does not depend on the order of attempts;
-  waits for the architect's ruling on #68.
+  (each later carrier would need its own check), and `Network` with neutral text (one
+  variant with two meanings: a caller cannot tell a dead socket from a bad address). An
+  attempt that connected before the break still wins, and its session ends with
+  `Error::Network`, as `accept` gives such a session, so the result does not depend on
+  the order of the attempts. The order and the stagger: proposed by `box2.builder-5`
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6022920297), decided
+  by the architect in review of #1067. `Unroutable`: decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
+  connected attempt: proposed by `box2.builder-5`, decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
