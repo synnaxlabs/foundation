@@ -245,7 +245,7 @@ impl Lab {
     }
 
     /// Writes `count` samples to `channel` on `node` at `rate` samples per second,
-    /// as the simulation runs.
+    /// as the simulation runs. Sample `k`, from 0, has the value `k as f64`.
     pub(crate) fn write(
         &mut self,
         _node: Node,

@@ -2352,6 +2352,13 @@ How to read this record:
   in the review of #1225
   (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
   https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
+  Data points in the lab: sample `k` of one `Lab::write`, from 0, has the value
+  `k as f64`, which is exact below 2^53. `Lab::stored` accepts a data point only
+  when its fields are one float with the value of the sample at its stamp. Until
+  #341 names the field key of a data line, the field may have any key; the #341 PR
+  that names the key changes the check to that key. Decided by the architect
+  (`laptop.architect-2`), #1151
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
