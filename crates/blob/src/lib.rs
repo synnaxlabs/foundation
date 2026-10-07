@@ -371,6 +371,8 @@ impl<'a> Flight<'a> {
             // A file of another length at the name is not the chunk.
             Err(files::Error::Length { .. }) => {
                 self.remove(&path).await?;
+                // A removed file keeps its room until the directory syncs.
+                store.files.sync_dir(&store.dir).await?;
                 store.files.open(&path, mode).await?
             }
             opened => opened?,
@@ -756,6 +758,24 @@ mod tests {
             .unwrap();
         }
 
+        // The disk has room for the chunk once the file of another length is gone,
+        // and only a sync of the directory frees that room.
+        #[test]
+        fn over_a_file_of_another_length_on_a_near_full_disk_stores_it() {
+            let (mut sim, node) = create_node(0, 64 << 10);
+            let (digest, block) = chunk(7, 30 << 10);
+            sim.run_on(&node, move |node, _| async move {
+                let (_, other) = chunk(7, 40 << 10);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
         #[test]
         fn over_a_file_of_another_length_on_a_full_disk_gives_full() {
             let (mut sim, node) = create_node(0, 64 << 10);
@@ -859,7 +879,7 @@ mod tests {
         // is in `env`: a write open waits for the calls in flight on the path.
         #[test]
         fn after_a_store_dropped_with_a_remove_in_flight_loses_the_chunk() {
-            let (mut sim, node) = create_default_node(336);
+            let (mut sim, node) = create_default_node(27104);
             sim.run_on(&node, |node, _| async move {
                 let (digest, block) = chunk(7, 3000);
                 let (_, other) = chunk(7, 512);
