@@ -127,8 +127,8 @@ impl Carrier {
 }
 
 impl Drop for Carrier {
-    /// Refuses each later dial from a peer, and closes each session that no caller
-    /// accepted with code 0.
+    /// Refuses each later dial from a peer until each connection drained, and closes
+    /// each session that no caller accepted with code 0.
     fn drop(&mut self) {
         let mut state = self.0.borrow_mut();
         state.endpoint.refuse();
@@ -954,6 +954,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
             node.clock().sleep(spans(IDLE, 3)).await;
             assert!(session.state.borrow().endpoint.drained());
+            assert!(session.state.borrow().task.is_none());
             drop(session);
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(socket(&node).err(), None);
