@@ -101,7 +101,7 @@ const COMMIT: Span = Span::from_nanos(2_000_000);
 /// error target.
 const LIMITS: home::order::Limits = home::order::Limits {
     earliest: Stamp::from_nanos(946_684_800_000_000_000),
-    ahead: Span::from_nanos(10 * Span::SECOND.nanos()),
+    ahead: Span::from_nanos(10_000_000_000),
 };
 
 impl Node {
