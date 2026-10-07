@@ -1841,7 +1841,8 @@ How to read this record:
   Each shard's part of the pool budget must hold the largest block its buffer takes;
   a smaller part stops the node at start with `Error::Buffer`. `config` cannot check
   it, because the shard count belongs to the node, so the buffer is the one place
-  that refuses it. Decided by the architect on #1062 ([ruling](https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343)).
+  that refuses it. Decided by the architect on #1062:
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
@@ -2253,7 +2254,8 @@ How to read this record:
   `Start` and `Memory` and before `Panicked`. A data directory made for another shard
   count, more or fewer, is refused before any buffer opens (#1076); a reshard at start
   is the long-term path (#1077). Running the stored count on another core count lost:
-  it bends C2. Decided by the architect on #1062 ([ruling](https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343)).
+  it bends C2. Decided by the architect on #1062:
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -2973,7 +2975,8 @@ buffers one after another, in order of core, and pass the interner along; a fail
 open does not pass it on, so no later shard opens. Start time is the sum of the
 opens. When that is too slow, the exit is a two-step `Buffer::open`: recover in
 parallel with no slots, then assign slots in one short step. Decided by the architect
-on #1062 ([ruling](https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343)).
+on #1062:
+https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
