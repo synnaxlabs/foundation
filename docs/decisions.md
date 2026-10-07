@@ -3521,8 +3521,10 @@ How to read this record:
   holds the drawn state. Lost: a create in two calls, one that makes the entry and one
   that allocates; it doubles the calls of each create, changes the stream of each run,
   and adds a step that `env` does not have.
-  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
-  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z, the entries of the
+  directory at 2026-10-07T19:22:31Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

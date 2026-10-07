@@ -114,7 +114,7 @@ pub(crate) struct Ended {
 }
 
 /// What a crash leaves of a [`Mode::Create`] open in flight that makes a file. The
-/// file system can make the entry, allocate, and commit the entry in any order.
+/// file system can make the entry, allocate, and commit the directory in any order.
 #[derive(Clone, Copy, Hash)]
 enum Cut {
     /// The open took effect.
