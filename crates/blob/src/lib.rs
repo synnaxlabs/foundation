@@ -491,6 +491,10 @@ mod tests {
         create_node(seed, 64 << 20)
     }
 
+    /// The pool budget of the tests. A pool reserves address space of up to 96 times
+    /// its budget, and the tests of one process share a limit on it.
+    const BUDGET: usize = 1 << 20;
+
     /// A pool of `budget` bytes.
     fn create_pool(budget: usize) -> Rc<Pool> {
         let config = block::Config { budget };
@@ -508,12 +512,12 @@ mod tests {
     }
 
     async fn open(node: &sim::node::Node) -> Result<Store, Error> {
-        open_with(node, create_pool(4 << 20)).await
+        open_with(node, create_pool(BUDGET)).await
     }
 
     /// A chunk of `len` bytes of `byte`, with its digest.
     fn chunk(byte: u8, len: usize) -> (Digest, Block) {
-        let mut block = create_pool(4 << 20).alloc(len).unwrap();
+        let mut block = create_pool(BUDGET).alloc(len).unwrap();
         block.fill(byte);
         let block = block.freeze();
         (Digest::of(&block), block)
@@ -569,7 +573,7 @@ mod tests {
         bytes: &[u8],
     ) {
         let file = node.files().open(&path(digest), Mode::Write).await.unwrap();
-        let mut block = create_pool(4 << 20).alloc(bytes.len()).unwrap();
+        let mut block = create_pool(BUDGET).alloc(bytes.len()).unwrap();
         block.copy_from_slice(bytes);
         file.write_at(offset, &[block.freeze()]).await.unwrap();
         file.sync().await.unwrap();
@@ -755,7 +759,7 @@ mod tests {
         #[test]
         fn over_a_file_of_another_length_on_a_full_disk_gives_full() {
             let (mut sim, node) = create_node(0, 64 << 10);
-            let (digest, block) = chunk(7, 1 << 20);
+            let (digest, block) = chunk(7, 128 << 10);
             sim.run_on(&node, move |node, _| async move {
                 let (_, other) = chunk(7, 512);
                 node.files().create_dir(Path::new(DIR)).await.unwrap();
@@ -923,7 +927,7 @@ mod tests {
         #[test]
         fn on_a_full_disk_gives_full_and_the_chunk_reads_as_absent() {
             let (mut sim, node) = create_node(0, 64 << 10);
-            let (digest, block) = chunk(7, 1 << 20);
+            let (digest, block) = chunk(7, 128 << 10);
             sim.run_on(&node, move |node, _| async move {
                 let store = open(&node).await.unwrap();
                 let error = store.put(digest, &block).await.unwrap_err();
