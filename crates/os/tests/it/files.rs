@@ -175,6 +175,8 @@ fn create_allocates_an_empty_file_that_is_there() {
 fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
     use rustix::fs::{self, FallocateFlags, OFlags};
     const LEN: u64 = 4 << 20;
+    // ext4 counts the extent tree of the file in `st_blocks`.
+    const SLACK: u64 = 64 << 10;
     run(|files, data| async move {
         // What a crash after an allocation that kept the length leaves.
         let flags = OFlags::WRONLY.union(OFlags::CREATE);
@@ -184,7 +186,10 @@ fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
         drop(fd);
         create(&files, "a", LEN).await.close().await;
         let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert_eq!(allocated, LEN);
+        assert!(
+            (LEN..=LEN + SLACK).contains(&allocated),
+            "{allocated} bytes allocated for {LEN}"
+        );
     });
 }
 
