@@ -5,11 +5,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use raft::{Claim, Message, Ready, Signature};
 use types::node::{self, PrivateKey, PublicKey};
 
 use crate::bytes::{put_grant, put_key};
+use crate::ed25519;
 
 const TAG: &[u8] = b"foundation/grant/1";
 
@@ -22,9 +23,10 @@ pub(crate) struct Signer {
 impl Signer {
     /// A signer for the node `key` with its private key.
     pub(crate) fn new(key: node::Key, private: &PrivateKey) -> Self {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&private.0)
-            .expect("invariant: any 32 bytes are an Ed25519 private key");
-        Self { key, pair }
+        Self {
+            key,
+            pair: ed25519::pair(private),
+        }
     }
 
     /// Whether `public` checks the grants that this signer signs.
@@ -45,13 +47,7 @@ impl Signer {
                 claim.voter, self.key,
                 "invariant: each message passed `check` before `step`"
             );
-            let signature = self.pair.sign(&statement(claim));
-            Signature(
-                signature
-                    .as_ref()
-                    .try_into()
-                    .expect("invariant: an Ed25519 signature is 64 bytes"),
-            )
+            Signature(ed25519::sign(&self.pair, &statement(claim)))
         });
     }
 }
@@ -76,8 +72,7 @@ pub(crate) fn check(
         let public = members.get(&voter).ok_or(Error::NotMember { voter })?;
         let Signature(bytes) =
             signature.expect("invariant: decode gives each grant a signature");
-        let public = UnparsedPublicKey::new(&ED25519, public.to_bytes());
-        if public.verify(&statement(&claim), &bytes).is_err() {
+        if !ed25519::holds(*public, &statement(&claim), &bytes) {
             return Err(Error::Forged { voter });
         }
     }
