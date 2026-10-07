@@ -378,3 +378,40 @@ fn gives_the_request_time_out_when_the_only_address_is_silent() {
     assert!(matches!(error, Error::TimedOut), "{error:?}");
     assert_eq!(network.elapsed, Some(TIMEOUT));
 }
+
+#[test]
+fn makes_no_connect_after_a_refusal_at_the_timeout() {
+    let mut network = Network::new(90);
+    let mut addresses: Vec<IpAddr> = (0..4).map(|_| network.silent()).collect();
+    let node = network.sim.node(node::Config::default());
+    let link = sim::link::Config {
+        delay: Span::SECOND,
+        ..sim::link::Config::default()
+    };
+    network.sim.link(&network.client, &node, link);
+    network.sim.link(&node, &network.client, link);
+    addresses.extend([node.addresses()[0], network.remote().ip()]);
+    network.name("influx", addresses, Span::ZERO);
+    let port = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&port);
+    network.serve(move |mut stream, _, _| {
+        *slot.lock().expect("no panic") = Some(stream.peer().port());
+        async move {
+            super::write(&mut stream, OK.as_bytes()).await;
+            Some(stream)
+        }
+    });
+    let url = network.url("/");
+    let outcomes = network.run(vec![
+        Step::Send(get(&format!("http://influx:{PORT}/"))),
+        Step::Send(get(&url)),
+    ]);
+    assert!(
+        matches!(outcomes[0], Err(Error::TimedOut)),
+        "{:?}",
+        outcomes[0]
+    );
+    all_ok(&outcomes[1..]);
+    // The refusal comes at the deadline, after a connect to each of the first five.
+    assert_eq!(*port.lock().expect("no panic"), Some(49_152 + 5));
+}

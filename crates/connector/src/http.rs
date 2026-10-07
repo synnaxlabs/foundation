@@ -103,8 +103,8 @@ impl Client {
     /// Sends `request` and reads the whole response. The URI gives the host and the
     /// port, which defaults to 80. A new connection looks up the host and tries each
     /// address in order. Each address gets an equal share of the time left, but at
-    /// least 2 s or all that is left. The client sets `Host` when the request has none, and
-    /// sends the path and query only.
+    /// least 2 s or all that is left. The client sets `Host` when the request has
+    /// none, and sends the path and query only.
     ///
     /// # Errors
     ///
