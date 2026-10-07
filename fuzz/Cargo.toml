@@ -133,6 +133,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "types_frame_ends"
+path = "fuzz_targets/types_frame_ends.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "types_name"
 path = "fuzz_targets/types_name.rs"
 test = false
