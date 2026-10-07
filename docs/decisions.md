@@ -1916,7 +1916,11 @@ How to read this record:
   ruling. Lost there: code 16 that says nothing about the change after a stop, because
   code 16 carries no cause, so the peer cannot tell a stop from a refusal (decided by
   the architect, 2026-10-07T14:17:49Z:
-  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458). The
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458).
+  Supersedes, for a stream that goes both ways, point 2 of
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501, and the
+  sentence "the group took the proposal" of
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823. The
   receiver does not check the class of a stream: the class sets only the priority of the
   sender (approved by the architect, 2026-10-07T11:52:00Z:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A
@@ -1986,7 +1990,9 @@ How to read this record:
   a new leader. A follower that waits answers no message and falls behind until its
   write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
   https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
-  of the variant decided by the architect, 2026-10-07T11:52:00Z:
+  of the variant decided by the architect, 2026-10-07T14:17:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6039908458, which
+  supersedes the text of
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
   of the two cases by the architect, 2026-10-07T12:08:39Z:
   https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group

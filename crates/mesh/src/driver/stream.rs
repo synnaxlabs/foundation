@@ -122,7 +122,8 @@ impl Mesh {
     }
 }
 
-/// The code that stops a stream after `error`, or `None` when the stream failed.
+/// The code that stops a stream after `error`, or `None` when the stream failed. A
+/// stream that goes both ways takes no code for a group that stopped.
 fn code(error: &Error) -> Option<Code> {
     match error {
         Error::Stream(_) => None,
