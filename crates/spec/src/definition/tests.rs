@@ -1338,6 +1338,14 @@ fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
             error: retention::Error::Negative(Span::from_nanos(-1)),
         })
     );
+    let count = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/retention_truncated_at_2"
+    );
+    let ones = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/retention_ones_truncated_at_2"
+    );
+    assert_eq!(Definition::decode(count), Err(Error::Truncated { at: 2 }));
+    assert_eq!(Definition::decode(ones), Err(Error::Truncated { at: 2 }));
 }
 
 #[test]
@@ -1422,20 +1430,8 @@ fn decodes_the_placement_fuzz_inputs_to_the_placement_reader() {
 }
 
 #[test]
-fn decodes_the_unknown_kind_fuzz_inputs_to_the_kind_check() {
-    let low = include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind");
-    let high =
-        include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind_high");
-    assert_eq!(Definition::decode(low), Err(Error::Kind { at: 1, tag: 0 }));
-    assert_eq!(
-        Definition::decode(high),
-        Err(Error::Kind { at: 1, tag: 0xff })
-    );
-}
-
-#[test]
-fn decodes_the_restored_fuzz_inputs_to_where_they_end() {
-    let cases: [(&[u8], Error); 7] = [
+fn decodes_the_malformed_placement_fuzz_inputs_to_the_placement_reader() {
+    let cases: [(&[u8], Error); 4] = [
         (
             include_bytes!(
                 "../../../../oracles/fuzz/spec_definition/placement_truncated_at_24"
@@ -1460,26 +1456,102 @@ fn decodes_the_restored_fuzz_inputs_to_where_they_end() {
             ),
             Error::Truncated { at: 41 },
         ),
+    ];
+    for (i, (bytes, expected)) in cases.into_iter().enumerate() {
+        assert_eq!(Definition::decode(bytes), Err(expected), "case {i}");
+    }
+}
+
+#[test]
+fn decodes_the_unknown_kind_fuzz_inputs_to_the_kind_check() {
+    let low = include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind");
+    let high =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/unknown_kind_high");
+    assert_eq!(Definition::decode(low), Err(Error::Kind { at: 1, tag: 0 }));
+    assert_eq!(
+        Definition::decode(high),
+        Err(Error::Kind { at: 1, tag: 0xff })
+    );
+}
+
+#[test]
+fn decodes_the_access_fuzz_inputs_to_the_access_reader() {
+    let cases: [(&[u8], Error); 8] = [
         (
             include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/connector_truncated_at_2"
+                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_1"
             ),
-            Error::Truncated { at: 2 },
+            Error::Truncated { at: 11 },
         ),
         (
             include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/retention_truncated_at_2"
+                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_2"
             ),
-            Error::Truncated { at: 2 },
+            Error::Truncated { at: 11 },
         ),
         (
             include_bytes!(
-                "../../../../oracles/fuzz/spec_definition/retention_ones_truncated_at_2"
+                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_3"
             ),
-            Error::Truncated { at: 2 },
+            Error::Truncated { at: 11 },
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_4"
+            ),
+            Error::Truncated { at: 11 },
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/access_truncated_at_11_5"
+            ),
+            Error::Truncated { at: 11 },
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/access_flag_2_at_10"
+            ),
+            Error::Flag { at: 10, found: 2 },
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/access_flag_3_at_10"
+            ),
+            Error::Flag { at: 10, found: 3 },
+        ),
+        (
+            include_bytes!(
+                "../../../../oracles/fuzz/spec_definition/access_flag_5_at_10"
+            ),
+            Error::Flag { at: 10, found: 5 },
         ),
     ];
     for (i, (bytes, expected)) in cases.into_iter().enumerate() {
         assert_eq!(Definition::decode(bytes), Err(expected), "case {i}");
     }
+}
+
+#[test]
+fn decodes_the_fuzz_inputs_with_only_a_kind_to_truncated() {
+    let connector = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/connector_truncated_at_2"
+    );
+    let node_settings = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/node_settings_truncated_at_2"
+    );
+    assert_eq!(
+        Definition::decode(connector),
+        Err(Error::Truncated { at: 2 })
+    );
+    assert_eq!(
+        Definition::decode(node_settings),
+        Err(Error::Truncated { at: 2 })
+    );
+}
+
+#[test]
+fn decodes_the_newer_version_fuzz_input_to_newer() {
+    let bytes =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/newer_version_2");
+    assert_eq!(Definition::decode(bytes), Err(Error::Newer { found: 2 }));
 }
