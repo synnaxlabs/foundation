@@ -187,17 +187,27 @@ jobs:
     timeout-minutes: 90
     steps:
       # A mutant can allocate in a loop until the host runs out of memory. The cgroup
-      # of the runner unit caps the job, so only a test process dies (#803). Hosts
-      # whose template sets no cap: #898.
+      # of the runner unit caps the job below the host's memory, and the unit's
+      # OOMPolicy=continue keeps the runner up, so only a test process dies (#803).
+      # Hosts whose template sets neither: #898.
       - name: Check the memory cap of the runner
         run: |
-          d=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+          c=$(cut -d: -f3 /proc/self/cgroup)
+          u=${c##*/}
+          p=$(systemctl show -p OOMPolicy --value "$u")
+          [ "$p" = continue ] ||
+            { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
+          total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          d=/sys/fs/cgroup$c
           while [ "$d" != /sys/fs/cgroup ]; do
             m=$(cat "$d/memory.max" 2>/dev/null || echo max)
-            [ "$m" = max ] || { echo "Memory cap $m at $d"; exit 0; }
+            if [ "$m" != max ] && [ $((m / 1024)) -lt "$total" ]; then
+              echo "Memory cap $m at $d, OOMPolicy $p on $u"
+              exit 0
+            fi
             d=${d%/*}
           done
-          echo "::error::The runner has no memory cap (#803, #898)."
+          echo "::error::No memory cap below $total KiB (#803, #898)."
           exit 1
       - uses: actions/checkout@v4
         with:
