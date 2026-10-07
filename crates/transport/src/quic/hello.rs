@@ -10,9 +10,8 @@ use crate::varint::{self, Varint};
 /// The most bytes a hello takes.
 pub(super) const BYTES_MAX: usize = 256;
 
-// An id below 64 is a varint of one byte, the id itself.
-const WINDOW: u8 = 0;
-const MESSAGE: u8 = 1;
+const WINDOW: u64 = 0;
+const MESSAGE: u64 = 1;
 
 /// The limits of the node that sends the hello.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +25,13 @@ pub struct Hello {
 impl Hello {
     /// The bytes of the hello. A value over 2^62 − 1 is sent as 2^62 − 1.
     #[must_use]
+    #[cfg_attr(
+        feature = "fuzzing",
+        expect(
+            clippy::missing_panics_doc,
+            reason = "the ids are constants below 2^62"
+        )
+    )]
     pub fn encode(&self) -> Vec<u8> {
         let pairs = [
             (WINDOW, self.window_bytes),
@@ -33,7 +39,7 @@ impl Hello {
         ];
         let mut bytes = Vec::with_capacity(4 * varint::BYTES_MAX);
         for (id, value) in pairs {
-            bytes.push(id);
+            bytes.extend_from_slice(&Varint::new(id).expect("an id is a varint"));
             bytes.extend_from_slice(&Varint::new(value).unwrap_or(Varint::MAX));
         }
         bytes
@@ -63,9 +69,9 @@ impl Hello {
             }
             last = Some(id);
             let value = usize::try_from(value).unwrap_or(usize::MAX);
-            match u8::try_from(id) {
-                Ok(WINDOW) => window = Some(value),
-                Ok(MESSAGE) => message = Some(value),
+            match id {
+                WINDOW => window = Some(value),
+                MESSAGE => message = Some(value),
                 _ => {}
             }
         }

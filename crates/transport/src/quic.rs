@@ -8,7 +8,7 @@ mod datagram;
     not(feature = "fuzzing"),
     expect(unreachable_pub, reason = "only the fuzzing feature exports it")
 )]
-pub(crate) mod hello;
+mod hello;
 #[cfg(test)]
 mod pair;
 mod settings;
@@ -39,6 +39,8 @@ use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::{Class, Code, Config, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
+#[cfg(feature = "fuzzing")]
+pub use self::hello::Hello;
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
