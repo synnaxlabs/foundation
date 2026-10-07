@@ -458,7 +458,14 @@ fn a_memory_path_with_a_trailing_slash_names_only_a_directory() {
     ] {
         results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
     }
-    for path in ["a/", "b/", "a"] {
+    results.push(ready(files.remove(FilePath::new("a/"))));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(
+        names,
+        [PathBuf::from("a")],
+        "a refused remove keeps the file"
+    );
+    for path in ["b/", "a"] {
         results.push(ready(files.remove(FilePath::new(path))));
     }
     let io = |path: &str, operation, code| FileError::Io {

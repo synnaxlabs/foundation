@@ -326,7 +326,14 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
         ] {
             results.push(files.open(Path::new(path), mode).await.map(drop));
         }
-        for path in ["a/", "b/", "a"] {
+        results.push(files.remove(Path::new("a/")).await);
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(
+            names,
+            [PathBuf::from("a")],
+            "a refused remove keeps the file"
+        );
+        for path in ["b/", "a"] {
             results.push(files.remove(Path::new(path)).await);
         }
         let expected = [
