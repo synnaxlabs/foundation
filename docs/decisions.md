@@ -1058,7 +1058,11 @@ How to read this record:
   place and its home entry, sorted by place, and writes each ends message from it with
   `wire::hub::ends::encode`, which sizes the message by its buffer, so no scratch buffer
   holds the ends (the architect, #1146,
-  https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). The
+  https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
+  takes exactly the ends the buffer holds and no more, so one iterator passed with
+  `by_ref()` splits a run into messages; the caller owns the count of the run (the
+  architect,
+  https://github.com/synnaxlabs/foundation/pull/1258#issuecomment-6033667563). The
   first series starts at 0, and each other at the end before it rounded up to a multiple
   of 8. So the body is the series bytes of the reader's own frame (FRAME LAYOUT), and
   the reader builds that frame in one block: the header and descriptors that `types`

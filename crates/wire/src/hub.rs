@@ -294,14 +294,14 @@ pub mod ends {
     /// The bytes of one end.
     pub const LEN: usize = 8;
 
-    /// Writes `ends`, each a place and an end, into `out`, one message of the run. The
-    /// count of ends is `out.len() / LEN`. It asks `ends` for one item after it fills
-    /// `out`, so a caller that passes `by_ref()` loses that item.
+    /// Writes the first `out.len() / LEN` ends of `ends`, each a place and an end, into
+    /// `out`, one message of the run. It takes no more, so a caller that passes
+    /// `by_ref()` writes the rest into the next message.
     ///
     /// # Panics
     ///
-    /// When `out` is empty or not a whole count of ends, or when `ends` gives fewer or
-    /// more ends than `out` holds.
+    /// When `out` is empty or not a whole count of ends, or when `ends` gives fewer ends
+    /// than `out` holds.
     pub fn encode(ends: impl IntoIterator<Item = (u32, u32)>, out: &mut [u8]) {
         let len = out.len();
         let (slots, rest) = out.as_chunks_mut::<LEN>();
@@ -314,10 +314,9 @@ pub mod ends {
             "a message of a run holds at least one item"
         );
         let count = slots.len();
-        let mut ends = ends.into_iter();
         let written = slots
             .iter_mut()
-            .zip(&mut ends)
+            .zip(ends)
             .map(|(slot, (place, end))| {
                 let [p0, p1, p2, p3] = place.to_le_bytes();
                 let [e0, e1, e2, e3] = end.to_le_bytes();
@@ -327,10 +326,6 @@ pub mod ends {
         assert!(
             written == count,
             "ends gave {written} of the {count} ends that out holds"
-        );
-        assert!(
-            ends.next().is_none(),
-            "ends gave more ends than the {count} that out holds"
         );
     }
 
@@ -885,20 +880,22 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "ends gave more ends than the 1 that out holds")]
-        fn panics_on_more_ends_than_out_holds() {
-            super::super::ends::encode([(0, 1), (1, 2)], &mut [0; 8]);
+        fn keeps_the_ends_that_out_does_not_hold() {
+            let mut ends = [(0, 1), (1, 2), (2, 3)].into_iter();
+            let mut out = [0xaa; 8];
+            super::super::ends::encode(ends.by_ref(), &mut out);
+            assert_eq!(out.as_slice(), encode_ends(&[(0, 1)]));
+            assert_eq!(ends.collect::<Vec<_>>(), [(1, 2), (2, 3)]);
         }
 
         #[test]
-        fn writes_a_split_run_from_one_iterator() {
+        fn writes_a_run_split_into_two_messages_from_one_iterator() {
             let sent: Vec<_> = (0..400).map(|place| (place, (place + 1) * 8)).collect();
             let mut ends = sent.iter().copied();
             let mut run = vec![0xaa; sent.len() * super::super::ends::LEN];
-            for message in run.chunks_mut(184 * super::super::ends::LEN) {
-                let count = message.len() / super::super::ends::LEN;
-                super::super::ends::encode(ends.by_ref().take(count), message);
-            }
+            let (first, second) = run.split_at_mut(184 * super::super::ends::LEN);
+            super::super::ends::encode(ends.by_ref(), first);
+            super::super::ends::encode(ends.by_ref(), second);
             assert_eq!(ends.next(), None);
             assert_eq!(run, encode_ends(&sent));
         }

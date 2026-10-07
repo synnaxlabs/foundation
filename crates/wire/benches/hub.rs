@@ -55,8 +55,7 @@ fn encode_ends_by_place(bencher: Bencher<'_, '_>, series: u32) {
         let mut each = frame::ends(lens)
             .map(|(place, end)| (place, u32::try_from(end).expect("fits")));
         for message in run.chunks_mut(184 * ends::LEN) {
-            let count = message.len() / ends::LEN;
-            ends::encode(each.by_ref().take(count), message);
+            ends::encode(each.by_ref(), message);
         }
     });
 }
