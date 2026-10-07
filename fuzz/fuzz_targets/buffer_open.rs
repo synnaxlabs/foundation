@@ -15,10 +15,11 @@
 //! block to a block of the area, on any lap, as a trim does: the records an open
 //! then writes wrap, or find the offsets at their end. A wide input commits a
 //! record of two blocks in the check, so a wrap record can come before it.
-//! They restate the formats in `header.rs` and `record.rs` of `buffer`. When the
-//! header moves, the seal of the first block as written changes it and the target
-//! panics. When the record moves, the edits stop reaching the walk and coverage
-//! drops without a failed replay.
+//!
+//! The edits restate the formats in `header.rs` and `record.rs` of `buffer`. Before
+//! it edits, the target seals the records from the tail up to the first one the
+//! seal changes, and moves the tail to where it is. When no record is left as
+//! written, or the move changes the file, a format moved and the target panics.
 
 #![no_main]
 
@@ -43,8 +44,15 @@ const BLOCK: usize = 4096;
 /// open writes.
 const BLOCKS: usize = 8;
 const AREA: u64 = (BLOCKS * BLOCK) as u64;
-/// A record is 9 bytes of header and a body, so the largest record is three blocks.
-const BODY_MAX: usize = 3 * BLOCK - 9;
+/// A record's CRC, kind, and body: `[len: u32][crc32c: u32][kind: u8][body]`.
+const RECORD_CRC_AT: usize = 4;
+const RECORD_KIND_AT: usize = 8;
+const RECORD_HEAD: usize = 9;
+const DATA: u8 = 1;
+const WRAP: u8 = 2;
+const RESTART: u8 = 3;
+/// The largest record is three blocks.
+const BODY_MAX: usize = 3 * BLOCK - RECORD_HEAD;
 /// The most bytes of one appended entry: two blocks less one byte.
 const PART_MAX: usize = 2 * BLOCK - 1;
 /// The place of a header block's tail offset.
@@ -61,12 +69,19 @@ const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const COMMIT: Span = Span::from_nanos(10_000_000);
 const INDEXES: usize = 3;
-/// Bytes of each entry the check commits: a record of one block, or of two.
+/// Bytes of each entry the check commits.
 const CHECK_PART: usize = 512;
 const CHECK_PART_WIDE: usize = 1024;
-/// The check's batch and its table, of 51 bytes an entry, fit one record.
-const _: () = assert!(4 + INDEXES * PATHS.len() * (51 + CHECK_PART_WIDE) <= BODY_MAX);
+const _: () = assert!(check_record(CHECK_PART) <= BLOCK);
+const _: () = assert!(BLOCK < check_record(CHECK_PART_WIDE));
+const _: () = assert!(check_record(CHECK_PART_WIDE) <= 2 * BLOCK);
 const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
+
+/// The bytes of the check's record with entries of `part` bytes: a batch has 4
+/// bytes, and each entry 51 in the table.
+const fn check_record(part: usize) -> usize {
+    RECORD_HEAD + 4 + INDEXES * PATHS.len() * (51 + part)
+}
 /// A read budget that some entries of a path fill together.
 const BUDGET: usize = 1024;
 /// A key that no build writes. Its slot comes after each slot an open made.
@@ -74,8 +89,9 @@ const SPARE: channel::Key = channel::Key::from_u128(u128::MAX);
 const STORED_AT: Stamp = Stamp::from_nanos(7);
 const CHECK_LAST: Stamp = Stamp::from_nanos(9);
 /// The tag of the first entry of the build and of the check. Each entry takes the
-/// next tag and fills its bytes with it, so a read cannot give one entry for another.
-/// The tags of the build start again after 128 entries, below the tags of the check.
+/// next tag and fills its bytes with it. The tags of the build start again after
+/// 128 entries, below the tags of the check, so entries that share a tag differ in
+/// `first`.
 const BUILD_TAG: u8 = 0x01;
 const CHECK_TAG: u8 = 0x81;
 /// The laps of the area that an offset holds.
@@ -110,6 +126,24 @@ impl From<&Stored> for Given {
             last: *last,
             tag: *tag,
             bytes: bytes.to_vec(),
+        }
+    }
+}
+
+impl From<&Entry> for Given {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            first: entry.first,
+            len: entry.len,
+            stored_at: entry.stored_at,
+            last: entry.last,
+            tag: entry.tag,
+            bytes: entry
+                .parts
+                .clone()
+                .into_iter()
+                .flat_map(|b| b.to_vec())
+                .collect(),
         }
     }
 }
@@ -289,17 +323,17 @@ fn apply(image: &mut [u8], edit: &Edit) {
         Edit::SealRecord { block } => {
             let start = block * BLOCK;
             let chain = chain_before(image, *block);
-            let (len, rest) = image[start..]
-                .split_first_chunk::<4>()
-                .expect("invariant: a block holds a record header");
-            let claimed = u32::from_le_bytes(*len);
+            let record = &image[start..];
+            let len = &record[..RECORD_CRC_AT];
+            let claimed = u32::from_le_bytes(len.try_into().expect("four bytes"));
             let body = usize::try_from(claimed)
                 .expect("invariant: a u32 fits in usize")
-                .min(rest.len() - 5);
+                .min(record.len() - RECORD_HEAD);
             let mut crc = crc32c::crc32c_append(chain, len);
-            crc = crc32c::crc32c_append(crc, &rest[4..5]);
-            crc = crc32c::crc32c_append(crc, &rest[5..5 + body]);
-            image[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+            crc = crc32c::crc32c_append(crc, &record[RECORD_KIND_AT..RECORD_HEAD]);
+            crc = crc32c::crc32c_append(crc, &record[RECORD_HEAD..RECORD_HEAD + body]);
+            let at = start + RECORD_CRC_AT;
+            image[at..at + 4].copy_from_slice(&crc.to_le_bytes());
         }
         Edit::MoveTail { block, laps } => {
             let chain = chain_before(image, *block);
@@ -318,9 +352,21 @@ fn apply(image: &mut [u8], edit: &Edit) {
 }
 
 /// The chain value a record at `block` must continue from: the one that the
-/// records from the tail in the first header block leave there. The CRCs on the way
-/// are not checked. When no record starts at `block`, the value where the way ends.
+/// records from the tail in the first header block leave there. When no record
+/// starts at `block`, the value where the way ends.
 fn chain_before(image: &[u8], block: usize) -> u32 {
+    let way = walk(image);
+    let end = way.last().expect("invariant: the way starts at the tail");
+    way.iter()
+        .find(|&&(start, _)| start == block)
+        .unwrap_or(end)
+        .1
+}
+
+/// The way of the records from the tail in the first header block, for `BLOCKS`
+/// records: the block each starts at, with the chain value it continues from. The
+/// CRCs on the way are not checked.
+fn walk(image: &[u8]) -> Vec<(usize, u32)> {
     let at = |offset: usize| -> u32 {
         let bytes = image[offset..offset + 4]
             .try_into()
@@ -332,24 +378,29 @@ fn chain_before(image: &[u8], block: usize) -> u32 {
         .expect("invariant: eight bytes");
     let mut start = 2 + (u64::from_le_bytes(tail) % AREA) as usize / BLOCK;
     let mut chain = at(HEADER_CHAIN_AT);
+    let mut way = vec![(start, chain)];
     for _ in 0..BLOCKS {
-        if start == block {
+        let record = start * BLOCK;
+        let kind = image[record + RECORD_KIND_AT];
+        chain = at(record
+            + if kind == RESTART {
+                RECORD_HEAD
+            } else {
+                RECORD_CRC_AT
+            });
+        start = match kind {
+            WRAP => 2,
+            _ => start + (RECORD_HEAD + at(record) as usize).div_ceil(BLOCK),
+        };
+        if start == 2 + BLOCKS {
+            start = 2;
+        }
+        way.push((start, chain));
+        if start > 2 + BLOCKS {
             break;
         }
-        let record = start * BLOCK;
-        let kind = image[record + 8];
-        chain = at(record + if kind == 3 { 9 } else { 4 });
-        start = match kind {
-            2 => 2,
-            _ => start + (9 + at(record) as usize).div_ceil(BLOCK),
-        };
-        match start.cmp(&(2 + BLOCKS)) {
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => start = 2,
-            std::cmp::Ordering::Greater => break,
-        }
     }
-    chain
+    way
 }
 
 fn key(index: usize) -> channel::Key {
@@ -411,25 +462,7 @@ async fn build(
             firsts[planned.index][path] = first + u64::from(planned.len);
             let last = (planned.len > 0)
                 .then(|| Stamp::from_nanos(i64::try_from(first).expect("small")));
-            let mut joined = Vec::new();
-            for part in planned.parts.clone() {
-                parts += 1;
-                joined.extend_from_slice(&part);
-            }
-            bytes += joined.len();
-            appended.push((
-                planned.index,
-                path,
-                Given {
-                    first,
-                    len: planned.len,
-                    stored_at: STORED_AT,
-                    last,
-                    tag: planned.tag,
-                    bytes: joined,
-                },
-            ));
-            entries.push(Entry {
+            let entry = Entry {
                 index: key(planned.index),
                 slot: slots[planned.index],
                 path: planned.path,
@@ -439,7 +472,12 @@ async fn build(
                 last,
                 tag: planned.tag,
                 parts: planned.parts,
-            });
+            };
+            let given = Given::from(&entry);
+            parts += entry.parts.clone().into_iter().count();
+            bytes += given.bytes.len();
+            appended.push((planned.index, path, given));
+            entries.push(entry);
         }
         let fits = buffer.layout().check(entries.len(), parts, bytes);
         let taken = buffer.append(entries);
@@ -590,12 +628,30 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
             .expect("the ring reads");
         image.extend_from_slice(&read);
     }
-    let sealed = image[..BLOCK].to_vec();
-    apply(&mut image, &Edit::SealHeader { second: false });
-    assert_eq!(
-        image[..BLOCK],
-        sealed,
-        "the header seal restates the format"
+    let written = image.clone();
+    let mut restated = 0;
+    for (block, _) in walk(&image) {
+        let kind = image.get(block * BLOCK + RECORD_KIND_AT);
+        if !matches!(kind, Some(&(DATA | WRAP | RESTART))) {
+            break;
+        }
+        apply(&mut image, &Edit::SealRecord { block });
+        if image != written {
+            break;
+        }
+        restated += 1;
+    }
+    let tail: [u8; 8] = written[HEADER_TAIL_AT..HEADER_TAIL_AT + 8]
+        .try_into()
+        .expect("invariant: eight bytes");
+    let tail = u64::from_le_bytes(tail);
+    let block = 2 + (tail % AREA) as usize / BLOCK;
+    let laps = u8::try_from(tail / AREA).expect("the build trims fewer than 128 laps");
+    let mut image = written.clone();
+    apply(&mut image, &Edit::MoveTail { block, laps });
+    assert!(
+        restated > 0 && image == written,
+        "the seal edits and `MoveTail` restate the formats"
     );
     for edit in edits {
         apply(&mut image, edit);
@@ -662,15 +718,7 @@ async fn check(
             let mut part = pool.alloc(len).expect("the pool has a block");
             let tag = CHECK_TAG + u8::try_from(commits.len()).expect("few paths");
             part.fill(tag);
-            commits.push(Given {
-                first: tail.seq,
-                len: 1,
-                stored_at: STORED_AT,
-                last: Some(CHECK_LAST),
-                tag,
-                bytes: part.to_vec(),
-            });
-            entries.push(Entry {
+            let entry = Entry {
                 index: key(index),
                 slot: *slot,
                 path,
@@ -680,7 +728,9 @@ async fn check(
                 last: Some(CHECK_LAST),
                 tag,
                 parts: Parts::from(part.freeze()),
-            });
+            };
+            commits.push(Given::from(&entry));
+            entries.push(entry);
         }
     }
     let before = tails(&buffer, &slots);
