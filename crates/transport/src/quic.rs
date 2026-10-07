@@ -435,6 +435,9 @@ impl Endpoint {
     ///   too.
     /// - The error of the connection's [`Event::Closed`] when it ended, until it
     ///   drains.
+    ///
+    /// After an error, or once the connection ended, `receiver` holds no bytes of a
+    /// message.
     pub(crate) fn read(
         &mut self,
         now: Monotonic,
@@ -445,9 +448,15 @@ impl Endpoint {
             return ended;
         }
         let key = receiver.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
-            streams.read(inner, receiver, |len| take(pool, len), events)
-        })
+        let read =
+            self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
+                streams.read(inner, receiver, |len| take(pool, len), events)
+            });
+        let live = find(&mut self.connections, key).is_some_and(|c| c.live());
+        if read.is_err() || !live {
+            receiver.clear();
+        }
+        read
     }
 
     /// Resets `sender`'s stream with `code`. The peer's next read gives

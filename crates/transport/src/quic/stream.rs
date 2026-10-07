@@ -387,6 +387,11 @@ impl Receiver {
         self.claim.class
     }
 
+    /// Drops the message in hand, so that the receiver holds no bytes of it.
+    pub(super) fn clear(&mut self) {
+        self.reader.clear();
+    }
+
     /// What each read gives after the stream ended, once it has.
     pub(super) fn ended(&self) -> Option<Result<Poll<Option<Block>>, Error>> {
         match self.end? {
@@ -1227,7 +1232,6 @@ impl Streams {
         if (missed || receiving.waits(claim))
             && let Some(error) = recv.received_reset().expect(RECEIVING)
         {
-            reader.clear();
             result = Err(reset_error(error));
         }
         if !matches!(result, Ok(Poll::Pending)) {
@@ -2042,6 +2046,9 @@ mod tests {
             let receivers = wait(&mut pair);
             assert_eq!(receivers.len(), 16);
             assert_eq!(shard.committed(), before);
+            for receiver in &receivers {
+                assert_eq!(receiver.reader.held(), (None, 0));
+            }
         });
     }
 
@@ -2093,6 +2100,40 @@ mod tests {
 
     /// Four streams in turn each send a whole message of [`MESSAGE_MAX`] bytes that
     /// finds no block, then reset. The receive budget holds three such messages.
+    #[test]
+    fn a_message_that_waits_for_a_block_is_dropped_when_the_connection_ends() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let body = [6; 1_000];
+            let prefix = message::prefix(body.len());
+            let bytes = [[byte(Class::Complete)].as_slice(), &*prefix, &body].concat();
+            for _ in 0..2 {
+                raw(pair.client.connection(), Dir::Uni, &bytes, false);
+            }
+            pair.run(RUN);
+            let mut receivers = [(); 2].map(|()| accept(&mut pair.server).receiver);
+            let now = pair.now();
+            for receiver in &mut receivers {
+                let read = pair.server.endpoint.read(now, receiver, |_, _| None);
+                assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+                assert_eq!(receiver.reader.held(), (Some((1_000, 1_000)), 0));
+            }
+            let (now, client) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, client, Code(7));
+            let [mut before, mut after] = receivers;
+            pair.run(RUN);
+            let now = pair.now();
+            let read = pair.server.endpoint.read(now, &mut before, |_, _| None);
+            assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
+            assert_eq!(before.reader.held(), (None, 0));
+            pair.run(Duration::from_secs(3));
+            let now = pair.now();
+            let read = pair.server.endpoint.read(now, &mut after, |_, _| None);
+            assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+            assert_eq!(after.reader.held(), (None, 0));
+        });
+    }
+
     #[test]
     fn reset_messages_that_wait_for_a_block_hold_no_bytes_past_the_budget() {
         testing::run(1, |shard| {
