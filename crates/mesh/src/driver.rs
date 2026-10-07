@@ -225,7 +225,9 @@ impl Mesh {
     ///   of the proof with no key is removed, and an append is cut before the first
     ///   entry with a claim of such a signer, so the group takes the shorter run. A
     ///   claim that does not hold under the key of a join that is not applied is
-    ///   such a claim: only the apply proves a key.
+    ///   such a claim: only the apply proves a key. The grant of a reply is the
+    ///   exception: the sender check proved that the peer holds that key, so a
+    ///   grant that fails under it is forged.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics

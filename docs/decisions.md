@@ -2202,6 +2202,11 @@ How to read this record:
   and steps the message that it checked (decided by `laptop.director`,
   2026-10-07T17:18:49Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6043037608). A
+  grant of a reply that does not hold under the key of its sender refuses the reply
+  (`Error::Claim` with `claim::Error::Forged`), also when the key comes from a join
+  that is not applied: the sender check proved that the peer holds that key
+  (decided by `laptop.architect`, 2026-10-07T20:37:34Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046390090). A
   hard proof that lost such a claim can be no quorum at a node with a newer
   configuration, which then learns the term from the leader. A follower answers a cut
   run with the last entry it kept, and the leader sends the rest from there.

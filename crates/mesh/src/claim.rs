@@ -85,15 +85,16 @@ impl Known {
 ///
 /// # Errors
 ///
-/// - [`Error::Forged`]: the first claim, in the order of [`Raft::claims`], of an
-///   applied member whose signature does not hold under its key.
-/// - [`Error::NotMember`]: the sender of a reply that grants has no key for its
-///   grant. A caller that checks the sender first meets it only for a grant that
-///   does not hold under a [`Known::Unapplied`] key.
+/// - [`Error::Forged`]: the first claim, in the order of [`Raft::claims`], whose
+///   signature does not hold under the key of its signer. The grant of a reply fails
+///   so under a [`Known::Unapplied`] key too: the sender check proved that the peer
+///   holds that key.
 ///
 /// # Panics
 ///
-/// When a claim has no signature. A decoded message gives each claim one.
+/// When a claim has no signature. A decoded message gives each claim one. When the
+/// sender of a reply that grants has no key under `public_key`. Check the sender
+/// first.
 pub(crate) fn check(
     raft: &Raft,
     message: &mut Message,
@@ -160,11 +161,11 @@ fn verify(
     public_key: impl Fn(node::Key) -> Option<Known>,
 ) -> Result<(), Error> {
     let signer = claim.signer();
-    match public_key(signer) {
-        Some(Known::Applied(public)) if holds(public, claim, signature) => Ok(()),
-        Some(Known::Applied(_)) => Err(Error::Forged { signer }),
-        Some(Known::Unapplied(public)) if holds(public, claim, signature) => Ok(()),
-        Some(Known::Unapplied(_)) | None => Err(Error::NotMember { signer }),
+    let known = public_key(signer).expect(NO_SENDER_KEY);
+    if holds(known.public_key(), claim, signature) {
+        Ok(())
+    } else {
+        Err(Error::Forged { signer })
     }
 }
 
@@ -175,14 +176,14 @@ fn holds(public: PublicKey, claim: &Claim<'_>, signature: Option<Signature>) -> 
     ed25519::holds(public, &statement(claim), &bytes)
 }
 
+// The panic of `verify` for a sender with no key. `check` removes every other
+// claim of a signer with no key before `verify`.
+const NO_SENDER_KEY: &str =
+    "invariant: the sender of a reply that grants has a key; check the sender first";
+
 /// Why [`check`] refused a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
-    /// The signer has no key at this node for its grant.
-    NotMember {
-        /// The node whose signature the claim needs.
-        signer: node::Key,
-    },
     /// A claim has no signature that holds under the public key of its signer.
     Forged {
         /// The node whose signature the claim needs.
@@ -193,9 +194,6 @@ pub(crate) enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotMember { signer } => {
-                write!(f, "node {signer} is not a member of the region")
-            }
             Self::Forged { signer } => {
                 write!(f, "the claim of node {signer} is forged")
             }
@@ -583,8 +581,22 @@ mod tests {
         };
         let signature = change.signature;
         assert_eq!(verify(&claim, signature, members(&[1, 2, 3])), Ok(()));
-        let unknown = Err(Error::NotMember { signer: key(1) });
-        assert_eq!(verify(&claim, signature, members(&[2, 3])), unknown);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: the sender of a reply that grants has a key; check the \
+                    sender first"
+    )]
+    fn verify_panics_for_a_signer_with_no_key() {
+        let change = signed_change();
+        let joint = joint();
+        let claim = Claim::Change {
+            leader: key(1),
+            at: written(),
+            voters: &joint,
+        };
+        verify(&claim, change.signature, members(&[2, 3])).unwrap();
     }
 
     #[test]
@@ -732,22 +744,21 @@ mod tests {
 
     #[test]
     fn check_refuses_a_grant_that_fails_under_the_written_join_of_its_sender() {
-        let unknown = Error::NotMember { signer: key(3) };
+        let forged = Error::Forged { signer: key(3) };
         let mut reply = granted(3, Grant::Vote, 1);
-        assert_eq!(checked(&mut reply, keys(&[1, 2], &[(3, 5)])), Err(unknown));
+        assert_eq!(checked(&mut reply, keys(&[1, 2], &[(3, 5)])), Err(forged));
         let mut held = granted(3, Grant::Vote, 1);
         assert_eq!(checked(&mut held, keys(&[1, 2], &[(3, 3)])), Ok(()));
     }
 
     #[test]
-    fn check_refuses_a_grant_whose_sender_has_no_key() {
-        let unknown = Error::NotMember { signer: key(3) };
+    #[should_panic(
+        expected = "invariant: the sender of a reply that grants has a key; check the \
+                    sender first"
+    )]
+    fn check_panics_for_a_grant_whose_sender_has_no_key() {
         let mut reply = granted(3, Grant::Vote, 1);
-        assert_eq!(checked(&mut reply, members(&[1, 2])), Err(unknown));
-        assert_eq!(
-            unknown.to_string(),
-            format!("node {} is not a member of the region", key(3))
-        );
+        checked(&mut reply, members(&[1, 2])).unwrap();
     }
 
     // An append of the change of leader 1 at index 2 of `TERM`, proven by 1.
