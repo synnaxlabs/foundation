@@ -541,7 +541,7 @@ mod tests {
     use crate::quic::Endpoint;
     use crate::testing::{self, IDLE, PORT, address, nodes, shard, spans};
     use crate::tls::public;
-    use crate::{Address, Code, Error, Peer};
+    use crate::{Code, Error, Peer};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -684,32 +684,6 @@ mod tests {
             }
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(carrier.0.borrow().sessions.len(), 0);
-        });
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    #[test]
-    fn a_dial_that_loses_frees_its_slot() {
-        let (mut sim, client, server) = nodes(0);
-        let silent = sim.node(sim::node::Config::default());
-        let addresses = [
-            Address::Udp(address(&silent)),
-            Address::Udp(address(&server)),
-        ];
-        testing::carrier(&server, SERVER, |carrier, _| async move {
-            let session = carrier.accept().await.expect("a session");
-            let closed = Error::PeerClosed { code: Code(5) };
-            assert_eq!(session.closed().await, closed);
-        });
-        testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let clock = node.clock();
-            let peer = public(&SERVER);
-            let dialed = crate::dial::dial(&carrier, &clock, peer, &addresses).await;
-            let session = dialed.expect("a session");
-            node.clock().sleep(Span::MILLISECOND).await;
-            assert_eq!(carrier.0.borrow().sessions.len(), 1);
-            session.close(Code(5));
-            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         assert_eq!(sim.run(), Ok(()));
     }

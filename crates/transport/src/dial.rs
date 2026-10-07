@@ -310,6 +310,53 @@ mod tests {
     }
 
     #[test]
+    fn an_attempt_that_connects_before_the_dial_polls_again_closes_with_code_0() {
+        let (mut sim, client, slow) = nodes(0);
+        let fast = sim.node(sim::node::Config::default());
+        let link = sim::link::Config {
+            delay: spans(Span::MILLISECOND, 150),
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &slow, link);
+        sim.link(&slow, &client, link);
+        let ends = Arc::new(Mutex::new(Vec::new()));
+        for (name, node) in [("slow", &slow), ("fast", &fast)] {
+            let ends = Arc::clone(&ends);
+            testing::carrier(node, SERVER, move |carrier, node| async move {
+                let mut accept = pin!(carrier.accept());
+                let mut sleep = pin!(node.clock().sleep(spans(IDLE, 3)));
+                let accepted = poll_fn(|cx| match accept.as_mut().poll(cx) {
+                    Poll::Ready(accepted) => Poll::Ready(accepted.ok()),
+                    Poll::Pending => sleep.as_mut().poll(cx).map(|()| None),
+                });
+                if let Some(session) = accepted.await {
+                    let end = session.closed().await;
+                    ends.lock().expect("a lock").push((name, end));
+                }
+            });
+        }
+        let addresses = [Address::Udp(address(&slow)), Address::Udp(address(&fast))];
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let clock = node.clock();
+            let mut dial =
+                pin!(super::dial(&carrier, &clock, public(&SERVER), &addresses));
+            for wait in [0, 260] {
+                clock.sleep(spans(Span::MILLISECOND, wait)).await;
+                let polled = poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx))).await;
+                assert!(polled.is_pending());
+            }
+            clock.sleep(spans(Span::MILLISECOND, 500)).await;
+            let session = dial.await.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+        let ends = ends.lock().expect("a lock").clone();
+        let peer = |code| Error::PeerClosed { code: Code(code) };
+        assert_eq!(ends, [("fast", peer(0)), ("slow", peer(5))]);
+    }
+
+    #[test]
     fn a_failed_address_starts_the_next_at_once() {
         let (mut sim, client, server) = nodes(0);
         let other = sim.node(sim::node::Config::default());
