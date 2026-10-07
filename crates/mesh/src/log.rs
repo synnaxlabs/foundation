@@ -161,7 +161,8 @@ impl Log {
     /// # Errors
     ///
     /// - [`Error::Files`] when a file call fails.
-    /// - [`Error::Pool`] when `pool` has no block for a read or a write.
+    /// - [`Error::Pool`] when the largest block of `pool` is less than one sector of
+    ///   512 bytes, or `pool` has no block for a read or a write.
     /// - [`Error::Corrupt`] when a record is not valid and is not a torn end.
     /// - [`Error::Version`] when a record has another format version.
     /// - [`Error::Stray`] when `dir` holds a file that is not the next log file.
@@ -170,6 +171,11 @@ impl Log {
         dir: PathBuf,
         pool: Rc<Pool>,
     ) -> Result<(Self, Stored), Error> {
+        let largest = pool.largest();
+        if largest < SECTOR {
+            let requested = SECTOR;
+            return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
+        }
         let names = match files.list(&dir).await {
             Ok(names) => names,
             Err(files::Error::NotFound { .. }) => {
@@ -316,12 +322,10 @@ fn narrow(offset: u64) -> usize {
 }
 
 // The most bytes in one block: `CHUNK`, or less when the pool has no such block.
-// It is whole sectors, so no two reads or writes of a file share a sector.
+// It is whole sectors, so no two reads and no two writes of an open share a sector.
 fn chunk(pool: &Pool) -> usize {
     let largest = pool.largest();
-    largest
-        .saturating_sub(largest % SECTOR)
-        .clamp(SECTOR, CHUNK)
+    largest.saturating_sub(largest % SECTOR).min(CHUNK)
 }
 
 // Where the record after one that ends at `end` starts: the next sector when the
@@ -1146,23 +1150,50 @@ mod tests {
         );
     }
 
+    // A pool of 512 bytes has a largest block of 448. A log that opens with it can
+    // write a record that no later open can read.
     #[test]
-    fn gives_the_error_of_a_pool_with_no_block_of_one_sector() {
+    fn refuses_a_pool_with_no_block_of_one_sector() {
+        for (budget, largest) in [(0, 0), (256, 192), (512, 448)] {
+            let (mut sim, node) = sim(0);
+            let (error, listed) = sim
+                .run_on(&node, move |node, _| async move {
+                    let config = block::Config { budget };
+                    let memory = block::Heap::new(config.reservation());
+                    let pool = Rc::new(Pool::new(config, memory));
+                    let files = node.files();
+                    let error = Log::open(files.clone(), DIR.into(), pool).await.err();
+                    (error, files.list(Path::new(DIR)).await.is_ok())
+                })
+                .unwrap();
+            let requested = SECTOR;
+            let cause = block::Error::TooLarge { requested, largest };
+            assert_eq!(error, Some(Error::Pool(cause)), "budget {budget}");
+            assert!(!listed, "budget {budget}: the open made the directory");
+        }
+    }
+
+    #[test]
+    fn opens_with_a_pool_whose_largest_block_is_one_sector() {
         let (mut sim, node) = sim(0);
-        let (error, expected) = sim
-            .run_on(&node, |node, _| async move {
-                drop(open(&node).await.unwrap());
-                let config = block::Config { budget: 256 };
-                let memory = block::Heap::new(config.reservation());
-                let pool = Rc::new(Pool::new(config, memory));
-                let expected = pool.alloc(SECTOR).unwrap_err();
-                let error =
-                    Log::open(node.files(), DIR.into(), pool).await.unwrap_err();
-                (error, expected)
-            })
-            .unwrap();
-        assert!(matches!(expected, block::Error::TooLarge { .. }));
-        assert_eq!(error, Error::Pool(expected));
+        sim.run_on(&node, |node, _| async move {
+            let config = block::Config { budget: 576 };
+            let memory = block::Heap::new(config.reservation());
+            let pool = Rc::new(Pool::new(config, memory));
+            assert_eq!(pool.largest(), SECTOR);
+            let files = node.files();
+            let (mut log, _) = Log::open(files.clone(), DIR.into(), Rc::clone(&pool))
+                .await
+                .unwrap();
+            let entries = vec![bytes(1, 10), bytes(2, 400)];
+            for entry in &entries {
+                log.write(None, std::slice::from_ref(entry)).await.unwrap();
+            }
+            drop(log);
+            let (_, stored) = Log::open(files, DIR.into(), pool).await.unwrap();
+            assert_eq!(stored.entries, entries);
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1198,17 +1229,23 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
+    // A run, its entries before the power cut, and its entries after it.
+    type Lost = (u64, usize, Result<usize, Error>);
+
     // Writes `before`, fails the sync of `failed` in the file `name`, opens the log
     // again, writes one more entry, and cuts the power. Gives each run that lost
-    // what the open and the last write gave.
+    // what the open and the last write gave, and the count of runs in which the open
+    // gave the record of the failed sync.
     fn lost_after_a_failed_sync(
         before: &[usize],
         failed: usize,
         name: &'static str,
-    ) -> Vec<(u64, usize, Result<usize, Error>)> {
+    ) -> (Vec<Lost>, usize) {
         let mut lost = Vec::new();
+        let mut gave = 0_usize;
         for run in 0..64 {
             let (mut sim, node) = sim(run);
+            let count = before.len();
             let before = before.to_vec();
             let expected = sim
                 .run_on(&node, move |node, _| async move {
@@ -1230,6 +1267,10 @@ mod tests {
                     opened
                 })
                 .unwrap();
+            // The entries are those of `before`, the failed one or not, and the last.
+            if expected.entries.len() > count.saturating_add(1) {
+                gave = gave.saturating_add(1);
+            }
             sim.crash(&node, Crash::Power);
             let kept = stored(&mut sim, &node);
             if kept != Ok(expected.clone()) {
@@ -1237,34 +1278,54 @@ mod tests {
                 lost.push((run, expected.entries.len(), kept));
             }
         }
-        lost
+        (lost, gave)
     }
 
     const LOST: &str = "(run, entries before the cut, entries after it)";
+    const GAVE: &str = "runs in which the open gave the record of the failed sync";
 
     #[test]
     fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_in_a_later_file() {
-        let lost = lost_after_a_failed_sync(&[10, LARGE, 700], 700, "log-2");
+        let (lost, gave) = lost_after_a_failed_sync(&[10, LARGE, 700], 700, "log-2");
         assert_eq!(lost, [], "{LOST}");
+        assert!(gave > 16, "{GAVE}: {gave}");
     }
 
     #[test]
     fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_of_a_new_file() {
-        let lost = lost_after_a_failed_sync(&[10, LARGE], 700, "log-2");
+        let (lost, gave) = lost_after_a_failed_sync(&[10, LARGE], 700, "log-2");
         assert_eq!(lost, [], "{LOST}");
+        assert!(gave > 16, "{GAVE}: {gave}");
     }
 
+    // The record has 385 sectors, and no run keeps each of them in the cache: the
+    // open finds a torn record, writes zeros on it, and the last record goes there.
     #[test]
-    fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_of_three_blocks() {
-        let lost = lost_after_a_failed_sync(&[100], 3 * CHUNK, "log-0");
+    fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_tore_a_record() {
+        let (lost, _) = lost_after_a_failed_sync(&[100], 3 * CHUNK, "log-0");
         assert_eq!(lost, [], "{LOST}");
     }
 
     // The failed record starts in one block of the open's write and ends in the next.
     #[test]
     fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_across_two_blocks() {
-        let lost = lost_after_a_failed_sync(&[CHUNK - 500], 700, "log-0");
+        let (lost, gave) = lost_after_a_failed_sync(&[CHUNK - 500], 700, "log-0");
         assert_eq!(lost, [], "{LOST}");
+        assert!(gave > 16, "{GAVE}: {gave}");
+    }
+
+    #[test]
+    fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_in_the_fourth_block() {
+        let (lost, gave) = lost_after_a_failed_sync(&[3 * CHUNK], 700, "log-0");
+        assert_eq!(lost, [], "{LOST}");
+        assert!(gave > 16, "{GAVE}: {gave}");
+    }
+
+    #[test]
+    fn a_power_cut_keeps_what_an_open_gave_after_a_failed_sync_in_the_last_block() {
+        let (lost, gave) = lost_after_a_failed_sync(&[15 * CHUNK], 700, "log-0");
+        assert_eq!(lost, [], "{LOST}");
+        assert!(gave > 16, "{GAVE}: {gave}");
     }
 
     #[test]

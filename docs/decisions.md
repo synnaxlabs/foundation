@@ -1512,9 +1512,10 @@ How to read this record:
   torn one, is `Error::Corrupt`, and the node does not start. Open writes again, whole,
   the end file that it finds: the records as it read them, then zeros to the end of the
   file. So a torn record leaves nothing that a later open reads as a header. Each read
-  and each write of the open is whole sectors, so a header gets one write, and a pool
-  with no block of one sector is `Error::Pool`. Then it syncs the end file, the
-  directory, and its parent, because `raft` acts on what open gives and a crash can
+  and each write of the open is whole sectors, so a header gets one write. An open
+  with a pool whose largest block is less than one sector gives
+  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
+  the directory, and its parent, because `raft` acts on what open gives and a crash can
   leave any of them with no sync. The write is there because a read sees, from the
   cache, the writes that a failed sync of this boot lost, and a later sync does not
   write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
@@ -1564,8 +1565,9 @@ How to read this record:
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. Nothing
   bounds the proposals and the messages that the group takes in that time, and a record
-  that the pool can never hold waits with no end (#1091). A pool whose budget holds no
-  block (`TooLarge`) stops the group (the `Refused` wait decided by the architect:
+  that the pool can never hold waits with no end (#1091). A pool whose largest block is
+  less than one sector does not open (MESH LOG), so no write gives `TooLarge` (the
+  `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with

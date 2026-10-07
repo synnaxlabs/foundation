@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_with_no_block_for_a_write_stops_the_group() {
+    fn a_pool_with_no_block_of_one_sector_does_not_open() {
         solo(|node, tasks| async move {
             let budget = block::Config { budget: 0 };
             let memory = block::Heap::new(budget.reservation());
@@ -1183,18 +1183,12 @@ mod tests {
                 pool: Rc::new(Pool::new(budget, memory)),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
-            let mut watch = mesh.watch(INDEX);
-            assert_eq!(watch.next().await, Ok(None));
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-            // The log asks for a block of the whole record, which is under a sector.
             let cause = block::Error::TooLarge {
-                requested: 327,
+                requested: 512,
                 largest: 0,
             };
-            let stopped = Stopped::Write(log::Error::Pool(cause));
-            assert_eq!(watch.next().await, Err(Error::Stopped(stopped)));
+            let error = Error::Log(log::Error::Pool(cause));
+            assert_eq!(Mesh::open(config).await.err(), Some(error));
         });
     }
 
