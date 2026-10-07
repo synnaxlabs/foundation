@@ -54,14 +54,18 @@ impl<'a> History<'a> {
     /// The first line of code that `from..end` adds or removes, as a phrase: "changes
     /// code at `<file>:<line>`". A line of a `.rs` file is code unless, trimmed, it is
     /// empty or starts with `//`; each line of a `Cargo.toml` or `Cargo.lock` is
-    /// code. A moved file counts as removed and added. The line number is in `end` for
-    /// an added line and in `from` for a removed one. `None` when no line is code.
-    /// `from` and `end` are SHAs or prefixes of at least 7 digits; text that names no
-    /// single commit gives the phrase "has `<text>`, which names no commit".
+    /// code. A moved file counts as removed and added. A merge of a commit on the base
+    /// on the first-parent chain of `end` counts by its resolution: the change from
+    /// the tree that `git merge-tree` makes of its parents, conflict markers included,
+    /// to the merge. The line number is in the newer tree for an added line and in the
+    /// older one for a removed one. `None` when no line is code. `from` and `end` are
+    /// SHAs or prefixes of at least 7 digits; text that names no single commit gives
+    /// the phrase "has `<text>`, which names no commit".
     ///
     /// # Errors
     ///
-    /// A failed `git` command, or a changed path that is not UTF-8.
+    /// A failed `git` command, also when the base ref does not exist, or a changed
+    /// path that is not UTF-8.
     pub(crate) fn code_change(
         &self,
         from: &str,
@@ -74,6 +78,41 @@ impl<'a> History<'a> {
         let Some(end_sha) = self.named(end)? else {
             return Ok(Some(unnamed(end)));
         };
+        let base = self.git(&["show-ref", "--verify", "--hash", &self.base])?;
+        let range = format!("{from_sha}..{end_sha}");
+        let chain = self.git(&[
+            "rev-list",
+            "--reverse",
+            "--first-parent",
+            "--parents",
+            &range,
+        ])?;
+        let mut start = from_sha;
+        for line in chain.lines() {
+            let [merge, first, second] = line.split(' ').collect::<Vec<_>>()[..] else {
+                continue;
+            };
+            if !self.on_base(second, &base)? {
+                continue;
+            }
+            let (tree, _) = self.merged(first, second)?;
+            for (old, new) in [(start.as_str(), first), (&tree, merge)] {
+                if let Some(change) = self.first_change(old, new)? {
+                    return Ok(Some(change));
+                }
+            }
+            start = merge.to_string();
+        }
+        self.first_change(&start, &end_sha)
+    }
+
+    /// The first line of code that the change from the tree-ish `old` to `new` adds
+    /// or removes, as `code_change` gives it.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command, or a changed path that is not UTF-8.
+    fn first_change(&self, old: &str, new: &str) -> Result<Option<String>, String> {
         // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
         // the path, each ended by a NUL.
         let raw = self.output(&[
@@ -82,8 +121,8 @@ impl<'a> History<'a> {
             "-z",
             "--no-abbrev",
             "--no-renames",
-            &from_sha,
-            &end_sha,
+            old,
+            new,
             "--",
             ":(glob)**/*.rs",
             ":(glob)**/Cargo.toml",
@@ -202,19 +241,27 @@ impl<'a> History<'a> {
     /// Reports whether `merge` has the tree that a merge of `first` and `second`
     /// makes with no conflict.
     fn clean(&self, merge: &str, first: &str, second: &str) -> Result<bool, String> {
+        let (made, clean) = self.merged(first, second)?;
+        let tree = self.git(&["rev-parse", &format!("{merge}^{{tree}}")])?;
+        Ok(clean && made == tree)
+    }
+
+    /// The tree that `git merge-tree` makes of `first` and `second`, with conflict
+    /// markers in each file that conflicts, and whether no file conflicts.
+    fn merged(&self, first: &str, second: &str) -> Result<(String, bool), String> {
         let output = command(self.root)
             .arg(format!("--attr-source={EMPTY_TREE}"))
             .args(["merge-tree", "--write-tree", first, second])
             .output()
             .map_err(|e| format!("git merge-tree: {e}"))?;
-        match output.status.code() {
-            Some(0) => {}
-            Some(1) => return Ok(false),
+        let clean = match output.status.code() {
+            Some(0) => true,
+            Some(1) => false,
             _ => return Err(failure("merge-tree", &output.stderr)),
-        }
+        };
         let made = String::from_utf8_lossy(&output.stdout);
-        let tree = self.git(&["rev-parse", &format!("{merge}^{{tree}}")])?;
-        Ok(made.lines().next() == Some(tree.as_str()))
+        let tree = made.lines().next().unwrap_or_default().to_string();
+        Ok((tree, clean))
     }
 
     /// The trimmed output of a `git` command that must succeed.

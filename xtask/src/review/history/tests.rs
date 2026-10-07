@@ -358,6 +358,81 @@ fn an_inter_hunk_context_config_keeps_the_line_number() {
 }
 
 #[test]
+fn a_merge_round_with_no_resolution_skips_the_breaker() {
+    let (repo, end) = Repo::with_pr("merge-none");
+    repo.advance_main("a.rs", "fn a() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let docs = repo.commit("b.rs", "// B.\n");
+    repo.advance_main("c.rs", "fn c() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(repo.code_change(&end, &repo.head()), Ok(None));
+    assert_eq!(repo.code_change(&docs, &repo.head()), Ok(None));
+}
+
+#[test]
+fn a_merge_round_whose_resolution_changes_code_needs_the_breaker() {
+    let (repo, end) = Repo::with_pr("merge-code");
+    repo.advance_main("a.rs", "fn a() {}\n");
+    repo.git(&["merge", "--quiet", "--no-commit", "origin/main"]);
+    std::fs::write(repo.dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some("changes code at `a.rs:2`".to_string()))
+    );
+}
+
+#[test]
+fn a_merge_round_whose_resolution_resolves_a_conflict_needs_the_breaker() {
+    let (repo, _) = Repo::with_pr("merge-conflict");
+    let end = repo.commit("a.rs", "// PR.\n");
+    repo.advance_main("a.rs", "// Main.\n");
+    let merge = repo
+        .command()
+        .args(["merge", "--no-edit", "origin/main"])
+        .output()
+        .unwrap();
+    assert_eq!(merge.status.code(), Some(1), "{merge:?}");
+    std::fs::write(repo.dir.join("a.rs"), "// PR.\n// Main.\n").unwrap();
+    repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_merge_round_finds_code_before_and_after_the_merge() {
+    let (repo, end) = Repo::with_pr("merge-around");
+    repo.commit("b.rs", "fn b() {}\n");
+    repo.advance_main("a.rs", "fn a() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merge = repo.head();
+    repo.commit("c.rs", "// C.\nfn c() {}\n");
+    assert_eq!(
+        repo.code_change(&end, &merge),
+        Ok(Some("changes code at `b.rs:1`".to_string()))
+    );
+    assert_eq!(
+        repo.code_change(&merge, &repo.head()),
+        Ok(Some("changes code at `c.rs:2`".to_string()))
+    );
+}
+
+#[test]
+fn a_merge_of_a_branch_that_is_not_main_counts_whole() {
+    let (repo, end) = Repo::with_pr("merge-other");
+    repo.git(&["switch", "--quiet", "-c", "other", "main"]);
+    let other = repo.commit("a.rs", "fn a() {}\n");
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", &other]);
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
+}
+
+#[test]
 fn reads_only_the_file_that_a_directory_of_the_same_name_replaces() {
     let (repo, _) = Repo::with_pr("dir");
     let from = repo.commit("x.rs", "// a\n");
