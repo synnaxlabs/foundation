@@ -1302,11 +1302,9 @@ mod tests {
         });
     }
 
-    // A known defect (#1066): an open after a failed sync loses the records that it
-    // writes next. No run may lose the home. The draws of `sim` choose the runs.
     #[test]
-    fn a_power_cut_loses_a_home_after_a_failed_sync_and_a_new_open() {
-        let (mut kept, mut lost) = (0, 0);
+    fn a_power_cut_keeps_a_home_after_a_failed_sync_and_a_new_open() {
+        let mut lost = Vec::new();
         for run in 0..64 {
             let mut sim = Sim::new(sim::Config {
                 seed: run,
@@ -1342,15 +1340,11 @@ mod tests {
                     Change::decode(bytes).ok()
                 })
                 .unwrap();
-            if end == Some(home(3)) {
-                kept += 1;
-            } else {
-                assert_eq!(end, Some(home(1)), "run {run}");
-                lost += 1;
+            if end != Some(home(3)) {
+                lost.push((run, end));
             }
         }
-        assert_ne!(lost, 0, "no run lost the home");
-        assert_ne!(kept, 0, "each run lost the home");
+        assert_eq!(lost, [], "(run, the last change after the power cut)");
     }
 
     #[test]

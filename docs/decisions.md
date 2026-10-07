@@ -1425,16 +1425,25 @@ How to read this record:
   next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
   header is whole or absent. At a restart, zeros where a record should start, or a good
   header with a torn body, are the end of the log. Anything else, or a record after a
-  torn one, is `Error::Corrupt`, and the node does not start. Open zeroes the bytes
-  after the end, so a torn record leaves nothing that a later open reads as a header.
-  Then it syncs the end file, the directory, and its parent, because `raft` acts on
-  what open gives and a crash can leave any of them with no sync. One check over the
-  whole record lost: a damaged length then reads as a torn end, and the log drops the
-  good records after it. Zeros over the header of a durable record, which only a disk
-  fault makes, read as the end, and open drops the records after it in that file. A
-  search past the end for a record lost: a body can hold the bytes of a record, so a
-  power cut could then stop the node. Nothing trims the log until snapshots (#253).
-  `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+  torn one, is `Error::Corrupt`, and the node does not start. Open writes the end file
+  again, whole: the records as it read them, then zeros to the end of the file. So a
+  torn record leaves nothing that a later open reads as a header. Then it syncs the end
+  file, the directory, and its parent, because `raft` acts on what open gives and a
+  crash can leave any of them with no sync. The write is there because a read sees, from
+  the cache, the writes that a failed sync of this boot lost, and a later sync does not
+  write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
+  the disk does not hold (#1066; the ring has the same rule, #698). Each file before the
+  end file is durable, because a failed write poisons the log, and the next open has the
+  file of that write as its end file or removes it. An open thus writes 1 MiB or more.
+  Lost: zeros only after a torn end (the first shape), which is the defect; and a read
+  with direct I/O, which needs a new `env::files` read mode in each driver and in `sim`.
+  One check over the whole record lost: a damaged length then reads as a torn end, and
+  the log drops the good records after it. Zeros over the header of a durable record,
+  which only a disk fault makes, read as the end, and open drops the records after it in
+  that file. A search past the end for a record lost: a body can hold the bytes of a
+  record, so a power cut could then stop the node. Nothing trims the log until snapshots
+  (#253). `mesh` depends on `block` for the blocks of its file calls. Decided by
+  `consensus`.
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
   `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
   proposal that a follower forwards to the leader, and its two answers (the position
@@ -1471,14 +1480,14 @@ How to read this record:
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
   the first cause, and a watch gives it also after each `Mesh` drops. A stopped group
-  does not start again: the node opens the mesh again (#1066 for an open after a failed
-  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
-  and a write that waits for a block ends at the next tick; until then a new open gives
-  `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
-  does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
-  node or a voter that is not a member (`Error::NotMember`), and a private key that is
-  not the key of this node's member (`Error::WrongKey`). Proposed by box1.builder-3,
-  decided by the architect (#471):
+  does not start again: the node opens the mesh again, and the open makes durable what
+  it gives (MESH LOG). The task ends soon after the last `Mesh` drops, a write in
+  progress ends first, and a write that waits for a block ends at the next tick; until
+  then a new open gives `Error::Log`. Each open applies the log from index 1, until
+  snapshots (#253). A watch does not keep the group running, and a dropped watch leaves
+  no waker. `open` refuses a node or a voter that is not a member (`Error::NotMember`),
+  and a private key that is not the key of this node's member (`Error::WrongKey`).
+  Proposed by box1.builder-3, decided by the architect (#471):
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque

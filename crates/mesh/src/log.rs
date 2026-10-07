@@ -11,8 +11,9 @@
 //! starts at the next sector. A power cut keeps all or none of a sector, so a header
 //! is whole or absent, and only the body of the last record can be torn. Where a
 //! record should start, zeros are the end of the log, a header with a torn body is the
-//! end too, and anything else is [`Error::Corrupt`]. Open zeroes the bytes after the
-//! end, so a torn record leaves nothing that a later open reads as a header.
+//! end too, and anything else is [`Error::Corrupt`]. Open writes the end file again,
+//! the records as read and then zeros, so a torn record leaves nothing that a later
+//! open reads as a header, and a record whose sync failed is durable.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -194,11 +195,14 @@ impl Log {
             let mode = Mode::Create { len: SEGMENT };
             files.open(&path(&dir, 0), mode).await?
         };
-        let tail = segments
+        let records = segments
             .get(scan.segment)
-            .and_then(|bytes| bytes.get(scan.offset..));
-        if tail.is_some_and(|tail| tail.iter().any(|&byte| byte != 0)) {
-            zero(&file, wide(scan.offset), &pool).await?;
+            .and_then(|bytes| bytes.get(..scan.offset));
+        // A sync that failed in this boot leaves its writes in the cache, where the
+        // read saw them, and a later sync does not write them. So the open writes
+        // again what it read, and zeros after it.
+        if let Some(records) = records {
+            rewrite(&file, records, &pool).await?;
         }
         // A crash before this open can leave the last record, a file, or `dir` with
         // no sync.
@@ -355,14 +359,18 @@ async fn read(file: &File, pool: &Pool) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-// Writes zeros from `from` to the end of `file`.
-async fn zero(file: &File, from: u64, pool: &Pool) -> Result<(), Error> {
+// Writes `records` at the start of `file`, then zeros to its end.
+async fn rewrite(file: &File, records: &[u8], pool: &Pool) -> Result<(), Error> {
     let chunk = chunk(pool);
-    let mut offset = from;
+    let mut offset = 0;
     while offset < file.len() {
         let len = narrow(file.len().saturating_sub(offset)).min(chunk);
         let mut block = pool.alloc(len)?;
         block.fill(0);
+        let records = records.get(narrow(offset)..).unwrap_or(&[]);
+        for (to, from) in block.iter_mut().zip(records) {
+            *to = *from;
+        }
         file.write_at(offset, &[block.freeze()]).await?;
         offset = offset.saturating_add(wide(len));
     }
@@ -985,8 +993,41 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
+    // The failed sync of an open leaves its zeros in the cache, clean, and the torn
+    // record on the disk.
     #[test]
-    fn an_open_with_no_torn_end_writes_nothing() {
+    fn a_power_cut_keeps_the_zeros_of_an_open_after_a_failed_open() {
+        let mut torn = Vec::new();
+        for seed in 0..64 {
+            let (mut sim, node) = sim(seed);
+            let starts = three(&mut sim, &node);
+            let at = starts[2] + wide(HEADER) + 50;
+            sim.run_on(&node, move |node, _| async move {
+                put(&node, "log-0", at, &[0xFF]).await;
+                node.fail_file(&file("log-0"), Operation::Sync);
+                open(&node).await.unwrap_err();
+                open(&node).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            let end = narrow(starts[2]);
+            let zeros = sim
+                .run_on(&node, move |node, _| async move {
+                    let log = file("log-0");
+                    let file = node.files().open(&log, Mode::Read).await.unwrap();
+                    let bytes = read(&file, &pool()).await.unwrap();
+                    bytes[end..].iter().all(|&byte| byte == 0)
+                })
+                .unwrap();
+            if !zeros {
+                torn.push(seed);
+            }
+        }
+        assert_eq!(torn, [], "the seeds with bytes after the end of the log");
+    }
+
+    #[test]
+    fn an_open_gives_the_error_of_a_failed_write() {
         let (mut sim, node) = sim(0);
         three(&mut sim, &node);
         let opened = sim
@@ -995,11 +1036,12 @@ mod tests {
                 open(&node).await.map(|(_, stored)| stored)
             })
             .unwrap();
-        let expected = Stored {
-            hard: Hard::default(),
-            entries: (1..=3).map(|index| bytes(index, 100)).collect(),
+        let failed = files::Error::Io {
+            path: file("log-0"),
+            operation: Operation::WriteAt,
+            code: 5,
         };
-        assert_eq!(opened, Ok(expected));
+        assert_eq!(opened, Err(Error::Files(failed)));
     }
 
     // A power cut keeps a header whole or not at all, so a damaged one is never
