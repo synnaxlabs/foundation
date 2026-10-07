@@ -107,7 +107,10 @@ nothing checked again. So when round 1 led to fix commits:
    `reviewer`'s words as given, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
-commits and the fix commits out of every round range.
+commits and the fix commits out of every round range. A merge gets a round that checks
+its resolution (`git show --remerge-diff <merge>`). When that diff changes no `.rs`
+line, the round runs `reviewer` alone, and its comment says so. Otherwise it runs as
+step 1 says.
 
 ## Done
 
