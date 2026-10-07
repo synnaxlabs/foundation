@@ -1188,8 +1188,9 @@ mod tests {
             assert_eq!(watch.next().await, Ok(None));
             let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            // The log asks for a block of the whole record, which is under a sector.
             let cause = block::Error::TooLarge {
-                requested: 1,
+                requested: 327,
                 largest: 0,
             };
             let stopped = Stopped::Write(log::Error::Pool(cause));
