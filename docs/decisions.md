@@ -1898,16 +1898,27 @@ How to read this record:
   in the review of #1225
   (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
   https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
-  Amended (2026-10-07, #1151): the connector is a recording reader, so it writes the
-  samples of both paths (A6, A8). A stamp names one sample of an index on each path
-  (X31). The connector keeps one gap per index and path, and the `count` of a gap line
-  is on the path of the sample after it. Data lines and gap lines get no `path` tag. A
-  live sample and a backfill sample of one index at one stamp are one point, and the
-  later write sets its fields. The fold runs on each path apart, with the path and
-  `seq(stamp)` from the write record. Lost: a `path` tag, which makes two series for
-  each channel and puts the path, which is internal to the node, in each user's schema.
-  Decided by `laptop.architect-2` on #1151
-  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748).
+  Amended (2026-10-07, #1151): with #1270 (M2), the connector is a recording reader and
+  writes the samples of both paths (A6, A8). Until then it reads the live path only. A
+  stamp names one sample of an index on each path (X31). The connector keeps one gap per
+  index and path. Each gap line is
+  `foundation_gaps,connector=<connector>,index=<index>,path=<path> count=<n>i <stamp>`,
+  with `<path>` `live` or `backfill`, so a live gap line and a backfill gap line at one
+  stamp stay two points, and the sum of `count` stays an upper bound on the loss. Before
+  #1270 the path is always `live`, so the format does not change at M2. Data lines get
+  no `path` tag, so a live sample and a backfill sample of one index at one stamp are
+  one point, and the later write sets its fields. The fold takes the path of a gap line
+  from its tag, and `seq(stamp)` on that path from the write record. A data point whose
+  stamp the write record holds on both paths of one index is a lab failure (panic),
+  because the lab cannot tell which seq the point holds, so the property test writes no
+  such stamp. A separate test reads the points of the simulated InfluxDB and pins the
+  overwrite. Lost: a `path` tag on data lines, which makes two series for each channel
+  and puts the path, which is internal to the node, in each user's data schema. So the
+  earlier of two samples of one index at one stamp is lost, with no gap line.
+  `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
+  data nothing. Decided by `laptop.architect-2` on #1151
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
