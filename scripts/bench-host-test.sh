@@ -24,7 +24,8 @@ case "$*" in
 *create-key-pair*) echo KEY ;;
 *create-security-group*) echo sg-1 ;;
 *ssm*) echo ami-1 ;;
-*run-instances*) echo i-1 ;;
+*delete-key-pair*) [[ -z ${FAIL_KEY:-} ]] || { echo InvalidKeyPair >&2; exit 254; } ;;
+*run-instances*) [[ -z ${FAIL_LAUNCH:-} ]] || exit 254; echo i-1 ;;
 *describe-instances*--instance-ids*) echo 192.0.2.1 ;;
 *describe-instances*)
     [[ -z ${FAIL_DESCRIBE:-} ]] || exit 254
@@ -39,7 +40,8 @@ case "${*: -1}" in
 *lscpu*) echo "Xeon, 96 CPUs, 6.8" ;;
 *"cargo bench"*)
     echo run >>"$T/runs"
-    run=$(wc -l <"$T/runs")
+    run=$(($(wc -l <"$T/runs")))
+    [[ -z ${BIG:-} ]] || { head -c 70000 /dev/zero | tr '\0' x && echo; }
     echo "table $run"
     [[ $run != "${FAIL_RUN:-}" ]] || { echo "bench error" >&2; exit 101; } ;;
 esac
@@ -51,16 +53,20 @@ echo 198.51.100.7
 EOF
 cat >"$bin/sleep" <<'EOF'
 #!/usr/bin/env bash
+[[ -z ${SLOW:-} ]] || exec /bin/sleep 1
 EOF
-# Comments live in $T/comments.json. Posts get the ids 1001, 1002, and so on.
+# Comments live in $T/comments.json. Posts get the ids 1001, 1002, and so on. Like
+# GitHub, it refuses a body over 65536 characters.
 cat >"$bin/gh" <<'EOF'
 #!/usr/bin/env bash
 path=$2 body= filter= get=1
 shift 2
 while [[ $# -gt 0 ]]; do
     case $1 in
-    -f) body=${2#body=} get= && shift ;;
-    -F) body=$(cat "${2#body=@}") get= && shift ;;
+    -f) body=${2#body=} get= && shift
+        [[ -z ${FAIL_END:-} || $body != "bench-host end"* ]] || exit 1 ;;
+    -F) body=$(cat "${2#body=@}") get= && shift
+        [[ -z ${FAIL_REPORT:-} ]] || exit 1 ;;
     --jq) filter=$2 && shift ;;
     esac
     shift
@@ -72,7 +78,10 @@ user) echo bench-bot ;;
     [[ $sha != missing ]] || exit 1
     printf '%s%0*d\n' "$sha" $((40 - ${#sha})) 0 ;;
 */comments)
-    if [[ -n $get ]]; then
+    if ((${#body} > 65536)); then
+        echo "body is too long (maximum is 65536 characters)" >&2
+        exit 1
+    elif [[ -n $get ]]; then
         jq -r "$filter" "$T/comments.json"
     else
         id=$(($(cat "$T/id" 2>/dev/null || echo 1000) + 1))
@@ -142,7 +151,7 @@ Still running from this run: none." &&
 check "each filter goes to the host as one argument" eval '
     has "$(cat "$T/calls")" "-- release push\ \(pop\|peek\)"'
 
-for minutes in -30 0 121 08 x; do
+for minutes in -30 0 121 08 x 18446744073709551736; do
     BENCH_MINUTES=$minutes run '[]' "${args[@]}"
     check "BENCH_MINUTES=$minutes is refused before any call" eval '
         [[ $status == 1 && ! -e $T/calls ]] &&
@@ -203,6 +212,42 @@ check "a failed run posts the report up to it and exits 1" eval '
     has "$(posted 1047)" "bench error" && ! has "$(posted 1047)" "Run 3" &&
     has "$(cat "$T/out")" "run 2 failed" &&
     has "$(posted 15)" "Terminated: yes. Still running from this run: none."'
+
+BIG=1 run '[]' "${args[@]}"
+check "each run of a long output posts its end" eval '
+    [[ $status == 0 && $(posted 1047 | grep -c "^table") == 4 ]]'
+
+FAIL_REPORT=1 run '[]' "${args[@]}"
+check "a report that does not post is printed, and the run exits 1" eval '
+    [[ $status == 1 ]] && has "$(cat "$T/out")" "table 4" &&
+    has "$(cat "$T/out")" "the report did not post on #1047" &&
+    has "$(posted 15)" "Terminated: yes. Still running from this run: none."'
+
+FAIL_KEY=1 run '[]' "${args[@]}"
+check "a key pair left exits 1 and is named" eval '
+    [[ $status == 1 ]] && has "$(posted 15)" "Key pair bench-1047-"'
+
+FAIL_LAUNCH=1 run '[]' "${args[@]}"
+check "a failed launch exits 1 and says no host launched" eval '
+    [[ $status == 1 ]] && has "$(posted 15)" "Terminated: no host launched."'
+
+FAIL_END=1 run '[]' "${args[@]}"
+check "an end line that does not post exits 1 and is printed" eval '
+    [[ $status == 1 ]] &&
+    has "$(cat "$T/out")" "post this on #15: bench-host end i-1"'
+
+T=$(mktemp -d "$root/case.XXXX")
+export T
+echo '[]' >"$T/comments.json"
+SLOW=1 FAIL_GROUP=1 PATH="$bin:$PATH" bash "$script" "${args[@]}" >"$T/out" 2>&1 &
+pid=$!
+until grep -qs delete-security-group "$T/calls"; do /bin/sleep 0.2; done
+kill -TERM "$pid"
+status=0
+wait "$pid" || status=$?
+check "a signal during the cleanup does not stop it" eval '
+    [[ $status == 1 ]] && has "$(posted 15)" "Security group sg-1 is left." &&
+    [[ $(grep -c delete-security-group "$T/calls") == 24 ]]'
 
 run '[]' 1047 box2.red-team delivery missing bbbb2222
 check "a commit not on GitHub is refused before any post" eval '

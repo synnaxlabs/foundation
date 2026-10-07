@@ -60,7 +60,7 @@ done
 number='^[0-9]+$'
 session='^[a-z0-9][a-z0-9.-]*$'
 package='^[a-z0-9_-]+$'
-whole='^[1-9][0-9]*$'
+whole='^[1-9][0-9]{0,2}$'
 price='^[0-9]+(\.[0-9]+)?$'
 hash='^[0-9a-f]{40}$'
 [[ $issue =~ $number ]] || fail "the issue is a number"
@@ -75,7 +75,7 @@ fi
 
 sha() {
     local sha
-    sha=$(gh api "repos/$repo/commits/$1" --jq .sha) || fail "no commit $1 on GitHub"
+    sha=$(gh api "repos/$repo/commits/$1" --jq .sha)
     [[ $sha =~ $hash ]] || fail "no commit $1 on GitHub"
     echo "$sha"
 }
@@ -130,6 +130,7 @@ launched=
 finish() {
     local status=$? ended=unconfirmed running=unknown left note= line hours
     set +e
+    trap '' INT TERM HUP
     if [[ -n $attempted ]]; then
         if [[ -n $instance ]] &&
             ec2 terminate-instances --instance-ids "$instance" >/dev/null &&
@@ -297,7 +298,7 @@ for run in 1 2 3 4; do
             "</summary>"
         echo
         echo '```'
-        cat "$out"
+        tail -c 15000 "$out"
         echo '```'
         echo
         echo "</details>"
@@ -305,7 +306,11 @@ for run in 1 2 3 4; do
     [[ -z $failed ]] || break
 done
 
-gh api "repos/$repo/issues/$issue/comments" -F "body=@$report" --jq .id >/dev/null
+if ! gh api "repos/$repo/issues/$issue/comments" -F "body=@$report" --jq .id \
+    >/dev/null; then
+    cat "$report" >&2
+    fail "the report did not post on #$issue; it is above"
+fi
 echo "bench-host: posted on #$issue"
 if [[ -n $failed ]]; then
     cat "$work/run$failed.txt" >&2
