@@ -14,6 +14,7 @@
 //! placement     := select:patterns standby:optional copies:names            tag 6
 //! time          := select:patterns peers:optional_names                     tag 7
 //! channel       := key kind                                                 tag 8
+//! retention     := select:patterns keep:i64                                 tag 9
 //! kind          := 0 error:optional_key control:optional_key                index
 //!                | 1 index:key quality:optional_key data_type unit:optional  data
 //! data_type     := 0 scalar:u8 | 1 scalar:u8 len:u32 | 2 scalar:u8 max:u32 | 3 | 4 | 5
@@ -44,6 +45,8 @@
 //!
 //! A compression `mode` is 0 auto, 1 raw, or 2 max.
 //!
+//! A retention `keep` is in nanoseconds, zero or more.
+//!
 //! A `data_type` is a scalar, an array, a list, a string, bytes, or quality, in that
 //! order from 0. A `scalar` is bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7,
 //! u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. Only a scalar from 1 to 10,
@@ -64,6 +67,7 @@ use types::byte;
 use types::channel::Key;
 use types::name::{self, Name, Selector, Written};
 use types::sample::{self, Scalar};
+use types::time::Span;
 
 use crate::access::{Action, Actions, Policy};
 use crate::channel::{self, Channel, Data, DataType};
@@ -72,6 +76,7 @@ use crate::connector::Connector;
 use crate::node_settings;
 use crate::placement;
 use crate::region::{Delegation, NoVoters};
+use crate::retention;
 use crate::time;
 use crate::unit::{self, Unit};
 
@@ -84,6 +89,7 @@ const COMPRESSION: u8 = 5;
 const PLACEMENT: u8 = 6;
 const TIME: u8 = 7;
 const CHANNEL: u8 = 8;
+const RETENTION: u8 = 9;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -109,6 +115,8 @@ pub enum Definition {
     Time(time::Policy),
     /// A channel.
     Channel(Channel),
+    /// A retention policy.
+    Retention(retention::Policy),
 }
 
 /// The kind of a definition. Its tree key names it, except for a connector or a
@@ -131,6 +139,8 @@ pub enum Kind {
     Placement,
     /// A time policy.
     Time,
+    /// A retention policy.
+    Retention,
 }
 
 impl Definition {
@@ -199,6 +209,11 @@ impl Definition {
                 out.push(CHANNEL);
                 channel(&mut out, definition);
             }
+            Self::Retention(policy) => {
+                out.push(RETENTION);
+                patterns(&mut out, policy.select());
+                out.extend_from_slice(&policy.keep().nanos().to_le_bytes());
+            }
         }
         out
     }
@@ -230,6 +245,7 @@ impl Definition {
             PLACEMENT => Self::Placement(reader.placement()?),
             TIME => Self::Time(reader.time()?),
             CHANNEL => Self::Channel(reader.channel()?),
+            RETENTION => Self::Retention(reader.retention()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -586,6 +602,14 @@ impl<'a> Reader<'a> {
         Ok(time::Policy::new(select, peers))
     }
 
+    fn retention(&mut self) -> Result<retention::Policy, Error> {
+        let select = self.patterns()?;
+        let at = self.at();
+        let keep = Span::from_nanos(self.u64()?.cast_signed());
+        retention::Policy::new(select, keep)
+            .map_err(|error| Error::Retention { at, error })
+    }
+
     fn channel(&mut self) -> Result<Channel, Error> {
         let key = self.key()?;
         let at = self.at();
@@ -807,6 +831,13 @@ pub enum Error {
         /// Why it cannot exist.
         error: channel::Error,
     },
+    /// A retention's keep time makes no policy.
+    Retention {
+        /// Where the keep time is.
+        at: usize,
+        /// Why it makes no policy.
+        error: retention::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -885,6 +916,9 @@ impl fmt::Display for Error {
             }
             Self::Channel { at, error } => {
                 write!(f, "the data channel at byte {at}: {error}")
+            }
+            Self::Retention { at, error } => {
+                write!(f, "the retention at byte {at}: {error}")
             }
         }
     }

@@ -95,6 +95,7 @@ fn refuses_an_unknown_kind() {
             PLACEMENT,
             TIME,
             CHANNEL,
+            RETENTION,
         ]
         .contains(t)
     }) {
@@ -716,6 +717,47 @@ fn refuses_peers_out_of_order() {
     assert_eq!(Definition::decode(&bytes), Err(Error::Order { at }));
 }
 
+fn retention(keep: Span) -> Definition {
+    Definition::Retention(retention::Policy::new(select(), keep).unwrap())
+}
+
+#[test]
+fn writes_the_documented_retention_layout() {
+    for nanos in [0, 1, 3 * Span::DAY.nanos(), i64::MAX] {
+        let definition = retention(Span::from_nanos(nanos));
+        let expected = select_bytes(RETENTION, &nanos.to_le_bytes());
+        assert_eq!(definition.encode(), expected);
+        assert_eq!(Definition::decode(&expected), Ok(definition));
+    }
+}
+
+#[test]
+fn refuses_a_retention_that_keeps_below_zero() {
+    for nanos in [-1, i64::MIN] {
+        let bytes = select_bytes(RETENTION, &nanos.to_le_bytes());
+        let error = Error::Retention {
+            at: bytes.len() - 8,
+            error: retention::Error::Negative(Span::from_nanos(nanos)),
+        };
+        assert_eq!(Definition::decode(&bytes), Err(error));
+    }
+    let error = Error::Retention {
+        at: 5,
+        error: retention::Error::Negative(Span::from_nanos(-1)),
+    };
+    assert_eq!(
+        error.to_string(),
+        "the retention at byte 5: a retention keeps -1ns, which is below zero"
+    );
+}
+
+#[test]
+fn refuses_a_retention_that_ends_early() {
+    let bytes = select_bytes(RETENTION, &[0; 7]);
+    let at = bytes.len() - 7;
+    assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at }));
+}
+
 fn key(n: u128) -> Key {
     Key::from_u128(n)
 }
@@ -1117,6 +1159,17 @@ fn time_strategy() -> impl Strategy<Value = Definition> {
         .prop_map(|(select, peers)| Definition::Time(time::Policy::new(select, peers)))
 }
 
+fn retention_strategy() -> impl Strategy<Value = Definition> {
+    (
+        selectors(),
+        prop_oneof![Just(0), Just(i64::MAX), 0..=i64::MAX],
+    )
+        .prop_map(|(select, nanos)| {
+            let keep = Span::from_nanos(nanos);
+            Definition::Retention(retention::Policy::new(select, keep).unwrap())
+        })
+}
+
 fn data_type_strategy() -> impl Strategy<Value = DataType> {
     let scalar = prop::sample::select(SCALARS.map(|(each, _)| each).to_vec());
     prop_oneof![
@@ -1162,6 +1215,7 @@ fn definition() -> impl Strategy<Value = Definition> {
         placement_strategy(),
         time_strategy(),
         channel_strategy(),
+        retention_strategy(),
     ]
 }
 

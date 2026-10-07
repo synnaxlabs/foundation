@@ -1166,7 +1166,7 @@ mod tests {
     /// entry 1 with as many scattered values, and the series of `more`. The shard's
     /// largest block is 1835008 bytes. The writer's pool has larger blocks, and
     /// scattered values do not compress.
-    fn large(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
+    fn create_large(set: &KeySet, first: i64, more: &[(usize, &[i64])]) -> Draft {
         let len = 240_000;
         let stamps: Vec<i64> = (first..).take(len).collect();
         let values = scattered(len);
@@ -1733,7 +1733,7 @@ mod tests {
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             for (label, stamp) in [(LIVE, 300_000), (BACKFILL, 5)] {
-                let large = large(&set, 10, &[(2, &[stamp])]);
+                let large = create_large(&set, 10, &[(2, &[stamp])]);
                 assert_eq!(shard.write(a, label, large), Err(Error::Large));
                 let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
                 assert_eq!(shard.write(a, label, small), Ok(&[applied(0, 0, 1)][..]));
@@ -1781,19 +1781,16 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
             }
             let stamps: Vec<i64> = (10..610).collect();
-            let no_record =
+            let large =
                 || frame(&test.pool, &set, &[(0, &stamps), (1, &scattered(600))]);
-            assert_eq!(shard.write(a, LIVE, no_record()), Err(Error::Large));
+            assert_eq!(shard.write(a, LIVE, large()), Err(Error::Large));
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
             // The handoff is appended before the bodies, so the size is never checked.
+            assert_eq!(shard.write(b, LIVE, large()), Ok(&[lost(0, 0, 600)][..]));
+            let huge = create_large(&set, 1000, &[(2, &[stamp])]);
             assert_eq!(
-                shard.write(b, LIVE, no_record()),
-                Ok(&[lost(0, 0, 600)][..])
-            );
-            let no_block = large(&set, 1000, &[(2, &[stamp])]);
-            assert_eq!(
-                shard.write(b, LIVE, no_block),
+                shard.write(b, LIVE, huge),
                 Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
             );
         });
@@ -2210,7 +2207,7 @@ mod tests {
         fn write(test: &Test, shard: &mut Shard, a: writer::Key, expected: &Error) {
             let set = two_indexes();
             for (label, first) in [(LIVE, 600_000), (BACKFILL, 100)] {
-                let no_block = large(&set, first, &[]);
+                let no_block = create_large(&set, first, &[]);
                 let written = shard.write(a, label, no_block);
                 assert_eq!(written, Err(expected.clone()), "{label:?}");
                 let stamps: Vec<i64> = (first..first + 600).collect();
@@ -2257,7 +2254,7 @@ mod tests {
                     [(LIVE, 600_000, 100), (BACKFILL, 100, 500_000)]
                 {
                     let frames =
-                        [small(first), small(refused), large(&set, first, &[])];
+                        [small(first), small(refused), create_large(&set, first, &[])];
                     for (at, draft) in frames.into_iter().enumerate() {
                         let written = shard.write(b, label, draft);
                         assert_eq!(
@@ -2286,11 +2283,11 @@ mod tests {
             let _a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let blocks = test.fill();
             let b = shard.open_writer(writer("b", 3, &set)).expect("synced");
-            let written = shard.write(b, BACKFILL, large(&set, 100, &[]));
-            assert_eq!(written, Err(Error::Full));
+            let large = create_large(&set, 100, &[]);
+            assert_eq!(shard.write(b, BACKFILL, large), Err(Error::Full));
             drop(blocks);
-            let written = shard.write(b, BACKFILL, large(&set, 100, &[]));
-            assert_eq!(written, Err(Error::Large));
+            let large = create_large(&set, 100, &[]);
+            assert_eq!(shard.write(b, BACKFILL, large), Err(Error::Large));
         });
     }
 
