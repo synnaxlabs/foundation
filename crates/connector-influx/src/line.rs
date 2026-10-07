@@ -144,8 +144,7 @@ pub enum Error {
     /// An empty part.
     Empty(Part),
     /// A name with a character that no name may hold: a backslash, a newline, a
-    /// carriage return, a tab, or NUL. In some part of a line, some InfluxDB version
-    /// splits, drops, or refuses each one.
+    /// carriage return, a tab, or NUL.
     Character {
         /// The name.
         name: String,
