@@ -1480,11 +1480,18 @@ mod tests {
             admission: [1; 64],
             ..common::member(2)
         };
+        let other = Member {
+            admission: [1; 64],
+            expiry: Some(Span::MILLISECOND),
+            status: [("clock.offset".parse().unwrap(), INDEX)].into(),
+            ..record(2, 3, 2)
+        };
         let cases = [
             ("an equal record", record(2, 2, 1)),
             ("another version", record(2, 2, 2)),
             ("another signer", record(2, 3, 1)),
             ("another admission", admitted),
+            ("another record in each field", other),
         ];
         for (case, second) in cases {
             for at in [0, 3] {
