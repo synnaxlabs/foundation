@@ -1528,8 +1528,9 @@ How to read this record:
   dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
   NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
   `Transport::public_key` gives the key that the transport proves to each peer, so
-  `node` can check it against the key it loads. Decided by laptop.architect and
-  laptop.architect-2 (#1587, 2026-10-07 19:55 UTC):
+  `Mesh::open` can check it against the public half of the private key of its config
+  (MESH SURFACE). Decided by laptop.architect and laptop.architect-2 (#1587, 2026-10-07
+  19:55 UTC):
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
@@ -2436,14 +2437,21 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
-  sentence on `Unsynced` and `Status`. `open` does not check that the transport proves
-  the key of `Config.private_key`, because `Transport` has no call that gives its key
-  (#1587). The `Debug` text of a `Config` does not show the private key. The calls that
-  change the region and the change records stay private. The surface is approved by the
-  architect, 2026-10-07T16:24:54Z:
+  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
+  key that is not the public half of `Config.private_key`. `node` builds both from the
+  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
+  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
+  the architect, 2026-10-07T19:55:13Z:
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
+  Supersedes the sentence that `open` does not check the key of the transport:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
+  `Debug` text of a `Config` does not show the private key. The calls that change the
+  region and the change records stay private. The surface is approved by the architect,
+  2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  surface as built, with the types that the caller builds and the sentence on the key of
-  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  surface as built, with the types that the caller builds and the sentence that `open`
+  does not check the key of the transport (superseded above), is approved by the
+  architect, 2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order

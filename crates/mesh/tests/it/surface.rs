@@ -128,9 +128,37 @@ fn create_config_on(
 fn solo<F: Future<Output = ()> + 'static>(
     body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
 ) {
+    assert_eq!(run(body), Ok(()));
+}
+
+/// What a run of `body` on its one node gives.
+fn run<F: Future<Output = ()> + 'static>(
+    body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+) -> Result<(), sim::Error> {
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    sim.run_on(&node, body).unwrap();
+    sim.run_on(&node, body)
+}
+
+/// The public half of `PrivateKey([1; 32])`, as the panic of `open` prints it.
+const PUBLIC_1: &str =
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
+
+/// As [`PUBLIC_1`], of `PrivateKey([3; 32])`.
+const PUBLIC_3: &str =
+    "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1";
+
+/// The panic of an `open` whose transport proves `proved` and whose config holds the
+/// private key of `own`.
+fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
+    Err(sim::Error::Panicked {
+        thread: "run_on".into(),
+        message: format!(
+            "invariant: the transport of a mesh proves the public half of its private \
+             key: it proves {proved}, not {own}"
+        ),
+        seed: 0,
+    })
 }
 
 #[test]
@@ -146,12 +174,33 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
-// A known gap until #1587: `open` must refuse this transport.
 #[test]
-fn open_takes_a_transport_that_proves_another_key() {
-    solo(|node, tasks| async move {
+fn open_panics_on_a_transport_that_proves_another_key() {
+    let ran = run(|node, tasks| async move {
         let config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
-        drop(Mesh::open(config).await.unwrap());
+        drop(Mesh::open(config).await);
+    });
+    assert_eq!(ran, mismatch(PUBLIC_3, PUBLIC_1));
+}
+
+// The transport proves the key of the member record, so only the private key of the
+// config is the other side of the check.
+#[test]
+fn open_panics_on_a_private_key_that_its_transport_does_not_prove() {
+    let ran = run(|node, tasks| async move {
+        let mut config = create_config(&node, &tasks);
+        config.private_key = PrivateKey([3; 32]);
+        drop(Mesh::open(config).await);
+    });
+    assert_eq!(ran, mismatch(PUBLIC_1, PUBLIC_3));
+}
+
+#[test]
+fn open_gives_wrong_key_when_the_transport_proves_the_private_key() {
+    solo(|node, tasks| async move {
+        let mut config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
+        config.private_key = PrivateKey([3; 32]);
+        assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
     });
 }
 
