@@ -412,6 +412,29 @@ mod tests {
         Diagnostic::new(Code::new(code), span, message.into(), fix.into())
     }
 
+    /// Asserts that each of two blocks inside a `keyword` block with `attributes` adds
+    /// one `config.unknown-block` diagnostic to what `check` gives without them.
+    fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
+        let mut policy = block(0, 0, keyword, &["edge"], attributes);
+        let Err(mut expected) = check(&[document(vec![policy.clone()])]) else {
+            panic!("{attributes:?} is valid");
+        };
+        for (offset, inner) in [(90, "inner"), (95, "other")] {
+            policy.body.blocks.push(block(0, offset, inner, &[], &[]));
+            expected.push(refused(
+                "config.unknown-block",
+                at(0, offset),
+                &format!("the `{keyword}` block cannot hold the `{inner}` block"),
+                "Remove it",
+            ));
+        }
+        assert_eq!(
+            check(&[document(vec![policy])]),
+            Err(expected),
+            "{attributes:?}"
+        );
+    }
+
     fn selector(patterns: &[&str]) -> Selector {
         Selector::new(patterns.iter().copied()).unwrap()
     }
@@ -700,6 +723,24 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn refuses_a_block_inside_node_settings_with_each_bad_attribute() {
+        let select = || ("select", string("site_a.*"));
+        let cases = [
+            vec![],
+            vec![("disk", string("1GiB"))],
+            vec![("select", Kind::Integer(7)), ("disk", string("1GiB"))],
+            vec![select()],
+            vec![select(), ("disk", Kind::Integer(7))],
+            vec![select(), ("disk", string("nope"))],
+            vec![select(), ("pool", Kind::Integer(7))],
+            vec![select(), ("disk", string("0B"))],
+        ];
+        for attributes in cases {
+            assert_inner_blocks_refused("node_settings", &attributes);
+        }
     }
 
     #[test]
@@ -1341,21 +1382,7 @@ mod tests {
                 ],
             ];
             for attributes in cases {
-                let Err(mut expected) = check(&placement(&attributes)) else {
-                    panic!("{attributes:?} is valid");
-                };
-                expected.push(refused(
-                    "config.unknown-block",
-                    at(0, 90),
-                    "the `placement` block cannot hold the `inner` block",
-                    "Remove it",
-                ));
-                let [mut documents] = placement(&attributes);
-                documents.blocks[0]
-                    .body
-                    .blocks
-                    .push(block(0, 90, "inner", &[], &[]));
-                assert_eq!(check(&[documents]), Err(expected), "{attributes:?}");
+                assert_inner_blocks_refused("placement", &attributes);
             }
         }
     }
@@ -1582,21 +1609,7 @@ mod tests {
                 vec![select(), ("keep", string("-3d"))],
             ];
             for attributes in cases {
-                let Err(mut expected) = check(&retention(&attributes)) else {
-                    panic!("{attributes:?} is valid");
-                };
-                expected.push(refused(
-                    "config.unknown-block",
-                    at(0, 90),
-                    "the `retention` block cannot hold the `inner` block",
-                    "Remove it",
-                ));
-                let [mut documents] = retention(&attributes);
-                documents.blocks[0]
-                    .body
-                    .blocks
-                    .push(block(0, 90, "inner", &[], &[]));
-                assert_eq!(check(&[documents]), Err(expected), "{attributes:?}");
+                assert_inner_blocks_refused("retention", &attributes);
             }
         }
     }
