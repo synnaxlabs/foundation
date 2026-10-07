@@ -454,6 +454,8 @@ mod tests {
         assert_eq!(decode(Some(0xfe), 0x00, 1), 0x100);
         assert_eq!(decode(Some(0x17f), 0x00, 1), 0x200);
         assert_eq!(decode(Some(0x17e), 0x00, 1), 0x100);
+        assert_eq!(decode(Some(0xff), 0x80, 1), 0x180);
+        assert_eq!(decode(Some((1 << 62) - 0x81), 0x00, 1), (1 << 62) - 0x100);
     }
 
     #[test]
@@ -495,7 +497,7 @@ mod tests {
         let mut packet = Vec::new();
         for (index, frame) in (0_u8..).zip(frames) {
             packet.extend_from_slice(frame);
-            packet.extend_from_slice(&[0x04, index, 0x40, index, 0x00]);
+            packet.extend_from_slice(&[0x04, index, 0x40, index, 0x41, 0x00]);
         }
         let mut expected: Vec<Reset> = (0..29)
             .map(|index| Reset {

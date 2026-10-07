@@ -114,8 +114,8 @@ pub(crate) struct Incoming {
 pub(super) struct Streams {
     /// This side's limits, which its hello carries.
     own: Hello,
-    /// This side sent its hello.
-    greeted: bool,
+    /// The stream of this side's hello, once it opened.
+    greeting: Option<StreamId>,
     /// Until the peer's hello arrives, no stream opens or is accepted.
     peer: hello::Peer,
     /// Streams the peer opened whose first message has not started to arrive.
@@ -773,7 +773,7 @@ impl Streams {
                 window_bytes,
                 message_bytes_max: bytes_max,
             },
-            greeted: false,
+            greeting: None,
             peer: hello::Peer::new(),
             arriving: Vec::new(),
             incoming: Default::default(),
@@ -803,7 +803,7 @@ impl Streams {
         &mut self,
         inner: &mut noq_proto::Connection,
     ) -> Result<(), Fault> {
-        if self.greeted {
+        if self.greeting.is_some() {
             return Ok(());
         }
         let room = || Fault("a peer with no room for the hello".to_owned());
@@ -814,7 +814,7 @@ impl Streams {
                 Err(room())
             };
         };
-        self.greeted = true;
+        self.greeting = Some(id);
         let mut send = inner.send_stream(id);
         send.set_priority(i32::MAX).expect(OPENED);
         let mut hello = [Bytes::from(self.own.encode())];
@@ -860,8 +860,9 @@ impl Streams {
         Ok(())
     }
 
-    /// Takes the peer's hello: its window bounds the send budget, and the streams it
-    /// opened before the hello get their class.
+    /// Takes the peer's hello: its window bounds the send budget, the streams it
+    /// opened before the hello get their class, and a stream it stopped before the
+    /// hello resets.
     fn arrive(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -870,6 +871,12 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) -> Result<(), Fault> {
         self.sending.budget = Budget::new(peer.window_bytes);
+        let greeting = self.greeting.expect("invariant: this side greeted");
+        // A stop before the peer's hello gave this side no event. The stream is
+        // closed once the peer has all of it.
+        if let Ok(Some(code)) = inner.send_stream(greeting).stopped() {
+            reset_stopped(inner, greeting, code)?;
+        }
         events.push_back(Event::Available { key });
         let bi = self.take(inner, key, Dir::Bi)?;
         if self.take(inner, key, Dir::Uni)? || bi {
@@ -6015,6 +6022,48 @@ mod tests {
                     assert_eq!(reset_codes(&pair, &log, id), [9], "{bytes:?}");
                 });
             }
+        }
+
+        #[test]
+        fn reset_at_the_hello_its_own_hello_stream_stopped_before_it() {
+            testing::run(1, |shard| {
+                let log = Arc::new(Log::default());
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let mut peer = Foreign::new(shard, |_| {});
+                let tls = log.client(tls::public(&pair::SERVER_KEY));
+                peer.dial_with(pair.now(), tls, pair::SERVER);
+                pair.foreign = Some(peer);
+                let mut steps = 0;
+                let id = loop {
+                    pair.run(Duration::from_micros(100));
+                    if let Some(id) = foreign(&mut pair).streams().accept(Dir::Uni) {
+                        break id;
+                    }
+                    steps += 1;
+                    assert!(steps < 10_000, "no hello stream");
+                };
+                let stopped =
+                    foreign(&mut pair).recv_stream(id).stop(VarInt::from_u32(9));
+                stopped.expect("stopped");
+                // The stop must arrive before the ACK of the hello, or noq-proto
+                // frees the stream and drops the stop.
+                let mut state = Ok(None);
+                for _ in 0..200 {
+                    pair.run(Duration::from_micros(100));
+                    if pair.server.key.is_some() {
+                        state = pair.server.connection().send_stream(id).stopped();
+                        if state != Ok(None) {
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(state, Ok(Some(VarInt::from_u32(9))));
+                assert!(reset_codes(&pair, &log, id).is_empty());
+                raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
+                pair.run(RUN);
+                assert!(available(&pair.server));
+                assert_eq!(reset_codes(&pair, &log, id), [9]);
+            });
         }
 
         #[test]
