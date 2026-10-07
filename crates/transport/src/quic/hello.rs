@@ -444,12 +444,21 @@ mod tests {
         #[test]
         fn decode_gives_what_the_doc_gives(
             pairs in pairs(),
-            // A cut inside an id, after an id, or inside a value.
+            // One more pair, cut inside its id, after its id, or inside its value,
+            // with each varint in 1, 2, 4, or 8 bytes when it fits.
             tail in prop_oneof![
-                Just(vec![]),
-                Just(vec![0x40]),
-                (0_u8..4).prop_map(|id| vec![id]),
-                (0_u8..4).prop_map(|id| vec![id, 0x40]),
+                1 => Just(vec![]),
+                3 => (
+                    prop_oneof![0_u64..4, unknown()],
+                    value(),
+                    prop::array::uniform2(prop_oneof![Just(1), Just(2), Just(4), Just(8)]),
+                    any::<prop::sample::Index>(),
+                )
+                    .prop_map(|(id, value, lens, at)| {
+                        let mut pair = encode_wide(&[(id, value)], &lens);
+                        pair.truncate(1 + at.index(pair.len() - 1));
+                        pair
+                    }),
             ],
             // At times, some varints in more bytes than they need.
             lens in prop_oneof![
@@ -525,6 +534,25 @@ mod tests {
         expected.push(0x01);
         expected.extend(long(VarInt::MAX.into_inner()));
         assert_eq!(hello.encode(), expected);
+    }
+
+    #[test]
+    fn decode_refuses_a_cut_inside_a_wide_id() {
+        let whole = encode(&[(0, 2_000), (1, 1_500)]);
+        for cut in [
+            &[0x80][..],
+            &[0x80, 0x10, 0x00],
+            &[0xc0],
+            &[0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ] {
+            let mut bytes = whole.clone();
+            bytes.extend_from_slice(cut);
+            assert_eq!(
+                Hello::decode(&bytes),
+                fault("a hello that ends inside a pair"),
+                "{cut:?}"
+            );
+        }
     }
 
     #[test]
