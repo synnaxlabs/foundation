@@ -2335,8 +2335,9 @@ pub(super) mod tests {
 
         #[derive(Clone, Copy, Debug)]
         enum Live {
-            /// Opens a session below the newest gone sample by the count, unnamed or
-            /// as a named reader that resumes.
+            /// Opens a session at the count below 4 past the end of the newest gone
+            /// frame, unnamed, or as a named reader that resumes, with that position
+            /// as the fallback.
             Open(u64, Option<usize>),
             Close(usize),
             Ack(usize, u64),
@@ -2353,8 +2354,6 @@ pub(super) mod tests {
         /// by number, and how many it took.
         #[derive(Default)]
         struct Got {
-            name: Option<usize>,
-            position: u64,
             behind: bool,
             /// The session missed a frame in the last release.
             missed: bool,
@@ -2364,12 +2363,12 @@ pub(super) mod tests {
             taken: usize,
         }
 
-        /// The live path stated a second way: open sessions by key, the position of
-        /// each named reader with no open session, and each queued frame.
+        /// The live path stated a second way: the readers and their positions, what
+        /// each open session got, by key, and each queued frame.
         #[derive(Default)]
         struct Flows {
+            readers: Model,
             open: BTreeMap<complete::Key, Got>,
-            closed: BTreeMap<usize, u64>,
             queued: Vec<Queued>,
         }
 
@@ -2407,21 +2406,14 @@ pub(super) mod tests {
                 queued.any(|queued| queued.held && !queued.seq.is_empty())
             }
 
-            /// The position that a named reader resumes from: that of its open session,
-            /// which the open takes over, or the one it held at its close.
-            fn take_over(&mut self, name: usize) -> Option<u64> {
-                let open = self.open.iter().find(|(_, got)| got.name == Some(name));
-                if let Some((&key, _)) = open {
-                    return self.open.remove(&key).map(|got| got.position);
-                }
-                self.closed.remove(&name)
+            /// The live position of the open session `key`.
+            fn position(&self, key: complete::Key) -> u64 {
+                self.readers.open[&key].1.live
             }
 
-            fn close(&mut self, key: complete::Key) {
-                let got = self.open.remove(&key).expect("the session is open");
-                if let Some(name) = got.name {
-                    self.closed.insert(name, got.position);
-                }
+            fn close(&mut self, key: complete::Key, now: i64) {
+                self.readers.close(key, now);
+                self.open.remove(&key);
                 if self.open.is_empty() {
                     for queued in &mut self.queued {
                         queued.held = false;
@@ -2457,8 +2449,9 @@ pub(super) mod tests {
                 let held = self.queued.iter_mut().filter(|queued| queued.held);
                 for queued in held.filter(|queued| queued.seq.end <= durable) {
                     queued.held = false;
-                    for got in self.open.values_mut() {
-                        if got.behind || !holds(&queued.seq, got.position) {
+                    for (key, got) in &mut self.open {
+                        let position = self.readers.open[key].1.live;
+                        if got.behind || !holds(&queued.seq, position) {
                             continue;
                         }
                         if got.spent >= got.limit {
@@ -2515,13 +2508,13 @@ pub(super) mod tests {
                 None => (Reader::Unnamed, Start::At(live(start))),
             };
             let opened = readers.open(reader, from, limit);
-            let stored = name.and_then(|name| model.take_over(name));
-            let position = stored.unwrap_or(start);
-            assert_eq!(opened.position, live(position));
+            let expected = model.readers.open(opened.key, name, 10, from);
+            assert_eq!((opened.position, opened.replaced), expected);
+            if let Some(Key::Complete(replaced)) = opened.replaced {
+                model.open.remove(&replaced);
+            }
             let got = Got {
-                name,
-                position,
-                behind: model.behind(position),
+                behind: model.behind(opened.position.live),
                 limit,
                 ..Got::default()
             };
@@ -2553,18 +2546,13 @@ pub(super) mod tests {
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        if model.got(key).name.is_some() {
-                            readers.close_named(key, at(0));
-                        } else {
-                            readers.close(key.into());
-                        }
-                        model.close(key);
+                        close(&mut readers, &model.readers, key, 0);
+                        model.close(key, 0);
                     }
                     Live::Ack(i, ahead) => {
                         let Some(key) = model.pick(i) else { continue };
-                        let got = model.got(key);
-                        got.position += ahead;
-                        readers.ack(key, live(got.position)).expect("forward");
+                        let to = live(model.position(key) + ahead);
+                        assert_eq!(readers.ack(key, to), model.readers.ack(key, to));
                     }
                     Live::Grant(i, limit) => {
                         let Some(key) = model.pick(i) else { continue };
