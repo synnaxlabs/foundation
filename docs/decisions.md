@@ -534,24 +534,30 @@ How to read this record:
   first checkpoint, so a ring with no checkpoint takes the layout of the open and a ring
   with one keeps its own (#1254). The open holds its write handle of the old file
   through the remove, so of two opens at once one gets `Busy`; an `os` open can still
-  take a removed file, which `os` is to close (#1297). A dropped open can leave its
-  remove in flight, and a later open of the same directory in the process can lose its
-  ring (#1310). It syncs the directory before each create of a ring, because a disk
-  gives the room of a removed file back only then, and a kill after the remove leaves
-  such a file: the remake needs room for the larger of the two files, not for both.
-  `Length` stays for a ring with a checkpoint whose length does not fit its header, and
-  for a file that is not empty and ends inside its header blocks. A crash at any point
-  of the remake leaves a ring that the next open takes, or no ring. Lost: fit the layout
-  to the length of the file (a ring whose size no config gave), and keep the file when
-  its length fits (two paths for one case). It does not wait for `File::resize` (#1238).
-  Decided by `laptop.architect` (2026-10-07T07:47:16Z):
+  take a removed file, which `os` is to close (#1297). An open that finds no ring, while
+  another open makes one with another layout, commits, and closes, gets `Files(Length)`
+  from its create, and the commit stays. The open does not look again, because no caller
+  opens one directory two times at once. A dropped open can leave its remove in flight,
+  and a later open of the same directory in the process can lose its ring (#1310). It
+  syncs the directory before each create of a ring, because a disk gives the room of a
+  removed file back only then, and a kill after the remove leaves such a file: the
+  remake needs room for the larger of the two files, not for both. `Length` stays for a
+  ring with a checkpoint whose length does not fit its header, and for a file that is
+  not empty and ends inside its header blocks. A crash at any point of the remake leaves
+  a ring that the next open takes, or no ring. Lost: fit the layout to the length of the
+  file (a ring whose size no config gave), and keep the file when its length fits (two
+  paths for one case). It does not wait for `File::resize` (#1238). Decided by
+  `laptop.architect` (2026-10-07T07:47:16Z):
   https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001. The held
   handle, the sync before the create, and the `Length` text: decided by
   `laptop.architect` (2026-10-07T09:08:16Z):
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034721207. The
   deferral of the dropped open to #1310: decided by `laptop.architect`
   (2026-10-07T09:34:29Z):
-  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6035164599.
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6035164599. The open
+  that gets `Files(Length)` from its create: decided by `laptop.architect`
+  (2026-10-07T10:59:02Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036483605.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
