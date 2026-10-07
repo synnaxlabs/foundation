@@ -3,6 +3,7 @@
 use std::future::poll_fn;
 use std::ops::Range;
 use std::rc::Rc;
+use std::task::Poll;
 
 use block::Block;
 
@@ -119,9 +120,7 @@ impl Sender {
     /// }
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
-        if self.stream.is_none() {
-            return self.cancelled(message.len());
-        }
+        let bytes_max = self.bytes_max;
         let mut sending = Sending {
             session: &self.session,
             stream: &mut self.stream,
@@ -129,8 +128,12 @@ impl Sender {
         };
         let mut message = Some(message);
         let sent = poll_fn(|cx| {
-            let invariant = "only a dropped send future resets a sender's stream";
-            let stream = sending.stream.as_mut().expect(invariant);
+            let Some(stream) = sending.stream else {
+                // Only a dropped send future resets the stream, so this is the first
+                // poll, and the message is in hand.
+                let bytes = message.as_ref().map_or(0, |message| message.len());
+                return Poll::Ready(cancelled(bytes, bytes_max));
+            };
             sending.session.poll_write(cx, stream, &mut message)
         })
         .await;
@@ -169,7 +172,7 @@ impl Sender {
     /// ```
     pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
         if self.stream.is_none() {
-            return self.cancelled(message.len());
+            return cancelled(message.len(), self.bytes_max);
         }
         drop(message);
         todo!("#68")
@@ -279,13 +282,13 @@ impl Sender {
             self.session.reset(stream, code);
         }
     }
+}
 
-    /// What a send of a message of `bytes` gives after a dropped send future reset the
-    /// stream: the size error first, as on an open stream.
-    fn cancelled<T>(&self, bytes: usize) -> Result<T, Error> {
-        quic::stream::check_size(bytes, self.bytes_max)?;
-        Err(CANCELLED)
-    }
+/// What a send of a message of `bytes` gives after a dropped send future reset the
+/// stream: the size error first, as on an open stream.
+fn cancelled<T>(bytes: usize, bytes_max: usize) -> Result<T, Error> {
+    quic::stream::check_size(bytes, bytes_max)?;
+    Err(CANCELLED)
 }
 
 impl Drop for Sender {
