@@ -3046,9 +3046,9 @@ fn each_open_starts_a_new_chain() {
 /// it has blocks opens and takes its largest record.
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
-    for area in [2 * BLOCK, AREA] {
+    for ring in [least(BODY_MAX), layout(AREA, BODY_MAX)] {
         run(24, Memory::default(), move |shard| async move {
-            let ring = layout(area, BODY_MAX);
+            let area = ring.area();
             for _ in 0..area / BLOCK {
                 drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
             }
