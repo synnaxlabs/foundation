@@ -1239,6 +1239,8 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // Compares `Debug` output: a log tells the halves of two sessions apart only by
+    // the session key in it.
     #[test]
     fn a_half_shows_its_session_key() {
         let (mut sim, ..) = testing::sessions(
