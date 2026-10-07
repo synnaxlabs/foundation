@@ -35,8 +35,8 @@ type Fields = BTreeMap<String, Field>;
 
 impl Store {
     /// Stores each line of `body`. Like InfluxDB, it stores each valid line, also
-    /// after a line that is not valid, and skips an empty line and a line that starts
-    /// with `#`.
+    /// after a line that is not valid. It skips a blank line, and a line whose first
+    /// character after spaces and tabs is `#`.
     ///
     /// # Errors
     ///

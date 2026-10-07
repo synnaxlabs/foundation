@@ -88,6 +88,49 @@ fn skips_empty_lines_and_comments() {
 }
 
 #[test]
+fn skips_a_comment_after_spaces_and_tabs() {
+    let store = stored("  #m v=1 10\n\t #m v=1 10\nm v=1 20\n");
+    assert_eq!(times(&store, "m", &[]), [20]);
+    assert_eq!(store.points("#m", &[]).count(), 0);
+}
+
+#[test]
+fn refuses_a_tab_in_a_line_and_nul_in_a_measurement() {
+    const TAKE: &str = "A generic parsing error occurred: TakeWhile1";
+    for (line, message) in [
+        ("m\tx v=1 10", TAKE),
+        ("m,a\tb=c v=1 10", "Tag Set Malformed"),
+        ("m,a=b\tc v=1 10", TAKE),
+        ("m a\tb=1 10", "No fields were provided"),
+        ("m\0x v=1 10", TAKE),
+    ] {
+        let (store, error) = refused(line);
+        assert_eq!(
+            error,
+            Error::Parse {
+                line: line.into(),
+                message: message.into(),
+            }
+        );
+        assert_eq!(store.points("m", &[]).count(), 0);
+    }
+}
+
+#[test]
+fn stores_a_backslash_in_a_name_and_nul_in_a_key() {
+    let store = stored("m\\x,a\\b=c,d\0e=f v\\w=1,x\0y=2 10\n");
+    let point = store.points("m\\x", &[]).next().unwrap();
+    assert_eq!(
+        point.tags,
+        &map(&[("a\\b", "c".to_owned()), ("d\0e", "f".to_owned())])
+    );
+    assert_eq!(
+        point.fields,
+        &map(&[("v\\w", Field::Float(1.0)), ("x\0y", Field::Float(2.0))])
+    );
+}
+
+#[test]
 fn refuses_a_body_that_is_not_utf8_and_stores_none_of_it() {
     let body = [b"m v=1 10\nm v=1 2".as_slice(), &[0xff], b"\n"].concat();
     let mut store = Store::default();

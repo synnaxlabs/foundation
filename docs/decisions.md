@@ -1850,20 +1850,23 @@ How to read this record:
   a name or key that starts with `_`; a key more than once in tags and fields together;
   a float that parses to infinity; and a field whose type differs from the type stored
   for that key in the measurement, also across shards, where InfluxDB 1 checks each
-  shard only. Each refusal is a typed `sim::Error` variant. Like InfluxDB, it skips a
-  line that starts with `#` as a comment, so a writer that writes a measurement name
-  with a leading `#` loses that line with no error; a test that reads the points sees
-  the loss. It stores a `u` integer, which InfluxDB 1 OSS refuses, until the writer
-  stops writing `u` (#1210). Lost: a store that gives a time to a line with none, and
-  one that takes a type conflict, as each hides a writer bug; and a test that a line is
-  refused if and only if the writer refuses its input, as the writer also refuses names
-  that InfluxDB stores (a backslash, a tab, NUL), so the two sets differ by design.
-  Decided by the architect (`laptop.architect-2`), #1151
+  shard only. Each refusal is a typed `sim::Error` variant. The InfluxDB 3 parser also
+  refuses a tab in any part of a line and NUL in a measurement name, which InfluxDB 1
+  stores; the writer refuses them too. Like InfluxDB, it skips a line whose first
+  character after spaces and tabs is `#` as a comment, so a writer that writes a
+  measurement name with a leading `#` loses that line with no error; a test that reads
+  the points sees the loss. It stores a `u` integer, which InfluxDB 1 OSS refuses, until
+  the writer stops writing `u` (#1210). Lost: a store that gives a time to a line with
+  none, and one that takes a type conflict, as each hides a writer bug; and a test that
+  a line is refused if and only if the writer refuses its input, as the writer also
+  refuses a backslash in a name and NUL in a key, which InfluxDB stores, so the two sets
+  differ by design. Decided by the architect (`laptop.architect-2`), #1151
   (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032723969), and in
   the review of #1239
   (https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032923332,
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032970676,
-  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033050251).
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033050251,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033093344).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
