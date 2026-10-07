@@ -329,7 +329,6 @@ impl TimeProvider for Epoch {
 }
 
 /// The public key of `private_key`, derived apart from the certificate template.
-#[cfg(test)]
 pub(crate) fn public(private_key: &PrivateKey) -> PublicKey {
     let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
     PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))

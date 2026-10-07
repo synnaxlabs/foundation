@@ -1465,6 +1465,10 @@ How to read this record:
   key or a `Client` (an SDK, proved by its signed hello above). Callers admit peers,
   dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
   NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+  `Transport::public_key` gives the key that the transport proves to each peer, so
+  `node` can check it against the key it loads (amended:
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124).
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
