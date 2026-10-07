@@ -661,3 +661,12 @@ fn the_machine_git_settings_do_not_change_a_test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("3 passed"), "{output:?}");
 }
+
+#[test]
+fn reads_no_system_config_or_attributes_file() {
+    let repo = Repo::new("system");
+    for name in ["GIT_CONFIG_SYSTEM", "GIT_ATTR_SYSTEM"] {
+        let output = command(&repo.dir).args(["var", name]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{name}");
+    }
+}
