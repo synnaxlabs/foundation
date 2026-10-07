@@ -2951,10 +2951,9 @@ How to read this record:
   (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
   8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
   "Outside input" is a value that a party outside the node chooses freely; a dense,
-  bounded number such as a QUIC stream ID is not.
-  Iteration order never decides behavior, so a test that breaks on the new order
-  shows a defect in the code.
-  Decided by `laptop.architect` (2026-10-07T09:59Z):
+  bounded number such as a QUIC stream ID is not. Iteration order never decides
+  behavior, so a test that breaks on the new order shows a defect in the code. Decided
+  by `laptop.architect` (2026-10-07T09:59:29Z):
   https://github.com/synnaxlabs/foundation/issues/1321
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
