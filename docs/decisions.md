@@ -1380,9 +1380,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
   has the place of its first listing in the open, from 0. The reader's `hub` lists the
   keys in the entry order of its own frame (its slot order), the index too, so a place
-  is an entry of the reader's frame and a session has `channels` places. An open whose keys do not hold the index is not
-  valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
-  `UNKNOWN`; the architect, 2026-10-07,
+  is an entry of the reader's frame and a session has `channels` places. An open whose
+  keys do not hold the index is not valid: the home's `hub` checks it and stops the
+  session with `MALFORMED` (lost: `UNKNOWN`; the architect, 2026-10-07,
   https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
   of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
   message. The rest is one run of bytes, in messages of at most the peer's
