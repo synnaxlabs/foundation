@@ -35,7 +35,7 @@ fn main() {
     }
     store.write(&body).expect("valid lines");
     drop(body);
-    let held = ALLOCATOR.held().saturating_sub(before);
+    let held = ALLOCATOR.held().strict_sub(before);
     assert_eq!(
         store.points("edge.value", &[]).count(),
         POINTS,
