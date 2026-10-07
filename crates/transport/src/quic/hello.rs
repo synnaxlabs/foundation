@@ -219,35 +219,64 @@ mod tests {
         (value | 0xc0 << 56).to_be_bytes()
     }
 
-    /// The fault that the `decode` doc gives for a hello of `pairs`, then the start
-    /// of one more pair when `cut`. A hello of at most 256 bytes.
-    fn doc_fault(pairs: &[(u64, u64)], cut: bool) -> Option<String> {
+    /// What the `decode` doc gives for a hello of `pairs`, then the start of one more
+    /// pair when `cut`, with the reason of a fault. A hello of at most 256 bytes.
+    fn doc_decode(pairs: &[(u64, u64)], cut: bool) -> Result<Hello, String> {
         let mut after = pairs.iter().zip(pairs.iter().skip(1));
         if let Some(((last, _), (id, _))) =
             after.find(|((last, _), (id, _))| id <= last)
         {
-            return Some(format!("a hello with id {id} after id {last}"));
+            return Err(format!("a hello with id {id} after id {last}"));
         }
         if cut {
-            return Some("a hello that ends inside a pair".to_owned());
+            return Err("a hello that ends inside a pair".to_owned());
         }
         let value = |id| pairs.iter().find(|pair| pair.0 == id).map(|pair| pair.1);
         let Some(window) = value(0) else {
-            return Some("a hello with no window_bytes".to_owned());
+            return Err("a hello with no window_bytes".to_owned());
         };
         let Some(message) = value(1) else {
-            return Some("a hello with no message_bytes_max".to_owned());
+            return Err("a hello with no message_bytes_max".to_owned());
         };
         if message < 1_472 {
-            return Some(format!(
+            return Err(format!(
                 "a hello with a message_bytes_max of {message}, below 1472"
             ));
         }
-        (window < message).then(|| {
-            format!(
+        if window < message {
+            return Err(format!(
                 "a hello with window_bytes {window} below message_bytes_max {message}"
-            )
+            ));
+        }
+        Ok(Hello {
+            window_bytes: usize::try_from(window).expect("64 bits"),
+            message_bytes_max: usize::try_from(message).expect("64 bits"),
         })
+    }
+
+    /// Up to 6 pairs of ids 0 to 3 and values near the limits: in any order, or
+    /// half the time with ids that rise, as a valid hello's do.
+    fn pairs() -> impl Strategy<Value = Vec<(u64, u64)>> {
+        let value = || {
+            prop_oneof![
+                0_u64..3_000,
+                Just(1_471),
+                Just(1_472),
+                0..=VarInt::MAX.into_inner(),
+            ]
+        };
+        let any = prop::collection::vec((0_u64..4, value()), 0..6);
+        let rising = (
+            prop::collection::btree_set(0_u64..4, 0..=4),
+            prop::collection::vec(value(), 4),
+            prop::collection::vec((0_u64..4, value()), 0..2),
+        )
+            .prop_map(|(ids, values, more)| {
+                let mut pairs: Vec<_> = ids.into_iter().zip(values).collect();
+                pairs.extend(more);
+                pairs
+            });
+        prop_oneof![any, rising]
     }
 
     proptest! {
@@ -307,20 +336,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4_096))]
+
         #[test]
-        fn decode_gives_the_fault_of_the_doc(
-            pairs in prop::collection::vec(
-                (
-                    0_u64..4,
-                    prop_oneof![
-                        0_u64..3_000,
-                        Just(1_471),
-                        Just(1_472),
-                        0..=VarInt::MAX.into_inner(),
-                    ],
-                ),
-                0..6,
-            ),
+        fn decode_gives_what_the_doc_gives(
+            pairs in pairs(),
             // A cut inside an id, after an id, or inside a value.
             tail in prop_oneof![
                 Just(vec![]),
@@ -332,10 +352,7 @@ mod tests {
             let mut bytes = encode(&pairs);
             bytes.extend(&tail);
             let decoded = Hello::decode(&bytes).map_err(|fault| fault.0);
-            match doc_fault(&pairs, !tail.is_empty()) {
-                Some(fault) => prop_assert_eq!(decoded, Err(fault)),
-                None => prop_assert!(decoded.is_ok()),
-            }
+            prop_assert_eq!(decoded, doc_decode(&pairs, !tail.is_empty()));
         }
     }
 
@@ -435,6 +452,10 @@ mod tests {
         assert_eq!(
             Hello::decode(&encode(&[(0, 2_000), (2, 0), (1, 1_500)])),
             fault("a hello with id 1 after id 2")
+        );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 2_000), (1, 1_000), (2, 0), (2, 0)])),
+            fault("a hello with id 2 after id 2")
         );
         let mut bytes = encode(&[(0, 2_000), (2, 0)]);
         bytes.push(0x03);
