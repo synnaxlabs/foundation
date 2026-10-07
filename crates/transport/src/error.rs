@@ -46,9 +46,10 @@ pub enum Error {
     /// The peer was silent for longer than [`Config::idle`](crate::Config::idle).
     TimedOut,
     /// The stream was cancelled before it finished sending: by the peer, or by a
-    /// [`send`](crate::stream::Sender::send) future that dropped.
+    /// [`send`](crate::stream::Sender::send) or
+    /// [`send_parts`](crate::stream::Sender::send_parts) future that dropped.
     Reset {
-        /// The code of the reset: `Code(0)` for a dropped send.
+        /// The code of the reset: `Code(0)` for a dropped send future.
         code: Code,
     },
     /// The peer stopped reading the stream.
