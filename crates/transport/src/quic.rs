@@ -314,48 +314,49 @@ impl Endpoint {
         connection.streams.accept(key)
     }
 
-    /// Puts `message` on the stream after the messages before it. `Ready` when the
-    /// stream took all of it. Else `sender` holds the rest: call
-    /// [`Endpoint::flush`] after [`Event::Writable`]. `Pending` with nothing taken
-    /// once the connection drained. The streams that wait for the connection take
-    /// turns, by class with `Complete` ahead of `Latest` while it is owed bytes, then
-    /// oldest first, so a write behind one waits.
+    /// Puts `message`, when `Some`, on the stream after the messages before it, and
+    /// takes it. Leaves it while the stream holds part of an earlier message.
+    /// `Ready` when the stream holds no message: it took all of `message`, or with
+    /// `None`, all of the one before. Else `Pending`: write again after
+    /// [`Event::Writable`] to send the rest. `Pending` with nothing taken once the
+    /// connection drained. The streams that wait for the connection take turns, by
+    /// class with `Complete` ahead of `Latest` while it is owed bytes, then oldest
+    /// first, so a write behind one waits.
     ///
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped the stream. Each later write gives it
     /// too. [`Error::TooLarge`] when `message` is over the peer's largest message.
-    /// Nothing of it is sent.
+    /// Nothing of it is sent, and it stays in `message`.
     /// The error of the connection's [`Event::Closed`] when it ended, until it
     /// drains.
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
-    /// message on a live connection and `message` is within the limit.
+    /// After an [`Endpoint::finish`] that gave `Ok`.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
-        sender: &mut Sender,
-        message: Block,
+        sender: &Sender,
+        message: &mut Option<Block>,
     ) -> Result<Poll<()>, Error> {
         sender.check_unfinished();
-        sender.check_size(&message)?;
+        if let Some(message) = message {
+            sender.check_size(message)?;
+        }
         let key = sender.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
-            sender.check();
-            sender.load(message);
-            streams.flush(inner, sender, events)
+        self.streams(now, key, Poll::Pending, |streams, inner, _, _| {
+            streams.write(inner, sender, message)
         })
     }
 
     /// Puts `message` on the stream after the messages before it when the stream
-    /// can take it now. Else gives it back with nothing of it sent: when `sender`
-    /// still holds part of an earlier message after a flush, when the send budget
-    /// has no room for it or a stream that goes ahead of it waits for room or its
-    /// turn, or once the connection drained. The stream does not wait for room
-    /// for a message it gives back. Once taken, `sender` may hold the rest of it:
-    /// call [`Endpoint::flush`] after [`Event::Writable`].
+    /// can take it now. Else gives it back with nothing of it sent: when the stream
+    /// still holds part of an earlier message once it wrote what it could of it,
+    /// when the send budget has no room for it or a stream that goes ahead of it
+    /// waits for room or its turn, or once the connection drained. The stream does
+    /// not wait for room for a message it gives back. Once taken, the stream sends
+    /// the rest of it by itself.
     ///
     /// # Errors
     ///
@@ -370,43 +371,24 @@ impl Endpoint {
     pub(crate) fn try_write(
         &mut self,
         now: Monotonic,
-        sender: &mut Sender,
+        sender: &Sender,
         message: Block,
     ) -> Result<Option<Block>, Error> {
         sender.check_unfinished();
         sender.check_size(&message)?;
         let key = sender.key().connection;
         let mut message = Some(message);
-        self.streams(now, key, (), |streams, inner, _, events| {
-            streams.try_write(inner, sender, &mut message, events)
+        self.streams(now, key, (), |streams, inner, _, _| {
+            streams.try_write(inner, sender, &mut message)
         })?;
         Ok(message)
     }
 
-    /// Writes the rest of the message that `sender` holds. `Ready` when it holds
-    /// none. `Pending` when the stream takes no more now or waits its turn
-    /// ([`Event::Writable`] follows), or once the connection drained.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Stopped`] when the peer stopped the stream.
-    /// The error of the connection's [`Event::Closed`] when it ended, until it
-    /// drains.
-    pub(crate) fn flush(
-        &mut self,
-        now: Monotonic,
-        sender: &mut Sender,
-    ) -> Result<Poll<()>, Error> {
-        let key = sender.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
-            streams.flush(inner, sender, events)
-        })
-    }
-
-    /// Ends the stream after the messages written to it. They arrive after the
-    /// caller drops `sender`. A stream this side opened that ends before its first
-    /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
-    /// [`Error::Reset`] with code 0. Does nothing once the connection drained.
+    /// Ends the stream after the messages written to it, the rest of the one in hand
+    /// included. They arrive after the caller drops `sender`. A stream this side
+    /// opened that ends before its first message never reaches the peer, and the
+    /// [`Receiver`] of a two-way one gets [`Error::Reset`] with code 0. Does nothing
+    /// once the connection drained.
     ///
     /// # Errors
     ///
@@ -416,8 +398,7 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`, or when `sender` holds part of a
-    /// message on a live connection.
+    /// After an [`Endpoint::finish`] that gave `Ok`.
     pub(crate) fn finish(
         &mut self,
         now: Monotonic,
@@ -426,7 +407,6 @@ impl Endpoint {
         sender.check_unfinished();
         let stream = sender.key();
         self.streams(now, stream.connection, (), |streams, inner, _, _| {
-            sender.check();
             streams.finish(inner, stream.id)?;
             sender.end();
             Ok(())
@@ -475,7 +455,7 @@ impl Endpoint {
             return;
         };
         let Connection { inner, streams, .. } = connection;
-        streams.reset(inner, sender, code, &mut self.events);
+        streams.reset(inner, sender, code);
         self.drive(key.handle, self.instant(now));
     }
 
@@ -1143,8 +1123,9 @@ mod tests {
                 let client = &mut pair.client.endpoint;
                 for _ in 0..testing::STREAMS_MAX - 1 {
                     let opened = client.open_sender(now, key, Class::Command);
-                    let mut sender = opened.expect("a stream");
-                    let written = client.write(now, &mut sender, shard.block(&sent));
+                    let sender = opened.expect("a stream");
+                    let written =
+                        client.write(now, &sender, &mut Some(shard.block(&sent)));
                     assert_eq!(written, Ok(Poll::Ready(())));
                 }
                 pair.run(Duration::from_secs(1));
@@ -1283,8 +1264,8 @@ mod tests {
                 let (now, key) = (pair.now(), pair.client.key.expect("a key"));
                 let client = &mut pair.client.endpoint;
                 let opened = client.open_sender(now, key, Class::Command);
-                let mut sender = opened.expect("a stream");
-                let written = client.write(now, &mut sender, shard.block(&sent));
+                let sender = opened.expect("a stream");
+                let written = client.write(now, &sender, &mut Some(shard.block(&sent)));
                 assert_eq!(written, Ok(Poll::Ready(())));
                 pair.run(Duration::from_millis(100));
                 assert!(pair.client.batch_max > 1, "{}", pair.client.batch_max);
