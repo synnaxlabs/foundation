@@ -324,6 +324,30 @@ mod tests {
             assert_eq!(readers.records().collect::<Vec<_>>(), [open]);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
         }
+
+        #[test]
+        fn leaves_the_complete_session_that_took_over_as_it_was() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let old = readers.open_named_latest(name("a"), at(0)).key;
+            let first = frames.frame(1);
+            let reader = Reader::Named {
+                name: name("a"),
+                hold: Span::from_nanos(10),
+            };
+            let new = readers.open(reader, Start::At(live(0)), first.charge()).key;
+            assert_eq!(readers.records().count(), 1);
+            readers.queue(&first, 0..1);
+            readers.queue(&frames.frame(2), 1..2);
+            dropped(&mut readers, old.into());
+            readers.flush();
+            assert_eq!(readers.records().count(), 0);
+            assert_eq!(readers.release(2), [new]);
+            dropped(&mut readers, old.into());
+            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+            assert!(readers.take(new.into()).is_none());
+            assert!(readers.behind(new));
+        }
     }
 
     mod put {
