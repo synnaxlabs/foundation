@@ -61,12 +61,14 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// The [`Error`] of a message that does not decode, or that breaks the order or a
-    /// run of the session: [`Error::Unopened`] for a head before `Opened`,
-    /// [`Error::Reopen`] for a second `Opened`, [`Error::Places`] for a head with more
-    /// series than places, [`Error::Run`] for a message with more ends than remain,
-    /// and [`Error::Body`] for a message longer than the rest of the body. A message
-    /// of a run has no kind, so a message where a run continues is read as one. The
+    /// Three checks, in order; the error is that of the first check that fails. The
+    /// bytes: the [`Error`] of a message that does not decode. The order of the
+    /// session, whatever the content of the message: [`Error::Unopened`] for a head
+    /// before `Opened` and [`Error::Reopen`] for a second `Opened`. The content
+    /// against the session: [`Error::Places`] for a head with more series than
+    /// places, [`Error::Run`] for a message with more ends than remain, and
+    /// [`Error::Body`] for a message longer than the rest of the body. A message of
+    /// a run has no kind, so a message where a run continues is read as one. The
     /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
     /// caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromHome<'m>, Error> {
@@ -256,13 +258,20 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_head_before_opened() {
+    fn refuses_a_head_before_opened_whatever_its_series() {
         let mut reader = Reader::new(&open(1));
         assert_eq!(
-            reader.decode(&head(1)).err(),
+            reader.decode(&head(3)).err(),
             Some(Error::Unopened { kind: 2 })
         );
         assert_eq!(event(&mut reader, &[OPENED]), Ok(Event::Opened));
+        assert_eq!(
+            reader.decode(&head(3)).err(),
+            Some(Error::Places {
+                series: 3,
+                places: 1
+            })
+        );
     }
 
     #[test]

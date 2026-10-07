@@ -1420,6 +1420,13 @@ How to read this record:
   reader's node, each with an exact error for each broken rule, so `hub` checks no wire
   rule. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
+  Amended (2026-10-07T14:56:48Z, #1455): `Reader::decode` checks a message in three
+  steps and gives the error of the first that fails: the bytes (its decode error), the
+  order of the session (`Unopened` or `Reopen`, whatever the content), then the content
+  against the session (`Places`, `Run`, `Body`). A head before `Opened` is not a head
+  of this session yet, so its series count has no session to break. Lost: `Places`
+  first. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/1455#issuecomment-6040654132).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
