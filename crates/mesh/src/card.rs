@@ -274,10 +274,10 @@ mod tests {
         ]
     }
 
-    // Any valid name: segments up to a drawn length, kept while they fit the
-    // byte limit.
+    // Valid names: segments up to a drawn length, kept while they fit the byte
+    // limit. Shapes a draw seldom reaches are in the edge tests.
     fn name() -> impl Strategy<Value = Name> {
-        (1..Name::MAX_BYTES)
+        (1..=Name::MAX_BYTES)
             .prop_flat_map(|longest| {
                 let segment = format!("@?[A-Za-z0-9_-]{{1,{longest}}}");
                 let segment = proptest::string::string_regex(&segment).unwrap();
@@ -286,6 +286,7 @@ mod tests {
             .prop_map(|segments| {
                 let mut segments = segments.into_iter();
                 let mut name = segments.next().unwrap();
+                name.truncate(Name::MAX_BYTES);
                 for segment in segments {
                     let longer = format!("{name}.{segment}");
                     if longer.len() > Name::MAX_BYTES {
@@ -543,14 +544,17 @@ mod tests {
     #[test]
     fn a_card_at_the_edges_round_trips() {
         let many = Card {
-            addresses: vec![Address::Udp("10.0.0.1:4100".parse().unwrap()); 300],
+            addresses: vec![
+                Address::Udp("10.0.0.1:4100".parse().unwrap());
+                usize::from(u16::MAX) + 1
+            ],
             ..fixed()
         };
         for version in [0, u64::MAX] {
             let card = Card { version, ..fixed() };
             assert_eq!(decoded(&encoded(&card)), Some(card), "version {version}");
         }
-        assert_eq!(decoded(&encoded(&many)), Some(many), "300 addresses");
+        assert_eq!(decoded(&encoded(&many)), Some(many), "65536 addresses");
         let ports = Card {
             addresses: vec![
                 Address::Udp("0.0.0.0:0".parse().unwrap()),
