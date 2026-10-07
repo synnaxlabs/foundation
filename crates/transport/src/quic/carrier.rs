@@ -489,14 +489,11 @@ impl Session {
     }
 
     /// Ends the last [`Session::poll_write`] on `sender`'s stream: drops its waker,
-    /// and when `taken`, cancels the message the stream took from it, as
-    /// [`Endpoint::cancel`] does.
-    pub(crate) fn abandon(&self, sender: &Sender, taken: bool) {
+    /// and cancels the message the stream took from it, as [`Endpoint::cancel`] does.
+    pub(crate) fn abandon(&self, sender: &Sender) {
         self.with(|endpoint, clock, slot, _| {
             slot.writing.remove(&sender.key().id);
-            if taken {
-                endpoint.cancel(clock.now(), sender);
-            }
+            endpoint.cancel(clock.now(), sender);
         });
     }
 

@@ -475,7 +475,8 @@ impl Endpoint {
     /// the message drops and the stream stays open. Else the stream resets with
     /// `Code(0)`, as [`Endpoint::reset`] does, and each later write and finish gives
     /// [`Error::Reset`] with `Code(0)`. Either way the send budget and the turn of
-    /// the message come back now. Does nothing when the connection ended.
+    /// the message come back now. Does nothing when the connection ended, or when the
+    /// stream holds no message from a waiting write.
     pub(crate) fn cancel(&mut self, now: Monotonic, sender: &Sender) {
         let key = sender.key().connection;
         let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())

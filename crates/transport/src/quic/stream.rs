@@ -1121,16 +1121,20 @@ impl Streams {
         }
     }
 
-    /// Takes the message in hand out of `sender`'s stream of `inner`, and gives back
-    /// its send budget and its turn. When a byte of it went, its header included,
-    /// it also resets the stream with `Code(0)`, and each later write and finish
-    /// gives [`Error::Reset`].
+    /// Takes the message in hand from a waiting write out of `sender`'s stream of
+    /// `inner`, and gives back its send budget and its turn. When a byte of it went,
+    /// its header included, it also resets the stream with `Code(0)`, and each later
+    /// write and finish gives [`Error::Reset`]. Does nothing when the stream holds no
+    /// message from a waiting write.
     pub(super) fn cancel(
         &mut self,
         inner: &mut noq_proto::Connection,
         sender: &Sender,
     ) {
-        let half = self.halves.get_mut(&sender.key.id).expect(HALF);
+        let waiting = |half: &&mut Half| half.rest == Rest::Caller && half.holds();
+        let Some(half) = self.halves.get_mut(&sender.key.id).filter(waiting) else {
+            return;
+        };
         if half.sent() {
             reset(inner, half.key.id, Code(0));
             half.ended = Some(Error::Reset { code: Code(0) });

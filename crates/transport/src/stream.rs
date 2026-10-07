@@ -278,8 +278,8 @@ impl Drop for Sender {
     }
 }
 
-/// A [`Sender::send`] in progress. Dropping it before it is done cancels the message
-/// once the stream took it.
+/// A [`Sender::send`] in progress. Dropping it before it is done ends its wait, and
+/// cancels the message once the stream took it.
 struct Sending<'a> {
     session: &'a quic::Session,
     stream: &'a quic::stream::Sender,
@@ -291,7 +291,7 @@ struct Sending<'a> {
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
         if !self.done {
-            self.session.abandon(self.stream, self.message.is_none());
+            self.session.abandon(self.stream);
         }
     }
 }
@@ -937,6 +937,15 @@ mod tests {
         }
     }
 
+    /// A waker that counts its wakes.
+    struct Count(AtomicU32);
+
+    impl std::task::Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// What a sender does after [`try_fill`].
     #[derive(Clone, Copy, Debug)]
     enum Then {
@@ -966,10 +975,18 @@ mod tests {
                         }
                         Then::Finish => sender.finish().expect("finished"),
                         Then::DropSend => {
-                            let send = sender.send(side.block(b"c"));
-                            let waiting = poll_once(pin!(send)).await;
-                            assert_eq!(waiting, None, "the send waits");
+                            let count = Arc::new(Count(AtomicU32::new(0)));
+                            let waker = Waker::from(Arc::clone(&count));
+                            {
+                                let mut send = pin!(sender.send(side.block(b"c")));
+                                let mut cx = Context::from_waker(&waker);
+                                let waiting = send.as_mut().poll(&mut cx);
+                                assert!(waiting.is_pending(), "the send waits");
+                            }
                             sender.finish().expect("finished");
+                            // Until the peer read the rest, which frees the stream.
+                            side.node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+                            assert_eq!(count.0.load(Ordering::Relaxed), 0, "no waker");
                         }
                         Then::Drop => {
                             // The first message reaches the peer first, as the peer
@@ -1219,55 +1236,6 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    #[test]
-    fn a_send_dropped_behind_part_of_an_earlier_message_leaves_no_waker() {
-        struct Count(AtomicU32);
-        impl std::task::Wake for Count {
-            fn wake(self: Arc<Self>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let (mut sim, ..) = testing::sessions(
-            0,
-            same,
-            |side| async move {
-                let opened = side.session.open_sender(Class::Complete).await;
-                let mut sender = opened.expect("a stream");
-                let body = vec![7; 60_000];
-                // Until the stream holds part of a message and gives the next back.
-                while sender.try_send(side.block(&body)).expect("open").is_none() {}
-                let count = Arc::new(Count(AtomicU32::new(0)));
-                let waker = Waker::from(Arc::clone(&count));
-                {
-                    let mut send = pin!(sender.send(side.block(b"b")));
-                    let mut cx = Context::from_waker(&waker);
-                    assert!(send.as_mut().poll(&mut cx).is_pending());
-                }
-                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
-                assert_eq!(count.0.load(Ordering::Relaxed), 0);
-                sender.send(side.block(b"c")).await.expect("sent");
-                sender.finish().expect("finished");
-                let closed = Error::PeerClosed { code: Code(4) };
-                assert_eq!(side.session.closed().await, closed);
-            },
-            |side| async move {
-                let mut receiver =
-                    side.session.accept().await.expect("a stream").receiver;
-                let mut messages = Vec::new();
-                while let Some(message) = receiver.recv().await.expect("read") {
-                    messages.push(message.to_vec());
-                }
-                assert_eq!(messages.pop(), Some(b"c".to_vec()));
-                let body = vec![7; 60_000];
-                assert!(messages.iter().all(|message| *message == body));
-                side.session.close(Code(4));
-            },
-        );
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    // Compares `Debug` output: a log tells the halves of two sessions apart only by
-    // the session key in it.
     #[test]
     fn a_half_shows_its_session_key() {
         let (mut sim, ..) = testing::sessions(
