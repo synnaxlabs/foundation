@@ -121,10 +121,6 @@ mod tests {
         text.parse().unwrap()
     }
 
-    fn error(text: &str) -> name::Error {
-        text.parse::<Name>().unwrap_err()
-    }
-
     #[test]
     fn names_each_kind_by_its_segment() {
         for (kind, segment) in KINDS {
@@ -195,19 +191,30 @@ mod tests {
             Kind::NodeSettings.key(&label),
             Err(Error::Long { most: 240 })
         );
-        let label = format!("{}.*", "a".repeat(254));
         assert_eq!(Kind::Connector.key(&label), Err(Error::Long { most: 255 }));
     }
 
     #[test]
     fn refuses_a_label_that_is_not_a_name() {
-        for label in ["", "site_a..budget", "site_a.*", "site a"] {
+        let segment = |input: &str, segment: &str| name::Error::Segment {
+            input: input.into(),
+            segment: segment.into(),
+        };
+        let wildcard = name::Error::Wildcard {
+            input: "site_a.*".into(),
+        };
+        for (label, error) in [
+            ("", name::Error::Empty),
+            ("site_a..budget", segment("site_a..budget", "")),
+            ("site a", segment("site a", "site a")),
+            ("site_a.*", wildcard.clone()),
+        ] {
             for (kind, _) in KINDS {
-                assert_eq!(kind.key(label), Err(Error::Name(error(label))));
+                assert_eq!(kind.key(label), Err(Error::Name(error.clone())));
             }
-            assert_eq!(Kind::Connector.key(label), Err(Error::Name(error(label))));
+            assert_eq!(Kind::Connector.key(label), Err(Error::Name(error)));
         }
-        let error = Error::Name(error("site_a.*"));
+        let error = Error::Name(wildcard);
         assert_eq!(
             error.to_string(),
             "a wildcard is out of place: \"site_a.*\""
