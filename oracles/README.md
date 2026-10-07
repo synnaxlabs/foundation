@@ -5,7 +5,7 @@ and never weaken them (see `docs/claude/testing.md`).
 
 - `targets.toml` -> the performance targets (P1).
 - `baselines/` -> benchmark baselines per crate, from #715. A regression over 5% then
-  blocks a merge. Until then, BENCH BASELINES in `docs/decisions.md` applies.
+  needs the P1 judgment (`docs/decisions.md`). Until then, BENCH BASELINES applies.
 - `invariants/` -> properties every simulated mesh run must keep.
 - `conformance/` -> vectors every codec and SDK must match, and scenario suites a
   crate must pass (`conformance/raft/`).

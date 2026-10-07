@@ -15,11 +15,18 @@
     expect(dead_code, reason = "the driver of #471 is the first user")
 )]
 mod bytes;
+#[cfg(test)]
+mod common;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the driver of #471 is the first user")
 )]
 mod entry;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the driver of #471 is the first user")
+)]
+mod grant;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the driver of #471 is the first user")

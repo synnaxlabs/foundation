@@ -130,7 +130,7 @@ fn center(interval: Interval) -> i64 {
 
 /// The midpoint of mesh time now, in nanoseconds.
 fn midpoint(reader: &Reader) -> i64 {
-    center(reader.now().expect("synced"))
+    center(reader.now().mesh.expect("synced"))
 }
 
 /// The midpoint of mesh time in the status now, in nanoseconds.

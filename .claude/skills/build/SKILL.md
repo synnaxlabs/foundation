@@ -1,73 +1,114 @@
 ---
 name: build
 description:
-  The builder loop for a session that owns Foundation crates. Use when a session starts
-  as a builder, when asked to take the next issue, or when resuming a builder after a
-  restart or compaction.
+  The builder loop: take the next ready issue in any crate, build it, review it, and
+  merge it through the queue, then clear the context and take the next one. Use when a
+  builder, integrator, or connector session starts, with the argument `night` on the
+  night lane.
 ---
 
 # Build
 
-You own a set of crates. Your session name is your owner label (`owner:<name>`).
+You are `$FACTORY_NAME` (`echo $FACTORY_NAME`). You build in any crate: work goes to
+whoever is idle, so all accounts spend their budget. You work one issue per context:
+when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
 
-## Start or resume
+## Take an issue
 
-1. Read `CLAUDE.md`, `docs/coordination.md`, and the sections of `docs/decisions.md`
-   for your crates.
-2. Find your work: `gh issue list --label owner:<name> --state open`. Read the last
-   state comment on each issue. With no open issue, file the next one for your crates
-   from `docs/decisions.md`: goal, crates, tests that must pass, and decisions
-   section, labeled `owner:<name>` and `crate:<crate>`. Order the riskiest unknowns
-   first.
-3. Make sure you are in your own worktree (`~/Desktop/synnaxlabs/foundation-wt/<name>`)
-   and it is up to date: `git fetch origin`.
+1. `git fetch origin`. Work only in your own worktree.
+2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
+   state comment. Else take the oldest `ready` issue whose crates no other open issue
+   with an `owner:` label holds: `gh issue list --label ready --search
+   "sort:created-asc"`. On the night lane, take only issues that also have `night`.
+3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
+   (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
+   `owner:` label, remove yours and take the next one.
+4. Day lane: when fewer than two `ready` issues remain, file the next ones on the
+   milestone path (goal, crates, tests that must pass, decisions section)
+   and send the links to `laptop.coordinator`, which adds `ready`.
+5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
 
-## Each issue
+Read only this before you plan: the issue and its comments, the section of
+`docs/decisions.md` for your crate (`grep -n '^#'`, then that range),
+`docs/claude/rust.md`, and `docs/claude/testing.md`. `/eb-review` adds the design docs
+it names; add `docs/claude/performance.md` for a hot path. Send wide searches to an
+`Explore` subagent with `model: "haiku"`. Read diffs and logs through `--stat`, `tail`,
+or a line range.
 
-1. Branch from `origin/main`: `git switch -c <name>/<issue>-<short-name>
-   origin/main`.
-2. **Plan, then audit it.** Write the approach and the exact public surface change on
-   the issue, with the doc comment of each new public item and a second, very
-   different design that lost (`docs/claude/design.md`). Run `/eb-review` on the plan
-   and post the revised plan.
-3. **Tests after design, before code.** Write the behavior of the whole abstraction
-   from the issue and its decisions section as failing tests. Add property tests for
-   codecs and pure logic, and simulation tests for anything with I/O.
-4. Implement until the tests pass. Keep the PR to a few hundred lines. When it grows
-   past that or a second idea appears, stop and split.
-5. Run the gates locally on the crates you changed, plus the crates that use a public
-   item you changed. Never `--workspace` on the laptop, because the sessions share its
-   RAM; CI runs the whole workspace ("Heavy runs on the laptop" in
-   `docs/coordination.md`).
-   ```sh
-   cargo fmt --check
-   cargo clippy -p <crate>... --all-targets -- -D warnings
-   cargo xtask layers
-   cargo xtask globals
-   cargo xtask oracles
-   cargo test -p <crate>...
-   ```
-6. If the change touches a hot path, run its benchmarks and answer the six questions
-   in `docs/claude/performance.md`.
-7. Run `/eb-review` on the diff. Fix its findings, and put its Complexity and Shape
-   decisions sections in the PR body.
-8. Push and open the PR with `gh pr create`, filling the template. Never add a Claude
-   co-author or footer.
-9. Run `/review <pr>`. Fix each finding or answer it on the PR.
-10. When every check on the current head passed, the PR has no conflict with `main`,
-    and every finding is fixed or answered, add the `ready` label. Read the checks
-    again just before you label, because a push resets them. If
-    the PR changes a public surface, a locked decision, or an oracle, message
-    `coordinator` instead: `PR #<n> needs a gate`. Only the coordinator labels those.
-11. Start the next issue while you wait.
+## Build it
+
+1. Branch from `origin/main`, machine first:
+   `git switch -c "${FACTORY_NAME%%.*}/<issue>-<slug>" origin/main`, for example
+   `box1/462-hub-route`.
+2. **Plan.** On the issue, write the approach, the exact public surface change with the
+   doc comment of each new public item, and a very different design that lost. Run
+   `/eb-review` on the plan and post the revised plan. A change to another crate's
+   public surface or a new crate dependency is an `interface` issue
+   (`docs/coordination.md`).
+3. **Tests first.** Write the behavior from the issue and its decisions section as
+   failing tests: property tests for codecs and pure logic, simulation tests for I/O.
+4. **Implement** until they pass. Keep the PR to a few hundred lines. When a second idea
+   appears, split.
+5. **Local gate** (below). Fix every failure.
+6. Run `/eb-review` on the diff. Put its Complexity and Shape decisions in the PR body.
+7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.
+8. `/review <pr>`. It runs the reviewers by tier and the second round.
+9. If review changed code, run the gate again. Then `gh pr ready <n>` and
+   `gh pr merge <n> --auto`. The merge queue takes it when the checks pass.
+10. **Wait once.** Run `.claude/skills/build/wait.sh <n>` with `run_in_background`.
+    Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
+    wakes you.
+    - Exit 0 (merged): comment the final state on the issue, call
+      `mcp__factory__next`, and end your turn. On the night lane, take the next
+      `night` issue in this context instead.
+    - Exit 1: read the cause it prints (`gh pr checks <n>`,
+      `gh run view <id> --log-failed | tail -60`, or the review). Fix it, run the gate
+      on what changed, `gh pr merge <n> --auto`, and wait again.
+
+## Local gate
+
+Until `cargo xtask gate` exists, run CI's PR job set on the crates you changed plus the
+crates that use a public item you changed (`-p <a> -p <b>`):
+
+```sh
+cargo fmt --check
+cargo clippy -p <crates> --all-targets --all-features -- -D warnings
+cargo xtask layers && cargo xtask globals && cargo xtask oracles
+cargo test -p <crates> --all-features
+cargo hack check -p <crates> --each-feature --no-dev-deps
+p=$(mktemp) && git diff origin/main...HEAD > "$p"
+cargo mutants --in-diff "$p" --jobs 4
+```
+
+- Each missed mutant is a missing test. Exit 3 with an empty `mutants.out/missed.txt` is
+  a pass: a timeout means a test caught the mutant.
+- On a box, cap each test process as CI does, so a mutant that allocates in a loop
+  cannot take the box down: prefix `cargo mutants` with `RUST_TEST_THREADS=8
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --data=4294967296 --"`.
+- A changed `Cargo.toml` or `Cargo.lock`: also
+  `cargo deny check advisories bans licenses sources`.
+- A change under a `models` path in `.github/workflows/ci.yaml`: also `cargo xtask
+  loom`, `cargo xtask shuttle`, and `cargo xtask miri`, except on the laptop.
+- On the laptop: never `--workspace`, and run `cargo mutants` under the heavy lock
+  (`docs/coordination.md`, "Heavy runs on the laptop").
+
+## Night lane
+
+Never change a public surface, a decision, or another crate. When the work needs a
+person or a decision, ask on the issue, add `blocked`, and take the next `night` issue.
+A PR that needs the person (`oracles/`, `.github/`, `.claude/`) waits for the morning;
+take the next issue meanwhile.
 
 ## Rules
 
-- You need a change to another crate's public surface: follow "Interface changes" in
-  `docs/coordination.md`. Never edit it yourself.
 - Never weaken an oracle. Add tests freely.
-- A decision you make that others need goes into `docs/decisions.md` in your PR.
+- In `acceptance`, a scenario that cannot run yet is `#[ignore = "waits on #<n>"]`.
+  Never delete or weaken a scenario to make it pass.
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
-- Before you stop, comment your state on each open issue: done, next step, open
-  questions.
+- A design choice that other crates need goes in the PR's Shape decisions; send the link
+  to `laptop.architect`.
+- When the architect rules in a comment on your issue, act on it at once. Add the ruling
+  to the crate's section of `docs/decisions.md` in your PR, with who decided and the
+  comment link.
+- Before you stop, comment your state on the issue: done, next step, open questions.

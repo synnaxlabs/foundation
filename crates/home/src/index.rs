@@ -118,7 +118,8 @@ impl Index {
 mod tests {
     use std::sync::Arc;
 
-    use control::{Lease, Writer};
+    use control::Writer;
+    use control::lease::Lease;
     use types::authority::Authority;
     use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};

@@ -22,8 +22,8 @@ behavior. Never print a pointer. No `thread_local!` state.
 | 1 | Unit and property tests (`proptest`) | Every commit |
 | 2 | Coverage-guided fuzzing (`cargo-fuzz`) of every decoder of outside input: wire, config, codecs, protocol parsers | Short run per merge, continuous nightly |
 | 3 | Deterministic simulation of a whole mesh: drops, partitions, crashes mid-write, clock jumps. A recorded random value replays a run | Thousands of runs per merge, millions nightly |
-| 4 | Unit benchmarks, per function | Every merge, 5% gate |
-| 5 | Component benchmarks | Every merge, 5% gate |
+| 4 | Unit benchmarks, per function | Every merge, 5% check (P1) |
+| 5 | Component benchmarks | Every merge, 5% check (P1) |
 | 6 | End-to-end performance against P1 on shared machines | Nightly and release |
 | 7 | Protocol simulators per connector | Every merge |
 | 8 | Hardware in the loop with real devices | Nightly and release |

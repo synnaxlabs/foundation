@@ -30,7 +30,7 @@ fn start(host: &Node, clock: Clock, wall: env::wall::Wall) {
 
 /// Mesh time and the OS clock now.
 fn read(host: &Node, reader: &Reader) -> (Interval, Stamp) {
-    let mesh = reader.now().expect("mesh time");
+    let mesh = reader.now().mesh.expect("mesh time");
     #[expect(clippy::disallowed_methods, reason = "the test reads the truth")]
     let wall = host.wall().now().time;
     (mesh, wall)
@@ -49,7 +49,7 @@ fn holds(interval: Interval, wall: Stamp) -> bool {
 fn serves_the_os_clock_at_once() {
     let (mut sim, host) = node();
     let reader = run(&host, host.wall());
-    assert_eq!(reader.now(), None);
+    assert_eq!(reader.now().mesh, None);
     assert_eq!(reader.status(), Status::Unsynced(Error::NoSources));
     sim.run_for(Span::ZERO).expect("runs");
     let (mesh, wall) = read(&host, &reader);

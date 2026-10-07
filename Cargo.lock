@@ -309,6 +309,12 @@ checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 [[package]]
 name = "config"
 version = "0.0.0"
+dependencies = [
+ "document",
+ "proptest",
+ "spec",
+ "types",
+]
 
 [[package]]
 name = "config-hcl"
@@ -848,6 +854,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mesh"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "block",
  "env",
  "proptest",

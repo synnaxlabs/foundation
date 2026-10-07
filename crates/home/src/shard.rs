@@ -11,7 +11,7 @@ use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Draft, Frame, Label, Path};
 use types::hash;
-use types::time::Stamp;
+use types::time::{Monotonic, Stamp};
 
 use crate::Refusal;
 use crate::index::{Accepted, Index};
@@ -26,8 +26,7 @@ use crate::{handoff, order, split, stored};
 pub(crate) struct Shard {
     buffer: Buffer,
     pool: Rc<block::Pool>,
-    monotonic: env::clock::Clock,
-    mesh: clock::Reader,
+    clock: clock::Reader,
     limits: order::Limits,
     indexes: Vec<Index>,
     /// The place in `indexes` of each carried index.
@@ -47,10 +46,9 @@ pub(crate) struct Config {
     /// The pool of `buffer`. Index frames, stored headers, and handoff bodies come
     /// from it.
     pub(crate) pool: Rc<block::Pool>,
-    /// The node's monotonic clock. Control leases expire on it.
-    pub(crate) monotonic: env::clock::Clock,
-    /// Mesh time. Stamp checks, handoffs, stored entries, and readers read it.
-    pub(crate) mesh: clock::Reader,
+    /// The node's clocks. Control leases expire on its monotonic clock. Stamp
+    /// checks, handoffs, stored entries, and readers read its mesh time.
+    pub(crate) clock: clock::Reader,
     /// The stamps each index accepts.
     pub(crate) limits: order::Limits,
 }
@@ -156,15 +154,13 @@ impl Shard {
         let Config {
             buffer,
             pool,
-            monotonic,
-            mesh,
+            clock,
             limits,
         } = config;
         Self {
             buffer,
             pool,
-            monotonic,
-            mesh,
+            clock,
             limits,
             indexes: Vec::new(),
             places: hash::Map::default(),
@@ -210,8 +206,7 @@ impl Shard {
     ///
     /// If an index of the key set is not carried.
     pub(crate) fn open_writer(&mut self, writer: Writer) -> Result<writer::Key, Error> {
-        let mesh = self.synced().ok_or(Error::Unsynced)?;
-        let now = self.monotonic.now();
+        let (now, mesh) = self.now().ok_or(Error::Unsynced)?;
         let Writer {
             control,
             lease,
@@ -242,8 +237,7 @@ impl Shard {
         let Some(session) = self.writers.remove(&key) else {
             panic!("writer {} is not open", key.0);
         };
-        let now = self.monotonic.now();
-        let mesh = self.mesh();
+        let (now, mesh) = self.time();
         for claim in &session.claims {
             self.indexes[claim.place].gate.close(claim.key, now);
         }
@@ -278,8 +272,7 @@ impl Shard {
         let Some(session) = self.writers.get(&key) else {
             panic!("writer {} is not open", key.0);
         };
-        let now = self.monotonic.now();
-        let mesh = self.mesh();
+        let (now, mesh) = self.time();
         let scratch = &mut self.scratch;
         let mut split = scratch.split.split(&session.set, frame);
         while let Some((group, stamps)) = split.next() {
@@ -375,7 +368,7 @@ impl Shard {
         limit_bytes: u64,
     ) -> Result<delivery::complete::Key, Error> {
         // Its close reads mesh time.
-        if self.synced().is_none() {
+        if self.now().is_none() {
             return Err(Error::Unsynced);
         }
         let place = self.place(slot);
@@ -397,7 +390,7 @@ impl Shard {
         &mut self,
         slot: Slot,
     ) -> Result<delivery::latest::Key, Error> {
-        let mesh = self.synced().ok_or(Error::Unsynced)?;
+        let (_, mesh) = self.now().ok_or(Error::Unsynced)?;
         Ok(self.readers.open_latest(self.place(slot), mesh))
     }
 
@@ -435,7 +428,7 @@ impl Shard {
     ///
     /// If the reader is not open.
     pub(crate) fn close_reader(&mut self, slot: Slot, session: delivery::Key) {
-        let mesh = self.mesh();
+        let (_, mesh) = self.time();
         self.readers.close(self.place(slot), session, mesh);
     }
 
@@ -451,24 +444,26 @@ impl Shard {
         self.readers.woken(&self.buffer, keys);
     }
 
-    /// Mesh time now: the midpoint of the clock's interval, which never goes back.
-    /// The latest edge can go back as the error shrinks, and is a century out while
-    /// the error is unknown. `None` before the node first has mesh time.
-    fn synced(&self) -> Option<Stamp> {
-        let now = self.mesh.now()?;
-        let midpoint = now.earliest.nanos().midpoint(now.latest.nanos());
-        Some(Stamp::from_nanos(midpoint))
+    /// A reading of the monotonic clock, and mesh time at it: the midpoint of the
+    /// clock's interval, which never goes back. The latest edge can go back as the
+    /// error shrinks, and is a century out while the error is unknown. `None` before
+    /// the node first has mesh time.
+    fn now(&self) -> Option<(Monotonic, Stamp)> {
+        let clock::Time { monotonic, mesh } = self.clock.now();
+        let mesh = mesh?;
+        let midpoint = mesh.earliest.nanos().midpoint(mesh.latest.nanos());
+        Some((monotonic, Stamp::from_nanos(midpoint)))
     }
 
-    /// Mesh time now, as [`synced`](Self::synced) gives it.
+    /// Both clocks now, as [`now`](Self::now) gives them.
     ///
     /// # Panics
     ///
     /// Before the node first has mesh time. No session opens before it, and mesh time
     /// stays once known.
-    fn mesh(&self) -> Stamp {
-        let mesh = self.synced();
-        mesh.expect("invariant: a session opened with mesh time, which stays")
+    fn time(&self) -> (Monotonic, Stamp) {
+        let now = self.now();
+        now.expect("invariant: a session opened with mesh time, which stays")
     }
 
     /// The place in `indexes` of the index at `slot`.
@@ -694,7 +689,7 @@ mod tests {
         node: sim::node::Node,
         pool: Rc<Pool>,
         clock: Clock,
-        mesh: clock::Reader,
+        reader: clock::Reader,
         tasks: Tasks,
         entropy: Entropy,
     }
@@ -704,12 +699,12 @@ mod tests {
         fn new(node: sim::node::Node, tasks: Tasks) -> Self {
             let config = block::Config { budget: POOL };
             let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
-            let (clock, mesh) = clock::Clock::new(node.clock());
+            let (clock, reader) = clock::Clock::new(node.clock());
             let wall = node.wall();
             tasks.spawn(async move { clock.run(wall).await });
             Self {
                 clock: node.clock(),
-                mesh,
+                reader,
                 entropy: node.entropy(),
                 node,
                 pool: Rc::new(pool),
@@ -727,21 +722,20 @@ mod tests {
 
         /// A shard over `buffer`, once the node has mesh time.
         async fn over(&self, buffer: Buffer) -> Shard {
-            while self.mesh.now().is_none() {
+            while self.reader.now().mesh.is_none() {
                 self.clock.sleep(Span::from_nanos(1)).await;
             }
             Shard::new(Config {
                 buffer,
                 pool: Rc::clone(&self.pool),
-                monotonic: self.clock.clone(),
-                mesh: self.mesh.clone(),
+                clock: self.reader.clone(),
                 limits: LIMITS,
             })
         }
 
         /// Mesh time now: the midpoint of the clock's interval.
         fn now(&self) -> Stamp {
-            let now = self.mesh.now().expect("the node has mesh time");
+            let now = self.reader.now().mesh.expect("the node has mesh time");
             Stamp::from_nanos(now.earliest.nanos().midpoint(now.latest.nanos()))
         }
 
@@ -1642,7 +1636,8 @@ mod tests {
         run(26, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let lease =
+                control::lease::Lease::new(Span::from_nanos(10)).expect("a lease");
             let a = Writer {
                 lease: Some(lease),
                 ..writer("subject-a", 2, &set)
@@ -1740,7 +1735,7 @@ mod tests {
         run(14, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let edges = test.mesh.now().expect("the node has mesh time");
+            let edges = test.reader.now().mesh.expect("the node has mesh time");
             let mesh = test.now();
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
@@ -1884,8 +1879,7 @@ mod tests {
             let mut shard = Shard::new(Config {
                 buffer,
                 pool: Rc::clone(&test.pool),
-                monotonic: test.clock.clone(),
-                mesh,
+                clock: mesh,
                 limits: LIMITS,
             });
             shard.carry(Slot::new(0));
@@ -2664,7 +2658,8 @@ mod tests {
         run(64, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let lease =
+                control::lease::Lease::new(Span::from_nanos(10)).expect("a lease");
             let a = Writer {
                 lease: Some(lease),
                 ..writer("a", 1, &set)
@@ -2681,7 +2676,8 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 2, &set)).expect("synced");
-            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let lease =
+                control::lease::Lease::new(Span::from_nanos(10)).expect("a lease");
             let b = Writer {
                 lease: Some(lease),
                 ..writer("b", 1, &set)
@@ -2737,8 +2733,7 @@ mod tests {
             let mut shard = Shard::new(Config {
                 buffer,
                 pool: Rc::clone(&test.pool),
-                monotonic: test.clock.clone(),
-                mesh: mesh.clone(),
+                clock: mesh.clone(),
                 limits: LIMITS,
             });
             shard.carry(Slot::new(0));
@@ -2750,7 +2745,7 @@ mod tests {
             );
             let wall = test.node.wall();
             test.tasks.spawn(async move { clock.run(wall).await });
-            while mesh.now().is_none() {
+            while mesh.now().mesh.is_none() {
                 test.clock.sleep(Span::from_nanos(1)).await;
             }
             let b = shard.open_writer(writer("b", 1, &set)).expect("synced");

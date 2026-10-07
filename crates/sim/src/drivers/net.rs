@@ -267,8 +267,8 @@ impl udp::Driver for Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
-        let waker = lock(&self.node.shared).net().udp().close(self.bound.key);
-        drop(waker);
+        let wakers = lock(&self.node.shared).net().udp().close(self.bound.key);
+        drop(wakers);
     }
 }
 
@@ -282,12 +282,12 @@ struct Sender {
 impl sender::Driver for Sender {
     fn poll_send(
         &mut self,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>> {
         self.owner.check(&self.node);
         let mut state = lock(&self.node.shared);
         let now = state.now();
-        Poll::Ready(state.net().udp().send(now, self.key, transmit))
+        state.net().udp().send(now, self.key, cx.waker(), transmit)
     }
 }
