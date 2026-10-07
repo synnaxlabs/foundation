@@ -2044,7 +2044,18 @@ How to read this record:
   across regions is ordinary access policy. A change that spans regions commits per
   region in dependency order. Supersedes: D7 linked meshes, K5 parent-owned voters.
 - **REGION BLOCK (tunable syntax)** `region "site_a" { voters = [...] }` declares a
-  region by name prefix. Regions nest like names. Supersedes: K5 voters policy.
+  region by name prefix. Regions nest like names. Supersedes: K5 voters policy. The
+  prefix is a `types::name::Prefix`, which can be empty: the root prefix
+  (`Prefix::ROOT`, text `""`) contains each name, so the root region holds each node.
+  `mesh` holds it in `driver::Config.region` and `region::State`, and checks each name
+  against the region with `Prefix::contains`; `ticket::Options.prefix` stays a `Name`.
+  Decided by `laptop.architect` (2026-10-07T12:47:19Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each
+  field that holds a region's prefix is a `Prefix`: also `ticket::Ticket`'s region (the
+  region that the joining node opens with) and the `region` of `Unfit::Outside` and
+  `Refused::Outside`, so a ticket for the root region exists. Decided by
+  `laptop.architect` (2026-10-07T13:32:35Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6039051758.
 - **r4 reconciliation (SETTLED BY ME)** Definition references (index, quality, error,
   control) stay inside one region. Placement is not a key reference (rules in 1.9).
 - **VOCABULARY + REGION LOCKED** "Region" names the governed part of the tree. Docs say
@@ -2906,6 +2917,21 @@ How to read this record:
   "YES"). 4 of the 5 worst escaped defects came in through a fix or a deferral that
   nothing checked again. Decided by the advisor under the quality delegation.
   Supersedes: BREAKER REVIEW.
+- **REVIEW CHECK (2026-10-07)** The required status `review` (`cargo xtask review`,
+  `.github/workflows/review.yaml`) passes a PR only when its review is done. It reads
+  only round comments by the factory bot, in the format of `/review`, "Round comment".
+  Each round names the reviewers REVIEW TIERS requires; `performance` is never required.
+  The last round finds none and ends at the head, or at a commit that reaches the head
+  through clean merges of the base (`git merge-tree`). When the last round is a later
+  round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
+  trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
+  any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
+  added. An earlier round's skip is taken as written, since a rebase can drop its range
+  from the clone. An earlier round in the fixed format that does not parse fails. A
+  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  status is `success` on `merge_group`. Decided by the director on #1169
+  (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
+  in messages on #1193.
 - **FACTORY MODELS (2026-10-06)** Opus 5.5 for every session and reviewer. Fable only on
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the

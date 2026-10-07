@@ -1,4 +1,4 @@
-//! Reads fields of the JSON that cargo writes. A missing field is an error that names
+//! Reads fields of JSON from `cargo` and `gh`. A missing field is an error that names
 //! it.
 
 use serde_json::Value;
@@ -22,7 +22,7 @@ pub(crate) fn flag(value: &Value, key: &str) -> Result<bool, String> {
 }
 
 fn missing(key: &str, kind: &str) -> String {
-    format!("cargo JSON has no {kind} field `{key}`")
+    format!("JSON has no {kind} field `{key}`")
 }
 
 #[cfg(test)]
@@ -45,15 +45,15 @@ mod tests {
     fn names_a_missing_or_mistyped_field() {
         assert_eq!(
             text(&value(), "kind").unwrap_err(),
-            "cargo JSON has no string field `kind`"
+            "JSON has no string field `kind`"
         );
         assert_eq!(
             list(&value(), "id").unwrap_err(),
-            "cargo JSON has no array field `id`"
+            "JSON has no array field `id`"
         );
         assert_eq!(
             flag(&value(), "name").unwrap_err(),
-            "cargo JSON has no boolean field `name`"
+            "JSON has no boolean field `name`"
         );
     }
 }
