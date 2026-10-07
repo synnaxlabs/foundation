@@ -289,7 +289,7 @@ pub mod keys {
 /// that is not above the place before it, or that is below the start of its series, is
 /// not valid.
 pub mod ends {
-    use super::{Error, Writer, run};
+    use super::{Error, run};
 
     /// The bytes of one end.
     pub const LEN: usize = 8;
@@ -303,17 +303,31 @@ pub mod ends {
     /// When `out` is empty or not a whole count of ends, or when `ends` gives fewer or
     /// more ends than `out` holds.
     pub fn encode(ends: impl IntoIterator<Item = (u32, u32)>, out: &mut [u8]) {
-        let count = out.len() / LEN;
-        let out = Writer::run(out, count, LEN).0.as_chunks_mut::<LEN>().0;
+        let len = out.len();
+        let (slots, rest) = out.as_chunks_mut::<LEN>();
+        assert!(
+            rest.is_empty(),
+            "out has {len} bytes, not a whole count of ends"
+        );
+        assert!(
+            !slots.is_empty(),
+            "a message of a run holds at least one item"
+        );
+        let count = slots.len();
         let mut ends = ends.into_iter();
-        for (written, out) in out.iter_mut().enumerate() {
-            let Some((place, end)) = ends.next() else {
-                panic!("ends gave {written} of the {count} ends that out holds");
-            };
-            let [p0, p1, p2, p3] = place.to_le_bytes();
-            let [e0, e1, e2, e3] = end.to_le_bytes();
-            *out = [p0, p1, p2, p3, e0, e1, e2, e3];
-        }
+        let written = slots
+            .iter_mut()
+            .zip(&mut ends)
+            .map(|(slot, (place, end))| {
+                let [p0, p1, p2, p3] = place.to_le_bytes();
+                let [e0, e1, e2, e3] = end.to_le_bytes();
+                *slot = [p0, p1, p2, p3, e0, e1, e2, e3];
+            })
+            .count();
+        assert!(
+            written == count,
+            "ends gave {written} of the {count} ends that out holds"
+        );
         assert!(
             ends.next().is_none(),
             "ends gave more ends than the {count} that out holds"
@@ -853,9 +867,15 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 9 bytes, and the message has 8")]
+        #[should_panic(expected = "out has 9 bytes, not a whole count of ends")]
         fn panics_on_a_partial_end_in_out() {
             super::super::ends::encode([(0, 1)], &mut [0; 9]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 7 bytes, not a whole count of ends")]
+        fn panics_on_an_out_shorter_than_an_end() {
+            super::super::ends::encode([(0, 1)], &mut [0; 7]);
         }
 
         #[test]

@@ -1068,9 +1068,11 @@ How to read this record:
   `Open`, because the home knows its index and a second copy needs a check; the whole
   `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
   open needs no mesh time (READER RULES), and a later named open can add one; grants for
-  many sessions in one message, which wait until a link carries a second session. The
-  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
-  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
+  many sessions in one message, which wait until a link carries a second session; a
+  public series count on `View`, for a home that writes the ends from `View::iter`,
+  which gives the home's entry order and not place order (#1146). The coordinator
+  approved the messages (2026-10-05); the architect decided the rest (#561, 2026-10-06)
+  and the run, the index place, and `MALFORMED` on #1064
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
   whole keys and ends and one message type for each direction
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
