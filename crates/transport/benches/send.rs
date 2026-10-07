@@ -1,13 +1,17 @@
 //! The cost of a `stream::Sender::send` that is ready on its first poll, on a session
 //! between two sim nodes. Run with `cargo bench -p transport --bench send`.
 //!
-//! Each round fills its blocks, then times one poll of each send. A sim sleep between
-//! rounds lets the peer read and acknowledge. A send that waits on its first poll
-//! panics, so no number holds a wait.
+//! Each round fills its blocks, then times one poll of each send: a burst of 64 sends
+//! into streams the peer has drained. A sim sleep between rounds lets the peer read
+//! and acknowledge. A send that waits on its first poll panics, so no number holds a
+//! wait. A figure is per send over a round, and some sends in a burst cost more than
+//! others.
 //!
 //! A send reads the sim clock and wakes a sim task, which `os` does more cheaply, so
 //! the control does both per block. Compare a send with the control, or a build
-//! with another build, not with an `os` number.
+//! with another build, not with an `os` number. To compare two builds, run each
+//! several times in turn on one pinned core and compare p10 and p50: on a busy
+//! machine, p90 holds the preemptions.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -230,8 +234,8 @@ fn poll_sends(senders: &mut [Sender], blocks: Vec<Block>) -> u64 {
 }
 
 /// The loop of [`poll_sends`] with no send: per block, it polls a ready future,
-/// reads `clock`, wakes `waker`, and moves the block into `held`. Gives the
-/// nanoseconds it took.
+/// reads `clock`, wakes `waker`, and moves the block into `held`, so its drop is not
+/// timed. Gives the nanoseconds it took.
 #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
 fn poll_control(
     clock: &env::clock::Clock,
@@ -298,19 +302,20 @@ fn public(key: &PrivateKey) -> PublicKey {
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
 fn print(lines: &[Measured]) {
     println!("ns per send over {ROUNDS} rounds of {SENDS} sends");
-    println!("p50: the median round, over its sends; mean: all rounds, over all sends");
+    println!("pN: the round at percentile N, over its sends");
     println!(
-        "{:<28} {:>9} {:>9} {:>12}",
-        "scenario", "p50", "mean", "allocs/send"
+        "{:<20} {:>9} {:>9} {:>9} {:>12}",
+        "scenario", "p10", "p50", "p90", "allocs/send"
     );
-    let sends = per(ROUNDS * SENDS);
     for line in lines {
-        let p50 = per(line.nanos[ROUNDS / 2]) / per(SENDS);
-        let mean = per(line.nanos.iter().sum::<u64>()) / sends;
-        let allocations = per(line.allocations) / sends;
+        let at = |percent: usize| per(line.nanos[ROUNDS * percent / 100]) / per(SENDS);
+        let allocations = per(line.allocations) / per(ROUNDS * SENDS);
         println!(
-            "{:<28} {p50:>9.1} {mean:>9.1} {allocations:>12.2}",
-            line.name
+            "{:<20} {:>9.1} {:>9.1} {:>9.1} {allocations:>12.2}",
+            line.name,
+            at(10),
+            at(50),
+            at(90),
         );
     }
 }
