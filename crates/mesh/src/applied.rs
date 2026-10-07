@@ -27,7 +27,7 @@ pub(crate) struct Floor(u64);
 /// floor, and one pair for the term of the last applied entry. So it holds at most one
 /// pair while no try is open, and it grows only by the terms that the node applies
 /// while a try is open.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Applied {
     // The index of the last applied entry, or 0.
     index: u64,

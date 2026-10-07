@@ -847,6 +847,13 @@ mod tests {
         requests: BTreeMap<u8, Request>,
         /// The join that each node stamped.
         stamped: BTreeMap<u8, Change>,
+        /// The node that is not a voter.
+        learner: Option<u8>,
+        /// The home that each node sets next.
+        sets: BTreeMap<u8, u8>,
+        /// Each call of `set_home` that returned, in order: its node, the home on
+        /// that node at the return, and what the call gave.
+        set: Vec<(u8, Option<node::Key>, Result<(), Error>)>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -1100,6 +1107,21 @@ mod tests {
         }
     }
 
+    /// Sets the home that the board gives node `id`, and puts the result on the
+    /// board.
+    async fn set(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let home = board.lock().unwrap().sets.remove(&id);
+            let Some(home) = home else {
+                continue;
+            };
+            let result = mesh.set_home(INDEX, key(home)).await;
+            let home = mesh.group.borrow().state.home(INDEX);
+            board.lock().unwrap().set.push((id, home, result));
+        }
+    }
+
     /// Three voters, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
@@ -1190,9 +1212,14 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let base = config_at(&node, &tasks, id, PORT, &IDS, &IDS);
+        let (hidden, learner) = {
+            let board = board.lock().unwrap();
+            (board.hidden, board.learner)
+        };
+        let voters: Vec<u8> =
+            IDS.into_iter().filter(|&of| Some(of) != learner).collect();
+        let base = config_at(&node, &tasks, id, PORT, &IDS, &voters);
         let transport = Rc::clone(&base.transport);
-        let hidden = board.lock().unwrap().hidden;
         let member = |of| {
             if hidden == Some(of) {
                 common::member(of)
@@ -1222,6 +1249,10 @@ mod tests {
             (mesh.clone(), node.clock(), Arc::clone(&board));
         tasks.spawn(async move {
             stamp(stamping, clock, id, requests).await;
+        });
+        let (setting, clock, sets) = (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            set(setting, clock, id, sets).await;
         });
         let mut watch = mesh.watch(INDEX);
         loop {
@@ -1648,6 +1679,7 @@ mod tests {
         });
     }
 
+    mod home;
     mod send;
     mod serve;
 
