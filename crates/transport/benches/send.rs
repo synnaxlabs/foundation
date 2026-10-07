@@ -14,10 +14,11 @@
 //! polls. `latest and complete 1 KiB waiting` times a send only when it ends while a
 //! send of the other class waits, so a class that sends alone adds nothing; `timed`
 //! gives the share of sends it timed. In each round, a send of each class must end
-//! while the other class waits, the round must time half its sends, and the server
-//! must get one stream of each class, or the bench panics. Its control is
-//! `complete 1 KiB waiting`, whose send must wait in each round. Each poll has a
-//! timing cost, so compare the two lines with their polls per send.
+//! while the other class waits, and the round must time half its sends so that its
+//! figure stands on enough sends. After the rounds, the server must have one stream
+//! of each class. Else the bench panics. Its control is `complete 1 KiB waiting`,
+//! whose send must wait in each round. Each poll has a timing cost, so compare the
+//! two lines with their polls per send.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
