@@ -152,8 +152,9 @@ pub(crate) struct Log {
     number: u64,
     // Where the last record ends in `file`.
     offset: u64,
-    // Where the bytes of a write that the pool stopped end in `file`.
-    stale: Option<u64>,
+    // Where the bytes that a write put before the pool stopped it start and end in
+    // `file`.
+    stale: Option<(u64, u64)>,
     // The number of the next record.
     next: u64,
     // The index of the last entry.
@@ -287,18 +288,18 @@ impl Log {
         result
     }
 
-    // Writes one record after the last one. A pool error leaves the log as it was,
-    // but for the bytes that `stale` names.
+    // Writes one record after the last one. A pool error leaves each record as it
+    // was. It can leave the bytes that `stale` names, and the end of the log in the
+    // file that it made for the record.
     async fn append(
         &mut self,
         hard: Option<Hard>,
         entries: &[Entry],
     ) -> Result<(), Error> {
-        if let Some(end) = self.stale {
+        if let Some((at, end)) = self.stale {
             // A scan reads bytes that stay after a later record as its next header.
             // The zeros get their own sync: with one sync, a power cut can keep the
             // record and not the zeros.
-            let at = wide(start(narrow(self.offset)));
             let zeros = vec![0; narrow(end.saturating_sub(at))];
             write_in_blocks(&self.file, &self.pool, at, &mut &zeros[..]).await?;
             self.file.sync().await?;
@@ -327,7 +328,7 @@ impl Log {
         let mut rest = &record[..];
         let written = write_in_blocks(&self.file, &self.pool, start, &mut rest).await;
         if written.is_err() && rest.len() < record.len() {
-            self.stale = Some(end);
+            self.stale = Some((start.saturating_add(wide(rest.len())), end));
         }
         written?;
         self.file.sync().await?;
@@ -2236,7 +2237,7 @@ mod tests {
     // The stopped write put two blocks, at bytes 131,072 and 65,536. The record after
     // it ends at byte 65,536, so a header there is in the bytes of the second block.
     #[test]
-    fn the_zeros_start_at_the_end_of_the_log() {
+    fn the_zeros_cover_each_block_of_the_stopped_write() {
         let (mut sim, node) = sim(0);
         sim.run_on(&node, |node, _| async move {
             let config = block::Config { budget: 140_000 };
@@ -2256,10 +2257,43 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(records(&[10_000, 55_416])));
     }
 
-    // The pool gives no block for the end of the record, so the write puts no byte,
-    // and the pool has no block for zeros over the 3,060 bytes of the record.
+    // The pool gives no block for the end of the record, so the write puts no byte. The
+    // sync that fails is the one of the next record, which the files keep or not. A
+    // sync of zeros fails in its place, and the log has no second record.
     #[test]
     fn a_stopped_write_that_put_no_block_needs_no_zeros() {
+        let mut kept = 0;
+        for run in 0..8 {
+            let (mut sim, node) = sim(run);
+            sim.run_on(&node, |node, _| async move {
+                let pool = odd_pool();
+                let files = node.files();
+                let (mut log, _) = Log::open(files, DIR.into(), Rc::clone(&pool))
+                    .await
+                    .unwrap();
+                log.write(None, &[bytes(1, 340)]).await.unwrap();
+                let _held = pool.alloc(1792).unwrap();
+                let error = log.write(None, &[bytes(2, 3000)]).await.unwrap_err();
+                assert_eq!(error, Error::Pool(exhausted(388, 192)));
+                node.fail_file(&file("log-0"), Operation::Sync);
+                let error = log.write(None, &[bytes(2, 10)]).await.unwrap_err();
+                assert_eq!(error, io("log-0", Operation::Sync));
+            })
+            .unwrap();
+            let stored = stored(&mut sim, &node);
+            if stored == Ok(records(&[340, 10])) {
+                kept += 1;
+            } else {
+                assert_eq!(stored, Ok(records(&[340])), "run {run}");
+            }
+        }
+        assert!(kept > 0);
+    }
+
+    // The stopped write put one block of 100 bytes, at byte 3,072, and the pool has
+    // no block for zeros over the 2,672 bytes before it.
+    #[test]
+    fn the_zeros_cover_no_byte_that_the_stopped_write_did_not_put() {
         let (mut sim, node) = sim(0);
         sim.run_on(&node, |node, _| async move {
             let pool = odd_pool();
@@ -2268,8 +2302,8 @@ mod tests {
                 .unwrap();
             log.write(None, &[bytes(1, 340)]).await.unwrap();
             let _held = pool.alloc(1792).unwrap();
-            let error = log.write(None, &[bytes(2, 3000)]).await.unwrap_err();
-            assert_eq!(error, Error::Pool(exhausted(388, 192)));
+            let error = log.write(None, &[bytes(2, 2712)]).await.unwrap_err();
+            assert_eq!(error, Error::Pool(exhausted(1536, 0)));
             log.write(None, &[bytes(2, 10)]).await.unwrap();
         })
         .unwrap();

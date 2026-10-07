@@ -1634,9 +1634,11 @@ How to read this record:
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
   In a file with no record, it makes that file again, larger, so each file but the last
-  holds a record. After a stopped write, the next record starts the file that the log
-  made for the stopped record. Decided by `laptop.architect` (2026-10-07T10:38:51Z):
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314. A write
+  holds a record. After a stopped write that made a file, the next record starts that
+  file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, and the last sentence at
+  2026-10-07T11:05:15Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
   puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
   the end of the record to its start, and then syncs one time.
   Each block but the one at the end of the record ends at a multiple of the block size
