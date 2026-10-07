@@ -251,9 +251,10 @@ How to read this record:
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at
   a crash restores as closed at the restore. The home drops a grant, ack, or close for
-  a key it gave that is no longer open, as a late message after a close or a takeover;
-  a key it never gave panics. Complete and latest sessions have separate key types, so
-  a call in the wrong mode does not compile (#725). Supersedes the B3 single position.
+  a key it gave that is no longer open, as a late message after a close or a takeover,
+  and a take of it gives nothing; a key it never gave panics. Complete and latest
+  sessions have separate key types, so a call in the wrong mode does not compile
+  (#725). Supersedes the B3 single position.
   Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
