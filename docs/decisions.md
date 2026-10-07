@@ -476,11 +476,17 @@ How to read this record:
   view. laptop.architect decided this on 2026-10-07T22:47:54Z:
   https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
   `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
-  it, so `hub` does not depend on `delivery`. The `Charge` adds about 7 ns per frame to
+  it, so `hub` does not depend on `delivery`. The `Charge` adds about 8 ns per frame to
   `release` with one `Whole` session; that is accepted, with the `Places` state boxed,
   so that a `Whole` session grows by one pointer and not by the size of `Places`.
   laptop.architect decided both on 2026-10-07T23:13:16Z:
-  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048741570. One layout
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048741570. The box2
+  rerun gave 8.0 ns per frame at one session and +4.0% at 16; laptop.architect ruled
+  on 2026-10-07T23:38:44Z that the acceptance covers it:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6049045510. The
+  `hash::Map` of those states adds about 0.3 ns per place to `release` at 100k places
+  (+10%); laptop.architect accepted it on 2026-10-07T23:32:22Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185. One layout
   type for this charge and the frame that `serve` sends, and the two `Places` costs at
   100k places, are #1648; laptop.architect gave the OK to defer them on
   2026-10-07T23:22:03Z:
