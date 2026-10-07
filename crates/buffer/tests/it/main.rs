@@ -1429,7 +1429,7 @@ fn a_ring_whose_first_header_write_was_lost_opens_as_new() {
 }
 
 /// A sim with `seed` and one node on it.
-fn one_node(seed: u64) -> (sim::Sim, sim::node::Node) {
+fn create_node(seed: u64) -> (sim::Sim, sim::node::Node) {
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -1513,7 +1513,7 @@ fn cut_the_first_open(
     cut: i64,
     crash: sim::Crash,
 ) -> (sim::Sim, sim::node::Node, bool) {
-    let (mut sim, node) = one_node(seed);
+    let (mut sim, node) = create_node(seed);
     let ended = cut_an_open(&mut sim, &node, cut, crash);
     (sim, node, ended)
 }
@@ -1571,7 +1571,7 @@ fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
 
 #[test]
 fn a_power_cut_after_the_first_commit_keeps_the_committed_entries() {
-    let (mut sim, node) = one_node(1);
+    let (mut sim, node) = create_node(1);
     let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
     assert_eq!(recovered, tail(3, Some(30)));
 }
@@ -1658,7 +1658,7 @@ fn open_with(
 fn a_ring_with_no_checkpoint_takes_the_layout_of_the_open() {
     let other = layout(2 * AREA, 2 * BODY_MAX);
     for len in [0, AREA_START, AREA_START + AREA, AREA_START + AREA + BLOCK] {
-        let (mut sim, node) = one_node(10);
+        let (mut sim, node) = create_node(10);
         create_unwritten(&mut sim, &node, len);
         let found = open_with(&mut sim, &node, other);
         let made = (Found::Unwritten(len), Ok(other), AREA_START + 2 * AREA);
@@ -1679,7 +1679,7 @@ fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
         each_cut(0..8, 5_000, |seed, cut| {
             let mut ended = false;
             for layout in [old, new] {
-                let (mut sim, node) = one_node(seed);
+                let (mut sim, node) = create_node(seed);
                 create_unwritten(&mut sim, &node, lens[0]);
                 ended = cut_an_open(&mut sim, &node, cut, crash);
                 let (found, opened, len) = open_with(&mut sim, &node, layout);
@@ -1843,7 +1843,7 @@ fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
 /// Returns whether the entry is there, or `None` when the first open had ended or
 /// the second open or its commit failed.
 fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
-    let (mut sim, node) = one_node(seed);
+    let (mut sim, node) = create_node(seed);
     create_unwritten(&mut sim, &node, AREA_START + AREA);
     let committed = sim.run_on(&node, move |node, tasks| async move {
         let mut slots = Slots::new();
@@ -1914,7 +1914,7 @@ fn commit_and_close_during_another_open(
     gap: i64,
     layout: Layout,
 ) -> (Result<(), Error>, Result<Tail, Error>, Tail) {
-    let (mut sim, node) = one_node(seed);
+    let (mut sim, node) = create_node(seed);
     let committed = Arc::new(Mutex::new(None));
     let opened = Arc::new(Mutex::new(None));
     let (own, shared) = (node.clone(), Arc::clone(&committed));
@@ -2108,7 +2108,7 @@ fn a_failed_read_of_the_header_blocks_fails_the_open_and_keeps_the_ring() {
         code: 5,
     });
     for committed in [false, true] {
-        let (mut sim, node) = one_node(11);
+        let (mut sim, node) = create_node(11);
         if committed {
             sim.run_on(&node, |node, tasks| async move {
                 let mut slots = Slots::new();
@@ -2151,7 +2151,7 @@ fn a_failed_read_of_the_header_blocks_fails_the_open_and_keeps_the_ring() {
 /// process `cut` nanoseconds after a point at most 10 µs before the deadline of the
 /// first commit. Returns the sim, the node, and whether the commit had ended.
 fn kill_the_first_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
-    let (mut sim, node) = one_node(seed);
+    let (mut sim, node) = create_node(seed);
     let opened = Arc::new(AtomicBool::new(false));
     let committed = Arc::new(AtomicBool::new(false));
     let (open, commit) = (Arc::clone(&opened), Arc::clone(&committed));
@@ -2226,7 +2226,7 @@ fn busy() -> Error {
 /// after it recovers the entry.
 #[test]
 fn an_open_right_after_a_drop_fails_with_busy_until_the_task_ended() {
-    let (mut sim, node) = one_node(41);
+    let (mut sim, node) = create_node(41);
     let run = sim.run_on(&node, |node, tasks| async move {
         let config = || node_config(&node, tasks.clone(), DIR);
         let mut slots = Slots::new();
@@ -2249,7 +2249,7 @@ fn an_open_right_after_a_drop_fails_with_busy_until_the_task_ended() {
 /// fails with `Busy` until the commit drops.
 #[test]
 fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
-    let (mut sim, node) = one_node(41);
+    let (mut sim, node) = create_node(41);
     let run = sim.run_on(&node, |node, tasks| async move {
         let config = || node_config(&node, tasks.clone(), DIR);
         let mut slots = Slots::new();
@@ -2279,7 +2279,7 @@ fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
 #[test]
 fn a_reopen_after_a_failed_sync_keeps_what_it_reports_across_a_power_cut() {
     for seed in 0..16 {
-        let (mut sim, node) = one_node(seed);
+        let (mut sim, node) = create_node(seed);
         let reported = sim.run_on(&node, |node, tasks| async move {
             let config = || node_config(&node, tasks.clone(), DIR);
             let mut slots = Slots::new();
@@ -2333,7 +2333,7 @@ fn long_config(node: &sim::node::Node, tasks: Tasks) -> Config {
 /// the ring and reports what is durable, the power is cut, and a last open recovers.
 /// Returns what the second open reported and what the last one recovered.
 fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Tail) {
-    let (mut sim, node) = one_node(seed);
+    let (mut sim, node) = create_node(seed);
     let failed = sim.run_on(&node, move |node, tasks| async move {
         let config = long_config(&node, tasks);
         let pool = Rc::clone(&config.pool);
@@ -2402,7 +2402,7 @@ fn an_open_after_a_failed_sync_of_a_long_record_reports_only_disk_records_durabl
 /// A failed write of the bytes an open read fails the open with the write's error.
 #[test]
 fn a_failed_write_of_the_read_bytes_fails_the_open() {
-    let (mut sim, node) = one_node(7);
+    let (mut sim, node) = create_node(7);
     let first = sim.run_on(&node, |node, tasks| async move {
         let mut slots = Slots::new();
         let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
@@ -2435,7 +2435,7 @@ fn a_failed_write_of_the_read_bytes_fails_the_open() {
 #[test]
 fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_durable() {
     for seed in 0..32 {
-        let (mut sim, node) = one_node(seed);
+        let (mut sim, node) = create_node(seed);
         let failed = sim.run_on(&node, |node, tasks| async move {
             node.fail_file(FilePath::new(RING), Operation::Sync);
             let config = node_config(&node, tasks, DIR);
@@ -2480,7 +2480,7 @@ fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_dur
 #[test]
 fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
     each_cut(0..32, 10_000, |seed, cut| {
-        let (mut sim, node) = one_node(seed);
+        let (mut sim, node) = create_node(seed);
         sim.run_on(&node, |node, tasks| async move {
             let mut slots = Slots::new();
             let config = node_config(&node, tasks.clone(), DIR);
@@ -2536,7 +2536,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
 #[test]
 fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
     for dir in ["", DIR] {
-        let (mut sim, node) = one_node(1);
+        let (mut sim, node) = create_node(1);
         node.fail_file(FilePath::new(dir), Operation::SyncDir);
         sim.run_on(&node, move |node, tasks| async move {
             let config = node_config(&node, tasks, DIR);
@@ -2561,7 +2561,7 @@ fn a_failed_directory_sync_at_any_point_of_the_open_fails_it() {
     let (new, len) = (layout(AREA, BODY_MAX), AREA_START + AREA);
     let mut left = BTreeSet::new();
     for at in (0..).step_by(5_000) {
-        let (mut sim, node) = one_node(1);
+        let (mut sim, node) = create_node(1);
         let result = Arc::new(Mutex::new(None));
         let (own, shared) = (node.clone(), Arc::clone(&result));
         drop(on_node(&node, "open", move |tasks| async move {
@@ -2594,7 +2594,7 @@ fn a_failed_directory_sync_at_any_point_of_the_open_fails_it() {
 /// The open syncs the parent of a nested ring directory, not the data directory.
 #[test]
 fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
-    let (mut sim, node) = one_node(1);
+    let (mut sim, node) = create_node(1);
     sim.run_on(&node, |node, _tasks| async move {
         let files = node.files();
         files
@@ -3131,7 +3131,7 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
 
 #[test]
 fn a_failed_record_write_ends_the_buffer_with_its_error() {
-    let (mut sim, node) = one_node(111);
+    let (mut sim, node) = create_node(111);
     sim.run_on(&node, |node, tasks| async move {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
@@ -4384,7 +4384,7 @@ fn a_mark_inside_an_entry_gives_it_whole_and_one_past_the_tail_gives_nothing() {
 /// A failed read of the ring gives its error, and a later read passes.
 #[test]
 fn a_failed_ring_read_gives_its_error_and_a_later_read_passes() {
-    let (mut sim, node) = one_node(150);
+    let (mut sim, node) = create_node(150);
     sim.run_on(&node, |node, tasks| async move {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
@@ -4490,7 +4490,7 @@ fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
 /// a read in flight when the sync failed.
 #[test]
 fn a_read_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
-    let (mut sim, node) = one_node(160);
+    let (mut sim, node) = create_node(160);
     let errors = sim.run_on(&node, |node, tasks| async move {
         let config = node_config(&node, tasks, DIR);
         let pool = Rc::clone(&config.pool);
@@ -4601,7 +4601,7 @@ fn a_record_with_a_table_over_one_block_is_read() {
 /// span after the start of the first commit, whose write and sync take up to 100 µs
 /// each. Returns the sim, the node, and whether the second commit had ended.
 fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
-    let (mut sim, node) = one_node(seed);
+    let (mut sim, node) = create_node(seed);
     let committed = Arc::new(AtomicBool::new(false));
     let commit = Arc::clone(&committed);
     let first = node.clone();
