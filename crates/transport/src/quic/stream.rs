@@ -121,7 +121,7 @@ pub(super) struct Streams {
     /// oldest first.
     incoming: [VecDeque<StreamId>; 4],
     /// Each stream that this side sends on and has not finished.
-    senders: Map<StreamId, Half>,
+    halves: Map<StreamId, Half>,
     sending: Sending,
     /// The messages that hold a block and have not gone to the caller.
     receiving: Budget,
@@ -647,9 +647,31 @@ impl Sending {
         let first = self.first();
         let pushed = self.push(inner, half);
         if pushed.is_ready() {
-            self.end(half, first);
+            self.end_after(half, first);
         }
         pushed
+    }
+
+    /// Writes the rest of the message that the half of stream `id` holds to `inner`.
+    /// Gives the half once it holds no message, and `None` while it holds one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Stopped`] when the peer stopped the stream.
+    fn resume<'a>(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        halves: &'a mut Map<StreamId, Half>,
+        id: StreamId,
+    ) -> Result<Option<&'a mut Half>, Error> {
+        let half = halves.get_mut(&id).expect(HALF);
+        if let Some(code) = half.stopped {
+            return Err(Error::Stopped { code });
+        }
+        if half.holds() && self.start(inner, half).is_pending() {
+            return Ok(None);
+        }
+        Ok(Some(half))
     }
 
     fn push(&mut self, inner: &mut noq_proto::Connection, half: &mut Half) -> Poll<()> {
@@ -678,9 +700,15 @@ impl Sending {
 
     /// Ends the message that `half` holds or waits for: drops what it holds, and
     /// gives back its budget and its turn. The streams that get the room are woken,
-    /// and so is the first stream in turn when `first`, the first before the caller
-    /// wrote or ended `half`, was not.
-    fn end(&mut self, half: &mut Half, first: Option<Key>) {
+    /// and so is the stream that is now first in turn.
+    fn end(&mut self, half: &mut Half) {
+        let first = self.first();
+        self.end_after(half, first);
+    }
+
+    /// [`Sending::end`], with `first` the first stream in turn before the caller
+    /// wrote `half`.
+    fn end_after(&mut self, half: &mut Half, first: Option<Key>) {
         (half.unsent, half.body) = (0..0, Bytes::new());
         let room = self.share.room(half.claim.class, &self.budget);
         let woken = &mut self.woken;
@@ -719,7 +747,7 @@ impl Streams {
             peer: hello::Peer::new(),
             unclassified: Vec::new(),
             incoming: Default::default(),
-            senders: Map::default(),
+            halves: Map::default(),
             sending: Sending {
                 budget: Budget::new(0),
                 turns: Turns::default(),
@@ -860,14 +888,13 @@ impl Streams {
                     *stopped = Some(code);
                     return Ok(None);
                 }
-                let Some(half) = self.senders.get_mut(&id) else {
+                let Some(half) = self.halves.get_mut(&id) else {
                     return Ok(None);
                 };
                 half.stopped = Some(code);
-                let first = self.sending.first();
-                self.sending.end(half, first);
+                self.sending.end(half);
                 if half.rest == Rest::Finish {
-                    self.senders.remove(&id);
+                    self.halves.remove(&id);
                 }
                 Ok(Some(Event::Writable { stream: stream(id) }))
             }
@@ -890,7 +917,7 @@ impl Streams {
         let prioritized = inner.send_stream(id).set_priority(priority(class));
         prioritized.expect("invariant: a stream that opens has a send half");
         let key = Key { connection, id };
-        self.senders.insert(id, Half::new(key, class));
+        self.halves.insert(id, Half::new(key, class));
         Some(Sender::new(key, peer.message_bytes_max))
     }
 
@@ -931,13 +958,12 @@ impl Streams {
         sender: &Sender,
         message: &mut Option<Block>,
     ) -> Result<Poll<()>, Error> {
-        let half = self.senders.get_mut(&sender.key.id).expect(HALF);
-        if let Some(code) = half.stopped {
-            return Err(Error::Stopped { code });
-        }
-        if half.holds() && self.sending.start(inner, half).is_pending() {
+        let resumed = self
+            .sending
+            .resume(inner, &mut self.halves, sender.key.id)?;
+        let Some(half) = resumed else {
             return Ok(Poll::Pending);
-        }
+        };
         let Some(message) = message.take() else {
             return Ok(Poll::Ready(()));
         };
@@ -961,13 +987,12 @@ impl Streams {
         sender: &Sender,
         message: &mut Option<Block>,
     ) -> Result<(), Error> {
-        let half = self.senders.get_mut(&sender.key.id).expect(HALF);
-        if let Some(code) = half.stopped {
-            return Err(Error::Stopped { code });
-        }
-        if half.holds() && self.sending.start(inner, half).is_pending() {
+        let resumed = self
+            .sending
+            .resume(inner, &mut self.halves, sender.key.id)?;
+        let Some(half) = resumed else {
             return Ok(());
-        }
+        };
         let Sending {
             budget,
             turns,
@@ -997,7 +1022,7 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) {
         while let Some(id) = self.sending.woken.pop_front() {
-            let Some(half) = self.senders.get_mut(&id) else {
+            let Some(half) = self.halves.get_mut(&id) else {
                 continue;
             };
             if !half.holds() {
@@ -1009,7 +1034,7 @@ impl Streams {
             }
             events.push_back(Event::Writable { stream: half.key });
             if half.rest == Rest::Finish {
-                self.senders.remove(&id);
+                self.halves.remove(&id);
                 finish(inner, id);
             }
         }
@@ -1031,9 +1056,7 @@ impl Streams {
         inner: &mut noq_proto::Connection,
         id: StreamId,
     ) -> Result<(), Error> {
-        let Some(half) = self.senders.get_mut(&id) else {
-            panic!("invariant: a sender finishes once");
-        };
+        let half = self.halves.get_mut(&id).expect(HALF);
         if let Some(code) = half.stopped {
             return Err(Error::Stopped { code });
         }
@@ -1043,7 +1066,7 @@ impl Streams {
                 return Ok(());
             }
         }
-        self.senders.remove(&id);
+        self.halves.remove(&id);
         finish(inner, id);
         Ok(())
     }
@@ -1059,9 +1082,8 @@ impl Streams {
     ) {
         let id = sender.key.id;
         reset(inner, id, code);
-        if let Some(mut half) = self.senders.remove(&id) {
-            let first = self.sending.first();
-            self.sending.end(&mut half, first);
+        if let Some(mut half) = self.halves.remove(&id) {
+            self.sending.end(&mut half);
         }
     }
 
@@ -1232,7 +1254,7 @@ impl Streams {
                     match inner.send_stream(id).set_priority(priority(class)) {
                         Ok(()) | Err(ClosedStream { .. }) => {}
                     }
-                    self.senders.insert(id, Half::reply(stream, class, stopped));
+                    self.halves.insert(id, Half::reply(stream, class, stopped));
                 }
                 self.incoming[usize::from(byte)].push_back(id);
                 Ok(true)
@@ -1403,7 +1425,7 @@ mod tests {
         let connection =
             crate::quic::find(&mut side.endpoint.connections, key.connection);
         let streams = &connection.expect("a connection").streams;
-        streams.senders.get(&key.id).expect("a half")
+        streams.halves.get(&key.id).expect("a half")
     }
 
     /// The next stream the peer opened on `side`.
