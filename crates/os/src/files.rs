@@ -350,15 +350,20 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
 /// Allocates the first `len` bytes of the empty file `fd` on disk, all or none, and
 /// sets its length to `len`.
 fn allocate(fd: &OwnedFd, len: u64) -> io::Result<()> {
-    // The length stays 0 until each block is there, also after a crash. On ext4, a
-    // failed call keeps the blocks it took.
+    // The length stays 0 until each block is there, also after a crash.
     #[cfg(target_os = "linux")]
     return match fs::fallocate(fd, fs::FallocateFlags::KEEP_SIZE, 0, len) {
         Ok(()) => fs::ftruncate(fd, len),
-        Err(errno) => fs::ftruncate(fd, 0).and(Err(errno)),
+        Err(errno) => release(fd).and(Err(errno)),
     };
     #[cfg(target_os = "macos")]
     return crate::allocate::all(fd, len);
+}
+
+/// Frees the blocks that a failed `fallocate` took past the end of the empty file `fd`.
+#[cfg(target_os = "linux")]
+fn release(fd: &OwnedFd) -> io::Result<()> {
+    fs::ftruncate(fd, 0)
 }
 
 /// The path of `path` from the data directory, where an empty path is the data
