@@ -62,8 +62,9 @@ impl<'a> History<'a> {
     /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
     /// tree that `git merge-tree` makes of `from` and the base parent of the last such
     /// merge, not from `from`: the base's code does not count, and text of the range
-    /// that the base moves into a code file does. A file that this tree has a
-    /// conflict in counts by its conflict markers, so it fails closed.
+    /// that the base moves into a code file does. A code file that this tree has a
+    /// conflict in gives "has a conflict in `<file>` between its start and the
+    /// base", so a conflict that leaves no markers fails closed too.
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
     /// a removed one.
@@ -111,11 +112,16 @@ impl<'a> History<'a> {
             }
             last = Some(second);
         }
-        let old = match last {
-            Some(second) => self.merged(&from_sha, second)?.tree,
-            None => from_sha,
+        let Some(second) = last else {
+            return self.first_change(&from_sha, &end_sha);
         };
-        self.first_change(&old, &end_sha)
+        let merged = self.merged(&from_sha, second)?;
+        if let Some(path) = merged.conflicts.iter().find(|p| code_path(p)) {
+            return Ok(Some(format!(
+                "has a conflict in `{path}` between its start and the base"
+            )));
+        }
+        self.first_change(&merged.tree, &end_sha)
     }
 
     /// The first line of code that the change from the tree-ish `old` to `new` adds

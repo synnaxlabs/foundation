@@ -2931,8 +2931,8 @@ How to read this record:
   file is a code change. The rest of the range is read from the tree that
   `git merge-tree` makes of its start and the base parent of the last merge, not from
   its start: the base's code does not count, and PR text that the base moves into a
-  code file does. A file that this tree has a conflict in counts by its conflict
-  markers, so it fails closed. Found by the director at 2026-10-07T14:50:33Z
+  code file does. A conflict in this tree in a code file is a code change, also one
+  that leaves no markers. Found by the director at 2026-10-07T14:50:33Z
   (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed
   by #1451. An earlier round's skip is taken as written, since a rebase can drop its
   range from the clone. An earlier round in the fixed format that does not parse fails.

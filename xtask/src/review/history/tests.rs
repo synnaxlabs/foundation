@@ -633,7 +633,66 @@ fn a_conflict_of_the_start_and_the_base_fails_closed() {
     assert_eq!(repo.reaches(&first, &merge), Ok(true));
     assert_eq!(
         repo.code_change(&end, &merge),
-        Ok(Some("changes code at `x.rs:2`".to_string()))
+        Ok(Some(
+            "has a conflict in `x.rs` between its start and the base".to_string()
+        ))
+    );
+}
+
+#[test]
+fn the_base_after_the_last_merge_does_not_count() {
+    let (repo, end) = Repo::with_pr("merge-later-base");
+    repo.advance_main("a.rs", "fn a() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    repo.advance_main("c.rs", "fn c() {}\n");
+    assert_eq!(repo.code_change(&end, &repo.head()), Ok(None));
+}
+
+#[test]
+fn a_modify_delete_conflict_of_the_start_and_the_base_fails_closed() {
+    let (repo, _) = Repo::with_pr("merge-moddel");
+    repo.advance_main("x.rs", "fn a() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.commit("x.rs", "fn a() {}\nfn pr() {}\n");
+    repo.commit("x.rs", "fn a() {}\n");
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["rm", "--quiet", "x.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "rm"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merge = repo.head();
+    let first = repo.git(&["rev-parse", "HEAD^1"]);
+    assert_eq!(repo.reaches(&first, &merge), Ok(true));
+    // The PR brings back the file that the base deleted.
+    repo.commit("x.rs", "fn a() {}\nfn pr() {}\n");
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some(
+            "has a conflict in `x.rs` between its start and the base".to_string()
+        ))
+    );
+}
+
+#[test]
+fn a_binary_conflict_of_the_start_and_the_base_fails_closed() {
+    let (repo, _) = Repo::with_pr("merge-binary");
+    repo.advance_main("x.rs", "// \0\nfn old() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.commit("x.rs", "// \0\nfn pr() {}\n");
+    repo.commit("x.rs", "// \0\nfn old() {}\n");
+    repo.advance_main("x.rs", "// \0\nfn base() {}\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merge = repo.head();
+    let first = repo.git(&["rev-parse", "HEAD^1"]);
+    assert_eq!(repo.reaches(&first, &merge), Ok(true));
+    // The PR replaces the base's `fn base` with its own text.
+    repo.commit("x.rs", "// \0\nfn pr() {}\n");
+    assert_eq!(
+        repo.code_change(&end, &repo.head()),
+        Ok(Some(
+            "has a conflict in `x.rs` between its start and the base".to_string()
+        ))
     );
 }
 
