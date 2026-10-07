@@ -38,8 +38,9 @@ pub struct Config<M> {
     /// Each shard's part must hold the largest block its buffer reads, else
     /// [`Node::join`] gives [`Error::Buffer`].
     pub budget: usize,
-    /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
-    /// once for each shard, in order of core.
+    /// Reserves `len` bytes of address space for one shard's pool. `node` calls it in
+    /// order of core, once for each shard, until a shard gets no memory or does not
+    /// start.
     pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
     /// Makes the files of one shard. `node` calls it on the thread that calls
     /// [`Node::start`], in order of core, once for each shard that gets its memory,
@@ -97,13 +98,13 @@ impl Node {
     /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
     /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
     /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
-    /// takes the remainder. The start first records the shard count in the data
-    /// directory, or checks the one there. Each shard opens its buffer in directory
-    /// `shard-<i>` of its files, and makes it there when it is not there. The shards
-    /// open their buffers one after another, in order of core. Returns once each
-    /// shard runs or one has failed to start. A failed start, a shard with no memory,
-    /// a data directory made for another shard count, or a buffer that does not open
-    /// stops the node, and [`Node::join`] returns its error.
+    /// takes the remainder. Unless the node stops first, the start records the shard
+    /// count in the data directory, or checks the one there, and each shard opens its
+    /// buffer in directory `shard-<i>` of its files, and makes it there when it is
+    /// not there. The shards open their buffers one after another, in order of core.
+    /// Returns once each shard runs or one has failed to start. A failed start, a
+    /// shard with no memory, a data directory made for another shard count, or a
+    /// buffer that does not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -185,7 +186,9 @@ impl Node {
         }
     }
 
-    /// Asks every shard to end. Does not wait; call [`Node::join`].
+    /// Asks every shard to end. A shard then starts no claim of the data directory
+    /// and no open of its buffer; a step that started runs to its end. A stop is not
+    /// a failure. Does not wait; call [`Node::join`].
     pub fn stop(&self) {
         self.stop.set();
     }
@@ -202,18 +205,32 @@ impl Node {
     /// [`Error::Panicked`] for the first shard by core that panicked. Any failed
     /// shard stops the node.
     pub fn join(self) -> Result<(), Error> {
-        let mut first = self.failed;
-        let mut panicked = None;
-        for shard in self.shards {
-            if let Err(e) = shard.handle.join() {
-                panicked.get_or_insert(Error::Panicked(e));
-            }
-            if let Some(error) = shard.failed.get() {
-                first.get_or_insert_with(|| error.clone());
-            }
-        }
-        first.or(panicked).map_or(Ok(()), Err)
+        let shards = self.shards.into_iter();
+        first(
+            self.failed,
+            shards.map(|shard| (shard.handle.join(), shard.failed.get().cloned())),
+        )
     }
+}
+
+/// The error of [`Node::join`]: `failed`, else the first shard error by core, else
+/// the first panic by core. Takes each item of `shards`, which gives each shard's
+/// join and error in order of core.
+fn first(
+    failed: Option<Error>,
+    shards: impl Iterator<Item = (Result<(), env::thread::Panicked>, Option<Error>)>,
+) -> Result<(), Error> {
+    let mut first = failed;
+    let mut panicked = None;
+    for (joined, error) in shards {
+        if let Err(e) = joined {
+            panicked.get_or_insert(Error::Panicked(e));
+        }
+        if let Some(error) = error {
+            first.get_or_insert(error);
+        }
+    }
+    first.or(panicked).map_or(Ok(()), Err)
 }
 
 /// The open of a shard's buffer, made before the shard starts. The shards open one

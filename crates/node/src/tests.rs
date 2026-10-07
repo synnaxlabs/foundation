@@ -413,6 +413,50 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
     })
 }
 
+/// `join` gives the node's own failure, else the first shard error by core, else the
+/// first panic by core, and joins every shard.
+#[test]
+fn join_gives_errors_in_order_of_precedence() {
+    let panicked = |core: usize| thread::Panicked {
+        name: format!("shard-{core}"),
+    };
+    let memory = Error::Memory {
+        core: 2,
+        error: os::memory::Error::Refused,
+    };
+    let shards = |stored: usize| Error::Shards { stored, cores: 3 };
+    let mut joined = 0;
+    let all = [
+        (Err(panicked(0)), Some(shards(2))),
+        (Ok(()), Some(shards(4))),
+    ];
+    let all = all.into_iter().inspect(|_| joined += 1);
+    assert_eq!(crate::first(Some(memory.clone()), all), Err(memory));
+    assert_eq!(joined, 2);
+    let cases = [
+        (
+            vec![(Err(panicked(0)), None), (Ok(()), Some(shards(2)))],
+            shards(2),
+        ),
+        (
+            vec![(Ok(()), Some(shards(2))), (Ok(()), Some(shards(4)))],
+            shards(2),
+        ),
+        (
+            vec![
+                (Ok(()), None),
+                (Err(panicked(1)), None),
+                (Err(panicked(2)), None),
+            ],
+            Error::Panicked(panicked(1)),
+        ),
+    ];
+    for (shards, error) in cases {
+        assert_eq!(crate::first(None, shards.into_iter()), Err(error));
+    }
+    assert_eq!(crate::first(None, [(Ok(()), None)].into_iter()), Ok(()));
+}
+
 mod buffer {
     use std::cell::RefCell;
     use std::pin::Pin;
@@ -780,7 +824,7 @@ mod buffer {
     }
 
     #[test]
-    fn join_gives_a_shard_that_could_not_start_over_a_ring_that_did_not_open() {
+    fn a_shard_that_cannot_start_skips_a_ring_that_would_not_open() {
         for seed in 0..32 {
             let e = refused(seed, 3, 1, &[(2, Fault::Start)]);
             let start = thread::Error::Start {
@@ -989,9 +1033,9 @@ mod directory {
         }
     }
 
-    /// A shard with no memory comes before a refused data directory in `join`.
+    /// A shard with no memory stops the node before the claim starts.
     #[test]
-    fn join_gives_a_shard_with_no_memory_over_a_refused_data_directory() {
+    fn a_shard_with_no_memory_skips_a_claim_that_would_be_refused() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         record(&mut sim, &host, 3);
