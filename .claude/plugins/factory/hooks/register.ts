@@ -22,12 +22,19 @@ const HINT =
   'answer, such as thanks. A line "fmsg <id> to <name>: no ack after 60 s" says ' +
   'that <name> did not receive your message yet; it is not a message.'
 
-type Roster = { host: string; port: number; names: string[] }
+// `turnCaps` raises the cap for a session that every other session messages.
+type Roster = {
+  host: string
+  port: number
+  names: string[]
+  turnCaps?: Record<string, number>
+}
 type Saved = { queue: string[]; seen: string[] }
 
 type Session = Saved & {
   name: string
   roster: Roster
+  cap: number
   tls: string[]
   link: string
   // The id of the last probe, until it comes back.
@@ -72,6 +79,7 @@ async function start($: Api): Promise<Session | undefined> {
     ...saved,
     name,
     roster,
+    cap: roster.turnCaps?.[name] ?? TURN_CAP,
     tls: [
       ...['-h', roster.host, '-p', String(roster.port)],
       ...['--cafile', `${dir}/root-ca.pem`, '--cert', `${dir}/cert.pem`],
@@ -202,7 +210,7 @@ async function drain($: Api, s: Session) {
     while (s.queue[0] !== undefined) {
       const now = await $.clock.now()
       s.starts = s.starts.filter(t => t > now - HOUR_MS)
-      if (s.starts.length >= TURN_CAP) {
+      if (s.starts.length >= s.cap) {
         s.capped = $.clock.after(s.starts[0]! + HOUR_MS - now, () => {
           s.capped = undefined
           void drain($, s)
@@ -285,7 +293,7 @@ async function refresh($: Api, s: Session) {
       `queued ${queued}`,
       ...(usage.cost ? [`$${usage.cost.usd.toFixed(2)}`] : []),
       ...usage.rateLimits.map(l => `${LIMITS[l.kind] ?? l.kind} ${l.percentUsed}%`),
-      ...(s.capped ? [`capped at ${TURN_CAP} turns an hour`] : []),
+      ...(s.capped ? [`capped at ${s.cap} turns an hour`] : []),
     ].join(' · '),
   )
   const { recv, sent, noAcks } = s

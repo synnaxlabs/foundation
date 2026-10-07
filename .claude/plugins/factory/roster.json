@@ -17,5 +17,8 @@
     "box2.builder-7",
     "box2.connector",
     "box2.red-team"
-  ]
+  ],
+  "turnCaps": {
+    "laptop.coordinator": 600
+  }
 }
