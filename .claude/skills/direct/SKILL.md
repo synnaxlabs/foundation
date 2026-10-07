@@ -78,9 +78,10 @@ findings. A later push needs a new approval.
   surfaces, contracts, and risk-crate deferrals.
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
   in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. Collect
-  the rule changes from your audits in one rule PR, and keep only one open at a time.
-  Send its link to `laptop.monitor` when it holds a set of rules, at most once every two
-  hours (12 a day), so that the person approves them together.
+  the rule changes from your audits in one draft rule PR, and keep only one open at a
+  time. Send its link to `laptop.monitor` when it holds a set of rules, at most once
+  every two hours (12 a day). The monitor gets the person's approval, then marks it
+  ready and queues it.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
   merged PR, performance findings after merge, acceptance scenarios passing, and review
   rounds per PR.
