@@ -15,7 +15,8 @@ Read `docs/claude/testing.md` and the section of `docs/decisions.md` the PR buil
 read the diff (`gh pr diff <n>`) and every file it touches. In a second round you get
 the earlier findings and a commit range: review only that range, and check that each fix
 closes its finding and adds no new defect, and that each answer with no code change
-holds.
+holds. A second-round report gives, after the summary, the `Hot path:` line that
+`.claude/agents/architecture.md` defines, for the range.
 
 Check:
 

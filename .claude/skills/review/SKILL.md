@@ -92,8 +92,9 @@ nothing checked again. So when round 1 led to fix commits:
    with the round 1 comment and each architect review attached. Only a range that
    changes no `.rs` line but comments skips `breaker`, and its round comment says so.
    The `reviewer` also gets each answer that changed no code, and checks it against the
-   code. When a fix commit changes code on a hot path, run `performance` again on it
-   too, and update the Performance section with its numbers.
+   code. Its report gives the `Hot path:` line for the range, and the round comment
+   copies it. When the line names a function, run `performance` again on the range, and
+   update the Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit.
@@ -106,7 +107,7 @@ commits and the fix commits out of every round range.
 Review is done when the last round comment ends at the PR head and finds nothing, each
 round comment names each reviewer its round requires (round 1: the table; a later round:
 `reviewer`, `breaker` unless its range changes only comments, and `performance` with new
-numbers when its range changes code on a hot path), the `Deferred:` line of each round
+numbers when its `Hot path:` line names a function), the `Deferred:` line of each round
 comment links the OK of each deferral in a risk crate, the `Public surface:` line of the
 last round comment links the architect's approval of each item, each finding of an
 architect review has its fix commit or a linked answer, and each later step that a
