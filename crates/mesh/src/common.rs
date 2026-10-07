@@ -5,24 +5,30 @@ use std::rc::Rc;
 
 use block::Pool;
 use raft::{
-    Answer, Body, Change, Data, Entry, Grant, Message, Position, Proof, Ready,
-    Signature, Term, Voters,
+    Answer, Body, Data, Entry, Grant, Message, Position, Proof, Ready, Signature, Term,
+    Voters,
 };
 use transport::Address;
 use types::channel;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
+use types::time::{Span, Stamp};
 
 use crate::bytes::{put_channel, put_count, put_name};
 use crate::card::{self, Card};
+use crate::change::{Change, Join};
 use crate::claim::Signer;
 use crate::ed25519;
 use crate::member::Member;
 use crate::status::Status;
-use crate::ticket::{Ticket, Voter};
+use crate::ticket::{Options, Ticket, Voter};
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);
+
+pub(crate) const EXPIRY: Stamp = Stamp::from_nanos(1_000);
+const BEFORE_EXPIRY: Stamp = Stamp::from_nanos(999);
+pub(crate) const EPHEMERAL: Span = Span::from_nanos(60);
 
 pub(crate) fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
@@ -185,6 +191,59 @@ pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
     ready.messages.remove(0)
 }
 
+pub(crate) fn index(bits: u128) -> channel::Key {
+    channel::Key::from_u128(bits)
+}
+
+pub(crate) fn name(text: &str) -> Name {
+    text.parse().unwrap()
+}
+
+pub(crate) fn options(prefix: &str, reusable: bool) -> Options {
+    Options {
+        prefix: name(prefix),
+        reusable,
+        expiry: EXPIRY,
+        ephemeral: Some(EPHEMERAL),
+    }
+}
+
+pub(crate) fn record(id: u8, options: Options) -> Change {
+    Change::Ticket {
+        public_key: public(id),
+        options,
+    }
+}
+
+/// The join of node `id` with the name `name_text`, which ticket `ticket_id` admits.
+pub(crate) fn join(ticket_id: u8, id: u8, name_text: &str) -> Join {
+    let card = signed(id, name_text);
+    Join {
+        ticket: public(ticket_id),
+        at: BEFORE_EXPIRY,
+        card: card::Unchecked {
+            key: key(id),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        },
+        admission: ticket(ticket_id).admission(&card),
+        status: status([(name("disk"), index(9))]),
+    }
+}
+
+pub(crate) fn home(i: u128, h: u128) -> Change {
+    Change::Home {
+        index: index(i),
+        home: node::Key::from_u128(h),
+    }
+}
+
+pub(crate) fn with_status(mut join: Join, status: &[(&str, u128)]) -> Join {
+    let map = status.iter().map(|&(text, key)| (name(text), index(key)));
+    join.status = Status::new(map.collect()).unwrap();
+    join
+}
+
 // The votes of 1, 2 and 3 for `leader` in `term`, each signed but the leader's own.
 fn votes(term: Term, leader: u8) -> Proof {
     assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
@@ -209,7 +268,7 @@ fn votes(term: Term, leader: u8) -> Proof {
 pub(crate) fn change(leader: u8, at: Position, voters: Voters) -> Entry {
     let entry = Entry {
         at,
-        data: Data::Voters(Change {
+        data: Data::Voters(raft::Change {
             voters,
             votes: votes(at.term, leader),
             signature: None,

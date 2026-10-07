@@ -11,8 +11,8 @@ use crate::bytes::{
     take, take_bool, take_change, take_count, take_key, take_position, take_proof,
     take_signature,
 };
+use crate::change::Change;
 use crate::entry;
-use crate::region::Change;
 
 const RAFT: u8 = 1;
 const PROPOSE: u8 = 2;

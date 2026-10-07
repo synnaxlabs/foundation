@@ -1687,11 +1687,9 @@ mod tests {
             let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 drop(open(&node).await.unwrap());
-                let mode = Mode::Create { len: 0 };
-                drop(node.files().open(&file(name), mode).await.unwrap());
-                node.files().sync_dir(Path::new(DIR)).await.unwrap();
             })
             .unwrap();
+            create_with_no_bytes(&mut sim, &node, &file(name));
             let error = stored(&mut sim, &node).unwrap_err();
             assert_eq!(error, Error::Stray { path: file(name) }, "{name}");
             assert_eq!(
@@ -1934,17 +1932,23 @@ mod tests {
     }
 
     /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
-    /// and no record, then cuts the power.
+    /// and no record, then cuts the power. With no bytes, the cut is in its create.
     fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
         sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len };
-            drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            if len > 0 {
+                let mode = Mode::Create { len };
+                drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            }
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        if len == 0 {
+            create_with_no_bytes(sim, node, &file("log-1"));
+        } else {
+            sim.crash(node, Crash::Power);
+        }
     }
 
     /// The files of a log after `create_spare`.
@@ -2007,18 +2011,51 @@ mod tests {
         lens
     }
 
-    /// Makes `log-0` with no bytes, as a crash before the allocation of a create
-    /// leaves it, then cuts the power.
+    /// Makes the file at `path` with no bytes through power crashes in its create.
+    /// The directory of `path` must be durable.
+    fn create_with_no_bytes(sim: &mut Sim, node: &sim::node::Node, path: &Path) {
+        for _ in 0..64 {
+            let (own, cut) = (node.clone(), path.to_owned());
+            let handle = node.shards().start(shard("create"), move |_| async move {
+                let mode = Mode::Create { len: SEGMENT };
+                drop(own.files().open(&cut, mode).await);
+                pending::<()>().await;
+            });
+            drop(handle.unwrap());
+            sim.run_for(Span::from_nanos(1_000)).unwrap();
+            sim.crash(node, Crash::Power);
+            let own = path.to_owned();
+            let len = sim
+                .run_on(node, move |node, _| async move {
+                    let opened = node.files().open(&own, Mode::Read).await;
+                    opened.ok().map(|file| file.len())
+                })
+                .unwrap();
+            match len {
+                Some(0) => return,
+                Some(_) => {
+                    let whole = path.to_owned();
+                    sim.run_on(node, move |node, _| async move {
+                        node.files().remove(&whole).await.unwrap();
+                        let dir = whole.parent().expect("a file in a directory");
+                        node.files().sync_dir(dir).await.unwrap();
+                    })
+                    .unwrap();
+                }
+                None => {}
+            }
+        }
+        panic!("64 power crashes in a create left no {}", path.display());
+    }
+
+    /// Makes `log-0` with no bytes through power crashes in its create.
     fn create_first_file_with_no_bytes(sim: &mut Sim, node: &sim::node::Node) {
         sim.run_on(node, |node, _| async move {
             node.files().create_dir(Path::new(DIR)).await.unwrap();
-            let mode = Mode::Create { len: 0 };
-            drop(node.files().open(&file("log-0"), mode).await.unwrap());
-            node.files().sync_dir(Path::new(DIR)).await.unwrap();
             node.files().sync_dir(Path::new("")).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        create_with_no_bytes(sim, node, &file("log-0"));
     }
 
     #[test]

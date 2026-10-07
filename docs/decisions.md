@@ -752,6 +752,21 @@ How to read this record:
   disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
   once where remote records enter (X43), and the read after it panics on a bad body.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **STORED BENCH (#1547, 2026-10-07)** The cargo feature `bench` of `home`, off by
+  default, adds `#[doc(hidden)] pub mod bench`: `entry` calls `stored::entry`, and
+  `read` calls `stored::read` and gives each series' channel, type, and bytes. Only the
+  bench `benches/stored.rs` (`test = true`) uses it, as `transport::fuzzing` serves the
+  fuzz crate. `read` gives all three fields, so the compiler cannot skip a decode that
+  production does, and the bench passes each item to `divan::black_box`. Run it with
+  `cargo bench -p home --bench stored`. Lost: a copy of `stored` in the bench through
+  `#[path]`, which breaks at its first `crate::` item, and a time of `Shard` writes and
+  reads, which hides the cost of the body in the cost of the write. Decided by
+  `laptop.architect` (2026-10-07T18:46:13Z):
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576.
+  `cargo bench -p home` turns on `bench` through a dev-dependency of `home` on itself,
+  since the bench host runs no features. Decided by `laptop.architect`
+  (2026-10-07T19:05:26Z):
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
@@ -890,6 +905,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929). The
   surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
+- **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
+  waker in the state while it sleeps and while it waits for a commit. The state wakes
+  it on drop. So the task ends, and drops the commit it waits for, at its first poll
+  after the hub and each of its sessions drop, and the home and its buffer end then.
+  `node` relies on this to close a shard's ring before it lets go of the data
+  directory lock. Lost: `Hub::close(self) -> Commit`, which each caller must call, and
+  which a clone or a live session defeats. Decided by `laptop.architect`
+  (2026-10-07T18:07:55Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -2053,11 +2077,14 @@ How to read this record:
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
   In a file with no record, it makes that file again, larger, so each file but the last
-  holds a record. After a stopped write that made a file, the next record starts that
-  file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, and the last sentence at
-  2026-10-07T11:05:15Z):
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
+  holds a record. A file with no bytes, which a crash in a create can leave (ENV SEAMS,
+  #1264), is a file with no record. After a stopped write that made a file, the next
+  record starts that file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, the
+  last sentence at 2026-10-07T11:05:15Z, and the sentence on a file with no bytes at
+  2026-10-07T18:39:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314,
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297, and
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044422561. A write
   puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
   the end of the record to its start, and then syncs one time. Each block but the one at
   the end of the record ends at a multiple of the block size in the file, so no two
@@ -2163,7 +2190,13 @@ How to read this record:
   coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
   gives the fuzz target `mesh_change` the decode and encode of a change record; no
   change type is public (decided by the architect, 2026-10-07T11:17:12Z:
-  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855).
+  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855). The
+  module `change` holds the change records and their byte forms (`Change`, `Join`,
+  `Malformed`, `Unknown`). The module `region` holds the state that they move (`State`,
+  `Request`, `Refused`, `Unfit`). One module for both lost: `region::Unknown`, a change
+  of no known kind, was not clear next to `region::Refused::Unknown`, a ticket that is
+  not recorded (decided by the architect, 2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
   the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
@@ -2342,6 +2375,39 @@ How to read this record:
   to the code that encodes definitions. A chunk's address is a `types::digest::Digest`,
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
+- **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
+  node's disk through `env::files`. A put returns only after the chunk is durable. A put
+  of a digest that a put stored since the open makes no file call. A get gives bytes
+  only when they hash to the digest; a chunk that fails the check (a write torn by a
+  crash, a bad sector) reads as absent, so the caller fetches it again as for any absent
+  chunk, and the store counts each one in a crate-private count: an `interface` issue
+  makes it public, with a noun for a name, when the first caller (the node's status of
+  its disk) needs it. `env::files` has no rename, so a torn chunk must read as absent,
+  never as a short chunk. A get or a put holds at most one chunk in memory. `put`
+  borrows its chunk (`&Block`). A put whose future is dropped stores nothing that a get
+  gives unchecked: the next get of the digest reads and checks the file, and the next
+  put writes it again. Layout: one flat directory, one file per chunk named by the 64
+  hex digits of its digest, with the chunk's bytes and nothing else, so the bytes are
+  their own check and the layout needs no header, no check field, and no rename. A pack
+  file with an index lost: it needs record headers, a scan of every byte at open, and
+  compaction for removal. Removal of chunks that no kept root reaches is a follow-up.
+  Decided by `laptop.architect` (2026-10-07T17:23:56Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The open
+  lists the directory and trusts no name: a get of a listed digest reads and checks its
+  bytes, and a put of one writes it again, because a process crash leaves whole bytes in
+  the cache that no sync covers, and a put that trusted a read of them would return
+  before they are durable. A put refuses a chunk longer than the largest block of the
+  pool before any file call. Decided by the builder (#1515,
+  https://github.com/synnaxlabs/foundation/pull/1515) and `laptop.architect`
+  (2026-10-07T17:47:50Z):
+  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043557708. Supersedes
+  the read on the first put of a listed digest in the plan
+  (https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6042962010) and the
+  sentence of item 1 of the ruling, "the next put or get of the digest reads the file
+  first". Every open makes the directory and syncs its parent, because an earlier open
+  can have stopped between the two. A put removes a file of another length at its name
+  and writes the chunk. Decided in review round 1 of #1515 (2026-10-07T17:56:25Z):
+  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043700902.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -2744,6 +2810,20 @@ How to read this record:
   Supersedes the Q2 check of
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6039706938, which
   compared each value with `seq - written.start`.
+- **LINE TEXT (#1098)** `connector_influx::line::Measurement::new` accepts only text
+  that InfluxDB 1, 2, and 3 each store as written, in each part (measurement name, tag
+  key, tag value, field key). It refuses the rest at construction, so the error
+  reaches the config diagnostic in place of a partial write that InfluxDB answers with
+  204 or drops. One set of refused characters holds for every part. Today the set is a
+  backslash, a newline, a carriage return, a tab, and NUL. #1098 will widen it to what
+  InfluxDB 1 and 2 with `validate-keys` drop, and its PR updates this list. NUL in a
+  tag value is refused, though InfluxDB 3 keeps it. No user needs it, and a user learns
+  one rule, not four. Foundation names hold only ASCII letters, digits, `_`, `-`, `.`,
+  and `@`, so the rule applies only to text that a user writes in the connector's
+  config. Lost: a rule for each part. It keeps NUL in tags for no caller, and the set
+  a user may write then depends on the part.
+  Decided by the architect (`laptop.architect-2`) on 2026-10-07T06:26:41Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -3360,26 +3440,37 @@ How to read this record:
   only round comments by the factory bot, in the format of `/review`, "Round comment".
   Each round names the reviewers REVIEW TIERS requires; `performance` is never required.
   The last round finds none and ends at the head, or at a commit that reaches the head
-  through clean merges of the base (`git merge-tree`). When the last round is a later
-  round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
-  trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
-  any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
-  added. A merge of the base in the range counts only by its resolution: a conflict that
-  `git merge-tree` finds between its parents in a `.rs`, `Cargo.toml`, or `Cargo.lock`
-  file is a code change. The rest of the range is read from the tree that
-  `git merge-tree` makes of its start and the newest base commit that its end holds,
-  not from its start: the base's code does not count, and text that the range changes
-  and the base moves into a code file does. Text from an earlier round that the base
-  moves into a code file does not yet count (#1496). A conflict in this tree in a code
-  file is a code change, also one that leaves no markers, and so is an end that holds
-  more than one newest base commit. Found by the director at 2026-10-07T14:50:33Z
-  (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed
-  by #1451. An earlier round's skip is taken as written, since a rebase can drop its
-  range from the clone. An earlier round in the fixed format that does not parse fails.
-  A red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  through clean merges of the base (`git merge-tree`). A merge of the base is not clean
+  when the base moves a path that the PR changed since their merge base, and that is not
+  code, to a code path, by the rename detection of the merge. A base move of a path that
+  the PR did not change stays clean. Decided by the director at 2026-10-07T17:21:14Z
+  (https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6043078385). When
+  the last round is a later round with `Breaker: skipped`, it fails if its range changes
+  code: a `.rs` line that, trimmed, is not blank and does not start with `//` (a doctest
+  line is a comment), or any `Cargo.toml` or `Cargo.lock` line. Each line of a moved
+  file counts as removed and added. A merge of the base in the range counts only by its
+  resolution: a conflict that `git merge-tree` finds between its parents in a `.rs`,
+  `Cargo.toml`, or `Cargo.lock` file is a code change. The rest of the range is read
+  from the tree that `git merge-tree` makes of its start and the newest base commit that
+  its end holds, not from its start: the base's code does not count, and text that the
+  range changes and the base moves into a code file does. So does a path that is not
+  code, that the start changes since its merge base with that base commit, as the merge
+  reads it, and that this merge moves into a code file, by the merge's own rename
+  detection. A conflict in this tree in a code file is a code change, also one that
+  leaves no markers, and so is an end that holds more than one newest base commit. In
+  the range, a base move counts only through this tree. Decided by the director at
+  2026-10-07T18:27:30Z
+  (https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6044222273).
+  Supersedes the range sentence of
+  https://github.com/synnaxlabs/foundation/issues/1496#issuecomment-6043078385. Found
+  by the director at 2026-10-07T14:50:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed by
+  #1451. An earlier round's skip is taken as written, since a rebase can drop its range
+  from the clone. An earlier round in the fixed format that does not parse fails. A
+  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
   status is `success` on `merge_group`. Decided by the director on #1169
-  (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
-  in messages on #1193.
+  (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and in
+  messages on #1193.
 - **FACTORY MODELS (2026-10-06)** Opus 5.5 for every session and reviewer. Fable only on
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
@@ -3541,6 +3632,13 @@ How to read this record:
   Supersedes the drop sentence of
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Lost:
   "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
+  Amended (2026-10-07, #1264): a crash before a `Mode::Create` open ends can leave the
+  file that it makes with no bytes, and `Create` makes a file with no bytes `len` zeroed
+  bytes. `sim` makes that file at a crash. Lost: an atomic create in `os` through a
+  temporary name and a rename; it leaves a temporary file after a crash, which needs a
+  sweep, and a caller already learns from its own header whether a file holds data.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -3680,6 +3778,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   text, 2026-10-07 17:35 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214.
+  Amended (2026-10-07, #1264): a `Mode::Create` open in flight at a crash that makes a
+  file draws its state. After a `Process` crash the file is whole or has no bytes. After
+  a `Power` crash there is no file, or the file with no bytes or whole, with the
+  entries of its directory durable, as when the file system commits its journal by
+  itself or the `fsync` of the open commits it. The commit acts as a `sync_dir` of the
+  directory, so it also keeps each earlier change there, a rename too, and the digest
+  holds the drawn state. Lost: a create in two calls, one that makes the entry and one
+  that allocates; it doubles the calls of each create, changes the stream of each run,
+  and adds a step that `env` does not have.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z, the entries of the
+  directory at 2026-10-07T19:22:31Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
