@@ -34,7 +34,7 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
 }
 
 #[test]
-#[ignore = "waits on #336, #337, #340, #341, #451, #1256, and #1419"]
+#[ignore = "waits on #336, #337, #340, #341, #451, #1256, #1419, and #1446"]
 fn a_budget_for_the_outage_delivers_every_sample_in_seq_order() {
     let (stored, written) = check(OUTAGE);
     assert_eq!(stored.samples, WRITTEN, "count");
@@ -44,7 +44,7 @@ fn a_budget_for_the_outage_delivers_every_sample_in_seq_order() {
 }
 
 #[test]
-#[ignore = "waits on #336, #337, #340, #341, #451, #1256, and #1419"]
+#[ignore = "waits on #336, #337, #340, #341, #451, #1256, #1419, and #1446"]
 fn a_budget_for_half_the_outage_delivers_one_gap_of_the_trimmed_samples() {
     let (stored, written) = check(OUTAGE / 2);
     let [Gap { after: 0, count }] = stored.gaps[..] else {
