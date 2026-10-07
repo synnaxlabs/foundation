@@ -259,6 +259,11 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
         Mode::Create { len } if found == 0 && len != 0 => {
             allocate(&fd, len)
                 .and_then(|()| sync_all(&fd))
+                // The blocks are free once `fd` closes. A failed create leaves no file,
+                // so a later write open gives `NotFound`, not an empty file.
+                .or_else(|errno| {
+                    fs::unlinkat(data, path, AtFlags::empty()).and(Err(errno))
+                })
                 .map_err(&failed)?;
             Ok((fd, len))
         }
@@ -350,20 +355,14 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
 /// Allocates the first `len` bytes of the empty file `fd` on disk, all or none, and
 /// sets its length to `len`.
 fn allocate(fd: &OwnedFd, len: u64) -> io::Result<()> {
-    // The length stays 0 until each block is there, also after a crash.
+    // The length stays 0 until each block is there, also after a crash. The first
+    // `ftruncate` frees the blocks that such a crash left past the end.
     #[cfg(target_os = "linux")]
-    return match fs::fallocate(fd, fs::FallocateFlags::KEEP_SIZE, 0, len) {
-        Ok(()) => fs::ftruncate(fd, len),
-        Err(errno) => release(fd).and(Err(errno)),
-    };
+    return fs::ftruncate(fd, 0)
+        .and_then(|()| fs::fallocate(fd, fs::FallocateFlags::KEEP_SIZE, 0, len))
+        .and_then(|()| fs::ftruncate(fd, len));
     #[cfg(target_os = "macos")]
     return crate::allocate::all(fd, len);
-}
-
-/// Frees the blocks that a failed `fallocate` took past the end of the empty file `fd`.
-#[cfg(target_os = "linux")]
-fn release(fd: &OwnedFd) -> io::Result<()> {
-    fs::ftruncate(fd, 0)
 }
 
 /// The path of `path` from the data directory, where an empty path is the data

@@ -41,7 +41,4 @@ exclude_re = [
   'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
-  # Only the `root` target kills these, in its CI step: a mutant leaves the blocks of
-  # `a_create_past_the_free_bytes_gives_full_and_keeps_no_blocks` on the disk.
-  'crates/os/src/files\.rs:.*replace release ->',
 ]

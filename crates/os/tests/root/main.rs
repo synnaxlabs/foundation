@@ -37,7 +37,8 @@ impl Small {
 
 impl Drop for Small {
     fn drop(&mut self) {
-        check(sudo("umount").arg(self.mount()));
+        // Lazy: when a test panics, its files thread may still hold the mount.
+        check(sudo("umount").arg("-l").arg(self.mount()));
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -75,6 +76,8 @@ fn a_create_past_the_free_bytes_gives_full_and_keeps_no_blocks() {
         let error = files.open(Path::new("a"), mode).await.unwrap_err();
         assert_eq!(error, Error::Full { path: "a".into() });
         assert_eq!(files.free().await.unwrap(), free);
+        let error = files.open(Path::new("a"), Mode::Write).await.unwrap_err();
+        assert_eq!(error, Error::NotFound { path: "a".into() });
     });
 }
 
