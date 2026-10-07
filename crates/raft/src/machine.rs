@@ -444,9 +444,8 @@ impl Raft {
     /// reply from a node that is not a peer. A grant or a proof that `step` reads
     /// past the header and then ignores is still a claim. The list is the one `step`
     /// reads only when `step` gets the same message, with no call to this node
-    /// between the two.
-    /// The caller checks each signature against its signer's key before `step`, and
-    /// refuses a `None`: `step` keeps each signature as it came.
+    /// between the two. The caller checks each signature against its signer's key
+    /// before `step`, and refuses a `None`: `step` keeps each signature as it came.
     pub fn claims<'a>(
         &'a self,
         message: &'a Message,
