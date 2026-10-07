@@ -158,7 +158,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Resolves when every frame written before [`Shard::committed`] is on disk, or
-/// with the error that ended the buffer first.
+/// with the error that ended the buffer first. It does not borrow the shard, and it
+/// holds the shard's ring open until it drops.
 #[derive(Debug)]
 pub(crate) struct Commit(buffer::Commit);
 
@@ -226,9 +227,9 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// [`writer::Error::Lease`] for a lease that is not longer than zero, and
-    /// [`writer::Error::Unsynced`] before the node first has mesh time. Neither
-    /// changes the shard.
+    /// In this order: [`writer::Error::Unsynced`] before the node first has mesh
+    /// time, and [`writer::Error::Lease`] for a lease that is not longer than zero.
+    /// Neither changes the shard.
     ///
     /// # Panics
     ///
@@ -243,8 +244,8 @@ impl Shard {
             lease,
             set,
         } = writer;
-        let lease = lease.map(writer::lease).transpose()?;
         let mesh = self.synced().ok_or(writer::Error::Unsynced)?;
+        let lease = lease.map(writer::lease).transpose()?;
         let now = self.monotonic.now();
         let control = control::Writer { subject, authority };
         let entries = set.entries();
@@ -258,10 +259,10 @@ impl Shard {
         self.record_all(&session, mesh);
         let key = writer::Key {
             shard: self.number,
-            writer: self.next,
+            number: self.next,
         };
         self.next += 1;
-        self.writers.insert(key.writer, session);
+        self.writers.insert(key.number, session);
         Ok(key)
     }
 
@@ -272,9 +273,9 @@ impl Shard {
     ///
     /// If the writer is not open, or `key` is of another shard.
     pub(crate) fn close_writer(&mut self, key: writer::Key) {
-        let writer = self.writer(key);
-        let Some(session) = self.writers.remove(&writer) else {
-            panic!("writer {writer} is not open");
+        let number = key.on(self.number);
+        let Some(session) = self.writers.remove(&number) else {
+            panic!("writer {number} is not open");
         };
         let now = self.monotonic.now();
         let mesh = self.mesh();
@@ -307,12 +308,12 @@ impl Shard {
         label: Label,
         frame: Draft,
     ) -> Result<&[Outcome], Error> {
+        let number = key.on(self.number);
+        let Some(session) = self.writers.get(&number) else {
+            panic!("writer {number} is not open");
+        };
         let Label::Path(path) = label else {
             return Err(Error::Resend);
-        };
-        let writer = self.writer(key);
-        let Some(session) = self.writers.get(&writer) else {
-            panic!("writer {writer} is not open");
         };
         let now = self.monotonic.now();
         let mesh = self.mesh();
@@ -452,7 +453,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the reader is not open, or `key` is of another shard.
     pub(crate) fn take(&mut self, key: reader::Key) -> Option<Frame> {
         self.readers.take(self.place(key.slot), key.session)
     }
@@ -462,7 +463,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the reader is not open, or `key` is of another shard.
     pub(crate) fn close_reader(&mut self, key: reader::Key) {
         let mesh = self.mesh();
         self.readers.close(self.place(key.slot), key.session, mesh);
@@ -498,21 +499,6 @@ impl Shard {
     fn mesh(&self) -> Stamp {
         let mesh = self.synced();
         mesh.expect("invariant: a session opened with mesh time, which stays")
-    }
-
-    /// The number on this shard of the writer `key`.
-    ///
-    /// # Panics
-    ///
-    /// If `key` is of another shard, whose writers count from 0 too.
-    fn writer(&self, key: writer::Key) -> u64 {
-        let writer::Key { shard, writer } = key;
-        assert!(
-            shard == self.number,
-            "writer {writer} is of shard {shard}, not shard {}",
-            self.number
-        );
-        writer
     }
 
     /// The place in `indexes` of the index at `slot`.
@@ -2694,6 +2680,27 @@ mod tests {
                 })
             );
         }
+
+        #[test]
+        fn panics_at_the_take_of_a_reader_of_an_index_it_does_not_carry() {
+            let (mut sim, _handle) = start(79, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let reader = latest(&mut shard, Slot::new(2));
+                let other = reader::Key {
+                    slot: Slot::new(3),
+                    ..reader
+                };
+                drop(shard.take(other));
+            });
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: DIR.into(),
+                    message: "the shard does not carry the index at Slot(3)".into(),
+                    seed: 79,
+                })
+            );
+        }
     }
 
     #[test]
@@ -2788,7 +2795,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_lease_of_zero_before_the_node_has_mesh_time() {
+    fn refuses_a_lease_of_zero_as_unsynced_before_the_node_has_mesh_time() {
         run(72, |test| async move {
             let buffer = test.buffer(AREA, BODY_MAX, 4).await;
             let (_, mesh) = clock::Clock::new(test.clock.clone());
@@ -2804,10 +2811,7 @@ mod tests {
                 lease: Some(Span::ZERO),
                 ..writer("a", 1, &two_indexes())
             };
-            assert_eq!(
-                shard.open_writer(zero),
-                Err(writer::Error::Lease { span: Span::ZERO })
-            );
+            assert_eq!(shard.open_writer(zero), Err(writer::Error::Unsynced));
         });
     }
 
@@ -2855,6 +2859,103 @@ mod tests {
                 thread: DIR.into(),
                 message: "writer 0 is of shard 1, not shard 0".into(),
                 seed: 74,
+            })
+        );
+    }
+
+    #[test]
+    fn panics_on_a_resend_write_with_a_writer_key_of_another_shard() {
+        let ran = with_a_key_of_another_shard(75, |test, shard, other| {
+            let set = two_indexes();
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            drop(shard.write(other, Label::Resend, write));
+        });
+        assert_eq!(
+            ran,
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "writer 0 is of shard 1, not shard 0".into(),
+                seed: 75,
+            })
+        );
+    }
+
+    #[test]
+    fn gives_and_takes_keys_of_its_own_number() {
+        run(76, |test| async move {
+            let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+            while test.mesh.now().is_none() {
+                test.clock.sleep(Span::from_nanos(1)).await;
+            }
+            let mut shard = Shard::new(Config {
+                shard: 1,
+                buffer,
+                pool: Rc::clone(&test.pool),
+                monotonic: test.clock.clone(),
+                mesh: test.mesh.clone(),
+                limits: LIMITS,
+            });
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            let set = two_indexes();
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            assert_eq!(
+                a,
+                writer::Key {
+                    shard: 1,
+                    number: 0
+                }
+            );
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+            shard.close_writer(a);
+        });
+    }
+
+    /// Runs `call` with a shard and the key of a writer it closed, and gives the
+    /// panic of the run.
+    fn with_a_closed_writer(
+        seed: u64,
+        call: impl FnOnce(&Test, &mut Shard, writer::Key) + Send + 'static,
+    ) -> Result<(), sim::Error> {
+        let (mut sim, _handle) = start(seed, move |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            shard.close_writer(a);
+            call(&test, &mut shard, a);
+        });
+        sim.run()
+    }
+
+    #[test]
+    fn panics_on_a_write_with_a_closed_writer() {
+        let ran = with_a_closed_writer(77, |test, shard, closed| {
+            let set = two_indexes();
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            drop(shard.write(closed, LIVE, write));
+        });
+        assert_eq!(
+            ran,
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "writer 0 is not open".into(),
+                seed: 77,
+            })
+        );
+    }
+
+    #[test]
+    fn panics_on_a_second_close_of_a_writer() {
+        let ran = with_a_closed_writer(78, |_, shard, closed| {
+            shard.close_writer(closed);
+        });
+        assert_eq!(
+            ran,
+            Err(sim::Error::Panicked {
+                thread: DIR.into(),
+                message: "writer 0 is not open".into(),
+                seed: 78,
             })
         );
     }

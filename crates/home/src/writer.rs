@@ -29,7 +29,24 @@ pub(crate) struct Key {
     /// The number of the shard that opened the writer.
     pub(crate) shard: u32,
     /// The writer's number on its shard.
-    pub(crate) writer: u64,
+    pub(crate) number: u64,
+}
+
+impl Key {
+    /// The writer's number on shard `shard`.
+    ///
+    /// # Panics
+    ///
+    /// If the key is of another shard, whose writers count from 0 too.
+    pub(crate) fn on(self, shard: u32) -> u64 {
+        assert!(
+            self.shard == shard,
+            "writer {} is of shard {}, not shard {shard}",
+            self.number,
+            self.shard
+        );
+        self.number
+    }
 }
 
 /// Why a writer did not open. Nothing changed.
