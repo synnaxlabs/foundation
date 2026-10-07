@@ -218,17 +218,21 @@ impl Readers {
         }
     }
 
-    /// Records that the session has every sample below `position`.
+    /// Records that the session has every sample below `position`. An ack to a closed
+    /// session changes nothing: an ack can arrive after its session closes.
     ///
     /// # Errors
     ///
-    /// [`Error::Ack`] when `position` drops a path, adds one, or moves back on one.
+    /// [`Error::Ack`] when the session is open and `position` drops a path, adds one,
+    /// or moves back on one.
     ///
     /// # Panics
     ///
-    /// If the complete session is not open.
+    /// If this `Readers` never gave `key`.
     pub fn ack(&mut self, key: complete::Key, position: Position) -> Result<(), Error> {
-        let i = self.find(key);
+        let Some(i) = self.find(key) else {
+            return Ok(());
+        };
         let session = &mut self.complete[i];
         let from = session.position;
         let forward = position.live >= from.live
@@ -253,13 +257,8 @@ impl Readers {
     ///
     /// If this `Readers` never gave `key`.
     pub fn grant(&mut self, key: complete::Key, limit_bytes: u64) {
-        if let Ok(i) = self.complete.binary_search_by_key(&key, |s| s.key) {
+        if let Some(i) = self.find(key) {
             self.flows[i].credit.grant(limit_bytes);
-        } else {
-            assert!(
-                key.0 < self.next_complete,
-                "complete session {key} was never open"
-            );
         }
     }
 
@@ -340,17 +339,17 @@ impl Readers {
         !self.queue.is_empty()
     }
 
-    /// Takes the session's next waiting frame, or `None` when it has none. A latest
-    /// session has at most one; a complete session has the frames that
-    /// [`Readers::release`] gave it, in seq order.
+    /// Takes the session's next waiting frame, or `None` when it has none or is
+    /// closed. A latest session has at most one; a complete session has the frames
+    /// that [`Readers::release`] gave it, in seq order.
     ///
     /// # Panics
     ///
-    /// If the session is not open.
+    /// If this `Readers` never gave `key`.
     pub fn take(&mut self, key: Key) -> Option<Frame> {
         match key {
             Key::Complete(key) => {
-                let i = self.find(key);
+                let i = self.find(key)?;
                 self.flows[i].waiting.pop_front()
             }
             Key::Latest(key) => self.take_latest(key),
@@ -358,16 +357,18 @@ impl Readers {
     }
 
     /// Ends the session at `now`, in either mode. A waiting frame does not go out. The
-    /// last complete session drops the queued frames.
+    /// last complete session drops the queued frames. A close of a closed session
+    /// changes nothing: a close can arrive after a takeover.
     ///
     /// # Panics
     ///
-    /// If the session is not open.
+    /// If this `Readers` never gave `key`.
     pub fn close(&mut self, key: Key, now: Stamp) {
         match key {
             Key::Complete(key) => {
-                let i = self.find(key);
-                self.close_complete(i, now);
+                if let Some(i) = self.find(key) {
+                    self.close_complete(i, now);
+                }
             }
             Key::Latest(key) => self.close_latest(key),
         }
@@ -463,15 +464,28 @@ impl Readers {
         self.complete.iter().position(|s| s.name() == Some(name))
     }
 
-    fn find(&self, key: complete::Key) -> usize {
-        self.complete
-            .binary_search_by_key(&key, |session| session.key)
-            .unwrap_or_else(|_| panic!("complete session {key} is not open"))
+    /// The open complete session `key`, or `None` when it closed. Panics on a key
+    /// never given.
+    fn find(&self, key: complete::Key) -> Option<usize> {
+        if key.0 >= self.next_complete {
+            never_open(key.into());
+        }
+        self.complete.binary_search_by_key(&key, |s| s.key).ok()
     }
 
     fn remove(&mut self, i: usize) -> Session {
         self.flows.remove(i);
         self.complete.remove(i)
+    }
+}
+
+/// Panics because this `Readers` never gave `key`.
+#[cold]
+#[inline(never)]
+fn never_open(key: Key) -> ! {
+    match key {
+        Key::Latest(key) => panic!("latest session {key} was never open"),
+        Key::Complete(key) => panic!("complete session {key} was never open"),
     }
 }
 
@@ -678,6 +692,28 @@ pub(super) mod tests {
         drained(readers);
     }
 
+    /// Makes each call on the closed session `key`, and asserts that it changes
+    /// nothing.
+    pub(super) fn dropped(readers: &mut Readers, key: Key) {
+        let before = format!("{readers:?}");
+        if let Key::Complete(key) = key {
+            readers.grant(key, u64::MAX);
+            assert_eq!(readers.ack(key, live(0)), Ok(()));
+        }
+        assert!(readers.take(key).is_none());
+        readers.close(key, at(i64::MAX));
+        assert_eq!(format!("{readers:?}"), before);
+    }
+
+    /// Checks [`dropped`] on each complete key that `readers` gave and `open` rejects.
+    fn dropped_closed(readers: &mut Readers, open: impl Fn(&complete::Key) -> bool) {
+        for key in (0..readers.next_complete).map(complete::Key) {
+            if !open(&key) {
+                dropped(readers, key.into());
+            }
+        }
+    }
+
     mod open {
         use super::*;
 
@@ -798,12 +834,13 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "complete session 0 is not open")]
         fn closes_the_old_session() {
             let mut readers = Readers::new(0);
             let old = readers.open(named("a", 10), resume(live(0)), 0).key;
-            readers.open(named("a", 10), resume(live(0)), 0);
-            readers.ack(old, live(1)).expect("panics before");
+            let new = readers.open(named("a", 10), resume(live(0)), 0).key;
+            readers.ack(new, live(5)).expect("forward");
+            assert_eq!(readers.ack(old, live(1)), Ok(()));
+            assert_eq!(readers.floor(), Some(live(5)));
         }
 
         #[test]
@@ -891,11 +928,85 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "complete session 0 is not open")]
-        fn panics_on_a_closed_session() {
-            let (mut readers, key) = opened(live(0));
+        fn to_a_closed_session_changes_nothing() {
+            let (mut readers, key) = opened(live(4));
             readers.close(key.into(), at(1));
-            readers.ack(key, live(1)).expect("panics before");
+            drained(&mut readers);
+            assert_eq!(readers.ack(key, live(9)), Ok(()));
+            assert_eq!(readers.ack(key, live(2)), Ok(()));
+            readers.flush();
+            assert_eq!(drained(&mut readers), []);
+            assert_eq!(readers.floor(), Some(live(4)));
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 1 was never open")]
+        fn panics_on_a_session_never_open() {
+            let (mut readers, _) = opened(live(0));
+            readers
+                .ack(complete::Key(1), live(1))
+                .expect("panics before");
+        }
+    }
+
+    mod late {
+        use super::*;
+
+        #[test]
+        fn after_a_close_keeps_the_hold_of_the_first_close() {
+            let mut readers = Readers::new(0);
+            let key = readers.open(named("a", 10), Start::At(live(2)), 0).key;
+            readers.close(key.into(), at(1));
+            drained(&mut readers);
+            dropped(&mut readers, key.into());
+            assert_eq!(drained(&mut readers), []);
+            assert_eq!(readers.floor(), Some(live(2)));
+            assert_eq!(readers.deadline(), Some(at(11)));
+        }
+
+        #[test]
+        fn after_a_takeover_by_a_complete_session_leaves_it_open() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
+            let new = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
+            readers.queue(&frames.frame(1), 0..1);
+            drained(&mut readers);
+            dropped(&mut readers, old.into());
+            assert_eq!(drained(&mut readers), []);
+            assert_eq!(readers.release(1), [new]);
+            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+            assert_eq!(readers.ack(new, live(1)), Ok(()));
+        }
+
+        #[test]
+        fn after_a_takeover_by_a_latest_session_leaves_it_open() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
+            let name = "a".parse().expect("valid name");
+            let new = readers.open_latest(Some(name), at(1)).key;
+            assert_eq!(readers.put(frames.frame(1)), [new]);
+            drained(&mut readers);
+            dropped(&mut readers, old.into());
+            assert_eq!(drained(&mut readers), []);
+            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 1 was never open")]
+        fn take_panics_on_a_session_never_open() {
+            let mut readers = Readers::new(0);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            readers.take(complete::Key(1).into());
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 1 was never open")]
+        fn close_panics_on_a_session_never_open() {
+            let mut readers = Readers::new(0);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0);
+            readers.close(complete::Key(1).into(), at(0));
         }
     }
 
@@ -1693,12 +1804,14 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "complete session 0 is not open")]
-        fn take_panics_on_a_closed_session() {
+        fn take_gives_a_closed_session_nothing() {
+            let frames = Frames::new(1);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 10);
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), [key]);
             readers.close(key.into(), at(0));
-            readers.take(key.into());
+            assert_eq!(taken(&mut readers, key), []);
         }
     }
 
@@ -1965,6 +2078,7 @@ pub(super) mod tests {
                 model.forget(now);
                 apply(&mut readers, &mut model, input, now);
                 records.extend(readers.records());
+                dropped_closed(&mut readers, |key| model.open.contains_key(key));
             }
             if flushed {
                 readers.flush();
@@ -2229,6 +2343,7 @@ pub(super) mod tests {
                     }
                 }
                 assert_eq!(readers.pending(), model.pending());
+                dropped_closed(&mut readers, |key| model.open.contains_key(key));
             }
         }
 

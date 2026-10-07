@@ -2,15 +2,16 @@
 name: build
 description:
   The builder loop: take the next ready issue in any crate, build it, review it, and
-  merge it through the queue. One issue per context. Use when a builder,
-  integrator, or connector session starts, with the argument `night` on the night lane.
+  merge it through the queue, then clear the context and take the next one. Use when a
+  builder, integrator, or connector session starts, with the argument `night` on the
+  night lane.
 ---
 
 # Build
 
 You are `$FACTORY_NAME` (`echo $FACTORY_NAME`). You build in any crate: work goes to
 whoever is idle, so all accounts spend their budget. You work one issue per context:
-when its PR merges, you stop.
+when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
 
 ## Take an issue
 
@@ -53,14 +54,13 @@ or a line range.
 7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.
 8. `/review <pr>`. It runs the reviewers by tier and the second round.
 9. If review changed code, run the gate again. Then `gh pr ready <n>` and
-   `gh pr merge <n> --auto`. The merge queue takes it when the checks and code owners
-   pass.
+   `gh pr merge <n> --auto`. The merge queue takes it when the checks pass.
 10. **Wait once.** Run `.claude/skills/build/wait.sh <n>` with `run_in_background`.
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
-    - Exit 0 (merged): comment the final state on the issue and stop. Tell your
-      engineer: "#<n> merged. Run `/clear`, then `/build`." On the night lane, take the
-      next `night` issue in this context instead.
+    - Exit 0 (merged): comment the final state on the issue, call
+      `mcp__factory__next`, and end your turn. On the night lane, take the next
+      `night` issue in this context instead.
     - Exit 1: read the cause it prints (`gh pr checks <n>`,
       `gh run view <id> --log-failed | tail -60`, or the review). Fix it, run the gate
       on what changed, `gh pr merge <n> --auto`, and wait again.
@@ -96,7 +96,8 @@ cargo mutants --in-diff "$p" --jobs 4
 
 Never change a public surface, a decision, or another crate. When the work needs a
 person or a decision, ask on the issue, add `blocked`, and take the next `night` issue.
-A PR that waits for a code owner waits for the morning; take the next issue meanwhile.
+A PR that needs the person (`oracles/`, `.github/`, `.claude/`) waits for the morning;
+take the next issue meanwhile.
 
 ## Rules
 
@@ -106,5 +107,8 @@ A PR that waits for a code owner waits for the morning; take the next issue mean
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
-  to `laptop.architect`, who records it.
+  to `laptop.architect`.
+- When the architect rules in a comment on your issue, act on it at once. Add the ruling
+  to the crate's section of `docs/decisions.md` in your PR, with who decided and the
+  comment link.
 - Before you stop, comment your state on the issue: done, next step, open questions.

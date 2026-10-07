@@ -32,6 +32,6 @@ A regression over 5% is a finding, not a verdict. Report it as the P1 judgment:
 - the noise of the machine: its load, and how far `main` moves against itself;
 - what the change buys.
 
-The code owner accepts or rejects it on those facts.
+The architect accepts or rejects it on those facts.
 
 For each finding: file and line, the cost (measured), and the fix. Most severe first.

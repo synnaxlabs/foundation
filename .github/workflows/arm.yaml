@@ -27,20 +27,22 @@ concurrency:
 
 jobs:
   # A trigger path filter leaves a required check pending, and a skipped one passes. So
-  # `test` skips only when this filter ran and found no change.
+  # `test` skips only when this filter ran and found no change. A merge queue push skips
+  # `test`, because the queue already ran it on the same commit.
   changes:
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.actor == 'github-merge-queue[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      code: ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.code }}
     steps:
       # In the merge queue, the filter diffs the group's base and head in a clone.
       - if: github.event_name == 'merge_group'
         uses: actions/checkout@v4
-      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+      - if: github.event_name != 'push'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: filter
         with:
           base: ${{ github.event.merge_group.base_sha }}
