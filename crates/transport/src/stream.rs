@@ -291,7 +291,7 @@ struct Sending<'a> {
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
         if !self.done {
-            self.session.abandon(self.stream);
+            self.session.abandon(self.stream, self.message.is_none());
         }
     }
 }
