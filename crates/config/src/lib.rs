@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, btree_map};
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
-use types::name::Name;
+use spec::definition::Definition;
+use types::name::{Name, Selector};
 
 const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
 const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
@@ -33,7 +34,7 @@ const KINDS: [(&str, Check); 2] = [
 #[non_exhaustive]
 pub struct Entry {
     /// The definition, as the spec tree stores it.
-    pub definition: spec::definition::Definition,
+    pub definition: Definition,
     /// Where the label is.
     pub label_span: Option<Span>,
 }
@@ -264,6 +265,33 @@ impl<'a> Found<'a> {
         }
     }
 
+    /// The `select` attribute of a policy block. When the block has none, it reports
+    /// `config.missing-attribute` with a fix that names `selects`, what the policy
+    /// selects, such as "nodes that it sets".
+    fn select(&mut self, block: &Block, selects: &str) -> Result<Selector, Reported> {
+        if let Some(select) = self.attribute(block, "select", read::selector)? {
+            return Ok(select);
+        }
+        let fix = format!(
+            "Add a `select` attribute with the {selects}, such as \"site_a.*\""
+        );
+        self.missing(block, &["select"], fix);
+        Err(Reported)
+    }
+
+    /// Adds `definition` at the key of its block, when the block has one.
+    fn add(&mut self, key: Option<(Name, Option<Span>)>, definition: Definition) {
+        if let Some((key, label_span)) = key {
+            self.entries.insert(
+                key,
+                Entry {
+                    definition,
+                    label_span,
+                },
+            );
+        }
+    }
+
     /// Reports that `block` has none of the attributes `keys`.
     fn missing(&mut self, block: &Block, keys: &[&str], fix: String) {
         self.diagnostics.push(Diagnostic::new(
@@ -282,7 +310,6 @@ mod tests {
     use proptest::prelude::*;
     use spec::node_settings::Policy;
     use types::byte;
-    use types::name::Selector;
 
     use super::*;
 
