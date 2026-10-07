@@ -3273,18 +3273,19 @@ How to read this record:
   read handle, or a `to` that is not a name in the directory of the file (another
   directory, empty, `.`, or ending in `/` or `/.`), is a defect and panics. A trailing
   slash gives `ENOTDIR` on Linux and `ENOENT` on macOS, so no error can name it the
-  same way on both. It poisons the file only when it is dropped before it ends, as any
-  other call. The rename can still end after the drop, and then the file is at `to`.
-  `os` checks that the old path still names the file by device and inode, with no
-  follow of a link, then renames with `RENAME_NOREPLACE`; the I/O thread runs the
-  calls of a node in order, so nothing changes the path between the check and the
-  rename. Lost: `Files::rename(from, to)` on paths, which cannot tell the file of the
+  same way on both. It poisons the file when its sync fails or when it is dropped
+  before it ends, as any other call. The rename can still end after the drop, and
+  then the file is at `to`. `os` checks that the old path still names the file by
+  device and inode, with no follow of a link, then renames with `RENAME_NOREPLACE`;
+  the I/O thread of a shard runs its calls in order, and each shard writes only its
+  own directory, so nothing changes the path between the check and the rename. Lost:
+  `Files::rename(from, to)` on paths, which cannot tell the file of the
   handle from a new file at its path; a link then an unlink, which leaves two names at
   a crash; a replacing rename or a `replace: bool`, which no caller wants and which
   hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
   &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
   one call that takes a name in place of a path in the data directory (#1449, decided
-  by `laptop.architect-2`, 2026-10-07:
+  by `laptop.architect-2`, 2026-10-07 14:55 UTC:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   panic list and the bare-name reason:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
@@ -3312,6 +3313,8 @@ How to read this record:
   `Power` crash keeps the durable entries of each directory, as for a create or a
   remove, so it undoes each rename since the last `sync_dir` of the directory, a rename
   in flight too. A `Process` crash applies a rename in flight, as for other calls.
+  Decided by `laptop.architect-2`, #1449
+  (https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508).
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

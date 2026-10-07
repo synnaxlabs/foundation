@@ -375,8 +375,8 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
 }
 
 /// Renames `from` to `to` when `from` names the file `fd`, with no replace. The I/O
-/// thread runs every call in order, so nothing changes `from` between the check and
-/// the rename.
+/// thread of a shard runs its calls in order, and each shard writes only its own
+/// directory, so nothing changes `from` between the check and the rename.
 fn rename(fd: &OwnedFd, data: &OwnedFd, from: &Path, to: &Path) -> Result<(), Error> {
     let failed = fail(from, Operation::Rename);
     let stat = fs::fstat(fd).map_err(&failed)?;

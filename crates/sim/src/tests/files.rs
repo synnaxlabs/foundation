@@ -1319,6 +1319,24 @@ fn dropped_rename(value: u64, remade: bool) -> Vec<PathBuf> {
 }
 
 #[test]
+fn a_close_waits_for_a_dropped_rename() {
+    for value in 0..8 {
+        let names = run(value, MIB, move |node, _| async move {
+            let files = node.files();
+            let mut file = create(&node, "a", KIB).await;
+            let mut rename = Box::pin(file.rename(Path::new("b")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+            drop(rename);
+            file.close().await;
+            files.list(Path::new("")).await.unwrap()
+        });
+        assert_eq!(names, [Path::new("b")], "value {value}");
+    }
+}
+
+#[test]
 fn a_dropped_rename_still_ends() {
     for value in 0..8 {
         assert_eq!(

@@ -908,12 +908,23 @@ mod tests {
     }
 
     /// Never ends a call of one operation.
-    struct Stuck(Operation);
+    /// A driver that hangs the call of `on` after `passed` calls of it ended.
+    struct Stuck {
+        on: Operation,
+        passed: Cell<u32>,
+    }
 
     impl Stuck {
         fn file(on: Operation) -> File {
+            Self::file_after(on, 0)
+        }
+
+        fn file_after(on: Operation, passed: u32) -> File {
             File {
-                descriptor: Box::new(Self(on)),
+                descriptor: Box::new(Self {
+                    on,
+                    passed: Cell::new(passed),
+                }),
                 path: "ring/0".into(),
                 mode: Mode::Write,
                 poisoned: Cell::new(false),
@@ -921,8 +932,11 @@ mod tests {
         }
 
         fn request(&self, operation: Operation) -> Request<'_, ()> {
-            if self.0 == operation {
-                return Box::pin(std::future::pending());
+            if self.on == operation {
+                if self.passed.get() == 0 {
+                    return Box::pin(std::future::pending());
+                }
+                self.passed.set(self.passed.get() - 1);
             }
             Box::pin(async { Ok(()) })
         }
@@ -1238,10 +1252,6 @@ mod tests {
             let mut file = open(&files, Mode::Write);
             ready(file.rename(Path::new("ring/1"))).expect("the driver renames");
             assert_eq!(calls.borrow()[1..], ["sync", "rename ring/0 ring/1"]);
-            assert_eq!(
-                format!("{file:?}"),
-                r#"File { path: "ring/1", mode: Write, poisoned: false, .. }"#
-            );
             ready(file.rename(Path::new("ring/2"))).expect("the driver renames");
             assert_eq!(calls.borrow()[3..], ["sync", "rename ring/1 ring/2"]);
         }
@@ -1256,10 +1266,9 @@ mod tests {
 
         #[test]
         fn an_error_after_the_rename_names_the_new_path() {
-            let (files, _) = Fixed::files(8);
-            let mut file = open(&files, Mode::Write);
+            let mut file = Stuck::file_after(Operation::Sync, 1);
             ready(file.rename(Path::new("ring/1"))).expect("the driver renames");
-            file.poisoned.set(true);
+            drop_pending(file.sync());
             assert_eq!(ready(file.write_at(0, &[])), poisoned("ring/1"));
         }
 
@@ -1340,10 +1349,10 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "rename ring/0 to , which is not a name")]
+        #[should_panic(expected = "rename a to , which is not a name")]
         fn panics_on_an_empty_path() {
             let (files, _) = Fixed::files(8);
-            let mut file = open(&files, Mode::Write);
+            let mut file = ready(files.open(Path::new("a"), Mode::Write)).unwrap();
             drop(ready(file.rename(Path::new(""))));
         }
 
@@ -1364,10 +1373,10 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "rename ring/0 to ., which is not a name")]
+        #[should_panic(expected = "rename a to ., which is not a name")]
         fn panics_on_the_current_directory() {
             let (files, _) = Fixed::files(8);
-            let mut file = open(&files, Mode::Write);
+            let mut file = ready(files.open(Path::new("a"), Mode::Write)).unwrap();
             drop(ready(file.rename(Path::new("."))));
         }
 

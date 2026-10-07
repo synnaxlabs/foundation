@@ -970,6 +970,23 @@ fn a_power_cut_leaves_a_renamed_file_at_one_name_with_its_synced_bytes() {
     assert_eq!(outcomes, all);
 }
 
+#[test]
+fn a_power_cut_after_a_rename_and_before_its_sync_dir_keeps_the_old_name() {
+    for seed in 0..8 {
+        let (mut sim, node) = disk(seed);
+        crash_after(&mut sim, &node, Crash::Power, |node| async move {
+            let mut file = create_synced(&node).await;
+            file.rename(Path::new("b")).await.unwrap();
+        });
+        let names = sim
+            .run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
+        assert_eq!(names, [PathBuf::from("a")], "seed {seed}");
+    }
+}
+
 /// The names in the data directory after `crash` with a rename of the synced file
 /// `a` to `b` in flight: the rename is polled 200 us before the crash, so its sync
 /// ends, and again at the crash, which puts the rename call in flight.
