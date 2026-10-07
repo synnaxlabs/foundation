@@ -76,9 +76,20 @@ fn holds_a_gap_of_i64_max() {
 }
 
 #[test]
-#[should_panic(expected = "a gap holds fewer than 2^63 samples")]
+#[should_panic(expected = "invariant: a gap holds fewer than 2^63 samples, held \
+                9223372036854775807, added 1")]
 fn panics_past_i64_max() {
     let mut gap = Gap::new("influx", "edge.time").unwrap();
     gap.add(u64::try_from(i64::MAX).unwrap());
     gap.add(1);
+}
+
+#[test]
+#[should_panic(
+    expected = "invariant: a gap holds fewer than 2^63 samples, held 0, added \
+                18446744073709551615"
+)]
+fn panics_on_one_add_past_i64_max() {
+    let mut gap = Gap::new("influx", "edge.time").unwrap();
+    gap.add(u64::MAX);
 }

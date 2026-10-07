@@ -36,10 +36,16 @@ impl Gap {
     ///
     /// When the gap passes `i64::MAX` samples, which takes 2^63 samples on one index.
     pub fn add(&mut self, count: u64) {
+        let held = self.count;
         self.count = i64::try_from(count)
             .ok()
-            .and_then(|count| self.count.checked_add(count))
-            .expect("a gap holds fewer than 2^63 samples");
+            .and_then(|count| held.checked_add(count))
+            .unwrap_or_else(|| {
+                panic!(
+                    "invariant: a gap holds fewer than 2^63 samples, held {held}, \
+                     added {count}"
+                )
+            });
     }
 
     /// Appends the gap's line at `stamp`, the stamp of the first sample after the
