@@ -1572,9 +1572,9 @@ How to read this record:
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
   and until then no message leaves, nothing applies, and the group gets no tick. Nothing
   bounds the proposals and the messages that the group takes in that time, and a write
-  whose blocks the pool cannot hold at one time waits with no end (#1091). A pool whose
-  largest block is less than one sector does not open (MESH LOG), so no write gives
-  `TooLarge` and the group does not stop for it (decided by the architect:
+  whose blocks the pool can never hold at one time waits with no end (#1091). A pool
+  whose largest block is less than one sector does not open (MESH LOG), so no write
+  gives `TooLarge` and the group does not stop for it (decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
   `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
