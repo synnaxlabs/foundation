@@ -917,11 +917,14 @@ fn a_crash_stops_a_leaked_timer() {
     }
 }
 
-/// The names in the data directory, and the sectors of the file at `b` if one is
-/// there, after a power cut at an instant set by `seed` in a create of `a`, a
-/// `sync_dir`, a write of 1s, a sync, a rename to `b`, and a `sync_dir`.
-fn renamed_at_cut(seed: u64) -> (Vec<PathBuf>, Option<Vec<u8>>) {
+/// The names in the data directory, the sectors of the file at `b` if one is there,
+/// and whether the first `sync_dir` ended, after a power cut at an instant set by
+/// `seed` in a create of `a`, a `sync_dir`, a write of 1s, a sync, a rename to `b`,
+/// and a `sync_dir`.
+fn renamed_at_cut(seed: u64) -> (Vec<PathBuf>, Option<Vec<u8>>, bool) {
     let (mut sim, node) = disk(seed);
+    let durable = Arc::new(AtomicBool::new(false));
+    let synced = Arc::clone(&durable);
     crash_after(&mut sim, &node, Crash::Power, move |node| async move {
         let crash = node::Config::default().monotonic + BEFORE;
         let early = Span::from_nanos(i64::try_from(seed % 64).unwrap() * 10_000);
@@ -929,6 +932,7 @@ fn renamed_at_cut(seed: u64) -> (Vec<PathBuf>, Option<Vec<u8>>) {
         let (files, pool) = (node.files(), pool());
         let mut file = create(&node, "a", 1_024).await;
         files.sync_dir(Path::new("")).await.unwrap();
+        synced.store(true, Ordering::Relaxed);
         file.write_at(0, &[block(&pool, &[1; 1_024])])
             .await
             .unwrap();
@@ -943,7 +947,7 @@ fn renamed_at_cut(seed: u64) -> (Vec<PathBuf>, Option<Vec<u8>>) {
             Ok(file) => Some(sectors(&read(&file, &pool(), 0, 1_024).await)),
             Err(_) => None,
         };
-        (names, at_b)
+        (names, at_b, durable.load(Ordering::Relaxed))
     })
     .unwrap()
 }
@@ -952,8 +956,11 @@ fn renamed_at_cut(seed: u64) -> (Vec<PathBuf>, Option<Vec<u8>>) {
 fn a_power_cut_leaves_a_renamed_file_at_one_name_with_its_synced_bytes() {
     let mut outcomes = BTreeSet::new();
     for seed in 0..64 {
-        let (names, at_b) = renamed_at_cut(seed);
+        let (names, at_b, durable) = renamed_at_cut(seed);
         assert!(names.len() <= 1, "seed {seed}: {names:?}");
+        if durable {
+            assert_eq!(names.len(), 1, "seed {seed}: {names:?}");
+        }
         if names == [PathBuf::from("b")] {
             assert_eq!(at_b, Some(vec![1, 1]), "seed {seed}");
         }

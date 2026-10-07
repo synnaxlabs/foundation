@@ -3263,26 +3263,29 @@ How to read this record:
   so that a store format asserts against it when it compiles. A length read from the
   device at run time lost (#569).
 - **FILE RENAME (2026-10-07)** `File::rename(&mut self, to: &Path)` moves an open file
-  to `to`, in the same directory, with no replace. It first syncs the file, so that a
-  reader at the new name sees the bytes written before it. After `Ok`, the handle names
-  `to` in its errors, and a write open of `to` is `Busy` until the handle closes. It
-  renames the file that the handle opened, not whatever path now holds its old name:
-  when the old path is gone or holds another file (a remove and a create since the
-  open), it gives `NotFound { path: old }` and changes nothing. When `to` is there, it
-  gives `Exists { path: to }` and changes nothing; the handle stays usable. A read
-  handle, a path in another directory, or a path that does not end in a name (empty,
-  or with `/` or `.` last, so a directory) is a defect and panics. It poisons the file only when it is dropped before it ends, as any
-  other call. `os` checks that the old path still names the file by device and inode,
-  with no follow of a link, then renames with `RENAME_NOREPLACE`; the I/O thread runs
-  the calls of a node in order, so nothing changes the path between the check and the
+  to `to`, in the same directory, with no replace. It first syncs the file, so that no
+  crash leaves the new name with bytes that were not durable (#1441). After `Ok`, the
+  handle names `to` in its errors, and a write open of `to` is `Busy` until the handle
+  closes. It renames the file that the handle opened, not whatever path now holds its
+  old name: when the old path is gone or holds another file (a remove and a create
+  since the open), it gives `NotFound { path: old }` and changes nothing. When `to` is
+  there, it gives `Exists { path: to }` and changes nothing; the handle stays usable. A
+  read handle, or a `to` that is not a name in the directory of the file (another
+  directory, empty, `.`, or ending in `/` or `/.`), is a defect and panics. A trailing
+  slash gives `ENOTDIR` on Linux and `ENOENT` on macOS, so no error can name it the
+  same way on both. It poisons the file only when it is dropped before it ends, as any
+  other call. The rename can still end after the drop, and then the file is at `to`.
+  `os` checks that the old path still names the file by device and inode, with no
+  follow of a link, then renames with `RENAME_NOREPLACE`; the I/O thread runs the
+  calls of a node in order, so nothing changes the path between the check and the
   rename. Lost: `Files::rename(from, to)` on paths, which cannot tell the file of the
-  handle from a new file at its path; a link then an unlink, which leaves two names at a
-  crash; a replacing rename or a `replace: bool`, which no caller wants and which hides
-  a defect that `Exists` reports; and a bare-name `rename(&mut self, name: &OsStr)`,
-  because each caller holds whole paths (`ring.new` to `ring`) and the path of the
-  handle and its errors need one (#1449, decided by
-  `laptop.architect-2`, 2026-10-07:
-  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508).
+  handle from a new file at its path; a link then an unlink, which leaves two names at
+  a crash; a replacing rename or a `replace: bool`, which no caller wants and which
+  hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
+  &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
+  one call that takes a name in place of a path in the data directory (#1449, decided
+  by `laptop.architect-2`, 2026-10-07: https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
+  panic list and the bare-name reason: https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
@@ -3304,8 +3307,9 @@ How to read this record:
   them, and a later write goes over them. A power cut drops them, and at each read or
   write of their sector the cache may drop them, by a coin. A sector with a write that
   no `sync` covered is dirty, and the cache keeps it. Amended (2026-10-07, #1449): a
-  `Power` crash drops a rename in flight and puts the file back at its durable name; a
-  `Process` crash applies it.
+  `Power` crash keeps the durable entries of each directory, as for a create or a
+  remove, so it undoes each rename since the last `sync_dir` of the directory, a rename
+  in flight too. A `Process` crash applies a rename in flight, as for other calls.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
