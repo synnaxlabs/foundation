@@ -1337,8 +1337,16 @@ mod tests {
                 ("an area of one record of two blocks", 2 * block, 4088),
                 ("an area of one record of one block", block, 4087),
                 ("an area of two records", 4 * block, 4088),
-                ("an area of four records less a block", 3 * block, 4087),
-                ("an area of four records less a block", 7 * block, 4088),
+                (
+                    "an area of four one-block records less a block",
+                    3 * block,
+                    4087,
+                ),
+                (
+                    "an area of four two-block records less a block",
+                    7 * block,
+                    4088,
+                ),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
                 ("a file over u64", u64::MAX - 4095, 4087),
