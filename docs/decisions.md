@@ -1743,14 +1743,24 @@ How to read this record:
   so a power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
-  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
-  proposal that a follower forwards to the leader, and its two answers (the position
-  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
-  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
-  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
-  format version. A message has one byte form, and a decode takes nothing else. The
-  log (MESH LOG) and the messages share the byte form of an entry. Decided by
-  `consensus`, approved by the coordinator (#471).
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
+  that a follower forwards to the leader, and its two answers (the position of the
+  entry, or "not the leader" with the leader the receiver knows). `wire` does not carry
+  them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and `wire` must
+  not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the format
+  version. A `raft` message travels on a one-way stream. A member forwards a proposal as
+  one two-way stream of `Class::Command`: the stream carries one proposal, the leader
+  writes one answer on its reply half, and then both halves end. So a proposal and its
+  answers name no sender and carry no request number (#779): a request number makes the
+  node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
+  and HUB WIRE already answers on the stream that asks. A two-way stream whose first
+  message is not a proposal, or a proposal on a one-way stream, breaks the protocol, and
+  the receiver ends the stream with code 2 (`wire::header::MALFORMED`) (decided by the
+  architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
+  has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
+  messages share the byte form of an entry. Decided by `consensus`, approved by the
+  coordinator (#471).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
   the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
@@ -1766,7 +1776,34 @@ How to read this record:
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242:
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
+  `propose` returns the position of its entry only after the write that holds the entry
+  ends: a lone voter leads before its term is on disk, and after a power cut the same
+  position can hold another change. A second call that waits for the write lost: no
+  caller needs a position that is not on disk, and a caller that skips the wait gets
+  that defect again (decided by the architect, 2026-10-07T08:18:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033920665). When the
+  append of a new leader replaces the entry before a write holds it, `propose` gives
+  "not the leader": the task tells each proposal whether the `Ready` that it wrote held
+  the entry, by index and term, and the first `Ready` after the call decides (approved
+  by the architect, 2026-10-07T10:17:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035860357). A node
+  that gets a forwarded proposal (MESH WIRE) proposes the change, and its answer is the
+  position, or "not the leader" with the leader that it knows. A proposal from a peer
+  whose key no voter of this node's configuration holds is refused
+  (`Error::PeerNotVoter`, with the key of the peer, because a forwarded change names no
+  sender; `Error::NotVoter` names the sender of a message; decided by the architect,
+  2026-10-07T10:38:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6036181809); a
+  member that is not a voter proposes with join (#336). The leader does not check the
+  home of a forwarded change: `Error::NotMember` checks only the argument of a local
+  caller, and the check of a home at apply on each node is #1273. A forwarded change
+  applies at least one time: a member that got no answer forwards it again, and the
+  leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
+  state of a call that took effect last. A later `Change` kind that is not safe to
+  repeat needs a ruling before a member forwards it (decided by the architect,
+  2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
   system refuses memory for (`Refused`), does not stop the group, because each may
@@ -1775,8 +1812,8 @@ How to read this record:
   bounds the proposals and the messages that the group takes in that time, and a write
   whose blocks the pool can never hold at one time waits with no end (#1091). A free
   block of a size with a block in use keeps its budget (#291), so a write can also wait
-  while the budget has room for its blocks: with no end when the block in use is its
-  own (#1091), and else until the other user of the pool drops its block (#1134). A pool
+  while the budget has room for its blocks: with no end when the block in use is its own
+  (#1091), and else until the other user of the pool drops its block (#1134). A pool
   whose largest block is less than one sector does not open (MESH LOG), so no write
   gives `TooLarge` and the group does not stop for it (decided by the architect,
   2026-10-07T06:32:47Z:
