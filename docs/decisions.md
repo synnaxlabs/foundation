@@ -251,8 +251,12 @@ How to read this record:
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at
   a crash restores as closed at the restore. Complete and latest sessions have
-  separate key types, so a call in the wrong mode does not compile (#725). Supersedes
-  the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+  separate key types, so a call in the wrong mode does not compile (#725). Only a
+  named complete session needs mesh time to close: `Readers::close_named` and
+  `Readers::open_named_latest` take a stamp, and no other open or close does, so the
+  home opens unnamed readers before the first estimate. A named complete session has a
+  `complete::Key`, and the wrong close of an open session panics; the architect decided
+  (#1024). Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -521,17 +525,20 @@ How to read this record:
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
   is known. Decided by the `write-path` builder (#191).
 - **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
-  clocks in its `Config`, in each call that needs them. Before the node first has mesh
+  `clock::Reader` in its `Config`, in each call that needs them. One
+  `clock::Reader::now` gives both at one instant, so a control lease and a stamp check
+  in one call see the same time, and a lease never compares readings of two clocks
+  (approved by the coordinator on 2026-10-06, #964). Before the node first has mesh
   time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
   so it never meets that case. This is a patch: #523 decides where samples wait before
   the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. Lost: time as
   arguments of each call, because each caller repeats the same two reads and can pass an
   old one. Approved by the coordinator on 2026-10-05 (#191). Mesh time in the home (the
-  ahead limit and the stamp of each entry) is the midpoint of `clock::Reader::now`,
-  which never goes back. Lost: the latest edge, because it goes back when the error
-  shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500 days ahead, so the
-  ahead limit stops nothing and one bad stamp makes each later true stamp `Backwards`
-  (#952 review, 2026-10-06).
+  ahead limit and the stamp of each entry) is the midpoint of the mesh time of
+  `clock::Reader::now`, which never goes back. Lost: the latest edge, because it goes
+  back when the error shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500
+  days ahead, so the ahead limit stops nothing and one bad stamp makes each later true
+  stamp `Backwards` (#952 review, 2026-10-06).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -851,7 +858,11 @@ How to read this record:
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
   `clock::Reader::first` gives that stamp: the first estimate at a reading. Later
   estimates never change it, so the stamps keep the order of their readings and are
-  never after mesh time (#523).
+  never after mesh time (#523). `clock::Reader::now` gives a `clock::Time`: a reading
+  of the monotonic clock, and mesh time at that reading, from one read of the clock, so
+  a sample with no mesh time keeps that reading. Lost: mesh time at a reading the
+  caller made, which can go back while the clock slews down. Approved by the
+  coordinator on 2026-10-06 (#964).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -949,6 +960,25 @@ How to read this record:
   header has one length (a request then sends 32 zero bytes); `encode` into a
   `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
   for the kind of time (two checks where one kind byte does the work).
+- **HUB WIRE (#561)** A remote reader session is one hub stream of class `Complete` or
+  `Latest`. After the header, the reader's node sends `wire::hub::Open`: the mode and
+  the channels, all on one index. A latest session gets the newest live frame before
+  its commit. A complete session gets each live frame after its commit, and `Open`
+  carries its first grant in bytes (CREDIT RULES). The home answers `Opened`; the
+  reader sends `Credit`, its total grant since the open; the home sends each frame as
+  a `Head` (path, seq, count, and the end of each series in the body), then the body.
+  The body holds only the series of the reader's view, the index series too, written
+  from the frame's block as slices, and both ends charge `View::charge` (M2). A body
+  over the peer's `message_bytes_max` goes as more than one message, back to back with
+  no prefix, and the reader fills one block of the length that `Head` gives. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know) and 17 `NOT_HOME` (the node is
+  not the home of the index). Lost: a `message_bytes_max` of at least the largest pool
+  block (a client or a foreign peer can set 1472, and it ties `transport` to the pool);
+  the whole `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an
+  unnamed open needs no mesh time (READER RULES), and a later named open can add one;
+  grants for many sessions in one message, which wait until a link carries a second
+  session. The coordinator approved the messages (2026-10-05); the architect decided
+  the rest (2026-10-06, #561). The byte form is recorded when it merges.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
@@ -1748,6 +1778,13 @@ How to read this record:
   places). Codes go into `oracles/conformance/document/` at the first stable release;
   the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
   builder; approved by the coordinator (#137).
+  A message or a fix quotes text from a file with `types::text::Quoted`: U+0020 to
+  U+007E as written, except `\"`, `\\`, and `$` or `%` for a `$` or `%`
+  before `{`; each other character as `\u` and four upper-case hex digits, or `\U` and
+  eight above U+FFFF. HCL, YAML, and TOML read the form back as the text, and a
+  look-alike shows. The `config-hcl` writer keeps its own rule, because a person edits
+  what it writes. Lost: Rust's `Debug` form, which no file reads; `$$` and `%%`, which
+  only HCL reads. Decided by the architect (#941).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -2994,7 +3031,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
