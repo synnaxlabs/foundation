@@ -1498,11 +1498,17 @@ How to read this record:
   class, because four handshakes and four congestion controllers compete on one path
   (#55). Settled by the advisor and the coordinator under the person's delegation
   (#789). A node resets a stream with the stop's code when the stop arrives, and frees
-  the stream's room in the send budget and its turn (#1308). A peer breaks the protocol
-  when it sends another class byte, ends a stream inside a message, sends a message over
-  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
-  the connection with application code 2^32 and the reason as text, and the caller gets
-  `Error::Broken`.
+  the stream's room in the send budget and its turn (#1308). A stop that arrives after
+  the peer acknowledged all the data of a finished stream, or this side's reset of the
+  stream, has no effect, and the node does not check its code, because the carrier has
+  freed the stream. Decided by architect-2 (#1445, 2026-10-07 17:48 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1445#issuecomment-6043565271.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1445#issuecomment-6042123544. A peer
+  breaks the protocol when it sends another class byte, ends a stream inside a message,
+  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
+  The node then closes the connection with application code 2^32 and the reason as
+  text, and the caller gets `Error::Broken`.
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
@@ -2035,11 +2041,14 @@ How to read this record:
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
   In a file with no record, it makes that file again, larger, so each file but the last
-  holds a record. After a stopped write that made a file, the next record starts that
-  file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, and the last sentence at
-  2026-10-07T11:05:15Z):
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
-  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
+  holds a record. A file with no bytes, which a crash in a create can leave (ENV SEAMS,
+  #1264), is a file with no record. After a stopped write that made a file, the next
+  record starts that file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, the
+  last sentence at 2026-10-07T11:05:15Z, and the sentence on a file with no bytes at
+  2026-10-07T18:39:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314,
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297, and
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044422561. A write
   puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
   the end of the record to its start, and then syncs one time. Each block but the one at
   the end of the record ends at a multiple of the block size in the file, so no two
@@ -2366,6 +2375,39 @@ How to read this record:
   to the code that encodes definitions. A chunk's address is a `types::digest::Digest`,
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
+- **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
+  node's disk through `env::files`. A put returns only after the chunk is durable. A put
+  of a digest that a put stored since the open makes no file call. A get gives bytes
+  only when they hash to the digest; a chunk that fails the check (a write torn by a
+  crash, a bad sector) reads as absent, so the caller fetches it again as for any absent
+  chunk, and the store counts each one in a crate-private count: an `interface` issue
+  makes it public, with a noun for a name, when the first caller (the node's status of
+  its disk) needs it. `env::files` has no rename, so a torn chunk must read as absent,
+  never as a short chunk. A get or a put holds at most one chunk in memory. `put`
+  borrows its chunk (`&Block`). A put whose future is dropped stores nothing that a get
+  gives unchecked: the next get of the digest reads and checks the file, and the next
+  put writes it again. Layout: one flat directory, one file per chunk named by the 64
+  hex digits of its digest, with the chunk's bytes and nothing else, so the bytes are
+  their own check and the layout needs no header, no check field, and no rename. A pack
+  file with an index lost: it needs record headers, a scan of every byte at open, and
+  compaction for removal. Removal of chunks that no kept root reaches is a follow-up.
+  Decided by `laptop.architect` (2026-10-07T17:23:56Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The open
+  lists the directory and trusts no name: a get of a listed digest reads and checks its
+  bytes, and a put of one writes it again, because a process crash leaves whole bytes in
+  the cache that no sync covers, and a put that trusted a read of them would return
+  before they are durable. A put refuses a chunk longer than the largest block of the
+  pool before any file call. Decided by the builder (#1515,
+  https://github.com/synnaxlabs/foundation/pull/1515) and `laptop.architect`
+  (2026-10-07T17:47:50Z):
+  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043557708. Supersedes
+  the read on the first put of a listed digest in the plan
+  (https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6042962010) and the
+  sentence of item 1 of the ruling, "the next put or get of the digest reads the file
+  first". Every open makes the directory and syncs its parent, because an earlier open
+  can have stopped between the two. A put removes a file of another length at its name
+  and writes the chunk. Decided in review round 1 of #1515 (2026-10-07T17:56:25Z):
+  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043700902.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -2832,6 +2874,67 @@ How to read this record:
   one point of 255 fields among points of one field, and 32 for 255 sparse keys, for
   257 and 255 sparse keys with writes that split chunks, and for 1000 series of 200
   points.
+  `connector_influx::sim::serve(listener, tasks, store, database)` is its HTTP front, on
+  `connector::http::sim::serve` (HTTP SIM SERVER). `POST /write?db=` (InfluxDB 1) and
+  `POST /api/v2/write?bucket=` (InfluxDB 2 and 3) give 204 when the store takes each
+  line, and 400 with the text of the store's error when it refuses one. A missing or
+  empty `db` or `bucket`, or on `/api/v2/write` a missing or empty `org` and `orgID`,
+  gives 400; a `db` or `bucket` other than `database` gives 404, as InfluxDB gives for
+  one that does not exist. `precision` is `ns` only, and a missing or empty one is
+  `ns`; another gives 400, where InfluxDB scales it, because our writer writes
+  nanoseconds only and a wrong precision must fail loud. Another path gives 404, and
+  another method on a write path 405. A `content-encoding` that names a coding other
+  than `identity` gets 415 and stores nothing, as the store decodes no body. The HTTP
+  front checks the path, then the method, then the `content-encoding`, then the query,
+  and gives the answer of the first check that fails. It checks no token. `database`
+  stays out of `Store`: the 404 is an answer of the HTTP front. The front compares names
+  as the query writes them, with no percent-decoding, until the first PR of
+  `connector-influx` that writes a name into a query (#1530). Decided by architect-2
+  (2026-10-07T16:33:22Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  2026-10-07T16:41:29Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
+  2026-10-07T17:22:22Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777,
+  2026-10-07T18:32:43Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6044310015).
+  Supersedes: https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777
+  (the 415 sentence of item 5, by 6044310015).
+- **HTTP SIM SERVER (#1151)** `connector::http::sim::serve(listener, tasks, answer)`,
+  behind the `connector` cargo feature `sim`, off by default, is the one HTTP/1.1
+  server of the protocol simulators of HTTP connectors. It runs `hyper`'s server on
+  each stream, on its own task, with keep-alive, and gives `answer` each request with
+  its whole body. A client that closes its write side after a whole request still gets
+  the answer. A request that breaks HTTP gets 400, or 414 when its URI is too long and
+  431 when its head is too long, and ends its stream; an HTTP/2 preface ends it
+  with no answer. Each simulator answers a `content-encoding` in its own route. It
+  returns the listener's error, so a test server that cannot accept fails loud. When the
+  caller drops the future, the server accepts no more streams, and each stream that it
+  accepted continues to run. `hyper`'s server reads OS wall time on each poll (hyper
+  1.12.0, `common/date.rs`) only for the `date` header, which is off. A timer reads its
+  own `Instant` to arm the header read timeout, which is off too
+  (`header_read_timeout(None)`). The person approved the server on the condition that it
+  gets no timer. Lost: our own server on `httparse`, which the person refused; and a
+  copy of the server in each kind crate.
+  Decided by architect-2 (2026-10-07T16:33:22Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321,
+  2026-10-07T16:41:29Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508,
+  2026-10-07T17:08:29Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816,
+  2026-10-07T17:14:34Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042958763,
+  2026-10-07T17:22:22Z
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6043097777) and the
+  person (2026-10-07T17:04:29Z
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353).
+  Supersedes: https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508
+  (items 1 and 4, by the person's ruling and 6042839816; item 9, by 6043097777 item 5),
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816 (its 400
+  and 415 sentences, by 6043097777 items 4 and 5; its `# Errors` section, by
+  6042958763),
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321 (the doc
+  of finding 1, by 6042446508 item 1 and 6042839816).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
@@ -3504,6 +3607,13 @@ How to read this record:
   Supersedes the drop sentence of
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Lost:
   "a drop does not stop the remove", which `os` breaks when its I/O queue is full.
+  Amended (2026-10-07, #1264): a crash before a `Mode::Create` open ends can leave the
+  file that it makes with no bytes, and `Create` makes a file with no bytes `len` zeroed
+  bytes. `sim` makes that file at a crash. Lost: an atomic create in `os` through a
+  temporary name and a rename; it leaves a temporary file after a crash, which needs a
+  sweep, and a caller already learns from its own header whether a file holds data.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -3595,18 +3705,26 @@ How to read this record:
   before it ends, as any other call. The rename can still end after the drop, and
   then the file is at `to`. `os` checks that the old path still names the file by
   device and inode, with no follow of a link, then renames with `RENAME_NOREPLACE`;
-  the I/O thread of a shard runs its calls in order, and each shard writes only its
-  own directory, so nothing changes the path between the check and the rename. Lost:
-  `Files::rename(from, to)` on paths, which cannot tell the file of the
-  handle from a new file at its path; a link then an unlink, which leaves two names at
-  a crash; a replacing rename or a `replace: bool`, which no caller wants and which
-  hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
-  &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
-  one call that takes a name in place of a path in the data directory (#1449, decided
-  by `laptop.architect-2`, 2026-10-07 14:55 UTC:
+  the I/O thread of a shard runs its calls in order, one shard writes each name
+  (SHARD BUFFERS), and one node uses a data directory (DATA DIRECTORY LOCK), so
+  nothing in Foundation changes the path between the check and the rename. Lost:
+  `Files::rename(from, to)` on paths, which cannot tell the file of the handle from a
+  new file at its path; a link then an unlink, which leaves two names at a crash; a
+  replacing rename or a `replace: bool`, which no caller wants and which hides a
+  defect that `Exists` reports; and a bare-name `rename(&mut self, name: &OsStr)`: an
+  `OsStr` can hold a `/`, so it needs the same check, and it would be the one call
+  that takes a name in place of a path in the data directory (#1449, decided by
+  `laptop.architect-2`, 2026-10-07 14:55 UTC:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   panic list and the bare-name reason, 2026-10-07 17:35 UTC:
-  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214). Also
+  lost: a rename that also syncs its directory: it would be the one directory change
+  that is durable when it ends, several changes could no longer share one
+  `sync_dir`, and a failed directory sync would be a third result, a rename that took
+  effect and is not durable (#1503, decided by `laptop.architect-2`, 2026-10-07
+  19:11 UTC: https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044972392;
+  the race sentence, 2026-10-07 19:12 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
@@ -3635,6 +3753,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
   text, 2026-10-07 17:35 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214.
+  Amended (2026-10-07, #1264): a `Mode::Create` open in flight at a crash that makes a
+  file draws its state. After a `Process` crash the file is whole or has no bytes. After
+  a `Power` crash there is no file, or the file with no bytes or whole, with the
+  entries of its directory durable, as when the file system commits its journal by
+  itself or the `fsync` of the open commits it. The commit acts as a `sync_dir` of the
+  directory, so it also keeps each earlier change there, a rename too, and the digest
+  holds the drawn state. Lost: a create in two calls, one that makes the entry and one
+  that allocates; it doubles the calls of each create, changes the stream of each run,
+  and adds a step that `env` does not have.
+  Decided by `laptop.architect-2` (2026-10-07T18:31:29Z, the entries of the
+  directory at 2026-10-07T19:22:31Z):
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -3782,7 +3913,12 @@ How to read this record:
   not started does not start; `join` gives `Start` or `Memory`, else `Shards` or
   `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
   architect on #1062 (#1174):
-  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. One
+  shard writes each name in the data directory: shard `i` writes `shard-<i>` and each
+  name in it, and shard 0 also writes `lock` and `shards-<n>`. A change that gives a
+  name a second writer first changes the check of FILE RENAME, which relies on this
+  (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory.
   Before the claim reads a name, shard 0 opens the file `lock` in the data directory
   to write (`Mode::Create { len: 0 }`), and drops it after each shard of the node has
