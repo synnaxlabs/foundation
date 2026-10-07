@@ -1015,7 +1015,9 @@ dependencies = [
  "os",
  "proptest",
  "sim",
+ "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
