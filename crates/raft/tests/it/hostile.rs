@@ -37,6 +37,7 @@ fn forged_append(
             commit: at.index,
         },
         proof: None,
+        chain: Vec::new(),
     };
     (append, entry)
 }

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use types::node;
 
-use crate::{Claim, Error, Position, Proof, Signature, Term, Voters};
+use crate::{Claim, Error, Link, Position, Proof, Signature, Term, Voters};
 
 /// One entry of the replicated log.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,6 +178,34 @@ impl Log {
     // configuration entry before `index`.
     pub(crate) fn voters_before(&self, index: u64) -> Voters {
         self.voters_through(index.saturating_sub(1))
+    }
+
+    // The last committed configuration entry with a term below `term`, or the
+    // configuration before the entries: what elected a leader of `term`.
+    pub(crate) fn committed_voters_below(&self, term: Term) -> Voters {
+        let end = usize::try_from(self.committed).unwrap_or(usize::MAX);
+        let below = self.entries.partition_point(|entry| entry.at.term < term);
+        let end = end.min(below).min(self.entries.len());
+        match self.entries[..end].iter().rev().find_map(voters_in) {
+            Some(voters) => voters.clone(),
+            None => self.before_entries(),
+        }
+    }
+
+    // The configuration entries with a term below `term`, oldest first, as the chain
+    // of a message of `term`.
+    pub(crate) fn links(&self, term: Term) -> Vec<Link> {
+        self.entries
+            .iter()
+            .take_while(|entry| entry.at.term < term)
+            .filter_map(|entry| match &entry.data {
+                Data::Voters(change) => Some(Link {
+                    at: entry.at,
+                    change: change.clone(),
+                }),
+                Data::Empty | Data::Bytes(_) => None,
+            })
+            .collect()
     }
 
     // The last configuration entry at or below `index`, or the configuration before
