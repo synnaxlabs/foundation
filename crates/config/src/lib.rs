@@ -1292,6 +1292,36 @@ mod tests {
                 )])
             );
         }
+
+        #[test]
+        fn refuses_a_block_inside_a_placement_with_an_unknown_attribute() {
+            let [mut documents] = placement(&[
+                ("select", string("edge.*")),
+                ("home", string("edge")),
+                ("node", string("edge")),
+            ]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 14),
+                        "`node` is not an attribute of the `placement` block",
+                        "Use `select`, `home`, `standby`, or `copies`, or remove it",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `placement` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
     }
 
     mod retentions {
@@ -1470,6 +1500,36 @@ mod tests {
                     "the `retention` block cannot hold the `inner` block",
                     "Remove it",
                 )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_retention_with_an_unknown_attribute() {
+            let [mut documents] = retention(&[
+                ("select", string("edge.**")),
+                ("keep", string("3d")),
+                ("hold", string("1d")),
+            ]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 14),
+                        "`hold` is not an attribute of the `retention` block",
+                        "Use `select` or `keep`, or remove it",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `retention` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
             );
         }
     }
