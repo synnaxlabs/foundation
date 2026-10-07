@@ -183,6 +183,9 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
+    // Some node refused a reply as unproven during `settle`: a peer sits at a term
+    // the group cannot prove (#1485).
+    unprovable: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
@@ -233,6 +236,7 @@ impl Network {
             cut: vec![false; logs.len()],
             wiped: vec![false; logs.len()],
             refused: Vec::new(),
+            unprovable: false,
             crash: vec![None; logs.len()],
             flight: Vec::new(),
             leaders: BTreeMap::new(),
@@ -630,7 +634,7 @@ impl Network {
     // and it stays in its term. A leader's chain reaches every node: a heartbeat or
     // an append is never unproven. A reply can be: a node that took the term through
     // another node's chain answers with a chain it does not hold.
-    fn check_unproven(&self, to: usize, before: Term, message: &Message) {
+    fn check_unproven(&mut self, to: usize, before: Term, message: &Message) {
         let (body, term, from) = (&message.body, message.term, message.from);
         assert_eq!(
             self.nodes[to].term(),
@@ -656,6 +660,7 @@ impl Network {
                     !self.quorum(to, &proof.voters.keys().copied().collect()),
                     "node {to} refuses a proven {body:?} at {term:?} from {from:?}"
                 );
+                self.unprovable = true;
                 return;
             }
             _ => panic!("node {to} in {before:?} refuses {body:?} at {term:?}"),
@@ -849,6 +854,7 @@ impl Network {
         // A leader that was cut off can step down once after the network mends,
         // because it counts the nodes it heard from over a full election timeout.
         let mut held = (None, 0);
+        self.unprovable = false;
         for _ in 0..100 * ELECTION {
             self.round();
             let agreed = self.agreed();
@@ -860,6 +866,13 @@ impl Network {
             if let (Some(agreed), true) = (held.0, held.1 >= 2 * ELECTION) {
                 return Ok(agreed);
             }
+        }
+        // A node that a change added back can sit at a term the group cannot prove,
+        // and no node passes it (#1485). Any other stall is a defect.
+        if self.unprovable {
+            return Err(TestCaseError::reject(
+                "no leader: a peer at a term this group cannot prove refuses it",
+            ));
         }
         Err(TestCaseError::fail("no leader after 100 election timeouts"))
     }

@@ -1673,10 +1673,14 @@ How to read this record:
   term through another node's chain answers a stale message with its hard proof and
   its own chain, which can fall short of the sender's configuration: the sender then
   stays in its term until the leader's chain moves it, and the random runs check that
-  a leader's heartbeat or append is never unproven (builder, #881, PR 2). The chain
-  excludes a leader that a change the node missed made a voter (#1096). The log
-  lists its configuration entries below a term with one forward scan; an index of
-  them waits for a measured scan on a log near its memory bound (architect, #881,
+  a leader's heartbeat or append is never unproven (builder, #881, PR 2). Known gap:
+  a node that a leave removed can reach, through pre-votes of the old configuration,
+  a term that no configuration entry stands behind; a change that adds it back then
+  needs its ack, and no node passes its term. The random runs reject such a run; the
+  fix is #1485. The chain excludes a leader that a change the node missed made a
+  voter (#1096). The log lists its configuration entries below a term with one
+  forward scan; an index of them waits for a measured scan on a log near its memory
+  bound (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
   The advisor required a proof on every message and on each refusal, signatures
   only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks
