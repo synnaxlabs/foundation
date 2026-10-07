@@ -1644,24 +1644,30 @@ How to read this record:
   `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
   node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
   byte form), the join ticket's signature over the first card, an ephemeral expiry, and
-  the status channel keys (X27). The card's byte form is the name behind a length byte,
-  the public key (32 bytes), the seal key (32 bytes), a count of addresses (8 bytes),
-  each address, and the version (8 bytes). An address is a kind byte (UDP 0, TCP 1,
-  relay 2, which adds the relay's public key of 32 bytes), a family byte (4 or 6), the
-  IP (4 or 16 bytes, in network order), and the port (2 bytes). An IPv6 address has no
-  flow info and no scope, because each means something only on the node that sets it.
-  Every number but the IP is little endian. It lives only in `mesh` region state (X1),
-  with no voter flag (the raft configuration is the one source) and no lease. The seal
-  key is inside the signed card (S8). A join is one `Join` change. Every node that
-  applies it checks the card, and the admission against the ticket's public key, scope,
-  uses, and expiry at the change's mesh time (BQ12), so a ticket is an Ed25519 key pair
-  (#336). The voter that admits a join answers with the founding voters and their cards,
-  and the node opens with them as `Start.voters` (RAFT VOTERS). Until snapshots (#253),
-  a region whose founders all left cannot admit a node. `secret` finds no key itself:
-  `ops` and `node` read the member and pass its seal key. A rotation, a new card, and
-  `Remove` wait for a caller; a rotation that only the node signs lets a stolen key lock
-  the node out. Lost: a record that only the admitting voter checks (a voter that lies
-  admits any key, against BQ12). Decided by the architect, #242
+  the key of each status channel (X27) by its name under the node's name
+  (`clock.offset`). A status name keeps its meaning and data type in every release, so
+  `hub` resolves a status channel from the record alone; a list in the order of a table
+  in `node` lost, because `hub` cannot read that table and a new release would change
+  what a stored position means (architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
+  card's byte form is the name behind a length byte, the public key (32 bytes), the seal
+  key (32 bytes), a count of addresses (8 bytes), each address, and the version (8
+  bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the relay's
+  public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in network
+  order), and the port (2 bytes). An IPv6 address has no flow info and no scope, because
+  each means something only on the node that sets it. Every number but the IP is little
+  endian. It lives only in `mesh` region state (X1), with no voter flag (the raft
+  configuration is the one source) and no lease. The seal key is inside the signed card
+  (S8). A join is one `Join` change. Every node that applies it checks the card, and the
+  admission against the ticket's public key, scope, uses, and expiry at the change's
+  mesh time (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a
+  join answers with the founding voters and their cards, and the node opens with them as
+  `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
+  cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
+  and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
+  rotation that only the node signs lets a stolen key lock the node out. Lost: a record
+  that only the admitting voter checks (a voter that lies admits any key, against BQ12).
+  Decided by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
@@ -2716,7 +2722,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |

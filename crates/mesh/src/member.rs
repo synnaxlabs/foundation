@@ -1,6 +1,9 @@
 //! The region's record of one node.
 
+use std::collections::BTreeMap;
+
 use types::channel;
+use types::name::Name;
 use types::time::Span;
 
 use crate::card;
@@ -14,6 +17,8 @@ pub struct Member {
     pub admission: [u8; 64],
     /// For an ephemeral node, the time offline after which the region removes it.
     pub expiry: Option<Span>,
-    /// The node's status channel keys, in `node::status::TABLE` order.
-    pub status: Vec<channel::Key>,
+    /// The key of each status channel of the node, by its name under `card.name`
+    /// (`clock.offset`). A status name keeps its meaning and data type in every
+    /// release.
+    pub status: BTreeMap<Name, channel::Key>,
 }
