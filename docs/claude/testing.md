@@ -30,13 +30,17 @@ behavior. Never print a pointer. No `thread_local!` state.
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
 checks on each PR that agent-written tests catch real changes. A missed mutant fails
-CI. A mutant that makes a test hang (a timeout) counts as caught. An assertion on a
-private field is never the only kill. `.cargo/mutants.toml` lists the few functions it
-skips. Each entry is as narrow as one function. Its comment says why no caller or peer
-can see the mutant, or names the test that kills it in a job that the mutants run does
-not see (Miri, loom, another OS). A mutant that a test could kill but none does links
-its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
-`rust-toolchain-nightly`, that only those gates use.
+CI. A mutant that makes a test hang (a timeout) counts as caught. Each run on a box caps
+each test process at 4 GiB as CI does, so that a mutant that allocates in a loop aborts
+and is caught: prefix `cargo mutants` with `RUST_TEST_THREADS=8
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --data=4294967296 --"`. With no
+cap, the mutant fills the box and the run stalls. An assertion on a private field is
+never the only kill. `.cargo/mutants.toml` lists the few functions it skips. Each entry
+is as narrow as one function. Its comment says why no caller or peer can see the mutant,
+or names the test that kills it in a job that the mutants run does not see (Miri, loom,
+another OS). A mutant that a test could kill but none does links its open issue. Miri
+and cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
+those gates use.
 
 ## Fuzzing
 

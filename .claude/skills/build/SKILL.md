@@ -83,9 +83,7 @@ cargo mutants --in-diff "$p" --jobs 4
 
 - Each missed mutant is a missing test. Exit 3 with an empty `mutants.out/missed.txt` is
   a pass: a timeout means a test caught the mutant.
-- On a box, cap each test process as CI does, so a mutant that allocates in a loop
-  cannot take the box down: prefix `cargo mutants` with `RUST_TEST_THREADS=8
-  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --data=4294967296 --"`.
+- On a box, cap each test process as `docs/claude/testing.md` says (mutation testing).
 - A changed `Cargo.toml` or `Cargo.lock`: also
   `cargo deny check advisories bans licenses sources`.
 - A change under a `models` path in `.github/workflows/ci.yaml`: also `cargo xtask
