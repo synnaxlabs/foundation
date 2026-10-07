@@ -89,10 +89,11 @@ Findings: <count, or none>
 `Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
 skips `breaker` adds the line
 ``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
-range: each `.rs` line it adds or removes, trimmed, must be empty or start with `//`. A
-head that is the range end plus clean merges of the base needs no new round. A red-team
-PR labeled `oracle` also needs the director's verdict with the line
-``Director: approved at `<sha>` `` at the head.
+range of the last round: each `.rs` line it adds or removes, trimmed, must be empty or
+start with `//`, and it must change no `Cargo.toml` or `Cargo.lock` line. A moved file
+counts as each of its lines removed and added. A head that is the range end plus clean
+merges of the base needs no new round. A red-team PR labeled `oracle` also needs the
+director's verdict with the line ``Director: approved at `<sha>` `` at the head.
 
 ## Second round
 

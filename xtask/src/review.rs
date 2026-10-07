@@ -48,6 +48,15 @@ struct Round {
     findings: u32,
 }
 
+/// A round comment that does not parse.
+#[derive(Debug)]
+struct Malformed {
+    /// It has a round number and a `Reviewers:`, `Range:`, or `Findings:` line, so it
+    /// is in the fixed format: not an older round or a quote of the format.
+    fixed: bool,
+    problem: String,
+}
+
 /// Checks that the review of PR `pr` is done at commit `head`: its last round
 /// comment ends at `head` or reaches it through clean merges of the base, finds
 /// nothing, and names each required reviewer, and, for a red-team PR, the director
@@ -116,10 +125,9 @@ fn problems(
     for (i, round) in rounds.iter().enumerate() {
         let round = match round {
             Ok(round) => round,
-            // An earlier round that does not parse predates the fixed format.
-            Err(_) if i + 1 < rounds.len() => continue,
+            Err(e) if i + 1 < rounds.len() && !e.fixed => continue,
             Err(e) => {
-                problems.push(e.clone());
+                problems.push(e.problem.clone());
                 continue;
             }
         };
@@ -214,16 +222,17 @@ fn approval(record: &Record, head: &str) -> Option<String> {
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
 /// The fields are the first block of lines after that line, so the findings text
 /// cannot set them.
-fn round(body: &str) -> Option<Result<Round, String>> {
+fn round(body: &str) -> Option<Result<Round, Malformed>> {
     let mut lines = body.lines().map(str::trim);
     let number = lines.find_map(|l| l.strip_prefix("## Review round "))?;
     let lines = lines
         .skip_while(|l| l.is_empty())
         .take_while(|l| !l.is_empty());
     let Ok(number) = number.parse::<u32>() else {
-        return Some(Err(format!(
-            "`## Review round {number}` has no round number"
-        )));
+        return Some(Err(Malformed {
+            fixed: false,
+            problem: format!("`## Review round {number}` has no round number"),
+        }));
     };
     let (mut reviewers, mut range, mut findings) = (None, None, None);
     let mut breakerless = false;
@@ -272,7 +281,8 @@ fn round(body: &str) -> Option<Result<Round, String>> {
             findings,
         })
     };
-    Some(fields())
+    let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
+    Some(fields().map_err(|problem| Malformed { fixed, problem }))
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.

@@ -53,7 +53,7 @@ impl<'a> History<'a> {
     ///
     /// # Errors
     ///
-    /// A failed `git` command.
+    /// A failed `git` command, or a changed path that is not UTF-8.
     pub(crate) fn code_change(
         &self,
         from: &str,
@@ -66,13 +66,12 @@ impl<'a> History<'a> {
         let Some(end_sha) = self.named(end)? else {
             return Ok(Some(unnamed(end)));
         };
-        let diff = self.git(&[
+        let paths = self.output(&[
             "diff",
             "--no-ext-diff",
-            "--no-color",
-            "--no-prefix",
             "--no-renames",
-            "--unified=0",
+            "--name-only",
+            "-z",
             &from_sha,
             &end_sha,
             "--",
@@ -80,30 +79,60 @@ impl<'a> History<'a> {
             ":(glob)**/Cargo.toml",
             ":(glob)**/Cargo.lock",
         ])?;
-        let (mut old, mut new) = ("", "");
-        let (mut old_line, mut new_line) = (0, 0);
+        for path in paths.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+            let path = std::str::from_utf8(path).map_err(|e| {
+                format!(
+                    "git diff: the path `{}` is not UTF-8: {e}",
+                    String::from_utf8_lossy(path)
+                )
+            })?;
+            if let Some(line) = self.first_code(&from_sha, &end_sha, path)? {
+                return Ok(Some(format!("changes code at `{path}:{line}`")));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The line number of the first line of code that `from..end` adds or removes in
+    /// the file at `path`, in `end` for an added line and in `from` for a removed one.
+    fn first_code(
+        &self,
+        from: &str,
+        end: &str,
+        path: &str,
+    ) -> Result<Option<u32>, String> {
+        // Only the hunks are read: git quotes or pads the paths in the headers.
+        let diff = self.git(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            "--text",
+            "--unified=0",
+            from,
+            end,
+            "--",
+            &format!(":(literal){path}"),
+        ])?;
+        let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
+        let (mut old, mut new) = (0, 0);
         let mut hunk = false;
         for line in diff.lines() {
-            if line.starts_with("diff ") {
-                hunk = false;
-            } else if !hunk && let Some(path) = line.strip_prefix("--- ") {
-                old = path;
-            } else if !hunk && let Some(path) = line.strip_prefix("+++ ") {
-                new = path;
-            } else if let Some(header) = line.strip_prefix("@@ ") {
+            if let Some(header) = line.strip_prefix("@@ ") {
                 hunk = true;
-                (old_line, new_line) = starts(header)
+                (old, new) = starts(header)
                     .ok_or_else(|| format!("git diff: a bad hunk header `{line}`"))?;
             } else if hunk && let Some(text) = line.strip_prefix('-') {
-                if code(old, text) {
-                    return Ok(Some(format!("changes code at `{old}:{old_line}`")));
+                if code(rust, text) {
+                    return Ok(Some(old));
                 }
-                old_line += 1;
+                old += 1;
             } else if hunk && let Some(text) = line.strip_prefix('+') {
-                if code(new, text) {
-                    return Ok(Some(format!("changes code at `{new}:{new_line}`")));
+                if code(rust, text) {
+                    return Ok(Some(new));
                 }
-                new_line += 1;
+                new += 1;
             }
         }
         Ok(None)
@@ -176,6 +205,12 @@ impl<'a> History<'a> {
 
     /// The trimmed output of a `git` command that must succeed.
     fn git(&self, args: &[&str]) -> Result<String, String> {
+        let output = self.output(args)?;
+        Ok(String::from_utf8_lossy(&output).trim().to_string())
+    }
+
+    /// The output of a `git` command that must succeed.
+    fn output(&self, args: &[&str]) -> Result<Vec<u8>, String> {
         let output = Command::new("git")
             .current_dir(self.root)
             .args(args)
@@ -184,15 +219,14 @@ impl<'a> History<'a> {
         if !output.status.success() {
             return Err(failure(&args.join(" "), &output.stderr));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(output.stdout)
     }
 }
 
-/// Whether `text`, a changed line of the file at `path`, is code: any line of a file
-/// that is not `.rs`, and a `.rs` line that, trimmed, is not empty or a comment.
-fn code(path: &str, text: &str) -> bool {
+/// Whether `text`, a changed line of a file, is code: any line of a file that is not
+/// `.rs`, and a `.rs` line that, trimmed, is not empty or a comment.
+fn code(rust: bool, text: &str) -> bool {
     let text = text.trim();
-    let rust = Path::new(path).extension().is_some_and(|e| e == "rs");
     !rust || !(text.is_empty() || text.starts_with("//"))
 }
 

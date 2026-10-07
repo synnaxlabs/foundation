@@ -97,6 +97,31 @@ fn skips_an_earlier_quote_of_the_format() {
 }
 
 #[test]
+fn fails_an_earlier_round_in_the_fixed_format_that_does_not_parse() {
+    let missing = |name| {
+        format!(
+            "review round 1 has no `{name}:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+        )
+    };
+    let cases = [
+        ("Reviewers: reviewer", missing("Range")),
+        ("Range: `a..b`", missing("Findings")),
+        ("Findings: none", missing("Range")),
+        (
+            "Reviewers: reviewer\nRange: `a..b`\nFindings: 2 (R1, B1)",
+            "review round 1 has `Findings: 2 (R1, B1)`, not a count or `none`: \
+             invalid digit found in string"
+                .to_string(),
+        ),
+    ];
+    for (fields, problem) in cases {
+        let first = bot(&format!("## Review round 1\n\n{fields}"));
+        assert_eq!(check(&record(vec![first, bot(ROUND)])), vec![problem]);
+    }
+}
+
+#[test]
 fn reads_the_range_of_the_last_round_only() {
     let skipped = ROUND
         .replace(COMMENTS, "940140aa")

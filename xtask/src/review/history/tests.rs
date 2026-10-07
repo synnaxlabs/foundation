@@ -252,6 +252,43 @@ fn a_moved_file_and_a_manifest_change_code() {
 }
 
 #[test]
+fn a_removed_line_that_looks_like_a_header_is_code() {
+    let (repo, _) = Repo::with_pr("header");
+    let from = repo.commit("a.rs", "const Q: &str = \"\n-- a\n++ b\n\";\n");
+    let end = repo.commit("a.rs", "const Q: &str = \"\n\";\n");
+    assert_eq!(
+        repo.code_change(&from, &end),
+        Ok(Some("changes code at `a.rs:2`".to_string()))
+    );
+}
+
+#[test]
+fn a_nul_byte_does_not_hide_code() {
+    let (repo, from) = Repo::with_pr("nul");
+    let code = repo.commit("a.rs", "// A \0 byte.\nfn a() {}\n");
+    assert_eq!(
+        repo.code_change(&from, &code),
+        Ok(Some("changes code at `a.rs:2`".to_string()))
+    );
+}
+
+#[test]
+fn reads_a_name_that_git_quotes() {
+    for name in ["caf\u{e9}.rs", "a b.rs", "a\tb.rs", "\"a\".rs"] {
+        let (repo, _) = Repo::with_pr("quoted");
+        let from = repo.commit(name, "fn a() {}\n");
+        let docs = repo.commit(name, "// A.\nfn a() {}\n");
+        assert_eq!(repo.code_change(&from, &docs), Ok(None), "{name:?}");
+        let code = repo.commit(name, "// A.\nfn b() {}\n");
+        assert_eq!(
+            repo.code_change(&docs, &code),
+            Ok(Some(format!("changes code at `{name}:2`"))),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
 fn a_colored_diff_config_does_not_hide_code() {
     let (repo, from) = Repo::with_pr("color");
     repo.git(&["config", "color.diff", "always"]);
@@ -261,5 +298,30 @@ fn a_colored_diff_config_does_not_hide_code() {
     assert_eq!(
         repo.code_change(&from, &code),
         Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn names_a_path_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let (repo, from) = Repo::with_pr("bytes");
+    let blob = repo.git(&["rev-parse", "HEAD:b.txt"]);
+    let info = [b"100644,", blob.as_bytes(), b",a\xff.rs"].concat();
+    let status = Command::new("git")
+        .current_dir(&repo.dir)
+        .args(["update-index", "--add", "--cacheinfo"])
+        .arg(std::ffi::OsStr::from_bytes(&info))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    repo.git(&["commit", "--quiet", "-m", "bytes"]);
+    assert_eq!(
+        repo.code_change(&from, &repo.head()),
+        Err(
+            "git diff: the path `a\u{fffd}.rs` is not UTF-8: invalid utf-8 sequence \
+             of 1 bytes from index 1"
+                .to_string()
+        )
     );
 }
