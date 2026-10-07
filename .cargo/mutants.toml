@@ -13,9 +13,6 @@ exclude_re = [
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
-  # A park stays behind only when a push lands inside a poll, which needs two threads.
-  # The loom model `leaves_no_park_behind_when_a_push_lands_in_a_poll` fails on it.
-  'crates/ring/src/wake\.rs:.*replace Parker::cancel with \(\)',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',

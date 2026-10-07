@@ -513,7 +513,37 @@ mod tests {
     }
 
     mod pop {
+        use std::sync::Mutex;
+
         use super::*;
+
+        /// Pushes when its last clone drops. A poll drops the waker of the park
+        /// before it, so the push lands inside that poll.
+        struct PushOnDrop(Arc<Mutex<Producer<u8>>>);
+
+        #[expect(clippy::manual_noop_waker, reason = "the test needs its drop")]
+        impl Wake for PushOnDrop {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for PushOnDrop {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push(1).unwrap();
+            }
+        }
+
+        #[test]
+        fn takes_its_park_back_when_a_push_lands_in_the_poll() {
+            let (producer, mut consumer) = new(config(2));
+            let producer = Arc::new(Mutex::new(producer));
+            let pushing = Waker::from(Arc::new(PushOnDrop(Arc::clone(&producer))));
+            let (tally, waker) = create_waker();
+            assert_eq!(poll_pop(&mut consumer, &pushing), Poll::Pending);
+            drop(pushing);
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
+            assert_eq!(producer.lock().unwrap().push(2), Ok(()));
+            assert_eq!(tally.count(), 0);
+        }
 
         /// A `pop` that finds a value looks before it parks, so it leaves no clone
         /// of the waker behind.
