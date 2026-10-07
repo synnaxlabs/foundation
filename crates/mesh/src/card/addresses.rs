@@ -4,7 +4,6 @@ use std::fmt;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use transport::Address;
-use types::node::PublicKey;
 
 use crate::bytes;
 
@@ -62,7 +61,7 @@ impl Addresses {
     // flow info and no scope.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the `Join` change of #336 is the first user")
+        expect(dead_code, reason = "the streams of #471 are the first user")
     )]
     pub(super) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let count = bytes::take_count(bytes)?;
@@ -134,7 +133,7 @@ fn put(address: Address, out: &mut Vec<u8>) {
         }
         Address::Relay { node, at } => {
             out.push(RELAY);
-            out.extend(node.to_bytes());
+            bytes::put_public_key(node, out);
             put_socket(at, out);
         }
     }
@@ -146,7 +145,7 @@ fn take(bytes: &mut &[u8]) -> Option<Address> {
         UDP => Address::Udp(take_socket(bytes)?),
         TCP => Address::Tcp(take_socket(bytes)?),
         RELAY => Address::Relay {
-            node: PublicKey::new(bytes::take(bytes)?).ok()?,
+            node: bytes::take_public_key(bytes)?,
             at: take_socket(bytes)?,
         },
         _ => return None,
