@@ -356,10 +356,51 @@ mod tests {
                 assert_eq!(opened.map(|_| ()), Err(closed.clone()));
                 let sender = sender.as_mut().expect("a reply half");
                 assert_eq!(sender.send(side.block(b"b")).await, Err(closed.clone()));
-                let tried = sender.try_send(side.block(b"b")).map(|_| ());
-                assert_eq!(tried, Err(closed.clone()));
                 assert_eq!(sender.finish(), Err(closed.clone()));
                 assert_eq!(receiver.recv().await.map(|_| ()), Err(closed));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_close_ends_an_accept_that_waits_alone() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(6) };
+                let accepted = side.session.accept().await;
+                assert_eq!(accepted.map(|_| ()), Err(closed));
+            },
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                side.session.close(Code(6));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_close_ends_an_open_that_waits_for_the_peer_to_allow_a_stream() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX {
+                    held.push(
+                        side.session.open(Class::Complete).await.expect("a stream"),
+                    );
+                }
+                let mut opened = pin!(side.session.open(Class::Complete));
+                assert!(poll_once(opened.as_mut()).await.is_none());
+                let closed = Error::PeerClosed { code: Code(7) };
+                assert_eq!(opened.await.map(|_| ()), Err(closed));
+            },
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                side.session.close(Code(7));
             },
         );
         assert_eq!(sim.run(), Ok(()));

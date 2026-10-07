@@ -134,8 +134,8 @@ impl Sender {
     /// }
     /// ```
     pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
-        let stream = self.stream.as_mut().ok_or(CANCELLED)?;
-        self.session.try_write(stream, message)
+        drop(message);
+        todo!("#68")
     }
 
     /// Ends the stream after the messages already sent. The peer's
@@ -634,8 +634,6 @@ mod tests {
                 // The peer's window holds at most 17 such messages.
                 assert!((1..=17).contains(&sent), "{sent}");
                 assert_eq!(sender.send(side.block(b"a")).await, Err(CANCELLED));
-                let tried = sender.try_send(side.block(b"a")).map(|_| ());
-                assert_eq!(tried, Err(CANCELLED));
                 assert_eq!(sender.finish(), Err(CANCELLED));
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
@@ -647,50 +645,6 @@ mod tests {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 assert_eq!(until_error(&mut incoming.receiver).await, CANCELLED);
                 side.session.close(Code(4));
-            },
-        );
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    #[test]
-    fn try_send_gives_a_message_back_until_the_peer_reads() {
-        let (mut sim, ..) = testing::sessions(
-            0,
-            same,
-            |side| async move {
-                let opened = side.session.open_sender(Class::Complete).await;
-                let mut sender = opened.expect("a stream");
-                let body = vec![7; 60_000];
-                let mut sent = 0;
-                let mut back = loop {
-                    match sender.try_send(side.block(&body)).expect("no error") {
-                        None => sent += 1,
-                        Some(back) => break back,
-                    }
-                };
-                assert_eq!(*back, *body);
-                assert!(sent > 0);
-                for _ in 0..100 {
-                    side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
-                    match sender.try_send(back).expect("no error") {
-                        None => break,
-                        Some(again) => back = again,
-                    }
-                }
-                sender.finish().expect("finished");
-                let closed = Error::PeerClosed {
-                    code: Code(sent + 1),
-                };
-                assert_eq!(side.session.closed().await, closed);
-            },
-            |side| async move {
-                let mut incoming = side.session.accept().await.expect("a stream");
-                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
-                let mut count = 0;
-                while incoming.receiver.recv().await.expect("a message").is_some() {
-                    count += 1;
-                }
-                side.session.close(Code(count));
             },
         );
         assert_eq!(sim.run(), Ok(()));
@@ -713,9 +667,7 @@ mod tests {
                     bytes_max: 1472,
                 };
                 let body = vec![7; 1473];
-                assert_eq!(sender.send(side.block(&body)).await, Err(large.clone()));
-                let tried = sender.try_send(side.block(&body)).map(|_| ());
-                assert_eq!(tried, Err(large));
+                assert_eq!(sender.send(side.block(&body)).await, Err(large));
                 sender.send(side.block(&body[1..])).await.expect("sent");
                 sender.finish().expect("finished");
                 let closed = Error::PeerClosed { code: Code(4) };

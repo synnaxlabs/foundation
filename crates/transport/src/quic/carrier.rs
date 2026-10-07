@@ -359,7 +359,7 @@ impl Session {
         self.poll_queue(
             cx,
             |slot| &mut slot.available,
-            |endpoint, now, key| endpoint.open(now, key, class),
+            |endpoint, clock, key| endpoint.open(clock.now(), key, class),
         )
     }
 
@@ -372,7 +372,7 @@ impl Session {
         self.poll_queue(
             cx,
             |slot| &mut slot.available,
-            |endpoint, now, key| endpoint.open_sender(now, key, class),
+            |endpoint, clock, key| endpoint.open_sender(clock.now(), key, class),
         )
     }
 
@@ -406,14 +406,14 @@ impl Session {
         sender: &mut Sender,
         message: &mut Option<Block>,
     ) -> Poll<Result<(), Error>> {
-        self.with(|endpoint, now, slot| {
+        self.with(|endpoint, clock, slot| {
             sender.check_unfinished();
             if let Some(error) = &slot.end {
                 return Poll::Ready(Err(error.clone()));
             }
             let written = match message.take() {
-                Some(message) => endpoint.write(now, sender, message),
-                None => endpoint.flush(now, sender),
+                Some(message) => endpoint.write(clock.now(), sender, message),
+                None => endpoint.flush(clock.now(), sender),
             };
             match written {
                 Ok(Poll::Pending) => {
@@ -423,29 +423,6 @@ impl Session {
                 Ok(Poll::Ready(())) => Poll::Ready(Ok(())),
                 Err(error) => Poll::Ready(Err(error)),
             }
-        })
-    }
-
-    /// Writes `message` when the stream can take it now, else gives it back.
-    ///
-    /// # Errors
-    ///
-    /// As [`Endpoint::try_write`], or why the session ended.
-    ///
-    /// # Panics
-    ///
-    /// After [`Session::finish`].
-    pub(crate) fn try_write(
-        &self,
-        sender: &mut Sender,
-        message: Block,
-    ) -> Result<Option<Block>, Error> {
-        self.with(|endpoint, now, slot| {
-            sender.check_unfinished();
-            if let Some(error) = &slot.end {
-                return Err(error.clone());
-            }
-            endpoint.try_write(now, sender, message)
         })
     }
 
@@ -460,20 +437,20 @@ impl Session {
     /// After [`Session::finish`], or as [`Endpoint::finish`] does while the session is
     /// live.
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
-        self.with(|endpoint, now, slot| {
+        self.with(|endpoint, clock, slot| {
             sender.check_unfinished();
             if let Some(error) = &slot.end {
                 return Err(error.clone());
             }
-            endpoint.finish(now, sender)
+            endpoint.finish(clock.now(), sender)
         })
     }
 
     /// Resets `sender`'s stream with `code`, as [`Endpoint::reset`] does.
     pub(crate) fn reset(&self, sender: Sender, code: Code) {
-        self.with(|endpoint, now, slot| {
+        self.with(|endpoint, clock, slot| {
             slot.writing.remove(&sender.key().id);
-            endpoint.reset(now, sender, code);
+            endpoint.reset(clock.now(), sender, code);
         });
     }
 
@@ -488,17 +465,19 @@ impl Session {
         cx: &mut Context<'_>,
         receiver: &mut Receiver,
     ) -> Poll<Result<Option<Block>, Error>> {
-        self.with(|endpoint, now, slot| match endpoint.read(now, receiver) {
-            Ok(Poll::Pending) => {
-                if let Some(error) = &slot.end {
-                    return Poll::Ready(Err(error.clone()));
+        self.with(
+            |endpoint, clock, slot| match endpoint.read(clock.now(), receiver) {
+                Ok(Poll::Pending) => {
+                    if let Some(error) = &slot.end {
+                        return Poll::Ready(Err(error.clone()));
+                    }
+                    register_one(&mut slot.reading, receiver.key().id, cx.waker());
+                    Poll::Pending
                 }
-                register_one(&mut slot.reading, receiver.key().id, cx.waker());
-                Poll::Pending
-            }
-            Ok(Poll::Ready(message)) => Poll::Ready(Ok(message)),
-            Err(error) => Poll::Ready(Err(error)),
-        })
+                Ok(Poll::Ready(message)) => Poll::Ready(Ok(message)),
+                Err(error) => Poll::Ready(Err(error)),
+            },
+        )
     }
 
     /// Ends a read of `receiver` that waits, as [`Endpoint::end_wait`] does.
@@ -511,9 +490,9 @@ impl Session {
 
     /// Stops `receiver`'s stream with `code`, as [`Endpoint::stop`] does.
     pub(crate) fn stop(&self, receiver: Receiver, code: Code) {
-        self.with(|endpoint, now, slot| {
+        self.with(|endpoint, clock, slot| {
             slot.reading.remove(&receiver.key().id);
-            endpoint.stop(now, receiver, code);
+            endpoint.stop(clock.now(), receiver, code);
         });
     }
 
@@ -523,13 +502,13 @@ impl Session {
         &self,
         cx: &mut Context<'_>,
         wakers: fn(&mut Slot) -> &mut Vec<Waker>,
-        take: impl FnOnce(&mut Endpoint, Monotonic, connection::Key) -> Option<T>,
+        take: impl FnOnce(&mut Endpoint, &Clock, connection::Key) -> Option<T>,
     ) -> Poll<Result<T, Error>> {
-        self.with(|endpoint, now, slot| {
+        self.with(|endpoint, clock, slot| {
             if let Some(error) = &slot.end {
                 return Poll::Ready(Err(error.clone()));
             }
-            if let Some(taken) = take(endpoint, now, self.key) {
+            if let Some(taken) = take(endpoint, clock, self.key) {
                 return Poll::Ready(Ok(taken));
             }
             register(wakers(slot), cx.waker());
@@ -549,12 +528,9 @@ impl Session {
         });
     }
 
-    /// Runs `call` on the endpoint, the time, and the session's slot, then wakes the
+    /// Runs `call` on the endpoint, the clock, and the session's slot, then wakes the
     /// task to send what the call queued.
-    fn with<T>(
-        &self,
-        call: impl FnOnce(&mut Endpoint, Monotonic, &mut Slot) -> T,
-    ) -> T {
+    fn with<T>(&self, call: impl FnOnce(&mut Endpoint, &Clock, &mut Slot) -> T) -> T {
         let mut state = self.state.borrow_mut();
         let State {
             endpoint,
@@ -566,7 +542,7 @@ impl Session {
         let slot = sessions
             .get_mut(&self.key)
             .expect("invariant: a session keeps its slot until it drops");
-        let called = call(endpoint, clock.now(), slot);
+        let called = call(endpoint, clock, slot);
         if let Some(task) = task {
             task.wake_by_ref();
         }
