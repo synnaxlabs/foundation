@@ -1333,8 +1333,11 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
-  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
+  `Start.entries`. An empty `Start.voters` is a voter that an operator wiped, because a
+  node that joins opens with the founding voters from its join answer (decided by the
+  architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). It takes
+  any proof until it holds a `Voters` entry (#1004). Then its
   first `Voters` entry shows the configuration before the entries: a joint entry's
   outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
   starts at index 1, so that entry is the joint entry of the group's first change, and
