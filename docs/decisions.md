@@ -1901,7 +1901,7 @@ How to read this record:
   incoming keys, the outgoing keys (each an 8-byte count, then the keys in rising
   order), the votes in the proof form, and the leader's signature (64 bytes). No
   form holds a grant or a change with no signature: encode panics on one, because
-  the caller signs before each write and send. `mesh::grant` signs each claim with
+  the caller signs before each write and send. `mesh::claim` signs each claim with
   the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
   endian), and the candidate (16 bytes, little endian). A change signs
@@ -2036,7 +2036,7 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node with a
+  (`Error::NotVoter`), and each claim holds (`Error::Claim`). So a node with a
   configuration refuses a leader that is not a voter of that configuration, when a
   change that the node does not hold made that leader a voter. The node does not get the
   log from that leader (a known defect, #1096, that #1107 fixes). A node with no
@@ -3134,7 +3134,17 @@ How to read this record:
   and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
   fixed hasher, so a simulated run replays. A map keyed by outside input will get a
   keyed hasher with its key from `env` randomness. Decided by the advisor under the
-  quality delegation.
+  quality delegation. The fixed hasher is the Fx hasher of `rustc-hash`
+  (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
+  8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
+  Iteration order never decides behavior, so a test that breaks on the new order shows a
+  defect in the code. Decided by `laptop.architect` (2026-10-07T09:59:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1321
+  "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
+  ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
+  are open, so a set of keys that collide costs the peer many streams and a lookup at
+  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
