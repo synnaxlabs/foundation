@@ -68,6 +68,30 @@ with two lines for a person who has not read the code:
 
 A reviewer that did not write the PR gives both. An author never rates its own PR.
 
+## Round comment
+
+The required check `review` (`cargo xtask review`) reads only comments by
+`synnax-foundation-factory[bot]`, and parses this text. Write each round comment so:
+
+```
+Quality: <n>/10
+<summary>
+
+## Review round <n>
+
+Reviewers: reviewer, architecture, breaker
+Range: `<from>..<head sha>`
+Findings: <count, or none>
+
+<the findings, most severe first>
+```
+
+The check passes when the last round comment finds `none`, names each reviewer that the
+table requires for the diff, and ends at the PR head. A head that is that end plus clean
+merges of `main` also passes; a merge that resolves a conflict needs a new round. A
+red-team PR labeled `oracle` also needs the director's verdict with the line
+``Approved at `<sha>` `` for the head.
+
 ## Second round
 
 In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that

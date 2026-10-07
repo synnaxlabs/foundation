@@ -1,0 +1,62 @@
+name: Review
+
+# Posts the commit status `review` on a PR head: success only when its review is done
+# (`cargo xtask review`). The status, not this job, is the required check, because a
+# run from a comment reports on `main`, not on the PR.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created, edited]
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: review-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # Only round comments and director verdicts by the factory bot change the result.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'synnax-foundation-factory[bot]')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # The gate applied when the PR entered the queue.
+      - if: github.event_name == 'merge_group'
+        env:
+          SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          gh api "repos/$GH_REPO/statuses/$SHA" -f state=success -f context=review \
+            -f description="The review was done when the PR entered the queue."
+      - if: github.event_name != 'merge_group'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - if: github.event_name != 'merge_group'
+        uses: Swatinem/rust-cache@v2
+      - if: github.event_name != 'merge_group'
+        env:
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -z "$HEAD" ]; then
+            HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          fi
+          if cargo xtask review "$PR" "$HEAD"; then
+            state=success description="The review is done at the head."
+          else
+            state=failure description="The review is not done at the head. See the log."
+          fi
+          gh api "repos/$GH_REPO/statuses/$HEAD" -f state="$state" -f context=review \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
