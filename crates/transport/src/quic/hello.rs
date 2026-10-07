@@ -302,15 +302,15 @@ mod tests {
         prop_oneof![Just(2), Just(4), Just(8)]
     }
 
-    /// A value near the limits, or any varint.
+    /// A value near the limits, or a varint of a bit length drawn evenly from 0 to
+    /// 62.
     fn value() -> impl Strategy<Value = u64> {
         prop_oneof![
-            0_u64..64,
             0_u64..3_000,
             Just(1_471),
             Just(1_472),
-            3_000_u64..1 << 30,
-            0..=VarInt::MAX.into_inner(),
+            (any::<u64>(), 2_u32..=64)
+                .prop_map(|(bits, shift)| bits.checked_shr(shift).unwrap_or(0)),
         ]
     }
 
@@ -540,6 +540,42 @@ mod tests {
         expected.push(0x01);
         expected.extend(long(VarInt::MAX.into_inner()));
         assert_eq!(hello.encode(), expected);
+    }
+
+    #[test]
+    fn decode_reads_each_varint_in_each_length() {
+        let cases = [
+            (
+                [(0, 5), (1, 1_472), (2, 7)],
+                fault("a hello with window_bytes 5 below message_bytes_max 1472"),
+            ),
+            (
+                [(0, 2_000), (1, 7), (2, 7)],
+                fault("a hello with a message_bytes_max of 7, below 1472"),
+            ),
+            (
+                [(0, 16_000), (1, 3_000), (2, 16_382)],
+                Ok(Hello {
+                    window_bytes: 16_000,
+                    message_bytes_max: 3_000,
+                }),
+            ),
+            (
+                [(0, 2_000), (1, 1_500), (63, 0)],
+                Ok(Hello {
+                    window_bytes: 2_000,
+                    message_bytes_max: 1_500,
+                }),
+            ),
+        ];
+        for (pairs, expected) in cases {
+            for at in 0..1 << 12 {
+                let lens: Vec<usize> =
+                    (0..6).map(|i| [1, 2, 4, 8][at >> (2 * i) & 3]).collect();
+                let bytes = encode_wide(&pairs, &lens);
+                assert_eq!(Hello::decode(&bytes), expected, "{pairs:?} {lens:?}");
+            }
+        }
     }
 
     #[test]
