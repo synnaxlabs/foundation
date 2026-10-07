@@ -477,7 +477,7 @@ mod tests {
     use block::testing::Scarce;
     use env::files::{self, Operation};
     use env::net::udp::{self, Meta, Transmit};
-    use raft::{Answer, Hard, Term};
+    use raft::{Answer, Grant, Hard, Proof, Term};
     use sim::{Crash, Sim, link};
     use transport::Address;
     use types::node::SealKey;
@@ -1554,10 +1554,16 @@ mod tests {
             };
             let data = Data::Voters(Voters::default());
             let entries = [Entry { at, data }];
+            let proof = Proof {
+                grant: Grant::Vote,
+                candidate: key(1),
+                voters: [(key(1), Some(common::signature(1, Grant::Vote, 1)))].into(),
+            };
             let hard = Hard {
                 term: Term(1),
                 vote: Some(key(1)),
-                ..Hard::default()
+                leader: Some(key(1)),
+                proof: Some(proof),
             };
             log.write(Some(hard.clone()), &entries).await.unwrap();
             drop(log);
