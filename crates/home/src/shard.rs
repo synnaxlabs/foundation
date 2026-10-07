@@ -3208,23 +3208,27 @@ mod tests {
         run(109, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let mut none = shard.committed();
-            shard
+            let a = shard
                 .open_writer(writer("subject-a", 1, &set))
                 .expect("synced");
-            let commit = shard.committed();
+            let mut first = shard.committed();
+            assert_eq!(polled(&mut first), Poll::Pending);
+            shard.committed().await.expect("the commit ends");
+            let handoff = handoff_to("subject-a");
+            assert_eq!(find(&test.ring().await, &handoff).len(), 2);
+            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 1)][..]));
+            let second = shard.committed();
             test.node.fail_file(FilePath::new(RING), Operation::WriteAt);
             drop(shard);
-            assert_eq!(polled(&mut none), Poll::Pending);
+            assert_eq!(polled(&mut first), Poll::Pending);
             let failed = env::files::Error::Io {
                 path: PathBuf::from(RING),
                 operation: Operation::WriteAt,
                 code: 5,
             };
-            assert_eq!(commit.await, Err(failed));
-            assert_eq!(polled(&mut none), Poll::Ready(Ok(())));
-            let handoff = handoff_to("subject-a");
-            assert_eq!(find(&test.ring().await, &handoff).len(), 0);
+            assert_eq!(second.await, Err(failed));
+            assert_eq!(polled(&mut first), Poll::Ready(Ok(())));
         });
     }
 
