@@ -90,17 +90,19 @@ impl Senders {
                     // The session failed, or no dial gave one. Other protocols can
                     // use the session, so only the handle drops.
                     transport::Error::Unreachable { .. }
-                    | transport::Error::Unroutable
-                    | transport::Error::Authentication { .. }
                     | transport::Error::Closed { .. }
                     | transport::Error::PeerClosed { .. }
                     | transport::Error::TimedOut
                     | transport::Error::Broken { .. }
                     | transport::Error::Network { .. } => link = Link::default(),
                     // A stream gives `Reset` only after a dropped send, and this
-                    // task ends when it drops one. Only a bind gives `Config`.
+                    // task ends when it drops one. Only a bind gives `Config`. Only
+                    // an attempt of a dial gives `Unroutable` or `Authentication`,
+                    // inside `Unreachable`.
                     transport::Error::Reset { .. }
-                    | transport::Error::Config { .. } => {
+                    | transport::Error::Config { .. }
+                    | transport::Error::Unroutable
+                    | transport::Error::Authentication { .. } => {
                         unreachable!("invariant: a send of the mesh gives no {error}")
                     }
                 },
