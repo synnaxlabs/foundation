@@ -48,9 +48,11 @@ returns (`git worktree remove --force <path>`).
    its reviewers returns. It starts with the rating and summary from the `reviewer`'s
    report, as given (Rating). Then its reviewers, its range (`<from>..<head sha>`), and
    the confirmed findings, most severe first: file and line, what goes wrong, and the
-   fix. It ends with the line `Public surface:` and `none`, or each public item and
-   crate dependency that the PR changes (the `architecture` report names them), each
-   with the link to the architect's approval once it exists.
+   fix. It ends with two lines. First `Deferred:` and `none`, or the issue of each
+   deferred finding, each with the link to the architect's OK in a risk crate. Then
+   `Public surface:` and `none`, or each public item and crate dependency that the PR
+   changes (the `architecture` report names them), each with the link to the architect's
+   approval once it exists.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A deferral to an existing issue is a comment on that
@@ -94,9 +96,9 @@ nothing checked again. So when round 1 led to fix commits:
 
 Review is done when the last round comment ends at the PR head and finds nothing, each
 round comment names each reviewer its round requires (round 1: the table; a later round:
-`reviewer`, and `breaker` unless its range changes only comments), each deferral in a
-risk crate links its OK, the `Public surface:` line of the last round comment links the
-architect's approval of each item, each finding of an architect review has its fix
-commit or a linked answer, and each later step that the review or an architect's ruling
-names has its issue, or its trigger in the decisions entry. Only then does the author
-run `gh pr ready`.
+`reviewer`, and `breaker` unless its range changes only comments), the `Deferred:` line
+of each round comment links the OK of each deferral in a risk crate, the
+`Public surface:` line of the last round comment links the architect's approval of each
+item, each finding of an architect review has its fix commit or a linked answer, and
+each later step that the review or an architect's ruling names has its issue, or its
+trigger in the decisions entry. Only then does the author run `gh pr ready`.
