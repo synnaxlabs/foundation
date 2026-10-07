@@ -1,9 +1,10 @@
 //! Hash maps and sets with a fixed, fast hasher.
 //!
 //! Iteration order and hashes are the same in every run, so a simulated run replays.
-//! The hasher has no key: never use these maps for keys that a party outside the node
-//! chooses. Such a map needs a keyed hasher with its key from `env` randomness, which
-//! comes with its first caller.
+//! The hasher has no key, so a party that chooses keys freely can make them collide.
+//! Never key these maps by a value that a party outside the node chooses freely; a
+//! dense, bounded number such as a QUIC stream ID is fine. Such a map needs a keyed
+//! hasher with its key from `env` randomness, which comes with its first caller.
 
 use rustc_hash::FxBuildHasher;
 
