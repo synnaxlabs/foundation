@@ -410,8 +410,11 @@ mod tests {
             message_bytes_max: 1 << 30,
         };
         assert_eq!(Hello::decode(&bytes), Ok(hello));
-        bytes.push(0);
-        assert_eq!(Hello::decode(&bytes), fault("a hello over 256 bytes"));
+        // Id 30 alone, then with its value: a cut pair, then a whole one.
+        for byte in [0x1e, 0x00] {
+            bytes.push(byte);
+            assert_eq!(Hello::decode(&bytes), fault("a hello over 256 bytes"));
+        }
     }
 
     #[test]
