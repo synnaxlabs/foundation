@@ -38,8 +38,8 @@ pub struct Voter {
 }
 
 /// The secret part of a join ticket, which an operator carries to the joining node. It
-/// is never in region state or in a file. Its `Debug` never writes the private key.
-#[derive(Clone, Debug)]
+/// is never in region state or in a file. Its `Debug` writes the region and the public
+/// key only, and it has no `Display`, no `Clone`, and no equality.
 pub struct Ticket {
     private_key: PrivateKey,
     region: Name,
@@ -49,12 +49,13 @@ pub struct Ticket {
 impl Ticket {
     /// A ticket for the region with prefix `region`, whose key pair is `private_key`,
     /// and whose joining node dials `voters` first.
+    ///
+    /// # Panics
+    ///
+    /// When `voters` is empty: a region always has a voter.
     #[must_use]
-    pub const fn new(
-        private_key: PrivateKey,
-        region: Name,
-        voters: Vec<Voter>,
-    ) -> Self {
+    pub fn new(private_key: PrivateKey, region: Name, voters: Vec<Voter>) -> Self {
+        assert!(!voters.is_empty(), "a ticket names at least one voter");
         Self {
             private_key,
             region,
@@ -85,6 +86,15 @@ impl Ticket {
     #[must_use]
     pub fn admission(&self, card: &card::Signed) -> [u8; 64] {
         ed25519::sign(&ed25519::pair(&self.private_key), &statement(card))
+    }
+}
+
+impl fmt::Debug for Ticket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ticket")
+            .field("region", &self.region)
+            .field("public_key", &self.public_key())
+            .finish_non_exhaustive()
     }
 }
 
@@ -251,8 +261,19 @@ mod tests {
     const EXPIRY: Stamp = Stamp::from_nanos(1_000);
     const BEFORE_EXPIRY: Stamp = Stamp::from_nanos(999);
 
+    fn voter() -> Voter {
+        Voter {
+            key: key(1),
+            public_key: public(1),
+            addresses: card::addresses::Addresses::new(vec![Address::Udp(
+                "10.0.0.1:4000".parse().unwrap(),
+            )])
+            .unwrap(),
+        }
+    }
+
     fn ticket(id: u8) -> Ticket {
-        Ticket::new(private(id), "plant".parse().unwrap(), Vec::new())
+        Ticket::new(private(id), "plant".parse().unwrap(), vec![voter()])
     }
 
     fn options(prefix: &str, reusable: bool) -> Options {
@@ -286,25 +307,31 @@ mod tests {
 
     #[test]
     fn a_ticket_keeps_its_region_and_voters() {
-        let voter = Voter {
-            key: key(1),
-            public_key: public(1),
-            addresses: card::addresses::Addresses::new(vec![Address::Udp(
-                "10.0.0.1:4000".parse().unwrap(),
-            )])
-            .unwrap(),
-        };
-        let ticket =
-            Ticket::new(private(7), "plant".parse().unwrap(), vec![voter.clone()]);
+        let ticket = ticket(7);
         assert_eq!(ticket.region().as_str(), "plant");
-        assert_eq!(ticket.voters(), [voter]);
+        assert_eq!(ticket.voters(), [voter()]);
     }
 
     #[test]
-    fn debug_never_writes_the_private_key() {
-        let written = format!("{:?}", ticket(7));
-        assert!(written.contains("PrivateKey(..)"), "{written}");
-        assert!(!written.contains(&format!("{:?}", [7_u8; 32])), "{written}");
+    #[should_panic(expected = "a ticket names at least one voter")]
+    fn a_ticket_with_no_voter_panics() {
+        drop(Ticket::new(
+            private(7),
+            "plant".parse().unwrap(),
+            Vec::new(),
+        ));
+    }
+
+    #[test]
+    fn debug_writes_the_region_and_the_public_key_only() {
+        let region: Name = "plant".parse().unwrap();
+        assert_eq!(
+            format!("{:?}", ticket(7)),
+            format!(
+                "Ticket {{ region: {region:?}, public_key: {:?}, .. }}",
+                public(7)
+            )
+        );
     }
 
     #[test]

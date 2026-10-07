@@ -1897,6 +1897,20 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). Decided
   by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
+  A `mesh::ticket::Ticket` is the secret part that an operator carries: the private key,
+  the region's prefix, and the voters to dial first (X37), at least one. Its `Debug`
+  writes the region and the public key only, and it has no `Display`, `Clone`, or
+  equality. `Ticket::admission` signs `foundation/admission/1`, the card's node key, and
+  the card's byte form. The region's `ticket::Record` holds the public key, the
+  `Options` (prefix, reusable, expiry, ephemeral), and the use count. `Record::admit`
+  refuses, in this order, a forged admission, a name outside the prefix, a join at or
+  after the expiry, and a second use of a single-use ticket, and counts a use only when
+  all checks pass, so a refused join never uses up a ticket. The ephemeral expiry of a
+  `Member` comes from its ticket, because the admin decides what a ticket admits
+  (BQ11a) and the joining node is outside input. Lost: a bearer secret in the `Join`,
+  which every member could replay and which binds to no card. Decided by
+  `laptop.architect` (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
