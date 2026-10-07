@@ -1984,8 +1984,9 @@ How to read this record:
   the mesh file.
 - **S12 (placement part) + B7** Placement is a policy: `placement { select, home,
   standby, copies }`. Each node field is optional, but a placement names at least one
-  node, and no node has two roles. With no placement that names a home, an index's
-  home is the node of the connector that writes it (precedence in X22). Amended: the
+  node, and no node has two roles. When no placement selects the index, or the
+  winning placement names no home, an index's home is the node of the connector that
+  writes it (precedence in X22). Amended: the
   `home` field restores the recorded intent ("placement decides home", r8 Q8), which
   the bootstrap list left out (architect, #1150,
   https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
@@ -3537,8 +3538,8 @@ covers a connector and every index under its name. B7 gives indexes a default ho
 the connector's node. A placement selecting the same connector could name another node.
 Resolution: the connector's `node` is its required primary node (it is
 attached to a device, and `discover` writes it). A placement that selects a connector
-may add `standby` and `copies` but may not move its primary; `plan` fails if it tries,
-also with a `home` other than the connector's `node`.
+may add `standby` and `copies`, and may name only the connector's `node` as `home`;
+`plan` fails otherwise.
 An index's home, in order: a placement that selects the index, then the node of the
 connector that writes it (B7), then a plan error. The placement resolves as a whole
 policy (X25): when the winning placement names no home, a less specific one does not
