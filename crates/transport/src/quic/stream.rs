@@ -284,7 +284,7 @@ impl Sender {
     }
 }
 
-/// The size rule of every send, also after the stream reset.
+/// The size rule of every send.
 ///
 /// # Errors
 ///

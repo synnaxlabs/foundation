@@ -13,7 +13,6 @@ use crate::quic;
 
 /// What a [`Sender`] gives after a dropped send future reset its stream.
 const CANCELLED: Error = Error::Reset { code: Code(0) };
-const SENDING: &str = "invariant: only a dropped send future resets a sender's stream";
 
 /// Bytes of a block to send, then zeros.
 ///
@@ -130,7 +129,8 @@ impl Sender {
             done: false,
         };
         let sent = poll_fn(|cx| {
-            let stream = sending.stream.as_mut().expect(SENDING);
+            let invariant = "only a dropped send future resets a sender's stream";
+            let stream = sending.stream.as_mut().expect(invariant);
             sending.session.poll_write(cx, stream, &mut sending.message)
         })
         .await;
