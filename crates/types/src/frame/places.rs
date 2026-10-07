@@ -31,8 +31,8 @@ pub struct Placed {
     /// Its bytes in the home's frame, as [`Frame::body`] holds them.
     pub bounds: Range<usize>,
     /// Its end in the reader's frame, as [`Frame::ends`] gives it there. The series
-    /// starts at `end - bounds.len()`, and the bytes between the end before it and
-    /// that start are zeros.
+    /// starts at `end - bounds.len()`. The bytes from the end before it to that start
+    /// are padding, which the caller writes (FRAME LAYOUT).
     pub end: usize,
 }
 

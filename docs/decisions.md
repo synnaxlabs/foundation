@@ -486,10 +486,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6049045510. The
   `hash::Map` of those states adds about 0.3 ns per place to `release` at 100k places
   (+10%); laptop.architect accepted it on 2026-10-07T23:32:22Z:
-  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185. One layout
-  type for this charge and the frame that `serve` sends, and the two `Places` costs at
-  100k places, are #1648; laptop.architect gave the OK to defer them on
-  2026-10-07T23:22:03Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185.
+  `types::frame::Places` holds this charge and the layout of the frame that `serve`
+  sends (HUB WIRE, #1648), with laptop.architect's OK on 2026-10-07T23:22:03Z to move
+  it out of #1655:
   https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
   charge is part of the wire contract: a change to `block`'s header or size classes
   needs a new wire version (C9d). The classes changed to four per
@@ -1508,6 +1508,14 @@ How to read this record:
   of this session yet, so its series count has no session to break. Lost: `Places`
   first. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1455#issuecomment-6040654132).
+  Amended (2026-10-07T23:34:09Z, #1648): `types::frame::Places` holds the layout of a
+  remote reader's frame for `delivery` and `serve`. `Places::lay` gives each series in
+  place order, with its bounds in the home's `Frame::body` and its end in the reader's
+  frame; `Places::charge` is the `Frame::charge` of that frame, in O(1) when the places
+  name each entry of the key set in entry order. Lost: a free function that lays one
+  frame, with each caller keeping its own state for each key set, so `delivery` and
+  `serve` each repeat it. Decided by laptop.architect:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
