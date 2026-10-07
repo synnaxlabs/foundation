@@ -1596,8 +1596,8 @@ How to read this record:
   stops when a write of the log fails, when a committed entry is not a change that this
   build reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with
   the first cause, and a watch gives it also after each `Mesh` drops. `member` has no
-  error (#562): it gives the record that the node holds, also after a stop, from the
-  view at the stop (approved by the architect:
+  error (#562): it gives the record that the node holds, also after a stop (approved by
+  the architect, 2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
   group does not start again: the node opens the mesh again (#1066 for an open after a
   failed sync). The task ends soon after the last `Mesh` drops, a write in progress ends
