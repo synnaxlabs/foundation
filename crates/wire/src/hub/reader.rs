@@ -63,9 +63,9 @@ impl Reader {
     ///
     /// Three checks, in order; the error is that of the first check that fails.
     ///
-    /// 1. The bytes: the [`Error`] of a message that does not decode as what the
-    ///    session expects. A message of a run has no kind, so a message where a run
-    ///    continues is read as one.
+    /// 1. The bytes: the [`Error`] of a message that does not decode as a reply
+    ///    (`Opened` or a head) or, where a run continues, as a message of that run. A
+    ///    message of a run has no kind, so a reply byte there is run bytes.
     /// 2. The order of the session, whatever the content of a reply:
     ///    [`Error::Unopened`] for a head before `Opened` and [`Error::Reopen`] for a
     ///    second `Opened`.
@@ -363,6 +363,27 @@ mod tests {
                 items: 2,
                 remain: 1
             })
+        );
+    }
+
+    #[test]
+    fn reads_a_reply_byte_inside_a_run_as_the_run() {
+        let mut reader = opened(1);
+        reader.decode(&head(1)).expect("the head decodes");
+        assert_eq!(
+            reader.decode(&[OPENED]).err(),
+            Some(Error::Length { len: 1 })
+        );
+        reader
+            .decode(&encode_ends(&[(0, 2)]))
+            .expect("the end decodes");
+        assert_eq!(
+            event(&mut reader, &[OPENED]),
+            Ok(Event::Body(vec![OPENED], false))
+        );
+        assert_eq!(
+            event(&mut reader, &[HEAD]),
+            Ok(Event::Body(vec![HEAD], true))
         );
     }
 
