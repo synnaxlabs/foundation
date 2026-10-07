@@ -186,7 +186,7 @@ impl Mesh {
         let Voters { incoming, outgoing } = group.raft.voters();
         let voter = incoming.contains(&from) || outgoing.contains(&from);
         if request(&message.body) && !voter {
-            return Err(Error::NotVoter { peer });
+            return Err(Error::NotVoter { from });
         }
         grant::check(&message, public_key)?;
         group.raft.step(message)?;
@@ -242,7 +242,7 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::NotVoter`] when `peer` is the key of no voter of this node's
+    /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
     ///   configuration. The group does not see the change.
     pub(crate) async fn answer(
         &self,
@@ -257,7 +257,7 @@ impl Mesh {
                 group.state.member(*voter).map(Member::public_key) == Some(peer)
             };
             if !incoming.iter().chain(outgoing).any(holds) {
-                return Err(Error::NotVoter { peer });
+                return Err(Error::PeerNotVoter { peer });
             }
         }
         match self.propose(change).await {
@@ -1226,7 +1226,13 @@ mod tests {
                 let first = lead(&mesh, &node.clock(), home(1)).await;
                 for (case, peer) in [("a member", 2), ("no member", 9)] {
                     let answer = mesh.answer(public(peer), home(2)).await;
-                    let refused = Error::NotVoter { peer: public(peer) };
+                    let refused = Error::PeerNotVoter { peer: public(peer) };
+                    let text = format!(
+                        "the peer with the public key {} forwarded a change, but no \
+                         voter holds that key",
+                        public(peer),
+                    );
+                    assert_eq!(refused.to_string(), text, "{case}");
                     assert_eq!(answer, Err(refused), "{case}");
                 }
                 // The group saw no change between the two.
@@ -1265,7 +1271,7 @@ mod tests {
                     assert_eq!(answer, Ok(Message::NotLeader { leader }), "{peer}");
                 }
                 let answer = mesh.answer(public(5), home(5)).await;
-                assert_eq!(answer, Err(Error::NotVoter { peer: public(5) }));
+                assert_eq!(answer, Err(Error::PeerNotVoter { peer: public(5) }));
             });
         }
 
@@ -1483,17 +1489,15 @@ mod tests {
         fn refuses_a_request_from_a_member_that_is_not_a_voter() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
-                let refused = Error::NotVoter { peer: public(4) };
+                let refused = Error::NotVoter { from: key(4) };
                 for body in requests() {
                     let received = mesh.receive(public(4), message(4, 1, body));
                     assert_eq!(received, Err(refused.clone()));
                 }
-                let text = format!(
-                    "the peer with the public key {} sent a request, but it is not a \
-                     voter",
-                    public(4),
+                assert_eq!(
+                    refused.to_string(),
+                    format!("node {} sent a request, but it is not a voter", key(4))
                 );
-                assert_eq!(refused.to_string(), text);
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 4).await);
                 assert_eq!(term(&mesh), Term(0));
@@ -1511,12 +1515,28 @@ mod tests {
             });
         }
 
+        // Members 2 and 4 share one public key. Node 2 is a voter, and node 4 is
+        // not.
+        #[test]
+        fn not_voter_names_no_key_that_a_voter_holds() {
+            solo(|node, tasks| async move {
+                let mut config = config(&node, &tasks, 1, &IDS, &IDS);
+                config.members.push(record(4, 2, 1));
+                let mesh = Mesh::open(config).await.unwrap();
+                let heartbeat = message(4, 1, Body::Heartbeat { commit: 0 });
+                let refused = mesh.receive(public(2), heartbeat);
+                assert_eq!(refused, Err(Error::NotVoter { from: key(4) }));
+                let answer = mesh.answer(public(2), home(2)).await;
+                assert_eq!(answer, Ok(Message::NotLeader { leader: None }));
+            });
+        }
+
         #[test]
         fn refuses_a_request_when_the_node_has_no_voters() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[]).await.unwrap();
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                let refused = Error::NotVoter { peer: public(2) };
+                let refused = Error::NotVoter { from: key(2) };
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
@@ -1596,7 +1616,7 @@ mod tests {
                 };
                 let spoofed = Error::Spoofed { from: key(2) };
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
-                let not_voter = Error::NotVoter { peer: public(3) };
+                let not_voter = Error::NotVoter { from: key(3) };
                 assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
                 let grant = Error::Grant(grant::Error::Forged { voter: key(1) });
                 assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
@@ -1649,7 +1669,7 @@ mod tests {
                 };
                 common::signer(4).sign(&mut ready);
                 let lie = ready.messages.remove(0);
-                let refused = Error::NotVoter { peer: public(4) };
+                let refused = Error::NotVoter { from: key(4) };
                 assert_eq!(mesh.receive(public(4), lie), Err(refused));
                 assert_eq!(term(&mesh), Term(0));
             });

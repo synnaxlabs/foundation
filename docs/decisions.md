@@ -1785,8 +1785,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035860357). A node
   that gets a forwarded proposal (MESH WIRE) proposes the change, and its answer is the
   position, or "not the leader" with the leader that it knows. A proposal from a peer
-  whose key no voter of this node's configuration holds is refused (`Error::NotVoter`);
-  a member that is not a voter proposes with join (#336). The leader does not check the
+  whose key no voter of this node's configuration holds is refused
+  (`Error::PeerNotVoter`, with the key of the peer, because a forwarded change names no
+  sender; `Error::NotVoter` names the sender of a message; decided by the architect,
+  2026-10-07T10:38:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6036181809); a
+  member that is not a voter proposes with join (#336). The leader does not check the
   home of a forwarded change: `Error::NotMember` checks only the argument of a local
   caller, and the check of a home at apply on each node is #1273. A forwarded change
   applies at least one time: a member that got no answer forwards it again, and the

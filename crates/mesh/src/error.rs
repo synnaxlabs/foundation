@@ -19,8 +19,14 @@ pub(crate) enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a peer whose key no voter of this node's configuration holds.
+    /// A request from a member that is not a voter of this node's configuration.
     NotVoter {
+        /// The sender.
+        from: node::Key,
+    },
+    /// A forwarded change from a peer whose key no voter of this node's configuration
+    /// holds.
+    PeerNotVoter {
         /// The key that the peer proved.
         peer: PublicKey,
     },
@@ -46,10 +52,13 @@ impl fmt::Display for Error {
                 "a message names node {from} as its sender, but its peer does not \
                  hold the key of that member"
             ),
-            Self::NotVoter { peer } => write!(
+            Self::NotVoter { from } => {
+                write!(f, "node {from} sent a request, but it is not a voter")
+            }
+            Self::PeerNotVoter { peer } => write!(
                 f,
-                "the peer with the public key {peer} sent a request, but it is not a \
-                 voter"
+                "the peer with the public key {peer} forwarded a change, but no voter \
+                 holds that key"
             ),
             Self::Grant(error) => error.fmt(f),
             Self::NotMember(key) => {
