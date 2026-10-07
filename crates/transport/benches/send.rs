@@ -19,8 +19,10 @@
 //! send of the other class waits, so a class that sends alone adds nothing; `timed`
 //! gives the share of sends it timed. In each round, a send of each class must end
 //! while the other class waits, and the round must time at least half its sends so
-//! that its figure stands on enough sends. After the rounds, the server must have one
-//! stream of each class. If not, the bench panics. Its control is `complete 1 KiB
+//! that its figure stands on enough sends. Over the timed rounds, the `Complete`
+//! sends it timed must be at least twice its `Latest` sends, as the share gives
+//! `Complete` three turns to each of `Latest`. After the rounds, the server must have
+//! one stream of each class. If not, the bench panics. Its control is `complete 1 KiB
 //! waiting`, whose send must wait in each round. Each poll has a timing cost, so
 //! compare the two lines with their polls per send.
 //!
@@ -434,6 +436,7 @@ async fn compete(
     let share = SENDS / senders.len();
     let mut nanos = Vec::with_capacity(ROUNDS);
     let (mut allocations, mut polls, mut timed) = (0, 0, 0);
+    let mut timed_of = vec![0; senders.len()];
     for round in 0..WARMUP + ROUNDS {
         let tally = Tally::new(classes.clone(), premise);
         let tally = RefCell::new(tally);
@@ -444,23 +447,42 @@ async fn compete(
         }
         join(sends).await;
         let tally = tally.into_inner();
+        let sends: u64 = tally.sends.iter().sum();
         assert!(
             tally.shown,
             "{} is not {premise:?} in round {round}",
             scenario.name
         );
         assert!(
-            2 * tally.sends >= u64::try_from(SENDS).expect("fits"),
-            "{} times {} of {SENDS} sends in round {round}",
+            2 * sends >= u64::try_from(SENDS).expect("fits"),
+            "{} times {sends} of {SENDS} sends in round {round}",
             scenario.name,
-            tally.sends
         );
         if round >= WARMUP {
-            nanos.push(per(tally.timed.nanos) / per(tally.sends));
+            nanos.push(per(tally.timed.nanos) / per(sends));
             allocations += tally.timed.allocations;
             polls += tally.timed.polls;
-            timed += tally.sends;
+            timed += sends;
+            for (total, sends) in timed_of.iter_mut().zip(tally.sends) {
+                *total += sends;
+            }
         }
+    }
+    if let Premise::Competes = premise {
+        let of = |class: Class| -> u64 {
+            let senders = classes.iter().zip(&timed_of);
+            senders
+                .filter(|(of, _)| **of == class)
+                .map(|(_, sends)| sends)
+                .sum()
+        };
+        let (complete, latest) = (of(Class::Complete), of(Class::Latest));
+        assert!(
+            complete >= 2 * latest,
+            "{} times {complete} Complete and {latest} Latest sends: the share does not \
+             see two classes",
+            scenario.name,
+        );
     }
     let mut sent = mem::take(&mut *accepted.lock().expect("not poisoned"));
     let mut asked = classes.clone();
@@ -499,8 +521,8 @@ async fn send_each(
 struct Tally {
     /// The cost of the timed sends.
     timed: Cost,
-    /// The timed sends.
-    sends: u64,
+    /// The timed sends of each sender.
+    sends: Vec<u64>,
     /// The cost so far of the current send of each sender.
     current: Vec<Cost>,
     /// The class of each sender.
@@ -526,7 +548,7 @@ impl Tally {
     fn new(classes: Vec<Class>, premise: Premise) -> Self {
         Self {
             timed: Cost::default(),
-            sends: 0,
+            sends: vec![0; classes.len()],
             current: vec![Cost::default(); classes.len()],
             waiting: vec![false; classes.len()],
             turned: vec![false; classes.len()],
@@ -564,7 +586,7 @@ impl Tally {
                 self.timed.nanos += cost.nanos;
                 self.timed.allocations += cost.allocations;
                 self.timed.polls += cost.polls;
-                self.sends += 1;
+                self.sends[at] += 1;
             }
         }
         self.shown |= match self.premise {
