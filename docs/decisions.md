@@ -938,13 +938,22 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
-  it on drop. So the task ends, and drops the commit it waits for, at its first poll
-  after the hub and each of its sessions drop, and the home and its buffer end then.
-  `node` relies on this to close a shard's ring before it lets go of the data
-  directory lock. Lost: `Hub::close(self) -> Commit`, which each caller must call, and
-  which a clone or a live session defeats. Decided by `laptop.architect`
-  (2026-10-07T18:07:55Z:
+  it on drop, and the task ends at its first poll after that. Lost:
+  `Hub::close(self) -> Commit`, which each caller must call, and which a clone or a
+  live session defeats. Decided by `laptop.architect` (2026-10-07T18:07:55Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
+  The commit that the task waits for lives in the state, and the task polls it
+  through the state. So the drop of the state drops the commit in the same call. Once
+  the hub and each of its sessions drop, the hub holds no part of the home: no
+  `Home`, no `Commit`, no `Reading`. A task that the hub spawns holds a part of the
+  home only through the state or a session. `node` takes its own commit before it
+  drops the hub, drops the hub and each session, awaits the commit, which resolves
+  once the buffer's task ended, drops it, and then lets go of the data directory lock.
+  Lost: a future of the end of the task, one more step for each caller; and an order
+  in `node`, which cannot know what the hub holds. Supersedes: "So the task ends, and
+  drops the commit it waits for, at its first poll after the hub and each of its
+  sessions drop". Decided by `laptop.architect` (2026-10-07T21:23:22Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6047128783).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -4267,6 +4276,7 @@ How to read this record:
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
+| HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 
 ---
 

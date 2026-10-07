@@ -74,8 +74,12 @@ struct Test {
     ended: Rc<Cell<usize>>,
     /// How many polls the hub's tasks have had.
     polls: Rc<Cell<usize>>,
+    /// While set, the hub's tasks are not polled.
+    paused: Rc<Pause>,
     /// The node's mesh clock until [`Test::sync`] runs it.
     unsynced: Option<clock::Clock>,
+    /// A commit of the home, taken before the hub had it. It holds the ring open.
+    commit: home::Commit,
     hub: Hub,
 }
 
@@ -105,7 +109,9 @@ impl Test {
             clock: mesh.clone(),
             limits: LIMITS,
         });
+        let commit = home.committed();
         let (ended, polls) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let paused = Rc::new(Pause::default());
         let hub = Hub::new(hub::Config {
             home,
             interner,
@@ -113,6 +119,7 @@ impl Test {
                 tasks: tasks.clone(),
                 ended: Rc::clone(&ended),
                 polls: Rc::clone(&polls),
+                paused: Rc::clone(&paused),
             }),
         });
         for (key, channel, data_type, index) in CHANNELS {
@@ -131,7 +138,9 @@ impl Test {
             tasks,
             ended,
             polls,
+            paused,
             unsynced: Some(unsynced),
+            commit,
             hub,
         }
     }
@@ -185,18 +194,51 @@ impl Test {
 }
 
 /// Spawns on `tasks`, and counts each poll in `polls` and each task that completes in
-/// `ended`.
+/// `ended`. Polls no task while `paused` is set.
 struct Counted {
     tasks: Tasks,
     ended: Rc<Cell<usize>>,
     polls: Rc<Cell<usize>>,
+    paused: Rc<Pause>,
+}
+
+/// Holds back the polls of the hub's tasks, as an executor that runs other tasks
+/// first does.
+#[derive(Default)]
+struct Pause {
+    /// The waker of each task woken while paused, when paused.
+    held: std::cell::RefCell<Option<Vec<Waker>>>,
+}
+
+impl Pause {
+    fn pause(&self) {
+        *self.held.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Wakes each task woken while paused.
+    fn resume(&self) {
+        let held = self.held.borrow_mut().take().unwrap_or_default();
+        held.into_iter().for_each(Waker::wake);
+    }
+
+    /// Whether the task of `cx` waits, which holds its waker.
+    fn holds(&self, cx: &Context<'_>) -> bool {
+        let mut held = self.held.borrow_mut();
+        held.as_mut()
+            .map(|held| held.push(cx.waker().clone()))
+            .is_some()
+    }
 }
 
 impl env::tasks::Driver for Counted {
     fn spawn(&self, mut task: env::tasks::Task) {
         let (ended, polls) = (Rc::clone(&self.ended), Rc::clone(&self.polls));
+        let paused = Rc::clone(&self.paused);
         self.tasks.spawn(async move {
             std::future::poll_fn(|cx| {
+                if paused.holds(cx) {
+                    return Poll::Pending;
+                }
                 polls.set(polls.get() + 1);
                 task.as_mut().poll(cx)
             })
@@ -507,6 +549,7 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
         let Test {
             pool,
             clock,
+            commit,
             hub,
             ended,
             ..
@@ -514,7 +557,7 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
         drop(writer);
         clock.sleep(SETTLE).await;
         assert_eq!(ended.get(), 0, "the hub holds the home");
-        drop((hub, reader));
+        drop((hub, reader, commit));
         clock.sleep(SETTLE).await;
         assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
         assert_eq!(ended.get(), 1, "the commit task ended");
@@ -553,17 +596,49 @@ fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
         let Test {
             pool,
             clock,
+            commit,
             hub,
             ended,
             ..
         } = test;
         clock.sleep(Span::from_nanos(1)).await;
-        drop((hub, reader, writer));
+        drop((hub, reader, writer, commit));
         clock.sleep(Span::from_nanos(1)).await;
         assert_eq!(ended.get(), 1, "the commit task ended before the commit");
         clock.sleep(SETTLE).await;
         assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
     });
+}
+
+/// Once the hub and each session drop while the commit task waits for a commit, the
+/// hub holds no commit: a commit of the home resolves only once the ring has closed.
+#[test]
+fn drops_the_commit_it_waits_for_with_the_hub() {
+    for seed in 0..64 {
+        run(seed, move |test| async move {
+            let reader = test.reader(&["value"], Mode::Complete).await;
+            let mut writer = test.writer("a", &["value"]).await;
+            test.clock.sleep(SETTLE).await;
+            write(&mut writer, &[test.now()], &[1]);
+            test.clock.sleep(Span::from_nanos(1)).await;
+            let Test {
+                node,
+                commit,
+                hub,
+                paused,
+                ..
+            } = test;
+            paused.pause();
+            drop((hub, reader, writer));
+            assert_eq!(commit.await, Ok(()));
+            let ring = node
+                .files()
+                .open(FilePath::new(RING), env::files::Mode::Write)
+                .await;
+            assert!(ring.is_ok(), "seed {seed}: {ring:?}");
+            paused.resume();
+        });
+    }
 }
 
 /// The commit task that went back to sleep after a commit wakes for the next write.
@@ -1033,7 +1108,7 @@ fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_its_next_call() 
 #[test]
 fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window() {
     for seed in 0..32 {
-        run(seed, |test| async move {
+        run(seed, move |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
@@ -1063,7 +1138,7 @@ fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window()
 #[test]
 fn ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame() {
     for seed in 0..32 {
-        run(seed, |test| async move {
+        run(seed, move |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
