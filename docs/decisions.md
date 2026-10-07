@@ -984,12 +984,15 @@ How to read this record:
   Only the fixed part of `Open` and of `Head` is one message. The rest is one run of
   bytes, in messages of at most the peer's `message_bytes_max`, back to back with no
   prefix: after `Open`, the keys; after `Head`, the end of each series in the body,
-  then the body. So no count of channels or series has a cap, and the reader fills
-  one block of the length of the last end. The home checks each key as it arrives and
+  then the body. A message never splits a key or an end, so each side decodes them as
+  they arrive. So no count of channels or series has a cap, and the reader fills one
+  block of the length of the last end. The home checks each key as it arrives and
   never allocates by the peer's count. A head with more series than places is not
-  valid. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
-  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
-  that does not decode or comes from the wrong side), which every protocol may use.
+  valid. Each direction has its own messages: the reader sends `Open`, then `Credit`;
+  the home sends a `Reply`, `Opened` or `Head`. Stop codes: 16 `UNKNOWN` (a channel the
+  home does not know), 17 `NOT_HOME` (the node is not the home of the index), and 2
+  `wire::header::MALFORMED` (a message that does not decode), which every protocol
+  may use.
   Lost: a `message_bytes_max` of at least the largest pool block (a client or a
   foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91
   channels a session, the most that fit in 1472 bytes; the index in its own field of
