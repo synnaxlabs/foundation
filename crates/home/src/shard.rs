@@ -4,7 +4,6 @@
 use std::fmt;
 use std::ops::Range;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -30,7 +29,6 @@ pub(crate) struct Shard {
     /// The shard's number on its node.
     number: u32,
     buffer: Buffer,
-    pool: Rc<block::Pool>,
     clock: clock::Reader,
     limits: order::Limits,
     indexes: Vec<Index>,
@@ -49,11 +47,9 @@ pub(crate) struct Shard {
 pub(crate) struct Config {
     /// The shard's number on its node. Each writer key the shard gives carries it.
     pub(crate) shard: u32,
-    /// The shard's buffer.
+    /// The shard's buffer. Index frames, stored headers, and handoff bodies come
+    /// from its pool.
     pub(crate) buffer: Buffer,
-    /// The pool of `buffer`. Index frames, stored headers, and handoff bodies come
-    /// from it.
-    pub(crate) pool: Rc<block::Pool>,
     /// The node's clocks. Control leases expire on its monotonic clock. Stamp
     /// checks, handoffs, stored entries, and readers read its mesh time.
     pub(crate) clock: clock::Reader,
@@ -176,14 +172,12 @@ impl Shard {
         let Config {
             shard,
             buffer,
-            pool,
             clock,
             limits,
         } = config;
         Self {
             number: shard,
             buffer,
-            pool,
             clock,
             limits,
             indexes: Vec::new(),
@@ -322,18 +316,11 @@ impl Shard {
             scratch.checks.push((group, checked, None));
         }
         let groups = scratch.checks.iter().map(|&(group, ..)| group);
-        let recorded = record(
-            &self.buffer,
-            &self.pool,
-            &mut self.indexes,
-            session,
-            groups,
-            mesh,
-        );
+        let recorded = record(&self.buffer, &mut self.indexes, session, groups, mesh);
         let entries = &mut scratch.entries;
         let made = freeze(
             entries,
-            &self.pool,
+            self.buffer.pool(),
             &mut split,
             &session.set,
             &mut scratch.checks,
@@ -521,7 +508,6 @@ impl Shard {
         // A handoff with no room waits, and a failed commit fails the next write.
         drop(record(
             &self.buffer,
-            &self.pool,
             &mut self.indexes,
             session,
             groups,
@@ -576,7 +562,6 @@ fn freeze(
 /// [`Error::Disk`] after a failed commit.
 fn record(
     buffer: &Buffer,
-    pool: &block::Pool,
     indexes: &mut [Index],
     session: &Session,
     groups: impl Iterator<Item = u32>,
@@ -589,7 +574,8 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let appended = match handoff::entry(pool, handoff, entry, first, mesh) {
+        let appended = match handoff::entry(buffer.pool(), handoff, entry, first, mesh)
+        {
             Ok(handoff) => buffer.append([handoff]),
             Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
                 all = false;
@@ -679,6 +665,7 @@ fn room(appended: Result<(), buffer::Rejected>) -> Result<bool, Error> {
 mod tests {
     use std::iter;
     use std::path::{Path as FilePath, PathBuf};
+    use std::rc::Rc;
 
     use block::{Heap, Pool, Unique};
     use buffer::Layout;
@@ -768,7 +755,7 @@ mod tests {
             while self.reader.now().mesh.is_none() {
                 self.clock.sleep(Span::from_nanos(1)).await;
             }
-            self.with(shard, buffer, self.reader.clone())
+            Self::with(shard, buffer, self.reader.clone())
         }
 
         /// A shard over the ring of the node that never has mesh time, with no index
@@ -777,15 +764,14 @@ mod tests {
             let buffer = self.buffer(AREA, BODY_MAX, 4).await;
             // A clock that never runs never has mesh time.
             let (_, reader) = clock::Clock::new(self.clock.clone());
-            self.with(0, buffer, reader)
+            Self::with(0, buffer, reader)
         }
 
         /// A shard of the number `shard` over `buffer`, with the clocks of `reader`.
-        fn with(&self, shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
+        fn with(shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
             Shard::new(Config {
                 shard,
                 buffer,
-                pool: Rc::clone(&self.pool),
                 clock: reader,
                 limits: LIMITS,
             })
@@ -3264,7 +3250,6 @@ mod tests {
             let mut shard = Shard::new(Config {
                 shard: 0,
                 buffer,
-                pool: Rc::clone(&test.pool),
                 clock: mesh.clone(),
                 limits: LIMITS,
             });
