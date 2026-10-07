@@ -9,13 +9,37 @@ use types::channel::Slot;
 use types::frame::{Frame, Path};
 use types::time::Stamp;
 
-/// A reader on its shard: the slot of its index and its session there.
+/// An open reader on its shard, in either mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     /// The slot of the reader's index.
     pub(crate) slot: Slot,
     /// The reader's session on the index.
     pub(crate) session: delivery::Key,
+}
+
+/// The key of a reader that takes every frame.
+pub(crate) mod complete {
+    use types::channel::Slot;
+
+    /// An open complete reader on its shard. It converts into a
+    /// [`reader::Key`](super::Key).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) struct Key {
+        /// The slot of the reader's index.
+        pub(crate) slot: Slot,
+        /// The reader's session on the index.
+        pub(crate) session: delivery::complete::Key,
+    }
+
+    impl From<Key> for super::Key {
+        fn from(key: Key) -> Self {
+            Self {
+                slot: key.slot,
+                session: key.session.into(),
+            }
+        }
+    }
 }
 
 /// The readers of each index of a shard, by the index's place in the shard, and the

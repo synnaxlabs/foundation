@@ -62,7 +62,7 @@ impl Index {
     ///
     /// # Errors
     ///
-    /// In this order: [`Refusal::Control`] when `key` does not hold control,
+    /// In this order: a control refusal when `key` does not hold control,
     /// [`Refusal::Codec`] with the error of `stamps`, and [`Refusal::Order`] when a
     /// stamp breaks a rule.
     ///
@@ -77,12 +77,12 @@ impl Index {
         now: Monotonic,
         mesh: Stamp,
     ) -> Result<Accepted, Refusal> {
-        let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
-        let mut stamps = stamps.map_err(Refusal::Codec)?;
+        let permit = self.gate.check(key, now).map_err(Refusal::control)?;
+        let mut stamps = stamps?;
         // A codec error comes first, so the vectors after an order error still decode.
         let mut order = Ok(self.order.check(path, mesh));
         while let Some(vector) = stamps.next() {
-            let vector = vector.map_err(Refusal::Codec)?;
+            let vector = vector?;
             order = order.and_then(|order| order.push(vector));
         }
         let order = order.map_err(Refusal::Order)?;
@@ -242,7 +242,7 @@ mod tests {
             let waiter = index.gate.open(writer("b", 5), None, at(0));
             let refusal = write(&mut index, waiter, &[1, 2], at(1))
                 .expect_err("b does not hold control");
-            assert_eq!(refusal, Refusal::Control(control::Error::Waiting));
+            assert_eq!(refusal, Refusal::Waiting);
             assert_eq!(
                 refusal.to_string(),
                 "not in control: another writer holds the gate"
@@ -258,7 +258,7 @@ mod tests {
             assert_eq!(write(&mut index, holder, &[5], at(1)), Ok(0..1));
             assert_eq!(
                 write(&mut index, waiter, &[4], at(2)),
-                Err(Refusal::Control(control::Error::Waiting))
+                Err(Refusal::Waiting)
             );
         }
 
@@ -315,7 +315,7 @@ mod tests {
             assert!(matches!(refused, Err(Refusal::Order(_))), "{refused:?}");
             assert_eq!(
                 write(&mut index, holder, &[6], at(12)),
-                Err(Refusal::Control(control::Error::Expired))
+                Err(Refusal::Expired)
             );
             assert_eq!(write(&mut index, waiter, &[6], at(13)), Ok(1..2));
         }
@@ -338,7 +338,7 @@ mod tests {
             let _ = index.gate.open(writer("b", 5), None, at(0));
             index.gate.recorded();
             let refusal = write(&mut index, holder, &[1], at(20));
-            assert_eq!(refusal, Err(Refusal::Control(control::Error::Expired)));
+            assert_eq!(refusal, Err(Refusal::Expired));
             assert_eq!(handed_to(&index), Some(writer("b", 5)));
         }
     }
@@ -504,7 +504,12 @@ mod tests {
                             let written = write(&mut index, key, &[stamp], now);
                             if let Err(refusal) = written {
                                 prop_assert!(
-                                    matches!(refusal, Refusal::Control(_)),
+                                    matches!(
+                                        refusal,
+                                        Refusal::Waiting
+                                            | Refusal::Reserved
+                                            | Refusal::Expired
+                                    ),
                                     "stamps in order were refused: {refusal}",
                                 );
                             }
