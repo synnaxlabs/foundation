@@ -35,7 +35,7 @@ impl Member {
     }
 
     /// Adds the one byte form of the record to `out`: the node key, the card, its
-    /// signature, the admission, a presence byte and then the expiry in nanoseconds,
+    /// signature, the admission, a presence byte and then `ephemeral` in nanoseconds,
     /// a count of status entries, and each entry in name order: the name behind a
     /// length byte, then the channel key. Every number is 8 or 16 little-endian bytes.
     #[cfg_attr(
@@ -47,11 +47,11 @@ impl Member {
         self.card.card().encode(out);
         out.extend(self.card.signature());
         out.extend(self.admission);
-        match self.expiry {
+        match self.ephemeral {
             None => out.push(ABSENT),
-            Some(expiry) => {
+            Some(span) => {
                 out.push(PRESENT);
-                out.extend(expiry.nanos().to_le_bytes());
+                out.extend(span.nanos().to_le_bytes());
             }
         }
         put_count(self.status.len(), out);
@@ -73,7 +73,7 @@ impl Member {
         let card = card::Card::decode(bytes)?;
         let card = card::Signed::check(key, card, take(bytes)?).ok()?;
         let admission = take(bytes)?;
-        let expiry = if take_present(bytes)? {
+        let ephemeral = if take_present(bytes)? {
             Some(Span::from_nanos(i64::from_le_bytes(take(bytes)?)))
         } else {
             None
@@ -93,7 +93,7 @@ impl Member {
         Some(Self {
             card,
             admission,
-            expiry,
+            ephemeral,
             status,
         })
     }
@@ -128,9 +128,9 @@ mod tests {
             prop::option::of(any::<i64>()),
             status(),
         )
-            .prop_map(|(id, admission, expiry, status)| Member {
+            .prop_map(|(id, admission, ephemeral, status)| Member {
                 admission,
-                expiry: expiry.map(Span::from_nanos),
+                ephemeral: ephemeral.map(Span::from_nanos),
                 status,
                 ..member(id)
             })
@@ -156,7 +156,7 @@ mod tests {
             .collect();
         Member {
             admission: [5; 64],
-            expiry: Some(Span::from_nanos(-2)),
+            ephemeral: Some(Span::from_nanos(-2)),
             status,
             ..member(3)
         }
@@ -169,7 +169,7 @@ mod tests {
         bytes
     }
 
-    // The bytes before the expiry's presence byte.
+    // The bytes before the presence byte of `ephemeral`.
     fn head(member: &Member) -> Vec<u8> {
         let mut bytes = card_bytes(member);
         bytes.extend(member.card.signature());
@@ -177,8 +177,8 @@ mod tests {
         bytes
     }
 
-    // The bytes of a member with no expiry whose status entries are `names`, in that
-    // order.
+    // The bytes of a member that is not ephemeral, whose status entries are `names`, in
+    // that order.
     fn entries(names: &[&str]) -> Vec<u8> {
         let mut bytes = head(&with_status(&[]));
         bytes.push(0);
@@ -210,9 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn a_member_with_no_expiry_has_an_absent_byte() {
+    fn a_member_that_is_not_ephemeral_has_an_absent_byte() {
         let member = Member {
-            expiry: None,
+            ephemeral: None,
             status: BTreeMap::new(),
             ..with_status(&[])
         };
