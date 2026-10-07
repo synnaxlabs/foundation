@@ -625,14 +625,16 @@ How to read this record:
   spends a seq range of zero, and is applied, also when another group of a live write
   is lost or its own handoff finds no room in a live write. A backfill write with no
   room gets `Full` whole (B5). A write with no samples still reports a failed commit.
-  Decided by the coordinator with the advisor on 2026-10-06 (#885):
+  Decided by the coordinator with the advisor at 2026-10-06T15:30:26Z (#885):
   https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440
   A group with no samples is confirmed with the entries appended before it. It appends
   no entry of its own and moves no stored mark, but a handoff that it records does. A
   lost range is durable only when a later live entry of its index, with samples or a
   handoff, is on disk. A restart before that continues the index at the lost range's
-  first seq. This replaces the confirm rule of #885. Decided by laptop.architect on
-  2026-10-07 (#1347), with the live write and `Full` text above:
+  first seq. Supersedes the confirm rule of
+  https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440.
+  Decided by `laptop.architect` (#1347), with the live write and `Full` text above,
+  in three comments (2026-10-07T11:46:56Z, 11:47:17Z, and 11:52:25Z, in this order):
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037240549
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037245942
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037325066
