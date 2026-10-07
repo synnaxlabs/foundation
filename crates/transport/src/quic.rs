@@ -32,6 +32,7 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
+use crate::message::Reader;
 use crate::{Class, Code, Config, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
@@ -292,7 +293,8 @@ impl Endpoint {
         class: Class,
     ) -> Option<(Sender, Receiver)> {
         let sender = self.start(now, key, Dir::Bi, class)?;
-        let receiver = Receiver::new(sender.key(), class, self.message_bytes_max);
+        let reader = Reader::new(self.message_bytes_max);
+        let receiver = Receiver::new(sender.key(), class, reader);
         Some((sender, receiver))
     }
 

@@ -1310,8 +1310,10 @@ How to read this record:
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
-  first message. A stream that ends or resets before its class byte drops: the peer
-  never accepts it, and resets the reply half of a two-way stream with code 0. Each
+  first message. The peer queues a stream for accept at the first byte of its first
+  message. A stream that ends or resets before that byte drops: the peer never accepts
+  it, and resets the reply half of a two-way stream with code 0 (amended:
+  https://github.com/synnaxlabs/foundation/pull/1380#issuecomment-6038160446). Each
   message is a QUIC varint length, then that many bytes, at most the receiver's
   `message_bytes_max`. A node accepts the waiting streams highest class first. Each
   stream sends at the QUIC priority of its class, `Command` first, and streams of one

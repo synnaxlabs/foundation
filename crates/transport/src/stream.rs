@@ -972,7 +972,7 @@ mod tests {
                             sender.finish().expect("finished");
                         }
                         Then::Drop => {
-                            // The peer drops a stream reset before its class byte came.
+                            // The peer drops a stream reset before its first message byte.
                             side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
                             drop(sender);
                         }
