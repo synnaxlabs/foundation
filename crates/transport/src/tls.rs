@@ -77,7 +77,7 @@ impl Tls {
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let certificate = issue(pair.public_key().as_ref(), |tbs| {
+        let certificate = issue(&public(private_key).to_bytes(), |tbs| {
             pair.sign(tbs).as_ref().to_vec()
         });
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
