@@ -598,10 +598,8 @@ impl Endpoint {
             tasks,
             pool,
         };
-        transport::Transport::new(config, self.part).expect(
-            "invariant: a pool that opened a buffer holds a block of 8 KiB, over the \
-             least message of 1472 bytes",
-        )
+        transport::Transport::new(config, self.part)
+            .expect("invariant: a buffer's pool holds a block of a whole UDP payload")
     }
 }
 

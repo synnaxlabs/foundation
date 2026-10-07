@@ -4103,7 +4103,10 @@ How to read this record:
   header in its own future, so a late header delays no other stream. One exhaustive
   `match` on `wire::Protocol` in `node` routes each stream; until a protocol has a
   server, its arm stops the stream with `Code(wire::header::REJECTED)` and resets the
-  reply half with the same code, as for a header that does not decode. The node admits
+  reply half with the same code, as for a header that does not decode, or for a first
+  message with bytes after the header. The node reads no datagram until the first
+  protocol that takes datagrams has a server (#1661). `Config::private_key` is a patch
+  until `Node::start` reads the key from its data directory (#1660). The node admits
   every peer that completes the handshake until the mesh states its rule. At the stop,
   each session and stream future drops, then the transport. The bound on the wait for a
   header is #1628. A transport that stops with an error ends the routing and the node
@@ -4111,7 +4114,9 @@ How to read this record:
   protocol in `route` gets a server. Decided by `laptop.architect-2`
   (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
-  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267.
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
+  datagrams and the key:
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

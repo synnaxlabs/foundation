@@ -29,10 +29,10 @@ async fn serve(session: Session, tasks: env::tasks::Tasks) {
 /// Reads the header of `incoming`, its first message, and routes the stream by its
 /// protocol. No protocol has a server yet, so each stream is rejected.
 async fn route(mut incoming: Incoming) {
-    let Ok(header) = incoming.receiver.recv().await else {
+    let Ok(first) = incoming.receiver.recv().await else {
         return;
     };
-    let Some(Ok((protocol, _))) = header.as_deref().map(wire::header::decode) else {
+    let Some(protocol) = first.as_deref().and_then(header) else {
         return reject(incoming);
     };
     match protocol {
@@ -44,11 +44,35 @@ async fn route(mut incoming: Incoming) {
     }
 }
 
+/// The protocol that `message` names when it is a whole header, with no byte after it.
+fn header(message: &[u8]) -> Option<Protocol> {
+    match wire::header::decode(message) {
+        Ok((protocol, [])) => Some(protocol),
+        Ok(_) | Err(_) => None,
+    }
+}
+
 /// Stops `incoming`, and resets its reply half, with the code of a rejected header.
 fn reject(incoming: Incoming) {
     let code = Code(wire::header::REJECTED);
     incoming.receiver.stop(code);
     if let Some(sender) = incoming.sender {
         sender.reset(code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wire::Protocol;
+
+    use super::header;
+
+    /// A first message is a header only when it is the whole message.
+    #[test]
+    fn a_header_with_a_byte_after_it_names_no_protocol() {
+        let mut message = wire::header::encode(Protocol::Mesh).to_vec();
+        assert_eq!(header(&message), Some(Protocol::Mesh));
+        message.push(0);
+        assert_eq!(header(&message), None);
     }
 }
