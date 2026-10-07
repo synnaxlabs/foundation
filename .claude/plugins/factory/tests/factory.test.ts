@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 const ME = 'laptop.integrator-1'
 const PEER = 'laptop.integrator-2'
 const SEND = 'mcp__factory__send'
+const NEXT = 'mcp__factory__next'
 const ROSTER = { host: 'broker', port: 8883, names: [ME, PEER, 'box1.builder-1'] }
 const HOUR_MS = 3_600_000
 
@@ -296,4 +297,22 @@ test('keeps send loaded and asks for answers through it', async ($, on) => {
   })
   expect(sections.map((s: any) => s.id)).toEqual(['factory:reply'])
   await w.settle()
+})
+
+test('clears the context, then runs /build, after the turn that calls next', async (
+  $,
+  on,
+) => {
+  const ran: string[] = []
+  on('command.run', (_: any, e: any) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  const w = await boot($, on)
+  const r = await $.tool.call({ tool: NEXT })
+  expect(r.result).toBe('after this turn: /clear, then /build')
+  expect(ran).toEqual([])
+  await w.clock.advance(0)
+  await w.settle()
+  expect(ran).toEqual(['clear', 'build'])
 })

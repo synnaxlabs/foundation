@@ -250,9 +250,14 @@ How to read this record:
   again. Between reads, the caller keeps the mark the last read gave, in memory
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at
-  a crash restores as closed at the restore. Complete and latest sessions have
-  separate key types, so a call in the wrong mode does not compile (#725). Only a
-  named complete session needs mesh time to close: `Readers::close_named` and
+  a crash restores as closed at the restore. The home drops a grant, ack, or close for a
+  key it gave that is no longer open: a late message after a close or a takeover. A take
+  of such a key gives nothing. A key is the home's own value, in memory only, and keys
+  start again at a restore. No hub message carries a key: the home maps each one to a
+  key it gave, so a key it never gave is a defect of the home and panics. Complete and
+  latest sessions have separate key types, so a call in the wrong mode does not compile
+  (advisor, #725; the take and the key rule: architect, #1038). Only a named complete
+  session needs mesh time to close: `Readers::close_named` and
   `Readers::open_named_latest` take a stamp, and no other open or close does, so the
   home opens unnamed readers before the first estimate. A named complete session has a
   `complete::Key`, and the wrong close of an open session panics; the architect decided
@@ -555,10 +560,11 @@ How to read this record:
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
   the dedicated machine needs a written judgment before merge. The judgment states how
   often the path runs (per sample, frame, session, or start), its absolute cost against
-  the P1 budget, the noise of the machine, and what the change buys. The code owner
-  accepts or rejects it on those facts. The person decided on 2026-10-06 (#1047): "we
-  need to make sure that we semantically understand benchmarks. A regression of 11% can
-  be ok in the right contexts". Supersedes: a regression over 5% blocks a merge.
+  the P1 budget, the noise of the machine, and what the change buys. The architect
+  accepts or rejects it on those facts (the person, 2026-10-07: "YES"). The person
+  decided on 2026-10-06 (#1047): "we need to make sure that we semantically understand
+  benchmarks. A regression of 11% can be ok in the right contexts". Supersedes: a
+  regression over 5% blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
@@ -967,23 +973,34 @@ How to read this record:
   for the kind of time (two checks where one kind byte does the work).
 - **HUB WIRE (#561)** A remote reader session is one hub stream of class `Complete` or
   `Latest`. After the header, the reader's node sends `wire::hub::Open`: the mode and
-  the channels, all on one index. A latest session gets the newest live frame before
-  its commit. A complete session gets each live frame after its commit, and `Open`
-  carries its first grant in bytes (CREDIT RULES). The home answers `Opened`; the
-  reader sends `Credit`, its total grant since the open; the home sends each frame as
-  a `Head` (path, seq, count, and the end of each series in the body), then the body.
-  The body holds only the series of the reader's view, the index series too, written
-  from the frame's block as slices, and both ends charge `View::charge` (M2). A body
-  over the peer's `message_bytes_max` goes as more than one message, back to back with
-  no prefix, and the reader fills one block of the length that `Head` gives. Stop
-  codes: 16 `UNKNOWN` (a channel the home does not know) and 17 `NOT_HOME` (the node is
-  not the home of the index). Lost: a `message_bytes_max` of at least the largest pool
-  block (a client or a foreign peer can set 1472, and it ties `transport` to the pool);
-  the whole `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an
-  unnamed open needs no mesh time (READER RULES), and a later named open can add one;
-  grants for many sessions in one message, which wait until a link carries a second
-  session. The coordinator approved the messages (2026-10-05); the architect decided
-  the rest (2026-10-06, #561). The byte form is recorded when it merges.
+  the number of channels, all on one index. A latest session gets the newest live
+  frame before its commit. A complete session gets each live frame after its commit,
+  and `Open` carries its first grant in bytes (CREDIT RULES). The home answers
+  `Opened`; the reader sends `Credit`, its total grant since the open; the home sends
+  each frame as a `Head` (path, seq, count, and the number of series). Every frame is
+  encoded (X35), so `Head` has no form. The body holds only the series of the
+  reader's view, the index series too, written from the frame's block as slices, and
+  both ends charge `View::charge` (M2). A series has the place of its first listing in
+  the open; the index, when the open does not list it, has the next place.
+  Only the fixed part of `Open` and of `Head` is one message. The rest is one run of
+  bytes, in messages of at most the peer's `message_bytes_max`, back to back with no
+  prefix: after `Open`, the keys; after `Head`, the end of each series in the body,
+  then the body. So no count of channels or series has a cap, and the reader fills
+  one block of the length of the last end. The home checks each key as it arrives and
+  never allocates by the peer's count. A head with more series than places is not
+  valid. Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME`
+  (the node is not the home of the index), and 2 `wire::header::MALFORMED` (a message
+  that does not decode or comes from the wrong side), which every protocol may use.
+  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91
+  channels a session, the most that fit in 1472 bytes; the index in its own field of
+  `Open`, because the home knows its index and a second copy needs a check; the whole
+  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
+  open needs no mesh time (READER RULES), and a later named open can add one; grants
+  for many sessions in one message, which wait until a link carries a second session.
+  The coordinator approved the messages (2026-10-05); the architect decided the rest
+  (#561, 2026-10-06) and the run, the index place, and `MALFORMED` on #1064. The byte
+  form is recorded when it merges.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
@@ -2007,13 +2024,20 @@ How to read this record:
 - **REVIEW TIERS (2026-10-06)** `reviewer` on every PR; `architecture` and `breaker` on
   every code PR; `performance` on hot paths, with measured numbers. A second round runs
   `reviewer` and `breaker` again on the fix commits only, with the earlier findings. A
-  deferral in a risk crate needs the engineer's explicit OK. 4 of the 5 worst escaped
-  defects came in through a fix or a deferral that nothing checked again. Decided by the
-  advisor under the quality delegation. Supersedes: BREAKER REVIEW.
+  deferral in a risk crate needs the architect's explicit OK (the person, 2026-10-07:
+  "YES"). 4 of the 5 worst escaped defects came in through a fix or a deferral that
+  nothing checked again. Decided by the advisor under the quality delegation.
+  Supersedes: BREAKER REVIEW.
 - **FACTORY MODELS (2026-10-06)** Opus 5.5 for every session and reviewer. Fable only on
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
+  own PR through the queue when the gate, the review rounds, and CI pass; agents may run
+  `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
+  `.claude/`. The person: "Great, make the fucking changes and do your fucking job
+  shipping software". Fuzz inputs in `oracles/fuzz/` need no approval either: they only
+  add tests. The person: "Yes". Supersedes: the approvals in ENGINEERS and MERGE QUEUE.
 
 ### 1.14 Testing
 
@@ -2052,6 +2076,13 @@ How to read this record:
 - **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
+- **R16-10 (#340)** One exception to one path per item (r16 2): `hub` re-exports each
+  item of another layer-2 crate that its public surface names, at the same path under
+  a module named for that crate (`hub::home::Error` for `home::Error`). Layer 3 names
+  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
+  re-exports, and only items its own signatures use. Layer 2 and `node` name the item
+  at its home. Copies of the types lost: each change in `home` needs a change in
+  `hub`. Decided by the architect (#340).
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
@@ -3040,6 +3071,11 @@ Rules:
    through `env`; everyone else asks `clock`. Only `node` builds real seams, and only
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
+8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
+   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
+   `buffer`, so its tests build a real `home::Shard`. The `hub` edge was decided by
+   the architect (#340). Lost: `buffer` in the `hub` row (hub code could call the
+   ring), the hub tests in `node`, and a second way to build a shard in `home`.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
@@ -3072,7 +3108,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `block`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
-| 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
+| 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home`; `buffer` as a dev-dependency only |
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. Seals a value to a node's seal key, and opens it. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
@@ -3139,7 +3175,8 @@ conclusion together". Each one is listed below.
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
   generated names as strings (#701), and POLICY NAMES (#474).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
-  the STREAM WIRE hello (#55), a reader session key type per mode (#725).
+  the STREAM WIRE hello (#55), a reader session key type per mode and the drop of a
+  late reader call (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
@@ -3248,3 +3285,9 @@ minimal `hub` (one writer and one reader session). Access, config files, and fai
 wait until its acceptance scenario passes. The plan and owners are on #462. The person
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
+
+**STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
+scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
+for one hour, and the `acceptance` tests run both disk budgets. It runs beside FIRST
+SLICE, which keeps priority. The person decided on 2026-10-06 ("Yes that is fine I
+approve", relayed by `monitor`).

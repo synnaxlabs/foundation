@@ -1,7 +1,8 @@
 //! The per-frame cost of the gate: a write from the holder that the home accepts, and
 //! the read of the handoff, with none waiting and with one waiting.
 
-use control::{Gate, Lease, Writer};
+use control::lease::Lease;
+use control::{Gate, Writer};
 use divan::Bencher;
 use types::authority::Authority;
 use types::time::{Monotonic, Span};
