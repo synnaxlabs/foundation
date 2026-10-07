@@ -13,10 +13,11 @@ clock, the network, the disk, or a random source directly. Clippy's
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
-behavior. Never print a pointer. No `thread_local!` state. One exception: the `hyper`
-server of HTTP SIM SERVER (`docs/decisions.md`) reads OS time into a `thread_local!` on
-each poll, only for the `date` header, which is off. It gets no `timer`, so no read
-changes what it does (the person,
+behavior. Never print a pointer. No `thread_local!` state. Two exceptions: TLS draws its
+own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions.md`), and the `hyper`
+server of HTTP SIM SERVER reads OS time into a `thread_local!` on each poll, only for
+the `date` header, which is off. It gets no `timer`, so no read changes what it does
+(the person,
 https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
 2026-10-07T17:04:29Z).
 
@@ -37,8 +38,10 @@ Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-dif
 checks on each PR that agent-written tests catch real changes. A missed mutant fails CI.
 A mutant that makes a test hang (a timeout) counts as caught. Each run on a box runs in
 a cgroup with a memory cap: `systemd-run --user --scope -p MemoryMax=<share> -p
-OOMPolicy=continue cargo mutants --jobs 4 ...`. The share is 20G on box1 and 10G on
-box2, and a session runs one mutants run at a time (`laptop.monitor`,
+OOMPolicy=continue cargo mutants --jobs 4 ...`. A test run on a box of a mutant made by
+hand (`.claude/agents/reviewer.md`) runs in the same cap, with `cargo test` in place of
+`cargo mutants`. The share is 20G on box1 and 10G on box2, and a session runs one
+mutants run at a time (`laptop.monitor`,
 https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6043431001,
 2026-10-07T17:40:51Z). A mutant that allocates in a loop then dies alone, its test
 fails, and the run counts it as caught. With no cap, the mutant fills the box and the
@@ -142,9 +145,11 @@ or proptest failure file. A change to the bytes of a fuzz input deletes the old 
 keep the old file and add the new bytes as a new file. A move that keeps the bytes is
 not a deletion. Only a byte string that `main` held counts. A byte string that only a PR
 branch held, such as the old bytes of an input that a PR adds and then changes before it
-merges, was never an oracle. So take each state that `git log --first-parent
-origin/main -- oracles/fuzz/<target>` lists: a byte string that one state holds and no
-file in `oracles/fuzz/` now holds is deleted
+merges, was never an oracle. A PR deletes an input when a byte string that its merge
+base with `main` (`git merge-base origin/main HEAD`) holds in `oracles/fuzz/` is in no
+file there at its head. An audit of `main` takes each state that
+`git log --first-parent origin/main -- oracles/fuzz/<target>` lists: a byte string that
+one state holds and `origin/main` does not hold was deleted
 (https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500,
 2026-10-07T19:46:25Z).
 
