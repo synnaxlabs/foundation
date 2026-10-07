@@ -2136,23 +2136,25 @@ How to read this record:
   that refuses it. Decided by the architect on #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
 - **SHARD DISK (2026-10-07)** Until segments exist, `node` gives each shard's ring
-  `disk / n` of the node's disk budget (`node::Config::disk`), and shard 0 also gets
-  the remainder, as SHARD POOLS does. The budget bounds the ring files: `node` takes
-  the largest ring whose file fits each part (`buffer::Layout::fit`), so the format
-  stays in `buffer`. A part that holds no ring starts no shard, and `join` gives
-  `Error::Disk` with the core; `config` cannot check it, as for the pool part (NODE
-  SETTINGS). The ring is the whole store. A ring already there keeps its size until
-  `Buffer::resize` exists (#451). Oldest first (B1) then holds
-  per shard, not per node: a patch. The long-term path is small rings for commits,
-  then segments that draw from one node-wide allowance (#1081). The 5.5 lab sizes
-  the budget for the shard that holds the index. Decided by the architect, #342:
-  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040.
-  With `Buffer::resize`, `node` computes the `Layout` with `fit` and calls
-  `Buffer::resize`, nothing more: `buffer` sets the file length itself, so `node`
-  never extends or cuts the ring file and does not learn the format. Decided by the
-  architect on #342:
-  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187, after
-  https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843.
+  `disk / n` of the node's disk budget (`node::Config::disk`, a `types::byte::Size`),
+  and shard 0 also gets the remainder, as SHARD POOLS does. The budget bounds each new
+  ring file: `node` takes the largest ring whose file fits each part
+  (`buffer::Layout::fit`), so the format stays in `buffer`. When a part holds no
+  ring, no shard starts, and `join` gives `Error::Disk` with the core; `config`
+  cannot check it, as for the pool part (NODE SETTINGS). The ring is the whole store.
+  A ring already there keeps its size, which can be more than its part, until
+  `Buffer::resize` exists (#451). So oldest first (B1) holds per shard, not per node.
+  This is a patch. The long-term path is small rings for commits, then segments that
+  draw from one node-wide allowance (#1081). The 5.5 lab sizes the budget for the
+  shard that holds the index. With `Buffer::resize`, `node` computes the `Layout`
+  with `fit` and calls `Buffer::resize`, nothing more: `buffer` sets the file length
+  itself, so `node` never extends or cuts the ring file and does not learn the
+  format (after
+  https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843).
+  Decided by the architect, #342:
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187, and
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a

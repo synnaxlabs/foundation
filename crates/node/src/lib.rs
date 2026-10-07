@@ -52,10 +52,10 @@ pub struct Config<M> {
     pub files: Box<dyn FnMut() -> Box<dyn FnOnce() -> env::files::Files + Send>>,
     /// Randomness for the node's shards.
     pub entropy: env::entropy::Entropy,
-    /// The most bytes the node's rings take on disk, split evenly across its
-    /// shards; shard 0 also takes the remainder. It sets the size of each ring that
-    /// the start makes. A ring already there keeps its size.
-    pub disk: u64,
+    /// The disk budget of the node's rings, split evenly across its shards; shard 0
+    /// also takes the remainder. Each ring that the start makes fits its part. A ring
+    /// already there keeps its size, which can be more than its part.
+    pub disk: types::byte::Size,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -106,8 +106,8 @@ impl Node {
     /// directory, or checks the one there, and each shard opens its buffer in
     /// directory `shard-<i>` of its files, and makes it there when it is not there.
     /// The shards open their buffers one after another, in order of core. Returns
-    /// once each shard runs or one has failed to start. A part of the disk budget
-    /// that holds no ring starts no shard. A failed start, a shard with no memory, a
+    /// once each shard runs or one has failed to start. When a part of the disk
+    /// budget holds no ring, no shard starts. A failed start, a shard with no memory, a
     /// data directory made for another shard count, or a buffer that does not open
     /// stops the node, and [`Node::join`] returns its error.
     ///
@@ -116,7 +116,9 @@ impl Node {
     /// If a shard's part of the budget needs more address space than a `usize` holds.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
-        match parts(config.budget, config.disk, config.shards.cores().get()) {
+        let budget =
+            u64::try_from(config.budget).expect("invariant: a usize fits a u64");
+        match parts(budget, config.disk, config.shards.cores().get()) {
             Ok(parts) => Self::spawn(config, parts),
             Err(error) => Self {
                 stop: Stop::default(),
@@ -274,25 +276,26 @@ struct Open {
 /// The pool of each shard from its part of `budget`, and the layout of its ring from
 /// its part of `disk`, in order of core.
 fn parts(
-    budget: usize,
-    disk: u64,
+    budget: u64,
+    disk: types::byte::Size,
     cores: usize,
 ) -> Result<Vec<(block::Config, buffer::Layout)>, Error> {
     (0..cores)
         .map(|core| {
-            let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
-            let layout = buffer::Layout::fit(part(disk, cores, core), BODY_MAX)
+            let budget = usize::try_from(part(budget, cores, core))
+                .expect("invariant: a part is at most its whole");
+            let layout = buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)
                 .map_err(|error| Error::Disk { core, error })?;
             Ok((block::Config { budget }, layout))
         })
         .collect()
 }
 
-/// The part of `disk` of the shard on `core` of `cores`: an even part, and the
+/// The part of `total` of the shard on `core` of `cores`: an even part, and the
 /// remainder for shard 0.
-fn part(disk: u64, cores: usize, core: usize) -> u64 {
+fn part(total: u64, cores: usize, core: usize) -> u64 {
     let count = u64::try_from(cores).expect("invariant: a core count fits a u64");
-    disk / count + if core == 0 { disk % count } else { 0 }
+    total / count + if core == 0 { total % count } else { 0 }
 }
 
 impl Open {

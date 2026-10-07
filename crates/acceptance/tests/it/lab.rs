@@ -118,7 +118,7 @@ impl Lab {
                 })
             },
             entropy: host.entropy(),
-            disk: 1 << 30,
+            disk: types::byte::Size::GIBIBYTE,
         });
         self.members.push(Member {
             name: name.into(),
@@ -136,7 +136,7 @@ impl Lab {
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
     /// second, as `buffer` stores it.
     pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
-        todo!("waits on #585")
+        todo!("waits on #1256")
     }
 
     /// Makes `nodes` the members of one mesh, without a ticket.

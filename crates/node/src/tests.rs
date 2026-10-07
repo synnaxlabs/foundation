@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use env::thread;
 use sim::shard::Fault;
+use types::byte::Size;
 use types::time::Span;
 
 use crate::{Config, Error, Node};
@@ -16,7 +17,7 @@ struct Run {
 }
 
 /// A disk budget of two rings of 64 MiB, with their header blocks.
-const DISK: u64 = 2 * (8192 + (64 << 20));
+const DISK: Size = Size::from_bytes(2 * (8192 + (64 << 20)));
 
 type Memory = Box<dyn FnMut(usize) -> Result<block::Heap, os::memory::Error>>;
 
@@ -359,7 +360,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!("{config:?}"),
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
-             budget: 4096, entropy: {entropy:?}, disk: {DISK}, .. }}"
+             budget: 4096, entropy: {entropy:?}, disk: {DISK:?}, .. }}"
         )
     );
 }
@@ -392,7 +393,7 @@ fn a_host_that_cannot_pin_starts_shards_on_no_core() {
 /// Starts a node on `host`, runs it for an hour, stops it, and gives what `join`
 /// gives.
 fn run_on(sim: &mut sim::Sim, host: &sim::node::Node) -> Result<(), Error> {
-    run_on_disk(sim, host, DISK)
+    run_on_disk(sim, host, DISK.bytes())
 }
 
 /// As [`run_on`], with a disk budget of `disk`.
@@ -402,7 +403,7 @@ fn run_on_disk(
     disk: u64,
 ) -> Result<(), Error> {
     let node = Node::start(Config {
-        disk,
+        disk: Size::from_bytes(disk),
         ..config(host, 1 << 20, Box::new(heap))
     });
     assert_eq!(sim.run_for(Span::HOUR), Ok(()));
@@ -636,26 +637,31 @@ mod buffer {
         assert_eq!(ring_len(&mut sim, &host, 1), RING);
     }
 
+    /// A ring already there keeps its size, larger or smaller than its new part.
     #[test]
     fn a_restart_with_another_disk_budget_opens_the_rings_at_their_sizes() {
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let host = host(&mut sim, 2);
-        assert_eq!(run_on_disk(&mut sim, &host, 2 * RING), Ok(()));
-        assert_eq!(run_on_disk(&mut sim, &host, 4 * RING), Ok(()));
-        for core in 0..2 {
-            assert_eq!(ring_len(&mut sim, &host, core), RING, "shard-{core}");
+        for (first, ring, then) in
+            [(2 * RING, RING, 4 * RING), (4 * RING, 2 * RING, 2 * RING)]
+        {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            assert_eq!(run_on_disk(&mut sim, &host, first), Ok(()));
+            assert_eq!(run_on_disk(&mut sim, &host, then), Ok(()), "{then}");
+            for core in 0..2 {
+                let len = ring_len(&mut sim, &host, core);
+                assert_eq!(len, ring, "shard-{core} at {then}");
+            }
         }
     }
 
-    /// The smallest ring of a 1 MiB body is two records of 1 MiB and a block, after
-    /// the two header blocks. Shard 0 takes the remainder, so only shard 1 is short.
+    /// Shard 0 takes the remainder, so only shard 1 is short.
     #[test]
     fn a_disk_budget_part_that_holds_no_ring_starts_no_shard() {
-        let smallest = 8192 + 2 * ((1 << 20) + 4096);
+        let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         let node = Node::start(Config {
-            disk: 2 * smallest - 1,
+            disk: Size::from_bytes(2 * smallest - 1),
             ..config(&host, 1 << 20, Box::new(heap))
         });
         assert_eq!(host.shard_starts(), []);
