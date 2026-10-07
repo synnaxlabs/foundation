@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::future::poll_fn;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -333,6 +333,30 @@ fn a_remove_frees_a_durable_file_only_after_sync_dir() {
         (removed, files.free().await.unwrap())
     });
     assert_eq!(frees, (MIB - 64 * KIB, MIB));
+}
+
+/// What a read open of a path gives a millisecond after a create at it, which starts
+/// once a remove of the path, with no file there, is polled once and its future drops.
+fn create_after_dropped_remove(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let mut remove = Box::pin(files.remove(path));
+        pend(remove.as_mut()).await;
+        drop(remove);
+        let created = create(&node, "a", 1_024).await;
+        node.clock().sleep(Span::MILLISECOND).await;
+        drop(created);
+        files.open(path, Mode::Read).await.err()
+    })
+}
+
+#[test]
+fn a_dropped_remove_can_remove_a_file_that_a_later_create_makes() {
+    let removed = Some(Error::NotFound { path: "a".into() });
+    let both = [removed, None];
+    let opens: Vec<_> = (0..32).map(create_after_dropped_remove).collect();
+    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
+    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
 }
 
 #[test]
@@ -826,6 +850,7 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
             ("a/", Mode::Create { len: 1 }),
             ("b/", Mode::Create { len: 1 }),
             ("b/", Mode::Read),
+            ("b/.", Mode::Read),
             ("d/", Mode::Read),
         ] {
             results.push(files.open(Path::new(path), mode).await.map(drop));
@@ -842,11 +867,38 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
         Err(io("a/", Operation::Open, 21)),
         Err(io("b/", Operation::Open, 21)),
         Err(Error::NotFound { path: "b/".into() }),
+        Err(Error::NotFound { path: "b/.".into() }),
         Err(io("d/", Operation::Open, 21)),
         Err(io("a/", Operation::Remove, 20)),
         Ok(()),
         Err(io("d/", Operation::Remove, 21)),
         Ok(()),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_path_of_the_data_directory_names_no_file() {
+    let results = run(0, MIB, |node, _| async move {
+        let files = node.files();
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("./", Mode::Read),
+            ("./", Mode::Write),
+            (".", Mode::Read),
+            (".", Mode::Create { len: 1 }),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        results.push(files.remove(Path::new(".")).await);
+        results
+    });
+    let expected = [
+        Err(io("./", Operation::Open, 21)),
+        Err(io("./", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Remove, 21)),
     ];
     assert_eq!(results, expected);
 }
@@ -1054,7 +1106,7 @@ fn the_digest_holds_the_polls_before_a_file_end() {
 }
 
 /// Polls `future` once, and checks that it is pending.
-async fn pend(mut future: Pin<&mut impl Future>) {
+pub(super) async fn pend(mut future: Pin<&mut impl Future>) {
     poll_fn(|cx| {
         assert!(future.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -1197,5 +1249,169 @@ fn a_dropped_close_is_not_woken_when_its_calls_end() {
             count.0.load(Ordering::Relaxed)
         });
         assert_eq!(woken, 0, "value {value}");
+    }
+}
+
+#[test]
+fn a_rename_moves_the_file_and_the_handle_follows_it() {
+    run(0, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        files.create_dir(Path::new("d")).await.unwrap();
+        let mut file = create(&node, "d/a", KIB).await;
+        file.write_at(0, &[block(&pool, &[1; 512])]).await.unwrap();
+        file.rename(Path::new("d/b")).await.unwrap();
+        let found = files.open(Path::new("d/a"), Mode::Read).await.err();
+        assert_eq!(found, Some(Error::NotFound { path: "d/a".into() }));
+        file.write_at(512, &[block(&pool, &[2; 512])])
+            .await
+            .unwrap();
+        let moved = files.open(Path::new("d/b"), Mode::Read).await.unwrap();
+        assert_eq!(sectors(&read(&moved, &pool, 0, 1_024).await), [1, 2]);
+        assert_eq!(files.list(Path::new("d")).await.unwrap(), [Path::new("b")]);
+    });
+}
+
+#[test]
+fn a_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    let (found, names) = run(0, MIB, |node, _| async move {
+        drop(create(&node, "b", KIB).await);
+        let mut file = create(&node, "a", KIB).await;
+        let found = file.rename(Path::new("./b")).await;
+        (found, node.files().list(Path::new("")).await.unwrap())
+    });
+    assert_eq!(found, Err(Error::Exists { path: "./b".into() }));
+    assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+}
+
+#[test]
+fn a_rename_onto_a_file_that_is_there_gives_exists_and_changes_nothing() {
+    run(0, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", KIB).await;
+        file.write_at(0, &[block(&pool, &[1; 512])]).await.unwrap();
+        let other = create(&node, "b", KIB).await;
+        other.write_at(0, &[block(&pool, &[2; 512])]).await.unwrap();
+        other.close().await;
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::Exists { path: "b".into() }));
+        for (path, value) in [("a", 1), ("b", 2)] {
+            let kept = files.open(Path::new(path), Mode::Read).await.unwrap();
+            assert_eq!(read(&kept, &pool, 0, 512).await, [value; 512]);
+        }
+        file.rename(Path::new("c")).await.unwrap();
+        let moved = files.open(Path::new("c"), Mode::Read).await.unwrap();
+        assert_eq!(read(&moved, &pool, 0, 512).await, [1; 512]);
+    });
+}
+
+#[test]
+fn a_rename_of_a_removed_path_gives_not_found_and_changes_nothing() {
+    run(0, MIB, |node, _| async move {
+        let files = node.files();
+        let mut file = create(&node, "a", KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        assert!(files.list(Path::new("")).await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn a_rename_of_a_path_that_names_another_file_gives_not_found() {
+    run(0, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let other = create(&node, "a", KIB).await;
+        other.write_at(0, &[block(&pool, &[3; 512])]).await.unwrap();
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        assert_eq!(files.list(Path::new("")).await.unwrap(), [Path::new("a")]);
+        let kept = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        assert_eq!(read(&kept, &pool, 0, 512).await, [3; 512]);
+    });
+}
+
+#[test]
+fn a_write_open_of_the_new_name_is_busy_until_the_handle_closes() {
+    run(0, MIB, |node, _| async move {
+        let files = node.files();
+        let mut file = create(&node, "a", KIB).await;
+        file.rename(Path::new("b")).await.unwrap();
+        let found = files.open(Path::new("b"), Mode::Write).await.err();
+        assert_eq!(found, Some(busy("b")));
+        file.close().await;
+        files.open(Path::new("b"), Mode::Write).await.unwrap();
+    });
+}
+
+#[test]
+fn a_fault_on_a_rename_fails_it_and_a_fault_on_the_new_name_fails_the_next_write() {
+    run(0, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", KIB).await;
+        node.fail_file(Path::new("a"), Operation::Rename);
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(io("a", Operation::Rename, 5)));
+        assert_eq!(files.list(Path::new("")).await.unwrap(), [Path::new("a")]);
+        file.rename(Path::new("b")).await.unwrap();
+        node.fail_file(Path::new("b"), Operation::WriteAt);
+        let found = file.write_at(0, &[block(&pool, &[1; 512])]).await;
+        assert_eq!(found, Err(io("b", Operation::WriteAt, 5)));
+    });
+}
+
+/// The names in the data directory after a rename of `a` to `b`, polled past its
+/// sync and then dropped in flight, ends, when `a` was removed and made again first
+/// or not.
+fn dropped_rename(value: u64, remade: bool) -> Vec<PathBuf> {
+    run(value, MIB, move |node, _| async move {
+        let files = node.files();
+        let mut file = create(&node, "a", KIB).await;
+        if remade {
+            files.remove(Path::new("a")).await.unwrap();
+            Box::leak(Box::new(create(&node, "a", KIB).await));
+        }
+        let mut rename = Box::pin(file.rename(Path::new("b")));
+        pend(rename.as_mut()).await;
+        node.clock().sleep(Span::from_nanos(200_000)).await;
+        pend(rename.as_mut()).await;
+        drop(rename);
+        node.clock().sleep(Span::MILLISECOND).await;
+        files.list(Path::new("")).await.unwrap()
+    })
+}
+
+#[test]
+fn a_close_waits_for_a_dropped_rename() {
+    for value in 0..8 {
+        let names = run(value, MIB, move |node, _| async move {
+            let files = node.files();
+            let mut file = create(&node, "a", KIB).await;
+            let mut rename = Box::pin(file.rename(Path::new("b")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+            drop(rename);
+            file.close().await;
+            files.list(Path::new("")).await.unwrap()
+        });
+        assert_eq!(names, [Path::new("b")], "value {value}");
+    }
+}
+
+#[test]
+fn a_dropped_rename_still_ends() {
+    for value in 0..8 {
+        assert_eq!(
+            dropped_rename(value, false),
+            [Path::new("b")],
+            "value {value}"
+        );
+        assert_eq!(
+            dropped_rename(value, true),
+            [Path::new("a")],
+            "value {value}"
+        );
     }
 }
