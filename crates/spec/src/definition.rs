@@ -328,8 +328,7 @@ fn data_type(out: &mut Vec<u8>, data_type: &DataType) {
         }
         DataType::Sample(sample::Type::Matrix {
             element,
-            rows,
-            columns,
+            sides: sample::Sides { rows, columns },
         }) => {
             out.extend_from_slice(&[MATRIX, code(element)]);
             out.extend_from_slice(&rows.to_le_bytes());
@@ -684,8 +683,10 @@ impl<'a> Reader<'a> {
             QUALITY => return Ok(DataType::Quality),
             MATRIX => sample::Type::Matrix {
                 element: self.scalar()?,
-                rows: self.u16()?,
-                columns: self.u16()?,
+                sides: sample::Sides {
+                    rows: self.u16()?,
+                    columns: self.u16()?,
+                },
             },
             found => return Err(Error::DataType { at, found }),
         };

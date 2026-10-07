@@ -21,7 +21,7 @@ mod word;
 
 use std::{fmt, iter, mem};
 
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 
 use crate::vector::Vector;
 
@@ -375,8 +375,7 @@ impl Shape {
             },
             Type::Matrix {
                 element,
-                rows,
-                columns,
+                sides: Sides { rows, columns },
             } => Self::Fixed {
                 element: Layout::of(element),
                 len: usize::from(rows).strict_mul(usize::from(columns)),
@@ -885,8 +884,7 @@ mod tests {
             (scalar(), 0..3_u16, 0..3_u16).prop_map(|(element, rows, columns)| {
                 Type::Matrix {
                     element,
-                    rows,
-                    columns,
+                    sides: Sides { rows, columns },
                 }
             }),
             (scalar(), 0..6_u32).prop_map(|(element, max)| Type::List { element, max }),
@@ -1831,8 +1829,10 @@ mod tests {
         fn encodes_a_matrix_as_the_array_of_its_elements() {
             let matrix = Type::Matrix {
                 element: Scalar::F32,
-                rows: 2,
-                columns: 3,
+                sides: Sides {
+                    rows: 2,
+                    columns: 3,
+                },
             };
             let values = bytes(4, (0..6_000).map(|n| n % 11));
             assert_eq!(

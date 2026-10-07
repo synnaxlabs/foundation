@@ -1379,8 +1379,10 @@ mod tests {
                 Type::Array { element, len: 3 },
                 Type::Matrix {
                     element,
-                    rows: 2,
-                    columns: 3,
+                    sides: types::sample::Sides {
+                        rows: 2,
+                        columns: 3,
+                    },
                 },
                 Type::List { element, max: 3 },
                 Type::String,

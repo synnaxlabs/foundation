@@ -6,7 +6,7 @@ use buffer::Entry;
 use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 use types::time::Stamp;
 
 /// The buffer tag of a data entry.
@@ -167,8 +167,7 @@ fn codes(data_type: Type) -> (u8, u8, u32) {
         Type::Bytes => (4, 0, 0),
         Type::Matrix {
             element,
-            rows,
-            columns,
+            sides: Sides { rows, columns },
         } => (5, code(element), u32::from(rows) | u32::from(columns) << 16),
     }
 }
@@ -191,8 +190,10 @@ fn data_type(descriptor: &[u8; DESCRIPTOR]) -> Type {
         4 => Type::Bytes,
         5 => Type::Matrix {
             element: scalar(element),
-            rows: u16::from_le_bytes(field(descriptor, at::N)),
-            columns: u16::from_le_bytes(field(descriptor, at::N + 2)),
+            sides: Sides {
+                rows: u16::from_le_bytes(field(descriptor, at::N)),
+                columns: u16::from_le_bytes(field(descriptor, at::N + 2)),
+            },
         },
         _ => panic!("the stored body has an unknown kind {kind}"),
     }
@@ -307,8 +308,7 @@ mod tests {
     fn matrix(element: Scalar, rows: u16, columns: u16) -> Type {
         Type::Matrix {
             element,
-            rows,
-            columns,
+            sides: Sides { rows, columns },
         }
     }
 

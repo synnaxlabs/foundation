@@ -110,11 +110,21 @@ pub enum Type {
     Matrix {
         /// The element type.
         element: Scalar,
-        /// Arrays per sample.
-        rows: u16,
-        /// Elements per array.
-        columns: u16,
+        /// The rows and columns.
+        sides: Sides,
     },
+}
+
+/// The sides of a matrix: `rows` arrays of `columns` elements.
+// Aligned to 4, so the sides sit at byte 4 of `Type`, as `Array.len`, `List.max`, and
+// the stored `n` do. `C` keeps `rows` in the low half, as in `n`.
+#[repr(C, align(4))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sides {
+    /// Arrays per sample.
+    pub rows: u16,
+    /// Elements per array.
+    pub columns: u16,
 }
 
 impl Type {
@@ -126,8 +136,7 @@ impl Type {
             Self::Array { element, len } => Some(element.width() * len as usize),
             Self::Matrix {
                 element,
-                rows,
-                columns,
+                sides: Sides { rows, columns },
             } => Some(element.width() * rows as usize * columns as usize),
             Self::List { .. } | Self::String | Self::Bytes => None,
         }
@@ -143,8 +152,7 @@ impl fmt::Display for Type {
             Self::Array { element, len } => write!(f, "{}[{len}]", element.name()),
             Self::Matrix {
                 element,
-                rows,
-                columns,
+                sides: Sides { rows, columns },
             } => write!(f, "{}[{rows}][{columns}]", element.name()),
             Self::List { element, max } => {
                 write!(f, "list<{}, {max}>", element.name())
@@ -195,8 +203,10 @@ impl FromStr for Type {
                 }),
                 Some(columns) => Ok(Self::Matrix {
                     element,
-                    rows: side(len)?,
-                    columns: side(columns)?,
+                    sides: Sides {
+                        rows: side(len)?,
+                        columns: side(columns)?,
+                    },
                 }),
             };
         }
@@ -319,8 +329,7 @@ mod tests {
             (scalar.clone(), any::<u16>(), any::<u16>()).prop_map(
                 |(element, rows, columns)| Type::Matrix {
                     element,
-                    rows,
-                    columns,
+                    sides: Sides { rows, columns },
                 }
             ),
             (scalar, any::<u32>())
@@ -450,8 +459,7 @@ mod tests {
     fn matrix(element: Scalar, rows: u16, columns: u16) -> Type {
         Type::Matrix {
             element,
-            rows,
-            columns,
+            sides: Sides { rows, columns },
         }
     }
 

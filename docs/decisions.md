@@ -192,6 +192,14 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042559685 (a
   `Matrix` with private fields and `u32` sides), and the `Lengths` text of
   https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040630702.
+  Amended: the field shape is `Type::Matrix { element, sides: Sides }`, with
+  `Sides { rows: u16, columns: u16 }` and its `repr(C, align(4))`, so the sides sit at
+  byte 4 of `Type`, as `Array.len`, `List.max`, and the stored `n` do. Without it,
+  `home::stored::read` was 16% to 44% slower for each series than `main` (box2).
+  Decided by `laptop.architect` (2026-10-07T19:03:23Z):
+  https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6044826781.
+  Supersedes the field shape of
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.

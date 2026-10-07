@@ -196,8 +196,10 @@ mod tests {
             DataType::Sample(sample::Type::Array { element, len: 3 }),
             DataType::Sample(sample::Type::Matrix {
                 element,
-                rows: 2,
-                columns: 3,
+                sides: sample::Sides {
+                    rows: 2,
+                    columns: 3,
+                },
             }),
             DataType::Sample(sample::Type::List { element, max: 3 }),
         ]

@@ -867,8 +867,7 @@ fn round_trips_an_array_or_list_of_each_size_bound() {
 fn matrix(element: Scalar, rows: u16, columns: u16) -> DataType {
     DataType::Sample(sample::Type::Matrix {
         element,
-        rows,
-        columns,
+        sides: sample::Sides { rows, columns },
     })
 }
 
