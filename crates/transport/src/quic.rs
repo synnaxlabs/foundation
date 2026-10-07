@@ -1123,9 +1123,9 @@ mod tests {
                 let client = &mut pair.client.endpoint;
                 for _ in 0..testing::STREAMS_MAX - 1 {
                     let opened = client.open_sender(now, key, Class::Command);
-                    let mut sender = opened.expect("a stream");
+                    let sender = opened.expect("a stream");
                     let written =
-                        client.write(now, &mut sender, &mut Some(shard.block(&sent)));
+                        client.write(now, &sender, &mut Some(shard.block(&sent)));
                     assert_eq!(written, Ok(Poll::Ready(())));
                 }
                 pair.run(Duration::from_secs(1));
@@ -1264,9 +1264,8 @@ mod tests {
                 let (now, key) = (pair.now(), pair.client.key.expect("a key"));
                 let client = &mut pair.client.endpoint;
                 let opened = client.open_sender(now, key, Class::Command);
-                let mut sender = opened.expect("a stream");
-                let written =
-                    client.write(now, &mut sender, &mut Some(shard.block(&sent)));
+                let sender = opened.expect("a stream");
+                let written = client.write(now, &sender, &mut Some(shard.block(&sent)));
                 assert_eq!(written, Ok(Poll::Ready(())));
                 pair.run(Duration::from_millis(100));
                 assert!(pair.client.batch_max > 1, "{}", pair.client.batch_max);

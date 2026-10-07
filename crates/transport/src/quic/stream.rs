@@ -57,16 +57,24 @@ struct Half {
     body: Bytes,
     /// The send budget of the message in hand.
     claim: Claim,
-    /// The message in hand came from a write that does not wait, so the stream
-    /// writes the rest of it with no call from the caller.
-    detached: bool,
+    /// Who writes the rest of the message in hand.
+    rest: Rest,
     /// The stream waits its turn in [`Turns`].
     waiting: bool,
     /// The code the peer stopped the stream with.
     stopped: Option<Code>,
-    /// The caller finished the stream while it held part of a message. The stream
-    /// finishes once noq-proto takes the rest.
-    finished: bool,
+}
+
+/// Who writes the rest of a stream's message in hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rest {
+    /// The caller, at its next write.
+    Caller,
+    /// The stream, with no call from the caller: the message came from a write that
+    /// does not wait.
+    Stream,
+    /// The stream, which then finishes: the caller finished it.
+    Finish,
 }
 
 /// The receiving half of a stream. The caller gives it to each read, and to
@@ -277,17 +285,16 @@ impl Half {
             unsent: 0..0,
             body: Bytes::new(),
             claim: Claim::new(class),
-            detached: false,
+            rest: Rest::Caller,
             waiting: false,
             stopped,
-            finished: false,
         }
     }
 
-    /// Takes `message` as the message in hand, after its header, `detached` when it
-    /// came from a write that does not wait. The half holds no part of a message.
-    fn load(&mut self, message: Block, detached: bool) {
-        self.detached = detached;
+    /// Takes `message` as the message in hand, after its header, with `rest` to write
+    /// what the stream does not take now. The half holds no part of a message.
+    fn load(&mut self, message: Block, rest: Rest) {
+        self.rest = rest;
         let prefix = message::prefix(message.len());
         let start = usize::from(self.started);
         self.started = true;
@@ -854,7 +861,7 @@ impl Streams {
                 half.stopped = Some(code);
                 let first = self.sending.first();
                 self.sending.end(half, first);
-                if half.finished {
+                if half.rest == Rest::Finish {
                     self.senders.remove(&id);
                 }
                 Ok(Some(Event::Writable { stream: stream(id) }))
@@ -929,7 +936,7 @@ impl Streams {
         let Some(message) = message.take() else {
             return Ok(Poll::Ready(()));
         };
-        half.load(message, false);
+        half.load(message, Rest::Caller);
         Ok(self.sending.start(inner, half))
     }
 
@@ -968,8 +975,8 @@ impl Streams {
             allowed && budget.admit(next.len(), &mut half.claim, order)
         };
         if let Some(taken) = message.take_if(admitted) {
-            half.load(taken, true);
-            let _ = self.sending.start(inner, half);
+            half.load(taken, Rest::Stream);
+            _ = self.sending.start(inner, half);
         }
         Ok(())
     }
@@ -991,12 +998,12 @@ impl Streams {
             if !half.holds() {
                 continue;
             }
-            let detached = half.detached || half.finished;
-            if detached && self.sending.start(inner, half).is_pending() {
+            let caller = half.rest == Rest::Caller;
+            if !caller && self.sending.start(inner, half).is_pending() {
                 continue;
             }
             events.push_back(Event::Writable { stream: half.key });
-            if half.finished {
+            if half.rest == Rest::Finish {
                 self.senders.remove(&id);
                 finish(inner, id);
             }
@@ -1026,7 +1033,7 @@ impl Streams {
             return Err(Error::Stopped { code });
         }
         if half.holds() {
-            half.finished = true;
+            half.rest = Rest::Finish;
         } else {
             self.senders.remove(&id);
             finish(inner, id);
@@ -1036,6 +1043,7 @@ impl Streams {
 
     /// Resets `sender`'s stream of `inner` with `code`, and gives back its send budget
     /// and its turn.
+    #[expect(clippy::needless_pass_by_value, reason = "a reset sender is spent")]
     pub(super) fn reset(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -1678,7 +1686,7 @@ mod tests {
             assert!(events(&pair.client).contains(&&writable));
             let now = pair.now();
             assert_eq!(
-                pair.client.endpoint.write(now, &mut sender, &mut None),
+                pair.client.endpoint.write(now, &sender, &mut None),
                 Ok(Poll::Ready(()))
             );
             pair.client
@@ -1980,12 +1988,9 @@ mod tests {
             let messages = [vec![1; MESSAGE_MAX], vec![2; 65_516]];
             let blocks = messages.each_ref().map(|message| shard.block(message));
             write(&mut pair.client, now, &mut first, &blocks);
-            let mut second = open_sender(&mut pair, Class::Complete);
+            let second = open_sender(&mut pair, Class::Complete);
             let message = shard.block(&[3; 100]);
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut second, &mut Some(message));
+            let written = pair.client.endpoint.write(now, &second, &mut Some(message));
             assert_eq!(written, Ok(Poll::Pending));
             assert_eq!(half(&mut pair.client, &second).unsent, 1..3);
             let id = second.key().id;
@@ -2017,14 +2022,14 @@ mod tests {
             assert_eq!(read.len(), usize::from(count - 1));
             pair.run(RUN);
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut third, &mut None);
+            let flushed = pair.client.endpoint.write(now, &third, &mut None);
             assert_eq!(flushed, Ok(Poll::Pending));
             pair.run(RUN);
             assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
             let (seen, now) = (pair.client.events.len(), pair.now());
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
-            let flushed = pair.client.endpoint.write(now, &mut second, &mut None);
+            let flushed = pair.client.endpoint.write(now, &second, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
             pair.run(Duration::ZERO);
             let writable = Event::Writable {
@@ -2501,7 +2506,7 @@ mod tests {
             };
             assert!(got(&pair.client, seen, &writable));
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
         });
     }
@@ -2535,7 +2540,7 @@ mod tests {
             };
             assert!(got(&pair.client, seen, &writable));
             let (seen, now) = (pair.client.events.len(), pair.now());
-            let flushed = pair.client.endpoint.write(now, &mut third, &mut None);
+            let flushed = pair.client.endpoint.write(now, &third, &mut None);
             assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
             exchange(&mut pair, &mut [first, second], 10 * RUN);
             assert!(!got(&pair.client, seen, &writable));
@@ -2612,12 +2617,9 @@ mod tests {
     fn pending(pair: &mut Pair, shard: &Shard, count: usize) -> Vec<Sender> {
         let mut senders = Vec::new();
         for _ in 0..count {
-            let mut sender = open_sender(pair, Class::Complete);
+            let sender = open_sender(pair, Class::Complete);
             let (now, message) = (pair.now(), shard.block(&vec![1; MESSAGE_MAX]));
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut sender, &mut Some(message));
+            let written = pair.client.endpoint.write(now, &sender, &mut Some(message));
             assert_eq!(written, Ok(Poll::Pending));
             senders.push(sender);
         }
@@ -2769,10 +2771,7 @@ mod tests {
             pair.server.endpoint.stop(now, receiver, Code(9));
             pair.run(RUN);
             let (now, message) = (pair.now(), shard.block(b"b"));
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut sender, &mut Some(message));
+            let written = pair.client.endpoint.write(now, &sender, &mut Some(message));
             assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
         });
     }
@@ -2870,9 +2869,9 @@ mod tests {
             let written =
                 pair.client
                     .endpoint
-                    .write(now, &mut sender, &mut Some(over.clone()));
+                    .write(now, &sender, &mut Some(over.clone()));
             assert_eq!(written, too_large.clone().map(|()| Poll::Ready(())));
-            let written = pair.client.endpoint.try_write(now, &mut sender, over);
+            let written = pair.client.endpoint.try_write(now, &sender, over);
             let written = written.map(|back| back.map(|back| back.to_vec()));
             assert_eq!(written, too_large.map(|()| None));
             write(
@@ -2907,10 +2906,10 @@ mod tests {
             write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
             pair.run(RUN);
             let incoming = accept(&mut pair.server);
-            let mut reply = incoming.sender.expect("a two-way stream");
+            let reply = incoming.sender.expect("a two-way stream");
             let now = pair.now();
             let over = shard.block(&[1; 1_473]);
-            let written = pair.server.endpoint.write(now, &mut reply, &mut Some(over));
+            let written = pair.server.endpoint.write(now, &reply, &mut Some(over));
             let too_large = Error::TooLarge {
                 bytes: 1_473,
                 bytes_max: 1_472,
@@ -3137,7 +3136,7 @@ mod tests {
             for _ in 0..2 {
                 let written = pair.client.endpoint.write(
                     now,
-                    &mut sender,
+                    &sender,
                     &mut Some(shard.block(b"b")),
                 );
                 assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
@@ -3162,11 +3161,10 @@ mod tests {
             stopped.expect("stopped");
             pair.run(DELAY + DELAY / 2);
             let now = pair.now();
-            let written = pair.client.endpoint.write(
-                now,
-                &mut sender,
-                &mut Some(shard.block(b"b")),
-            );
+            let written =
+                pair.client
+                    .endpoint
+                    .write(now, &sender, &mut Some(shard.block(b"b")));
             assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
         });
     }
@@ -3271,7 +3269,7 @@ mod tests {
             let mut pair = connected(shard);
             let (now, key) = (pair.now(), key(&pair.client));
             let opened = pair.client.endpoint.open(now, key, Class::Complete);
-            let (mut sender, mut receiver) = opened.expect("a stream");
+            let (sender, mut receiver) = opened.expect("a stream");
             let mut other = open_sender(&mut pair, Class::Latest);
             let mut finishing = [Class::Latest, Class::Latest]
                 .map(|class| open_sender(&mut pair, class));
@@ -3288,20 +3286,20 @@ mod tests {
                 let endpoint = &mut pair.client.endpoint;
                 assert!(endpoint.open(now, key, Class::Command).is_none());
                 assert!(endpoint.accept(key).is_none());
-                let flushed = endpoint.write(now, &mut sender, &mut None);
+                let flushed = endpoint.write(now, &sender, &mut None);
                 assert_eq!(flushed, ended.clone().map(|()| Poll::Pending));
                 let large = Error::TooLarge {
                     bytes: MESSAGE_MAX + 1,
                     bytes_max: MESSAGE_MAX,
                 };
                 let over = shard.block(&vec![1; MESSAGE_MAX + 1]);
-                let written = endpoint.write(now, &mut sender, &mut Some(over.clone()));
+                let written = endpoint.write(now, &sender, &mut Some(over.clone()));
                 assert_eq!(written, Err(large.clone()));
                 let given = try_write(&mut pair.client, now, &mut other, over);
                 assert_eq!(given, Err(large));
                 let endpoint = &mut pair.client.endpoint;
                 let mut message = Some(shard.block(b"a"));
-                let written = endpoint.write(now, &mut sender, &mut message);
+                let written = endpoint.write(now, &sender, &mut message);
                 assert_eq!(written, ended.clone().map(|()| Poll::Pending));
                 assert!(message.is_some());
                 assert_eq!(endpoint.finish(now, finished), ended.clone());
@@ -3328,7 +3326,7 @@ mod tests {
                 let server = key(&pair.server);
                 let (now, key) = (pair.now(), key(&pair.client));
                 let opened = pair.client.endpoint.open(now, key, Class::Complete);
-                let (mut sender, mut receiver) = opened.expect("a stream");
+                let (sender, mut receiver) = opened.expect("a stream");
                 let mut other = open_sender(&mut pair, Class::Latest);
                 let mut finishing = open_sender(&mut pair, Class::Latest);
                 if closed {
@@ -3344,10 +3342,10 @@ mod tests {
                 let read = next(&mut pair.client, now, &mut receiver);
                 assert_eq!(read, Err(error.clone()));
                 let endpoint = &mut pair.client.endpoint;
-                let flushed = endpoint.write(now, &mut sender, &mut None);
+                let flushed = endpoint.write(now, &sender, &mut None);
                 assert_eq!(flushed, Err(error.clone()));
                 let written =
-                    endpoint.write(now, &mut sender, &mut Some(shard.block(b"a")));
+                    endpoint.write(now, &sender, &mut Some(shard.block(b"a")));
                 assert_eq!(written, Err(error.clone()));
                 let finished = endpoint.finish(now, &mut finishing);
                 assert_eq!(finished, Err(error.clone()));
@@ -3368,7 +3366,7 @@ mod tests {
             let mut sender = open_sender(&mut pair, Class::Complete);
             fill(&mut pair, shard, &mut sender);
             let (now, mut message) = (pair.now(), Some(shard.block(b"a")));
-            let written = pair.client.endpoint.write(now, &mut sender, &mut message);
+            let written = pair.client.endpoint.write(now, &sender, &mut message);
             assert_eq!(written, Ok(Poll::Pending));
             assert_eq!(message.as_deref(), Some(&b"a"[..]));
         });
@@ -3382,10 +3380,7 @@ mod tests {
             fill(&mut pair, shard, &mut sender);
             let now = pair.now();
             let over = shard.block(&vec![1; MESSAGE_MAX + 1]);
-            let written = pair
-                .client
-                .endpoint
-                .write(now, &mut sender, &mut Some(over));
+            let written = pair.client.endpoint.write(now, &sender, &mut Some(over));
             let large = Error::TooLarge {
                 bytes: MESSAGE_MAX + 1,
                 bytes_max: MESSAGE_MAX,
@@ -3431,7 +3426,7 @@ mod tests {
             let endpoint = &mut pair.client.endpoint;
             endpoint.finish(now, &mut sender).expect("finished");
             let over = shard.block(&vec![1; MESSAGE_MAX + 1]);
-            drop(endpoint.write(now, &mut sender, &mut Some(over)));
+            drop(endpoint.write(now, &sender, &mut Some(over)));
         });
     }
 
@@ -3467,12 +3462,9 @@ mod tests {
     fn hold(pair: &mut Pair, shard: &Shard) -> [Sender; 2] {
         let mut first = open_sender(pair, Class::Complete);
         fill(pair, shard, &mut first);
-        let mut second = open_sender(pair, Class::Complete);
+        let second = open_sender(pair, Class::Complete);
         let (now, message) = (pair.now(), shard.block(&vec![0xb; MESSAGE_MAX]));
-        let written = pair
-            .client
-            .endpoint
-            .write(now, &mut second, &mut Some(message));
+        let written = pair.client.endpoint.write(now, &second, &mut Some(message));
         assert_eq!(written, Ok(Poll::Pending));
         [first, second]
     }
@@ -3482,10 +3474,10 @@ mod tests {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let [first, second] = hold(&mut pair, shard);
-            let mut sender = open_sender(&mut pair, Class::Complete);
+            let sender = open_sender(&mut pair, Class::Complete);
             let (now, message) = (pair.now(), shard.block(b"c"));
             let address = message.as_ptr();
-            let written = pair.client.endpoint.try_write(now, &mut sender, message);
+            let written = pair.client.endpoint.try_write(now, &sender, message);
             let given = written.expect("written").expect("given back");
             assert_eq!((given.as_ptr(), &*given), (address, b"c".as_slice()));
             let (seen, key) = (pair.client.events.len(), sender.key());
@@ -3625,18 +3617,18 @@ mod tests {
             pair.server.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
             pair.dial(tls::public(&pair::SERVER_KEY));
             pair.run(RUN);
-            let mut first = open_sender(&mut pair, Class::Complete);
-            let mut second = open_sender(&mut pair, Class::Latest);
+            let first = open_sender(&mut pair, Class::Complete);
+            let second = open_sender(&mut pair, Class::Latest);
             let now = pair.now();
             // The second message waits for the peer's credit, so it holds 1,472
             // bytes of the send budget.
             for byte in [1, 2] {
                 let message = shard.block(&[byte; 1_472]);
-                let written = pair.client.endpoint.try_write(now, &mut first, message);
+                let written = pair.client.endpoint.try_write(now, &first, message);
                 assert!(matches!(written, Ok(None)), "{written:?}");
             }
             let message = shard.block(&[3; 1_472]);
-            let written = pair.client.endpoint.try_write(now, &mut second, message);
+            let written = pair.client.endpoint.try_write(now, &second, message);
             assert_eq!(
                 written.map(|back| back.map(|back| back.to_vec())),
                 Ok(Some(vec![3; 1_472]))
@@ -3659,7 +3651,7 @@ mod tests {
             drop(
                 pair.client
                     .endpoint
-                    .try_write(now, &mut sender, shard.block(b"a")),
+                    .try_write(now, &sender, shard.block(b"a")),
             );
         });
     }
@@ -3680,17 +3672,17 @@ mod tests {
                 }
             }
             let block = shard.block(&vec![0xb; MESSAGE_MAX]);
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut latest[1], &mut Some(block));
+            let written = pair
+                .client
+                .endpoint
+                .write(now, &latest[1], &mut Some(block));
             assert_eq!(written, Ok(Poll::Pending));
-            let mut command = open_sender(&mut pair, Class::Command);
+            let command = open_sender(&mut pair, Class::Command);
             let message = shard.block(&vec![0xc; MESSAGE_MAX]);
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut command, &mut Some(message));
+            let written = pair
+                .client
+                .endpoint
+                .write(now, &command, &mut Some(message));
             assert_eq!(written, Ok(Poll::Pending));
             pair.run(RUN);
             let mut incoming = accept(&mut pair.server);
@@ -3699,7 +3691,7 @@ mod tests {
             let seen = pair.client.events.len();
             pair.run(RUN);
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut latest[0], &mut None);
+            let flushed = pair.client.endpoint.write(now, &latest[0], &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
             let written =
                 try_write(&mut pair.client, now, &mut latest[0], shard.block(b"l"));
@@ -3727,20 +3719,17 @@ mod tests {
             let mut pair = narrow(shard);
             let mut first = open_sender(&mut pair, Class::Complete);
             fill(&mut pair, shard, &mut first);
-            let mut second = open_sender(&mut pair, Class::Complete);
+            let second = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
             let message = shard.block(&[0xb; 100]);
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut second, &mut Some(message));
+            let written = pair.client.endpoint.write(now, &second, &mut Some(message));
             assert_eq!(written, Ok(Poll::Pending));
-            let mut catch_up = open_sender(&mut pair, Class::CatchUp);
+            let catch_up = open_sender(&mut pair, Class::CatchUp);
             let message = shard.block(&vec![0xc; MESSAGE_MAX]);
             let written =
                 pair.client
                     .endpoint
-                    .write(now, &mut catch_up, &mut Some(message));
+                    .write(now, &catch_up, &mut Some(message));
             assert_eq!(written, Ok(Poll::Pending));
             let mut latest = open_sender(&mut pair, Class::Latest);
             let written =
@@ -3759,13 +3748,10 @@ mod tests {
             let mut pair = narrow(shard);
             let mut first = open_sender(&mut pair, Class::Complete);
             fill(&mut pair, shard, &mut first);
-            let mut empty = open_sender(&mut pair, Class::Complete);
+            let empty = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
             let message = shard.block(&[]);
-            let written =
-                pair.client
-                    .endpoint
-                    .write(now, &mut empty, &mut Some(message));
+            let written = pair.client.endpoint.write(now, &empty, &mut Some(message));
             assert_eq!(written, Ok(Poll::Pending));
             let mut second = open_sender(&mut pair, Class::Complete);
             let mut third = open_sender(&mut pair, Class::Complete);
@@ -3781,9 +3767,9 @@ mod tests {
             drain(&mut pair.server, now, &mut incoming.receiver);
             pair.run(RUN);
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
-            let flushed = pair.client.endpoint.write(now, &mut empty, &mut None);
+            let flushed = pair.client.endpoint.write(now, &empty, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
     }
@@ -3796,19 +3782,17 @@ mod tests {
             let now = pair.now();
             let block = shard.block(&vec![1; MESSAGE_MAX]);
             write(&mut pair.client, now, &mut other, &[block]);
-            let mut lagging = open_sender(&mut pair, Class::Complete);
+            let lagging = open_sender(&mut pair, Class::Complete);
             let message = shard.block(&[2; NARROW / 32]);
             for round in 0..3 {
                 let now = pair.now();
-                let mut written =
-                    pair.client.endpoint.write(now, &mut lagging, &mut None);
+                let mut written = pair.client.endpoint.write(now, &lagging, &mut None);
                 while written == Ok(Poll::Ready(())) {
                     let message = message.clone();
-                    written = pair.client.endpoint.write(
-                        now,
-                        &mut lagging,
-                        &mut Some(message),
-                    );
+                    written =
+                        pair.client
+                            .endpoint
+                            .write(now, &lagging, &mut Some(message));
                 }
                 assert_eq!(written, Ok(Poll::Pending));
                 pair.run(RUN);
@@ -3836,14 +3820,14 @@ mod tests {
     fn a_write_behind_a_waiting_sender_of_its_class_waits_its_turn() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            let [mut first, mut second] = hold(&mut pair, shard);
+            let [first, second] = hold(&mut pair, shard);
             free(&mut pair);
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut second, &mut None);
+            let flushed = pair.client.endpoint.write(now, &second, &mut None);
             assert_eq!(flushed, Ok(Poll::Pending));
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
-            let flushed = pair.client.endpoint.write(now, &mut second, &mut None);
+            let flushed = pair.client.endpoint.write(now, &second, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
     }
@@ -3871,7 +3855,7 @@ mod tests {
     fn room_wakes_only_the_first_waiting_sender() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            let [mut first, mut second] = hold(&mut pair, shard);
+            let [first, second] = hold(&mut pair, shard);
             let seen = pair.client.events.len();
             free(&mut pair);
             let [first_writable, second_writable] =
@@ -3881,11 +3865,11 @@ mod tests {
             assert!(got(&pair.client, seen, &first_writable));
             assert!(!got(&pair.client, seen, &second_writable));
             let (seen, now) = (pair.client.events.len(), pair.now());
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
             pair.run(Duration::ZERO);
             assert!(got(&pair.client, seen, &second_writable));
-            let flushed = pair.client.endpoint.write(now, &mut second, &mut None);
+            let flushed = pair.client.endpoint.write(now, &second, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
     }
@@ -3896,11 +3880,11 @@ mod tests {
             let mut pair = connected(shard);
             let mut bulk = open_sender(&mut pair, Class::CatchUp);
             fill(&mut pair, shard, &mut bulk);
-            let mut command = open_sender(&mut pair, Class::Command);
+            let command = open_sender(&mut pair, Class::Command);
             let now = pair.now();
             let written = pair.client.endpoint.write(
                 now,
-                &mut command,
+                &command,
                 &mut Some(shard.block(b"go")),
             );
             assert_eq!(written, Ok(Poll::Pending));
@@ -3913,13 +3897,13 @@ mod tests {
             assert!(got(&pair.client, seen, &command_writable));
             assert!(!got(&pair.client, seen, &bulk_writable));
             let (seen, now) = (pair.client.events.len(), pair.now());
-            let flushed = pair.client.endpoint.write(now, &mut bulk, &mut None);
+            let flushed = pair.client.endpoint.write(now, &bulk, &mut None);
             assert_eq!(flushed, Ok(Poll::Pending));
-            let flushed = pair.client.endpoint.write(now, &mut command, &mut None);
+            let flushed = pair.client.endpoint.write(now, &command, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
             pair.run(Duration::ZERO);
             assert!(got(&pair.client, seen, &bulk_writable));
-            let flushed = pair.client.endpoint.write(now, &mut bulk, &mut None);
+            let flushed = pair.client.endpoint.write(now, &bulk, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
     }
@@ -3943,7 +3927,7 @@ mod tests {
     fn a_stop_of_the_first_waiting_sender_wakes_the_next() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            let [mut first, second] = hold(&mut pair, shard);
+            let [first, second] = hold(&mut pair, shard);
             pair.run(RUN);
             let id = accept(&mut pair.server).receiver.key().id;
             assert_eq!(id, first.key().id);
@@ -3956,7 +3940,7 @@ mod tests {
             };
             assert!(got(&pair.client, seen, &writable));
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
         });
     }
@@ -3986,14 +3970,14 @@ mod tests {
             stopped.expect("stopped");
             pair.run(RUN);
             let (seen, now) = (pair.client.events.len(), pair.now());
-            let flushed = pair.client.endpoint.write(now, &mut second, &mut None);
+            let flushed = pair.client.endpoint.write(now, &second, &mut None);
             assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
             pair.client.endpoint.reset(now, third, Code(9));
             pair.run(Duration::ZERO);
             assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
             free(&mut pair);
             let now = pair.now();
-            let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+            let flushed = pair.client.endpoint.write(now, &first, &mut None);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
     }
@@ -4160,11 +4144,11 @@ mod tests {
             let mut pair = connected(shard);
             let mut bulk = open_sender(&mut pair, Class::CatchUp);
             fill(&mut pair, shard, &mut bulk);
-            let mut command = open_sender(&mut pair, Class::Command);
+            let command = open_sender(&mut pair, Class::Command);
             let now = pair.now();
             let written = pair.client.endpoint.write(
                 now,
-                &mut command,
+                &command,
                 &mut Some(shard.block(b"go")),
             );
             assert_eq!(written, Ok(Poll::Pending));
@@ -4230,12 +4214,9 @@ mod tests {
             write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
             pair.run(RUN);
             let incoming = accept(&mut pair.server);
-            let mut reply = incoming.sender.expect("a two-way stream");
+            let reply = incoming.sender.expect("a two-way stream");
             let (now, message) = (pair.now(), shard.block(b"b"));
-            let written =
-                pair.server
-                    .endpoint
-                    .write(now, &mut reply, &mut Some(message));
+            let written = pair.server.endpoint.write(now, &reply, &mut Some(message));
             assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
         });
     }
@@ -4374,7 +4355,7 @@ mod tests {
                 let flushed = pair.client.endpoint.write(now, second, &mut None);
                 assert_eq!(flushed, Ok(Poll::Pending));
                 let seen = pair.client.events.len();
-                let flushed = pair.client.endpoint.write(now, &mut complete, &mut None);
+                let flushed = pair.client.endpoint.write(now, &complete, &mut None);
                 assert_eq!(flushed, Ok(Poll::Ready(())));
                 pair.run(Duration::ZERO);
                 assert!(got(&pair.client, seen, &second_writable));
@@ -4389,27 +4370,27 @@ mod tests {
                 let mut pair = narrow(shard);
                 let mut complete = open_sender(&mut pair, Class::Complete);
                 fill(&mut pair, shard, &mut complete);
-                let mut latest =
+                let latest =
                     [Class::Latest; 2].map(|class| open_sender(&mut pair, class));
-                let mut waiting = open_sender(&mut pair, Class::Complete);
+                let waiting = open_sender(&mut pair, Class::Complete);
                 let (now, message) = (pair.now(), shard.block(&vec![1; MESSAGE_MAX]));
                 let written = pair.client.endpoint.write(
                     now,
-                    &mut latest[0],
+                    &latest[0],
                     &mut Some(message.clone()),
                 );
                 assert_eq!(written, Ok(Poll::Pending));
                 // The send budget is full, so both wait for room.
                 let written = pair.client.endpoint.write(
                     now,
-                    &mut waiting,
+                    &waiting,
                     &mut Some(shard.block(b"c")),
                 );
                 assert_eq!(written, Ok(Poll::Pending));
                 let written =
                     pair.client
                         .endpoint
-                        .write(now, &mut latest[1], &mut Some(message));
+                        .write(now, &latest[1], &mut Some(message));
                 assert_eq!(written, Ok(Poll::Pending));
                 free(&mut pair);
                 let [complete_writable, latest_writable] =
@@ -4417,8 +4398,7 @@ mod tests {
                         stream: sender.key(),
                     });
                 let (seen, now) = (pair.client.events.len(), pair.now());
-                let flushed =
-                    pair.client.endpoint.write(now, &mut latest[0], &mut None);
+                let flushed = pair.client.endpoint.write(now, &latest[0], &mut None);
                 assert_eq!(flushed, Ok(Poll::Ready(())));
                 pair.run(Duration::ZERO);
                 assert!(got(&pair.client, seen, &complete_writable));
@@ -4448,14 +4428,13 @@ mod tests {
                 take(&mut pair, &mut receivers, &mut read);
                 pair.run(RUN);
                 let now = pair.now();
-                let flushed =
-                    pair.client.endpoint.write(now, &mut latest[0], &mut None);
+                let flushed = pair.client.endpoint.write(now, &latest[0], &mut None);
                 assert_eq!(flushed, Ok(Poll::Ready(())));
                 // The send budget holds `Complete` and `latest[1]`.
                 let written =
                     pair.client
                         .endpoint
-                        .write(now, &mut latest[0], &mut Some(message));
+                        .write(now, &latest[0], &mut Some(message));
                 assert_eq!(written, Ok(Poll::Pending));
                 pair.run(RUN);
                 take(&mut pair, &mut receivers, &mut read);
@@ -4464,18 +4443,15 @@ mod tests {
                     stream: latest[0].key(),
                 };
                 let (seen, now) = (pair.client.events.len(), pair.now());
-                let flushed = pair.client.endpoint.write(now, &mut complete, &mut None);
+                let flushed = pair.client.endpoint.write(now, &complete, &mut None);
                 assert_eq!(flushed, Ok(Poll::Ready(())));
                 pair.run(Duration::ZERO);
                 assert!(!got(&pair.client, seen, &writable));
                 let next = shard.block(b"c");
                 let written =
-                    pair.client
-                        .endpoint
-                        .write(now, &mut complete, &mut Some(next));
+                    pair.client.endpoint.write(now, &complete, &mut Some(next));
                 assert_eq!(written, Ok(Poll::Ready(())));
-                let flushed =
-                    pair.client.endpoint.write(now, &mut latest[0], &mut None);
+                let flushed = pair.client.endpoint.write(now, &latest[0], &mut None);
                 assert_eq!(flushed, Ok(Poll::Pending));
             });
         }
@@ -4485,7 +4461,7 @@ mod tests {
             testing::run(1, |shard| {
                 let mut pair = connected(shard);
                 let mut complete = open_sender(&mut pair, Class::Complete);
-                let mut latest = open_sender(&mut pair, Class::Latest);
+                let latest = open_sender(&mut pair, Class::Latest);
                 let bulk = shard.block(&vec![0; MESSAGE_MAX]);
                 let (mut receivers, mut read) = (Vec::new(), [0; 4]);
                 let (mut written, mut waits) = (None, Vec::new());
@@ -4494,7 +4470,7 @@ mod tests {
                     pair.run(STEP);
                     refill(&mut pair, &mut complete, &bulk);
                     let now = pair.now();
-                    if pair.client.endpoint.write(now, &mut latest, &mut None)
+                    if pair.client.endpoint.write(now, &latest, &mut None)
                         == Ok(Poll::Ready(()))
                     {
                         if let Some(at) = written.take() {
@@ -4507,7 +4483,7 @@ mod tests {
                             let message = shard.block(&[1; 100]);
                             let sent = pair.client.endpoint.write(
                                 now,
-                                &mut latest,
+                                &latest,
                                 &mut Some(message),
                             );
                             if sent == Ok(Poll::Ready(())) {
@@ -4593,15 +4569,13 @@ mod tests {
                     free(&mut pair);
                     let writable = Event::Writable { stream: idle.key() };
                     let (seen, now) = (pair.client.events.len(), pair.now());
-                    let flushed =
-                        pair.client.endpoint.write(now, &mut first, &mut None);
+                    let flushed = pair.client.endpoint.write(now, &first, &mut None);
                     assert_eq!(flushed, Ok(Poll::Ready(())), "{writer:?}");
                     pair.run(Duration::ZERO);
                     assert!(got(&pair.client, seen, &writable), "{writer:?}");
                     // `idle` got room and has not taken it.
                     let owed_before = owed(&mut pair);
-                    let flushed =
-                        pair.client.endpoint.write(now, &mut second, &mut None);
+                    let flushed = pair.client.endpoint.write(now, &second, &mut None);
                     assert_eq!(flushed, Ok(Poll::Ready(())), "{writer:?}");
                     assert_eq!(owed(&mut pair), owed_before, "{writer:?}");
                 });
@@ -4630,16 +4604,16 @@ mod tests {
                 }
                 free(&mut pair);
                 let now = pair.now();
-                let flushed = pair.client.endpoint.write(now, &mut owing, &mut None);
+                let flushed = pair.client.endpoint.write(now, &owing, &mut None);
                 assert_eq!(flushed, Ok(Poll::Ready(())));
                 // `second` got the room that `owing` freed, and waits for its turn.
-                let flushed = pair.client.endpoint.write(now, &mut second, &mut None);
+                let flushed = pair.client.endpoint.write(now, &second, &mut None);
                 assert_eq!(flushed, Ok(Poll::Pending));
                 let writable = Event::Writable {
                     stream: waiting.key(),
                 };
                 let seen = pair.client.events.len();
-                let flushed = pair.client.endpoint.write(now, &mut first, &mut None);
+                let flushed = pair.client.endpoint.write(now, &first, &mut None);
                 assert_eq!(flushed, Ok(Poll::Ready(())));
                 pair.run(Duration::ZERO);
                 assert!(owed(&mut pair) > 0);
@@ -5076,12 +5050,10 @@ mod tests {
                 send.finish().expect("finished");
                 pair.run(RUN);
                 let incoming = accept(&mut pair.server);
-                let mut reply = incoming.sender.expect("a two-way stream");
+                let reply = incoming.sender.expect("a two-way stream");
                 let (now, message) = (pair.now(), shard.block(b"b"));
                 let written =
-                    pair.server
-                        .endpoint
-                        .write(now, &mut reply, &mut Some(message));
+                    pair.server.endpoint.write(now, &reply, &mut Some(message));
                 assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
             });
         }
