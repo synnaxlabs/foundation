@@ -3020,6 +3020,11 @@ How to read this record:
   the true bound in one round. Lost: a `&Name` label, whose parse gives its own length
   error with the wrong bound. Decided by the architect, #1109
   (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031559597).
+- **CHECK ORDER (2026-10-07)** `config::check` gives the same entries for each order
+  of the Documents, or problems in each order, so the meaning of a mesh's files does
+  not depend on the order that a tool reads them. The problems can differ. Decided by
+  architect-2 (#1444, 2026-10-07T17:08:05Z,
+  https://github.com/synnaxlabs/foundation/pull/1444#issuecomment-6042832407).
 
 ### 1.12 Access, identity, and secrets
 
@@ -3251,21 +3256,37 @@ How to read this record:
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
   invariants in `oracles/invariants/`.
-- **R16-7 (2026-10-04)** `clippy.toml` bans `std::collections::HashMap`, `HashSet`,
-  and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
-  fixed hasher, so a simulated run replays. A map keyed by outside input will get a
-  keyed hasher with its key from `env` randomness. Decided by the advisor under the
-  quality delegation. The fixed hasher is the Fx hasher of `rustc-hash`
-  (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
-  8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
-  Iteration order never decides behavior, so a test that breaks on the new order shows a
-  defect in the code. Decided by `laptop.architect` (2026-10-07T09:59:29Z):
+- **R16-7 (2026-10-04)** `clippy.toml` bans `std::collections::HashMap`, `HashSet`, and
+  `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a fixed
+  hasher, so a simulated run replays. Decided by the advisor under the quality
+  delegation. The fixed hasher is the Fx hasher of `rustc-hash` (`FxBuildHasher`), not
+  SipHash with fixed keys: SipHash cost the `transport` write 8.5 ns of 131 ns per 64 B
+  message (Xeon 8488C), and its public keys stop no flood. Iteration order never decides
+  behavior, so a test that breaks on the new order shows a defect in the code. Decided
+  by `laptop.architect` (2026-10-07T09:59:29Z):
   https://github.com/synnaxlabs/foundation/issues/1321
+  A map whose keys a party outside the node picks is a `BTreeMap`, whose lookup is
+  O(log n) compares for each set of keys, unless the node limits the keys that the party
+  puts in the map to a small count, as `streams_max` limits the streams of one session.
+  A keyed hasher, with its key from `env` randomness, comes only when a benchmark shows
+  that such a `BTreeMap` is too slow. Decided by `laptop.architect`
+  (2026-10-07T17:36:18Z):
+  https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6043338861. It
+  supersedes "A map keyed by outside input will get a keyed hasher with its key from
+  `env` randomness." The first PR that gives `Interner::intern` a subset of channels
+  that a party outside the node picks makes `Interner.sets` a `BTreeMap` and limits the
+  key sets of outside sessions (#1513).
   "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
   ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
-  are open, so a set of keys that collide costs the peer many streams and a lookup at
-  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  are open, so a set of keys that collide costs the peer many streams and a lookup in a
+  map of one session at most that many compares. A map that holds the streams of many
+  sessions has no such bound (#1506). Decided by `laptop.architect`
+  (2026-10-07T14:37:40Z):
   https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
+  `laptop.architect` limited the bound to a map of one session and filed #1506
+  (2026-10-07T17:29:27Z):
+  https://github.com/synnaxlabs/foundation/pull/1493#issuecomment-6043218811
+  Supersedes: the bound for each map of 2026-10-07T14:37:40Z.
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
@@ -3415,10 +3436,53 @@ How to read this record:
   queue stays readable. A pulled serial adapter takes its buffer with it, so
   `Node::fail_serial` loses its unread bytes. Decided by `laptop.architect-2`, #1255
   (https://github.com/synnaxlabs/foundation/issues/1255#issuecomment-6033324472).
+  Amended (2026-10-07, #1473): `Node::fail_listener` makes a TCP listener fail until
+  it drops: each accept gives the streams already in its backlog, then `EIO`. A
+  connect after the fault is refused, and the streams it accepted still work. Decided
+  by `laptop.architect-2` at 2026-10-07T17:07:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042821949).
+  Amended (2026-10-07, #1532): a connect is refused when its SYN arrives after the
+  fault. A connect whose SYN the listener took, but not its ACK, before the fault
+  ends `Ok`, and its stream is reset when the RST of the fault arrives, so a write
+  before it is taken. An accept error of `env` leaves the listener usable, unless the
+  listener is broken: then each later accept fails too. Decided by
+  `laptop.architect-2` at 2026-10-07T18:01:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1532#issuecomment-6043781710),
+  with the connect sentences at 2026-10-07T18:05:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1532#issuecomment-6043854311).
+  Supersedes the connect sentence of
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042821949.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
   device at run time lost (#569).
+- **FILE RENAME (2026-10-07)** `File::rename(&mut self, to: &Path)` moves an open file
+  to `to`, in the same directory, with no replace. It first syncs the file, so that no
+  crash leaves the new name with bytes that were not durable (#1441). After `Ok`, the
+  handle names `to` in its errors, and a write open of `to` is `Busy` until the handle
+  closes. It renames the file that the handle opened, not whatever path now holds its
+  old name: when the old path is gone or holds another file (a remove and a create
+  since the open), it gives `NotFound { path: old }` and changes nothing. When `to` is
+  there, it gives `Exists { path: to }` and changes nothing; the handle stays usable. A
+  read handle, or a `to` that is not a name in the directory of the file (another
+  directory, empty, `.`, or ending in `/` or `/.`), is a defect and panics. A trailing
+  slash gives `ENOTDIR` on Linux and `ENOENT` on macOS, so no error can name it the
+  same way on both. It poisons the file when its sync fails or when it is dropped
+  before it ends, as any other call. The rename can still end after the drop, and
+  then the file is at `to`. `os` checks that the old path still names the file by
+  device and inode, with no follow of a link, then renames with `RENAME_NOREPLACE`;
+  the I/O thread of a shard runs its calls in order, and each shard writes only its
+  own directory, so nothing changes the path between the check and the rename. Lost:
+  `Files::rename(from, to)` on paths, which cannot tell the file of the
+  handle from a new file at its path; a link then an unlink, which leaves two names at
+  a crash; a replacing rename or a `replace: bool`, which no caller wants and which
+  hides a defect that `Exists` reports; and a bare-name `rename(&mut self, name:
+  &OsStr)`: an `OsStr` can hold a `/`, so it needs the same check, and it would be the
+  one call that takes a name in place of a path in the data directory (#1449, decided
+  by `laptop.architect-2`, 2026-10-07 14:55 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
+  panic list and the bare-name reason, 2026-10-07 17:35 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
@@ -3439,7 +3503,14 @@ How to read this record:
   order of the writes. As on Linux, these writes stay in the cache, clean: a read sees
   them, and a later write goes over them. A power cut drops them, and at each read or
   write of their sector the cache may drop them, by a coin. A sector with a write that
-  no `sync` covered is dirty, and the cache keeps it.
+  no `sync` covered is dirty, and the cache keeps it. Amended (2026-10-07, #1449): a
+  `Power` crash keeps the durable entries of each directory, as for a create or a
+  remove, so it undoes each rename since the last `sync_dir` of the directory, a rename
+  in flight too. A `Process` crash applies a rename in flight, as for other calls.
+  Decided by `laptop.architect-2`, #1449, 2026-10-07 14:55 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508; the
+  text, 2026-10-07 17:35 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6043326214.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -3632,6 +3703,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083 and
   https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6043266054, the
   latter at 2026-10-07T17:32:11Z).
+  Amended (2026-10-07, #1504): a const assertion in `block` checks the 16 bytes of a
+  handle, so `block`, and each crate that depends on it, builds only where a pointer is
+  8 bytes. So `frame::charge` maps no `usize::MAX` of a narrower target to `u64::MAX`,
+  and no crate that depends on `block` checks the pointer width (`usize::BITS` or
+  `target_pointer_width`); #1396 removes the last such check, in `os`. A 32-bit target
+  first needs a new handle, and the choice of targets is the person's (CPU BASELINE);
+  `charge_of` in `types` changes with that handle. Decided by `laptop.architect`
+  (2026-10-07T18:30:48Z):
+  https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6044276677
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -3658,6 +3738,18 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242).
   Supersedes the `held` part of
   https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190.
+  A counting allocator runs code as `System` runs it, apart from its count: each
+  `GlobalAlloc` method calls the `System` method of the same name, and keeps the
+  trait's own body only when the allocator's contract needs it, with a comment that
+  names that contract. So `Bytes::realloc` calls `System.realloc` and changes `held` by
+  the difference of the two sizes in one atomic step, and `Allocator::realloc` keeps
+  the trait's own body, because the scan of a free reads the old block. A count that
+  no test can tell apart is not a reason to keep the trait's own body: under it, a
+  `realloc` that doubles 64 B to 1 MiB took 15.4 µs, not 1.6 µs (Apple M3 Max).
+  Decided by `laptop.architect` on 2026-10-07T17:59:58Z
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6043758919, #1536).
+  Supersedes the reason of 5d23e00e
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042860057).
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
@@ -3788,6 +3880,7 @@ How to read this record:
 | REMOTE CONTROL, `inbox:<name>` issues | MESSAGES |
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
+| R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 
 ---
 

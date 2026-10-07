@@ -38,6 +38,10 @@ pub(crate) enum Call {
     Sync {
         handle: Handle,
     },
+    Rename {
+        handle: Handle,
+        to: PathBuf,
+    },
 }
 
 impl Call {
@@ -52,6 +56,7 @@ impl Call {
             Self::Write { .. } => Operation::WriteAt,
             Self::Read { .. } => Operation::ReadAt,
             Self::Sync { .. } => Operation::Sync,
+            Self::Rename { .. } => Operation::Rename,
         }
     }
 
@@ -60,9 +65,25 @@ impl Call {
         match self {
             Self::Write { handle, .. }
             | Self::Read { handle, .. }
-            | Self::Sync { handle } => Some(*handle),
+            | Self::Sync { handle }
+            | Self::Rename { handle, .. } => Some(*handle),
             _ => None,
         }
+    }
+}
+
+/// The error of `operation` on `path`, which failed by `cause`.
+fn error(cause: Cause, path: PathBuf, operation: Operation) -> Error {
+    match cause {
+        Cause::NotFound => Error::NotFound { path },
+        Cause::Full => Error::Full { path },
+        Cause::Busy => Error::Busy { path },
+        Cause::Exists(path) => Error::Exists { path },
+        Cause::Code(code) => Error::Io {
+            path,
+            operation,
+            code,
+        },
     }
 }
 
@@ -293,21 +314,14 @@ impl Files {
                 disk.file(handle.inode).sync(key);
                 Ok(Done::Unit)
             }
+            Call::Rename { handle, to } => {
+                disk.rename(handle.inode, &path, to).map(|()| Done::Unit)
+            }
         };
         if let Some(handle) = call.handle() {
             disk.release(handle);
         }
-        let operation = call.operation();
-        let result = result.map_err(|cause| match cause {
-            Cause::NotFound => Error::NotFound { path },
-            Cause::Full => Error::Full { path },
-            Cause::Busy => Error::Busy { path },
-            Cause::Code(code) => Error::Io {
-                path,
-                operation,
-                code,
-            },
-        });
+        let result = result.map_err(|cause| error(cause, path, call.operation()));
         Ended { result, held }
     }
 
