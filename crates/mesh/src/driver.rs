@@ -1024,11 +1024,14 @@ mod tests {
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
                 assert_eq!(term(&mesh), Term(0));
-                let founding = Voters {
-                    incoming: [key(1), key(2), key(3)].into(),
-                    outgoing: [].into(),
+                let probe = Body::Append {
+                    prev: at,
+                    entries: Vec::new(),
+                    commit: 0,
                 };
-                assert_eq!(*mesh.group.borrow().raft.voters(), founding);
+                assert_eq!(mesh.receive(public(2), proven(2, 1, probe)), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::AppendReject { hint: 0 }));
             });
         }
 
