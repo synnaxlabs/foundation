@@ -93,7 +93,8 @@ nothing checked again. So when round 1 led to fix commits:
    code. When a fix commit changes code on a hot path, run `performance` again on it
    too, and update the Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
-   one finds nothing.
+   one finds nothing. So does a fix that only edits the PR body: its range is
+   `<head>..<head>`, so its round runs `reviewer` alone, on the edit.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range.
