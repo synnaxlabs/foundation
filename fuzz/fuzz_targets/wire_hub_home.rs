@@ -1,4 +1,5 @@
-//! `wire::hub::Home` never panics, each event encodes to its message, and each valid
+//! `wire::hub::Home` never panics, each event encodes to its message and comes in the
+//! order of a session, each refusal is one that the order gives, and each valid
 //! message that the reader's node writes reads back.
 //!
 //! Input: the messages from the reader's node (`fuzz::messages`).
@@ -10,34 +11,103 @@ use libfuzzer_sys::{
     fuzz_target,
 };
 use types::channel;
-use wire::hub::{Credit, FromReader, Home, Mode, Open, keys};
+use wire::hub::{Credit, Error, FromReader, Home, Mode, Open, keys};
 
 /// The most keys of a written run.
 const RUN_MAX: u32 = 4;
 
-/// Each event of the session in `bytes` must encode to its message.
+/// The kind bytes of an open: one for each mode.
+const OPENS: [u8; 2] = [1, 2];
+
+/// The kind byte of a credit.
+const CREDIT: u8 = 3;
+
+/// What a home must take next, kept apart from the home.
+#[derive(Clone, Copy, Debug)]
+enum Next {
+    Open,
+    /// `remain` keys of the run are still to come.
+    Keys {
+        remain: u32,
+    },
+    Credit,
+}
+
+/// Whether `error` says only that the bytes of a message are no open and no credit.
+fn malformed(error: Error) -> bool {
+    matches!(
+        error,
+        Error::Empty | Error::Kind { .. } | Error::Length { .. } | Error::Channels
+    )
+}
+
+/// Whether a home that must take `next` refuses `message` with `error`. For a message
+/// of a run, only one error is correct.
+fn refused(next: Next, message: &[u8], error: Error) -> bool {
+    match next {
+        Next::Open => match error {
+            Error::Unopened { kind } => {
+                kind == CREDIT && message.first() == Some(&CREDIT)
+            }
+            error => malformed(error),
+        },
+        Next::Keys { remain } => fuzz::run_refused(message, keys::LEN, remain, error),
+        Next::Credit => match error {
+            Error::Reopen { kind } => {
+                OPENS.contains(&kind) && message.first() == Some(&kind)
+            }
+            error => malformed(error),
+        },
+    }
+}
+
+/// Each event of the session in `bytes` must encode to its message and come in the
+/// order of a session, and each refusal must be the one that the order gives.
 fn read(bytes: &[u8]) {
     let mut home = Home::default();
+    let mut next = Next::Open;
     for message in fuzz::messages(bytes) {
-        match home.decode(message) {
-            Ok(FromReader::Open(open)) => {
+        next = match (next, home.decode(message)) {
+            (Next::Open, Ok(FromReader::Open(open))) => {
                 let mut out = vec![0; open.encoded_len()];
                 open.encode(&mut out);
                 assert_eq!(out, message, "the open changed");
+                Next::Keys {
+                    remain: open.channels,
+                }
             }
-            Ok(FromReader::Keys { keys, .. }) => {
+            (Next::Keys { remain }, Ok(FromReader::Keys { keys, last })) => {
                 let keys: Vec<_> = keys.collect();
                 let mut out = vec![0; message.len()];
                 keys::encode(&keys, &mut out);
                 assert_eq!(out, message, "the keys changed");
+                assert!(!keys.is_empty(), "a run message has no key");
+                let remain = u32::try_from(keys.len())
+                    .ok()
+                    .and_then(|count| remain.checked_sub(count))
+                    .expect("a run message has more keys than remain");
+                assert_eq!(last, remain == 0, "the run ends at another message");
+                if last {
+                    Next::Credit
+                } else {
+                    Next::Keys { remain }
+                }
             }
-            Ok(FromReader::Credit(credit)) => {
+            (Next::Credit, Ok(FromReader::Credit(credit))) => {
                 let mut out = [0; Credit::LEN];
                 credit.encode(&mut out);
                 assert_eq!(out, message, "the credit changed");
+                Next::Credit
             }
-            Err(_) => {}
-        }
+            (next, Err(error)) => {
+                assert!(
+                    refused(next, message, error),
+                    "{error:?} is not the refusal of {message:?} for {next:?}"
+                );
+                next
+            }
+            (next, Ok(event)) => panic!("{event:?} came, not {next:?}"),
+        };
     }
 }
 
