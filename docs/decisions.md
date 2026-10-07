@@ -1451,17 +1451,20 @@ How to read this record:
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
   (`Error::NotVoter`), and each grant holds (`Error::Grant`). A node with no
-  configuration takes no request until join (#336) or #881 gives it one. The messages
-  for one member wait in a queue of 64 that drops its oldest, because `raft` sends
-  again. A write that gets no block from the pool does not stop the group, because a
-  full pool is a normal state (MEMORY BOUNDS): the task writes the same `Ready` again at
-  each tick, and until then no message leaves and nothing applies. A group stops when a
-  write of the log fails, when a committed entry is not a change that this build reads,
-  or when each `Mesh` drops. Each later call gives `Error::Stopped` with the first
-  cause, and a watch gives it also after each `Mesh` drops. A stopped group does not
-  start again: the node opens the mesh again (#1066 for an open after a failed sync).
-  The task ends soon after the last `Mesh` drops, a write in progress ends first, and a
-  write that waits for a block ends at the next tick; until then a new open gives
+  configuration takes no request. Only a voter that an operator wiped is such a node
+  (#881), because a node that joins opens with the founding voters from its join answer
+  (decided by the architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
+  messages for one member wait in a queue of 64 that drops its oldest, because `raft`
+  sends again. A write that gets no block from the pool does not stop the group, because
+  a full pool is a normal state (MEMORY BOUNDS): the task writes the same `Ready` again
+  at each tick, and until then no message leaves and nothing applies. A group stops when
+  a write of the log fails, when a committed entry is not a change that this build
+  reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with the
+  first cause, and a watch gives it also after each `Mesh` drops. A stopped group does
+  not start again: the node opens the mesh again (#1066 for an open after a failed
+  sync). The task ends soon after the last `Mesh` drops, a write in progress ends first,
+  and a write that waits for a block ends at the next tick; until then a new open gives
   `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch
   does not keep the group running, and a dropped watch leaves no waker. `open` refuses a
   node or a voter that is not a member (`Error::NotMember`), and a private key that is

@@ -42,7 +42,8 @@ pub(crate) struct Config {
     /// peer proves the key, and the key signs the member's grants.
     pub(crate) members: BTreeMap<node::Key, PublicKey>,
     /// The voters before the first entry of the log, the same at each open. Each is a
-    /// member. A node with no voter takes no request until its log gives it some.
+    /// member. A node that joins gives the founding voters from its join answer. A node
+    /// with no voter takes no request.
     pub(crate) voters: BTreeSet<node::Key>,
     /// The mesh's directory.
     pub(crate) files: Files,
