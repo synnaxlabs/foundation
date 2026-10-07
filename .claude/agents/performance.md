@@ -25,6 +25,10 @@ Run the benchmarks for the crates touched (`cargo bench -p <crate>`) on `main` a
 the change, and report both numbers with the machine. Never infer a number you did not
 measure. A report without both numbers is not a review.
 
+A stub has no numbers. For each stub on the path, answer the six questions for what its
+surface makes each call cost (allocations, copies, count changes, locks), read from the
+code under it: the carrier or the library that the body will call.
+
 Each changed function on a per-sample, per-frame, or per-message path has a benchmark,
 or the report names the one that covers it. In the same run, report one benchmark whose
 code did not change. If it moves over 2%, or a changed result is within 2 points of 5%,
