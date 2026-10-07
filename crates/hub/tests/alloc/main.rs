@@ -1,6 +1,7 @@
-//! A write and a read of a complete reader make no heap allocation once the hub has
-//! taken a few frames, when frames wait for the reader and when it waits for them. This binary has no test harness: the count covers each
-//! thread, and a harness allocates on its own thread at any time.
+//! A write and the `next` of a complete reader make no heap allocation once the hub
+//! has taken a few frames, when frames wait for the reader and when it waits for
+//! them. The commit task is not counted. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -178,11 +179,11 @@ fn main() {
         let now = now + WARM + COUNTED;
         for n in 0..WARM + COUNTED {
             let waited = wait(&mut reader);
-            write(&mut writer, now + n);
+            let written = write(&mut writer, now + n);
             node.clock().sleep(SETTLE).await;
-            read(&mut reader);
+            let read = read(&mut reader);
             if n >= WARM {
-                assert_eq!(waited, 0, "the wait for frame {n} allocated");
+                assert_eq!((waited, written, read), (0, 0, 0), "frame {n} allocated");
             }
         }
     })

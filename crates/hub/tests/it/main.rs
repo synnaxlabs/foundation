@@ -45,7 +45,8 @@ const LIVE: Label = Label::Path(Path::Live);
 const WINDOW: u64 = 1 << 20;
 const STAMP: Type = Type::Scalar(Scalar::Stamp);
 const I64: Type = Type::Scalar(Scalar::I64);
-/// Two indexes, each with one `i64` channel. `time` is at slot 0.
+/// Two indexes: `time` with `value` and `value-c`, and `time-b` with `value-b`. `time`
+/// is at slot 0.
 const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (1, "time", STAMP, 1),
     (2, "value", I64, 1),
