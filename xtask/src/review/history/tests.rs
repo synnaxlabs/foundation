@@ -456,3 +456,23 @@ fn a_ref_named_like_a_short_blob_does_not_hide_code() {
         Ok(Some("changes code at `a.rs:1`".to_string()))
     );
 }
+
+#[test]
+fn a_tag_named_like_a_commit_prefix_does_not_hide_code() {
+    let (repo, _) = Repo::with_pr("tagfrom");
+    let from = repo.commit("a.rs", "// a\n");
+    let end = repo.commit("a.rs", "fn a() {}\n");
+    repo.git(&["tag", &from[..8], &end]);
+    assert_eq!(
+        repo.code_change(&from[..8], &end[..8]),
+        Ok(Some("changes code at `a.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_tag_named_like_an_end_prefix_does_not_reach() {
+    let (repo, end) = Repo::with_pr("tagend");
+    let head = repo.commit("a.rs", "fn a() {}\n");
+    repo.git(&["tag", &end[..8], &head]);
+    assert_eq!(repo.reaches(&end[..8], &head), Ok(false));
+}

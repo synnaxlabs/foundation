@@ -155,34 +155,23 @@ impl<'a> History<'a> {
     }
 
     /// The full SHA of the commit that `text` names when it is a SHA or a prefix of at
-    /// least 7 digits, or `None`.
+    /// least 7 digits, or `None`. A ref is never read, so a tag named like a prefix
+    /// cannot take the commit's place.
     fn named(&self, text: &str) -> Result<Option<String>, String> {
         if text.len() < 7 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Ok(None);
         }
-        self.commit(text)
-    }
-
-    /// The full SHA of the commit that `name` names, or `None` when it names no
-    /// single commit.
-    fn commit(&self, name: &str) -> Result<Option<String>, String> {
-        let output = Command::new("git")
-            .current_dir(self.root)
-            .args([
-                "rev-parse",
-                "--quiet",
-                "--verify",
-                &format!("{name}^{{commit}}"),
-            ])
-            .output()
-            .map_err(|e| format!("git rev-parse: {e}"))?;
-        match output.status.code() {
-            Some(0) => Ok(Some(
-                String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            )),
-            Some(1) => Ok(None),
-            _ => Err(failure("rev-parse", &output.stderr)),
+        let objects = self.git(&["rev-parse", &format!("--disambiguate={text}")])?;
+        let mut commits = Vec::new();
+        for object in objects.lines() {
+            if self.git(&["cat-file", "-t", object])? == "commit" {
+                commits.push(object);
+            }
         }
+        Ok(match commits[..] {
+            [commit] => Some(commit.to_string()),
+            _ => None,
+        })
     }
 
     fn on_base(&self, commit: &str) -> Result<bool, String> {
