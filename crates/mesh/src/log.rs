@@ -19,10 +19,10 @@
 //! A write puts a record in blocks, one block of the pool at a time, from the end of
 //! the record to its start. Each block but the one at the end of the record ends at a
 //! multiple of the block size in the file, so no two blocks share a sector. The block
-//! with the header is the last. So when the pool gives no block for a part, the log
-//! has no header of the record, and the bytes of the parts after it stay after the end
-//! of the log. The next write puts zeros over them, and syncs, before it writes its
-//! record.
+//! with the header is the last that it writes. So when the pool gives no block for a
+//! part, the log has no header of the record, and the bytes of the parts after it stay
+//! after the end of the log. The next write puts zeros over them, and syncs, before it
+//! writes its record.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -217,7 +217,7 @@ impl Log {
                 .get_mut(scan.offset..)
                 .expect("invariant: the log ends in its end file")
                 .fill(0);
-            write_in_blocks(&file, &pool, 0, bytes).await?;
+            write_in_blocks(&file, &pool, 0, &mut &bytes[..]).await?;
             file
         } else {
             let mode = Mode::Create { len: SEGMENT };
@@ -300,7 +300,7 @@ impl Log {
             // record and not the zeros.
             let at = wide(start(narrow(self.offset)));
             let zeros = vec![0; narrow(end.saturating_sub(at))];
-            write_in_blocks(&self.file, &self.pool, at, &zeros).await?;
+            write_in_blocks(&self.file, &self.pool, at, &mut &zeros[..]).await?;
             self.file.sync().await?;
             self.stale = None;
         }
@@ -324,8 +324,9 @@ impl Log {
             (self.file, self.number, self.offset, start) = (file, number, 0, 0);
         }
         let end = start.saturating_add(len);
-        let written = write_in_blocks(&self.file, &self.pool, start, &record).await;
-        if written.is_err() {
+        let mut rest = &record[..];
+        let written = write_in_blocks(&self.file, &self.pool, start, &mut rest).await;
+        if written.is_err() && rest.len() < record.len() {
             self.stale = Some(end);
         }
         written?;
@@ -402,13 +403,14 @@ async fn read(file: &File, pool: &Pool) -> Result<Vec<u8>, Error> {
 }
 
 // Writes `bytes` at `at` of `file`, one block at a time, from the end of `bytes` to
-// its start. Each block but the one at the end ends at a multiple of the block size
-// in the file, so no two blocks share a sector.
+// its start, and takes each block that it wrote off the end of `bytes`. Each block but
+// the one at the end ends at a multiple of the block size in the file, so no two
+// blocks share a sector.
 async fn write_in_blocks(
     file: &File,
     pool: &Pool,
     at: u64,
-    mut bytes: &[u8],
+    bytes: &mut &[u8],
 ) -> Result<(), Error> {
     let chunk = chunk(pool);
     while !bytes.is_empty() {
@@ -422,7 +424,7 @@ async fn write_in_blocks(
         block.copy_from_slice(part);
         let offset = at.saturating_add(wide(rest.len()));
         file.write_at(offset, &[block.freeze()]).await?;
-        bytes = rest;
+        *bytes = rest;
     }
     Ok(())
 }
@@ -2124,9 +2126,9 @@ mod tests {
         );
     }
 
-    /// A log on a pool of 2,048 bytes, with one record to byte 1,236 and the last
-    /// block of a second record at bytes 1,536 to 1,576: the pool gave no block for
-    /// the 300 bytes before it. Returns the log, its pool, and the block that keeps
+    /// A log on a pool of 2,048 bytes, with one record to byte 1,236 and the block
+    /// at the end of a second record at bytes 1,536 to 1,576: the pool gave no block
+    /// for the 300 bytes before it. Returns the log, its pool, and the block that keeps
     /// the pool full.
     async fn stopped(node: &sim::node::Node) -> (Log, Rc<Pool>, block::Unique) {
         let pool = odd_pool();
@@ -2237,6 +2239,76 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, 279])));
     }
 
+    // The stopped write put two blocks, at bytes 131,072 and 65,536. The record after
+    // it ends at byte 65,536, so a header there is in the bytes of the second block.
+    #[test]
+    fn the_zeros_start_at_the_end_of_the_log() {
+        let (mut sim, node) = sim(0);
+        sim.run_on(&node, |node, _| async move {
+            let config = block::Config { budget: 140_000 };
+            let memory = block::Heap::new(config.reservation());
+            let pool = Rc::new(Pool::new(config, memory));
+            let (mut log, _) = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
+                .await
+                .unwrap();
+            log.write(None, &[bytes(1, 10_000)]).await.unwrap();
+            let held = pool.alloc(CHUNK).unwrap();
+            let error = log.write(None, &[bytes(2, 120_992)]).await.unwrap_err();
+            assert_eq!(error, Error::Pool(exhausted(55_476, 8672)));
+            drop(held);
+            log.write(None, &[bytes(2, 55_416)]).await.unwrap();
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[10_000, 55_416])));
+    }
+
+    // The pool gives no block for the end of the record, so the write puts no byte,
+    // and the pool has no block for zeros over the 3,060 bytes of the record.
+    #[test]
+    fn a_stopped_write_that_put_no_block_needs_no_zeros() {
+        let (mut sim, node) = sim(0);
+        sim.run_on(&node, |node, _| async move {
+            let pool = odd_pool();
+            let (mut log, _) = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
+                .await
+                .unwrap();
+            log.write(None, &[bytes(1, 340)]).await.unwrap();
+            let _held = pool.alloc(1792).unwrap();
+            let error = log.write(None, &[bytes(2, 3000)]).await.unwrap_err();
+            assert_eq!(error, Error::Pool(exhausted(388, 192)));
+            log.write(None, &[bytes(2, 10)]).await.unwrap();
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[340, 10])));
+    }
+
+    // The sync that fails is the one of the third record, which the files keep or
+    // not. A second sync of the zeros fails in its place, and the log has no third
+    // record.
+    #[test]
+    fn the_zeros_go_in_one_time() {
+        let mut kept = 0;
+        for run in 0..8 {
+            let (mut sim, node) = sim(run);
+            sim.run_on(&node, |node, _| async move {
+                let (mut log, _, held) = stopped(&node).await;
+                drop(held);
+                log.write(None, &[bytes(2, 280)]).await.unwrap();
+                node.fail_file(&file("log-0"), Operation::Sync);
+                let error = log.write(None, &[bytes(3, 10)]).await.unwrap_err();
+                assert_eq!(error, io("log-0", Operation::Sync));
+            })
+            .unwrap();
+            let stored = stored(&mut sim, &node);
+            if stored == Ok(records(&[1176, 280, 10])) {
+                kept += 1;
+            } else {
+                assert_eq!(stored, Ok(records(&[1176, 280])), "run {run}");
+            }
+        }
+        assert!(kept > 0);
+    }
+
     #[test]
     fn a_write_after_a_stopped_write_can_start_a_new_file() {
         let (mut sim, node) = sim(0);
@@ -2250,8 +2322,8 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, len])));
     }
 
-    // The pool stops the first record of a new file after its last block. The record
-    // after it starts that file, and ends in the bytes of the stopped write.
+    // The pool stops the first record of a new file after the block at its end. The
+    // record after it starts that file, and ends in the bytes of the stopped write.
     #[test]
     fn a_write_after_the_pool_stops_a_new_file_starts_that_file() {
         let (mut sim, node) = sim(0);
