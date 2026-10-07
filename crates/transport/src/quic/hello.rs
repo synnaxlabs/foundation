@@ -219,6 +219,37 @@ mod tests {
         (value | 0xc0 << 56).to_be_bytes()
     }
 
+    /// The fault that the `decode` doc gives for a hello of `pairs`, then one id
+    /// with no value when `cut`. A hello of at most 256 bytes.
+    fn doc_fault(pairs: &[(u64, u64)], cut: bool) -> Option<String> {
+        let mut after = pairs.iter().zip(pairs.iter().skip(1));
+        if let Some(((last, _), (id, _))) =
+            after.find(|((last, _), (id, _))| id <= last)
+        {
+            return Some(format!("a hello with id {id} after id {last}"));
+        }
+        if cut {
+            return Some("a hello that ends inside a pair".to_owned());
+        }
+        let value = |id| pairs.iter().find(|pair| pair.0 == id).map(|pair| pair.1);
+        let Some(window) = value(0) else {
+            return Some("a hello with no window_bytes".to_owned());
+        };
+        let Some(message) = value(1) else {
+            return Some("a hello with no message_bytes_max".to_owned());
+        };
+        if message < 1_472 {
+            return Some(format!(
+                "a hello with a message_bytes_max of {message}, below 1472"
+            ));
+        }
+        (window < message).then(|| {
+            format!(
+                "a hello with window_bytes {window} below message_bytes_max {message}"
+            )
+        })
+    }
+
     proptest! {
         #[test]
         fn decode_gives_what_encode_sent(
@@ -271,6 +302,35 @@ mod tests {
                     Hello::decode(&bytes[..cut]),
                     fault("a hello that ends inside a pair")
                 );
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn decode_gives_the_fault_of_the_doc(
+            pairs in prop::collection::vec(
+                (
+                    0_u64..4,
+                    prop_oneof![
+                        0_u64..3_000,
+                        Just(1_471),
+                        Just(1_472),
+                        0..=VarInt::MAX.into_inner(),
+                    ],
+                ),
+                0..6,
+            ),
+            cut in any::<bool>(),
+        ) {
+            let mut bytes = encode(&pairs);
+            if cut {
+                bytes.push(0x03);
+            }
+            let decoded = Hello::decode(&bytes).map_err(|fault| fault.0);
+            match doc_fault(&pairs, cut) {
+                Some(fault) => prop_assert_eq!(decoded, Err(fault)),
+                None => prop_assert!(decoded.is_ok()),
             }
         }
     }
