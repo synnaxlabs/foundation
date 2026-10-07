@@ -7,4 +7,5 @@
     clippy::string_slice
 )]
 
+pub mod gap;
 pub mod line;

@@ -1241,7 +1241,23 @@ How to read this record:
   FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
   budgets: proposed by `network` in #228. The room order: approved by the advisor on
   #611. The hello: proposed by `network` in #55; settled by the advisor and the
-  coordinator under the person's delegation (#55).
+  coordinator under the person's delegation (#55). A sender can send one message from
+  parts of one block (`send_parts`, `try_send_parts`), and the budgets count it as one
+  message, of the sum of its parts. A `stream::Part` is a range of the block, then at
+  most 7 zeros. The stream never sends a byte of the block outside the ranges, because
+  those bytes can hold stale data of another channel; the padding is zeros, which `hub`
+  computes from FRAME LAYOUT. Lost: a range that runs past the series, because it sends
+  stale block bytes; a pad rule in the stream, because it puts the hub layout in
+  `transport` and is wrong for a series split across messages (architect, #1197:
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575, after
+  HUB WIRE
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). A
+  receiver can receive into its own buffer (`recv_into`). A message longer than the
+  buffer gives `Error::TooLarge` and stays queued, and so does a message whose future
+  drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe. Lost: the
+  `Message` type of the proposal, because it changes `send` and `try_send` for each
+  caller and must own its ranges (architect, #1197:
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
@@ -1867,6 +1883,45 @@ How to read this record:
   info, because `Debug` and the field still hold the password. Decided by
   `laptop.architect-2` on #1159
   (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
+- **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
+  names one sample of an index (X31), and InfluxDB keys a point by measurement, tag
+  set, and time, so a resend stores each sample once. Each run of explicit gaps
+  before a sample is one line,
+  `foundation_gaps,connector=<connector>,index=<index> count=<n>i <stamp>`: `<stamp>`
+  is the stamp of the first sample after the gaps, and `count` is the number of seqs
+  from the first trimmed seq up to that sample. The gap line goes in the request of
+  that sample, and the position is acked only after InfluxDB confirms it (B3). The
+  count is signed, because InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two
+  connectors that write one index to one database from replacing each other's gap
+  lines. Until a later sample comes, the connector keeps one gap per index. After a
+  restart the buffer reports the gap again (READER RULES), so a lost gap line is sent
+  again. The measurement name is fixed, and the kind check (#1153) refuses it as a
+  data measurement.
+  Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
+  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
+  `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
+  minus the stored seqs, as maximal runs. Each run is one gap: `after` is the count
+  of stored samples before the run, and the count is the run's length. A gap line
+  whose stamp is not in the write record, or whose range starts below the first
+  written seq, is a lab failure (panic), not data. The property test also asserts no
+  silent loss: each seq from the first written seq to the last stored seq is stored
+  or in a gap range. After a lost confirmation, a resend, and a later trim, gap lines
+  can overlap, so the sum of `count` in `foundation_gaps` is an upper bound on the
+  loss. The exact loss is the union of the ranges minus the stored samples.
+  Lost: a seq field (about 20 bytes a line), a seq tag (one series per sample), a gap
+  point in the data measurement (a field type conflict), a configurable gap
+  measurement, and a `first=<seq>i` field on each gap line. That field puts a seq,
+  which is internal to the node, into each user's InfluxDB; the lab does not need
+  it; a reader still cannot get the exact loss, as the stored samples hold no seq;
+  and it makes each gap line longer when the store is under pressure. Decided by the
+  architect (`laptop.architect-2`), #1151
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032215953,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032802085), and
+  in the review of #1225
+  (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
+  https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -2577,7 +2632,9 @@ How to read this record:
   `Rc`, and a shard that does not start drops it unrun. A caller on the real OS makes
   each shard's disk with `os::files` before the start and joins its I/O thread after
   `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files` only
-  with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
+  with a lock around a queue of disks. A fallible maker like `memory`, with a `node`
+  error for it, lost: `node` would then own I/O thread handles, which `sim` does not
+  have. Decided by the architect on #1062 (#1173):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
   `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
   randomness. A ring that does not open stops the node, and `join` gives
@@ -2594,13 +2651,25 @@ How to read this record:
   next to `shards-<cores>`, and `stored` is the smallest such count, so the error
   does not hang on the order of the list. A name whose rest is not a count in plain
   decimal (`shards-03`, `shards-+3`), or is zero, is not a record. With no record,
-  rings up to `shard-<k>` are a record of `k + 1`, so a data directory made before
-  #1076 is checked too; a crash cannot leave a ring with no record. A name
+  rings up to `shard-<k>` are a record of `k + 1`, so a data directory whose record
+  a copy dropped is checked too; a crash cannot leave a ring with no record. A name
   `shard-<usize::MAX>` is not a ring, because no node has a shard of that index.
   Each start syncs the data directory before `shard-0`, also when the record is
   there, because a process crash can leave it unsynced. A one-sector file lost: it
   needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
   https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
+  The rule of rings with no record stays, decided by the architect on #1178:
+  https://github.com/synnaxlabs/foundation/issues/1178#issuecomment-6032340796, with
+  the reasons at
+  https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. After a
+  stop, a shard starts no disk step: shard 0 checks the stop before the claim, and
+  each shard before its open. A started step runs to its end. A skipped step drops its
+  handoff, so each later shard skips too. A stop is not a failure, so `join` gives
+  `Ok` when no shard failed. Any failure stops the node, so a claim or open that has
+  not started does not start; `join` gives `Start` or `Memory`, else `Shards` or
+  `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
+  architect on #1062 (#1174):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
