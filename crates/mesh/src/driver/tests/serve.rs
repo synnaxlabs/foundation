@@ -1,10 +1,8 @@
 //! Tests of `Mesh::serve`. Node 2 writes raw streams to node 1 over two transports,
 //! and node 1 serves each with its mesh.
 
-use std::num::{NonZeroU32, NonZeroUsize};
-
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code, Port, Session, Transport};
+use transport::{Class, Code, Session};
 use wire::Protocol;
 
 use super::*;
@@ -13,32 +11,6 @@ use super::*;
 const MALFORMED: Code = Code(2);
 /// The code of a stream with a message that the mesh refused.
 const REFUSED: Code = Code(16);
-
-/// A transport of node `id` at [`PORT`] of `node`, with `pool`.
-fn create_transport(
-    node: &sim::node::Node,
-    tasks: &Tasks,
-    id: u8,
-    pool: Rc<Pool>,
-) -> Transport {
-    let config = transport::Config {
-        private_key: private(id),
-        message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(16).unwrap(),
-        // No session of a test ends for its idle time.
-        idle: seconds(60),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks: tasks.clone(),
-        pool,
-    };
-    let at = SocketAddr::new(node.addresses()[0], PORT);
-    let mut parts = Port::bind(&node.net(), at)
-        .unwrap()
-        .split(NonZeroUsize::MIN);
-    Transport::new(config, parts.pop().unwrap()).unwrap()
-}
 
 /// Node 2, with its session to node 1.
 struct Peer {
@@ -111,7 +83,7 @@ where
     };
     let (node, result) = (nodes[0].clone(), Arc::clone(&served));
     let main = move |tasks: Tasks| async move {
-        let transport = create_transport(&node, &tasks, 1, create_pool());
+        let transport = create_transport(&node, &tasks, 1, PORT, create_pool());
         let session = transport.accept().await.unwrap();
         let mut incoming = session.accept().await.unwrap();
         let header = incoming.receiver.recv().await.unwrap().unwrap();
@@ -125,7 +97,7 @@ where
     let (node, result) = (nodes[1].clone(), Arc::clone(&sent));
     let main = move |tasks: Tasks| async move {
         let pool = create_pool();
-        let transport = create_transport(&node, &tasks, 2, Rc::clone(&pool));
+        let transport = create_transport(&node, &tasks, 2, PORT, Rc::clone(&pool));
         let addresses = [Address::Udp(at)];
         let session = transport.dial(public(1), &addresses).await.unwrap();
         let clock = node.clock();
@@ -169,7 +141,7 @@ async fn leader(
         pool,
         ..config(node, tasks, 1, &[1, 2], &[1])
     };
-    let mesh = Mesh::open(config).await.unwrap();
+    let mesh = Mesh::start(config).await.unwrap();
     let first = lead(&mesh, &node.clock(), home(1)).await;
     (mesh, first)
 }
@@ -223,7 +195,7 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
         let (served, finished) = run(
             move |node, tasks, incoming| async move {
                 let config = config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS);
-                let mesh = Mesh::open(config).await.unwrap();
+                let mesh = Mesh::start(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
                 // The group did not see the heartbeat after the refused message:
                 // its reply comes after the write of the term.
@@ -288,7 +260,7 @@ fn serve_drops_a_message_that_the_pool_has_no_block_for_and_goes_on() {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
             let free = {
                 let clock = node.clock();

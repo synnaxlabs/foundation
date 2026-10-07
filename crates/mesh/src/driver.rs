@@ -6,7 +6,7 @@ use std::future::poll_fn;
 use std::mem;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 use block::Pool;
 use env::clock::Clock;
@@ -14,6 +14,7 @@ use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
+use transport::Transport;
 use types::channel;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
@@ -25,7 +26,9 @@ use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
 use crate::region::{self, Change, Malformed, Refused};
+use send::Senders;
 
+mod send;
 mod stream;
 
 /// The time of one `raft` tick.
@@ -66,6 +69,8 @@ pub(crate) struct Config {
     /// memory for, waits: the group takes, sends, and applies nothing until that write
     /// ends.
     pub(crate) pool: Rc<Pool>,
+    /// The transport of this shard. The mesh dials each other member on it.
+    pub(crate) transport: Rc<Transport>,
 }
 
 /// One node's part in the group of a region. Clones share it. The group runs until
@@ -85,6 +90,10 @@ impl Mesh {
     /// its task on `config.tasks`. Homes are known again when this node applies the
     /// log, after it hears the leader.
     ///
+    /// The group sends its messages on a session to each member. It dials a member at
+    /// the addresses of its card, at the first message for it, and again after the
+    /// session fails. It never closes a session.
+    ///
     /// # Errors
     ///
     /// - [`Error::Member`] when the region cannot hold one of `config.members`, or two
@@ -95,6 +104,20 @@ impl Mesh {
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
+        let (transport, tasks) = (Rc::clone(&config.transport), config.tasks.clone());
+        let mesh = Self::start(config).await?;
+        let senders = Senders {
+            group: Rc::downgrade(&mesh.group),
+            transport,
+            pool: Rc::clone(&mesh.pool),
+            tasks: tasks.clone(),
+        };
+        tasks.spawn(senders.run());
+        Ok(mesh)
+    }
+
+    // Opens the group with no task that sends: `outgoing` gives each message.
+    async fn start(config: Config) -> Result<Self, Error> {
         let state =
             region::State::new(config.region, config.members).map_err(Error::Member)?;
         let signer = Signer::new(config.key, &config.private_key);
@@ -135,6 +158,7 @@ impl Mesh {
             proposals: Vec::new(),
             slots: 0,
             waits: None,
+            senders: None,
         }));
         let weak = Rc::downgrade(&group);
         config
@@ -299,17 +323,7 @@ impl Mesh {
     ///
     /// [`Error::Stopped`] when the group stopped.
     pub(crate) async fn outgoing(&self, to: node::Key) -> Result<raft::Message, Error> {
-        poll_fn(|cx| {
-            let mut group = self.group.borrow_mut();
-            group.running()?;
-            let queue = group.queues.entry(to).or_default();
-            let Some(message) = queue.messages.pop_front() else {
-                queue.waker = Some(cx.waker().clone());
-                return Poll::Pending;
-            };
-            Poll::Ready(Ok(message))
-        })
-        .await
+        poll_fn(|cx| self.group.borrow_mut().outgoing(to, cx)).await
     }
 }
 
@@ -385,6 +399,8 @@ struct Group {
     slots: u64,
     // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
+    // The task that starts the sender of each new queue, while it waits.
+    senders: Option<Waker>,
 }
 
 impl Group {
@@ -420,8 +436,34 @@ impl Group {
     // Queues each message for its member.
     fn send(&mut self, messages: Vec<raft::Message>) {
         for message in messages {
-            self.queues.entry(message.to).or_default().push(message);
+            let queue = self.queues.entry(message.to).or_insert_with(|| {
+                self.senders.take().into_iter().for_each(Waker::wake);
+                Queue::default()
+            });
+            queue.push(message);
         }
+    }
+
+    // The next message for the member `to`.
+    fn outgoing(
+        &mut self,
+        to: node::Key,
+        cx: &Context<'_>,
+    ) -> Poll<Result<raft::Message, Error>> {
+        self.running()?;
+        let queue = self.queues.entry(to).or_default();
+        let Some(message) = queue.messages.pop_front() else {
+            queue.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        };
+        Poll::Ready(Ok(message))
+    }
+
+    // Wakes each task that sends, so that it ends.
+    fn wake_senders(&mut self) {
+        let queues = self.queues.values_mut();
+        let waiting = queues.filter_map(|queue| queue.waker.take());
+        waiting.chain(self.senders.take()).for_each(Waker::wake);
     }
 
     // Applies each change in `committed`, and wakes the watches when a home moves.
@@ -451,9 +493,7 @@ impl Group {
 
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
-        let queues = self.queues.values_mut();
-        let waiting = queues.filter_map(|queue| queue.waker.take());
-        waiting.for_each(Waker::wake);
+        self.wake_senders();
         self.wake_watches();
         for proposal in &self.proposals {
             proposal.wake();
@@ -468,10 +508,11 @@ impl Group {
 }
 
 impl Drop for Group {
-    // The task must end and free the log, and a watch that waits must learn that
-    // each mesh dropped.
+    // Each task must end, which frees the log, and a watch that waits must learn
+    // that each mesh dropped.
     fn drop(&mut self) {
         self.wake();
+        self.wake_senders();
         self.wake_watches();
     }
 }
@@ -621,22 +662,22 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
-    use std::io::IoSliceMut;
     use std::iter;
     use std::mem::ManuallyDrop;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::num::{NonZeroU32, NonZeroUsize};
     use std::path::Path;
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
 
     use block::testing::Scarce;
     use env::files::{self, Operation};
-    use env::net::udp::{self, Meta, Transmit};
     use raft::{Answer, Grant, Hard, Proof, Term};
     use sim::{Crash, Sim, link};
-    use transport::Address;
+    use transport::{Address, Peer, Port};
     use types::node::SealKey;
     use types::time::Stamp;
+    use wire::Protocol;
 
     use super::*;
     use crate::card;
@@ -646,6 +687,8 @@ mod tests {
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
+    /// The idle time of each transport.
+    const IDLE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
     const INDEX: channel::Key = channel::Key::from_u128(7);
 
     /// What each node's watch gave, in order.
@@ -704,9 +747,39 @@ mod tests {
             entropy: node.entropy(),
             tasks: tasks.clone(),
             pool: create_pool(),
+            transport: Rc::new(create_transport(node, tasks, id, 0, create_pool())),
         }
     }
 
+    /// A transport of node `id` at `port` of `node`, with `pool`. Port 0 is a free
+    /// port.
+    fn create_transport(
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        id: u8,
+        port: u16,
+        pool: Rc<Pool>,
+    ) -> Transport {
+        let config = transport::Config {
+            private_key: private(id),
+            message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
+            window_bytes: 1 << 20,
+            streams_max: NonZeroU32::new(16).unwrap(),
+            idle: IDLE,
+            clock: node.clock(),
+            entropy: node.entropy(),
+            tasks: tasks.clone(),
+            pool,
+        };
+        let at = SocketAddr::new(node.addresses()[0], port);
+        let mut parts = Port::bind(&node.net(), at)
+            .unwrap()
+            .split(NonZeroUsize::MIN);
+        Transport::new(config, parts.pop().unwrap()).unwrap()
+    }
+
+    /// A mesh of node `id` with no task that sends: the test reads each message with
+    /// `outgoing`.
     async fn open(
         node: &sim::node::Node,
         tasks: &Tasks,
@@ -714,7 +787,7 @@ mod tests {
         members: &[u8],
         voters: &[u8],
     ) -> Result<Mesh, Error> {
-        Mesh::open(config(node, tasks, id, members, voters)).await
+        Mesh::start(config(node, tasks, id, members, voters)).await
     }
 
     /// The record of node `id` with the card of node `signer` at `version`, which
@@ -751,44 +824,43 @@ mod tests {
         })
     }
 
-    /// Sends each message for `to` as one datagram.
-    async fn send(mesh: Mesh, mut sender: udp::Sender, to: u8) -> ! {
-        loop {
-            let message = mesh.outgoing(key(to)).await.unwrap();
-            let contents = Message::Raft(message).encode();
-            let transmit = Transmit {
-                destination: address(to),
-                source: None,
-                ecn: None,
-                contents: &contents,
-                segment: None,
-            };
-            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+    /// The record of voter `id`, with the address of its transport in its card.
+    fn create_voter(id: u8) -> Member {
+        let member = common::member(id);
+        let mut card = member.card.card().clone();
+        let addresses = vec![Address::Udp(address(id))];
+        card.addresses = card::addresses::Addresses::new(addresses).unwrap();
+        Member {
+            card: card::Signed::sign(key(id), card, &private(id)),
+            ..member
         }
     }
 
-    /// Gives the mesh each datagram, with the key of the node at its source address.
-    async fn receive(mesh: Mesh, mut receiver: udp::Receiver) -> ! {
-        let mut bytes = vec![0; 1 << 16];
+    /// Serves each stream of each session that a peer opens to `transport`, as `node`
+    /// does. The group refuses no message of a cluster.
+    async fn accept(mesh: Mesh, transport: Rc<Transport>, tasks: Tasks) -> ! {
         loop {
-            let mut meta = [Meta::default()];
-            poll_fn(|cx| {
-                let mut buffers = [IoSliceMut::new(&mut bytes)];
-                receiver.poll_recv(cx, &mut buffers, &mut meta)
-            })
-            .await
-            .unwrap();
-            let [meta] = meta;
-            let IpAddr::V4(source) = meta.source.ip() else {
-                panic!("{} is not a node of the cluster", meta.source);
+            let session = transport.accept().await.unwrap();
+            let Peer::Node(peer) = session.peer() else {
+                panic!("a peer with no node key opened a session");
             };
-            let peer = public(source.octets()[3]);
-            for datagram in bytes[..meta.len].chunks(meta.stride.max(1)) {
-                let Some(Message::Raft(message)) = Message::decode(datagram) else {
-                    panic!("{datagram:?} is not a raft message");
-                };
-                mesh.receive(peer, message).unwrap();
-            }
+            let (mesh, streams) = (mesh.clone(), tasks.clone());
+            tasks.spawn(async move {
+                while let Ok(mut incoming) = session.accept().await {
+                    let mesh = mesh.clone();
+                    streams.spawn(async move {
+                        let Ok(Some(header)) = incoming.receiver.recv().await else {
+                            return;
+                        };
+                        let protocol = wire::header::decode(&header).unwrap();
+                        assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                        match mesh.serve(peer, incoming).await {
+                            Ok(()) | Err(Error::Stream(_)) => {}
+                            Err(error) => panic!("a voter refused a message: {error}"),
+                        }
+                    });
+                }
+            });
         }
     }
 
@@ -833,27 +905,17 @@ mod tests {
         }
     }
 
-    /// Three voters, each on its own node, that send their messages as datagrams.
+    /// Three voters, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
         nodes: Vec<sim::node::Node>,
         board: Arc<Mutex<Board>>,
     }
 
-    /// `config` with an MTU that holds each raft message in one datagram, as the
-    /// stream of a mesh does.
-    fn wide(config: link::Config) -> link::Config {
-        link::Config {
-            mtu: 1 << 16,
-            ..config
-        }
-    }
-
     impl Cluster {
         fn new(seed: u64) -> Self {
             let mut sim = Sim::new(sim::Config {
                 seed,
-                link: wide(link::Config::default()),
                 ..sim::Config::default()
             });
             let node = |_| sim.node(sim::node::Config::default());
@@ -898,10 +960,10 @@ mod tests {
         /// Sets the chance that a datagram between `a` and `b` is lost, each way.
         fn link(&mut self, a: u8, b: u8, loss: f64) {
             let node = |id| &self.nodes[IDS.iter().position(|&own| own == id).unwrap()];
-            let config = wide(link::Config {
+            let config = link::Config {
                 loss,
                 ..link::Config::default()
-            });
+            };
             self.sim.link(node(a), node(b), config);
             self.sim.link(node(b), node(a), config);
         }
@@ -924,22 +986,17 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let mesh = open(&node, &tasks, id, &IDS, &IDS).await.unwrap();
-        let config = udp::Config {
-            local: address(id),
-            send_buffer_bytes: 1 << 20,
-            recv_buffer_bytes: 1 << 20,
+        let transport = create_transport(&node, &tasks, id, PORT, create_pool());
+        let transport = Rc::new(transport);
+        let config = Config {
+            members: IDS.map(create_voter).into(),
+            transport: Rc::clone(&transport),
+            ..config(&node, &tasks, id, &IDS, &IDS)
         };
-        let (sender, receiver) = node.net().udp(&config).unwrap();
-        for to in IDS.into_iter().filter(|&to| to != id) {
-            let (mesh, sender) = (mesh.clone(), sender.clone());
-            tasks.spawn(async move {
-                send(mesh, sender, to).await;
-            });
-        }
-        let (receiving, proposing) = (mesh.clone(), mesh.clone());
+        let mesh = Mesh::open(config).await.unwrap();
+        let (serving, proposing, streams) = (mesh.clone(), mesh.clone(), tasks.clone());
         tasks.spawn(async move {
-            receive(receiving, receiver).await;
+            accept(serving, transport, streams).await;
         });
         let (clock, script) = (node.clock(), Arc::clone(&board));
         tasks.spawn(async move {
@@ -1136,7 +1193,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let first = lead(&mesh, &node.clock(), home(1)).await;
             let held = fill(&pool);
             let results = Rc::new(RefCell::new(Vec::new()));
@@ -1452,7 +1509,7 @@ mod tests {
                     pool: Rc::clone(&pool),
                     ..config(&node, &tasks, 1, &[1], &[1])
                 };
-                let mesh = Mesh::open(config).await.unwrap();
+                let mesh = Mesh::start(config).await.unwrap();
                 // No write of the log ends from here on.
                 let _held = ManuallyDrop::new(fill(&pool));
                 let answers = Answers::default();
@@ -1598,7 +1655,7 @@ mod tests {
                     card,
                     ..common::member(4)
                 });
-                let mesh = Mesh::open(config).await.unwrap();
+                let mesh = Mesh::start(config).await.unwrap();
                 let heartbeat = message(4, 1, Body::Heartbeat { commit: 0 });
                 let refused = mesh.receive(public(2), heartbeat);
                 assert_eq!(refused, Err(Error::NotVoter { from: key(4) }));
@@ -1841,7 +1898,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let mut watch = mesh.watch(INDEX);
             lead(&mesh, &node.clock(), home(1)).await;
             assert_eq!(watch.next().await, Ok(Some(key(1))));
@@ -1862,7 +1919,7 @@ mod tests {
                 pool: small_pool(),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let first = lead(&mesh, &node.clock(), home(1)).await;
             // One poll starts each proposal, so one `Ready` holds the 99 entries.
             let mut calls: Vec<_> = (2..=100)
@@ -1888,7 +1945,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
             let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
@@ -1908,7 +1965,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
             let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
@@ -1933,7 +1990,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let mut watch = mesh.watch(INDEX);
             let first = lead(&mesh, &node.clock(), home(1)).await;
             assert_eq!(watch.next().await, Ok(Some(key(1))));
@@ -1968,7 +2025,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let first = lead(&mesh, &node.clock(), home(1)).await;
             let held = fill(&pool);
             let mut waits = pin!(mesh.propose(home(2)));
@@ -1998,7 +2055,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let first = lead(&mesh, &node.clock(), home(1)).await;
             let held = fill(&pool);
             let mut waits = pin!(mesh.propose(home(2)));
@@ -2025,7 +2082,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
             let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
             assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
@@ -2054,7 +2111,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
             let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
             let mut forged = heartbeat();
@@ -2097,7 +2154,7 @@ mod tests {
                 pool: Rc::new(Pool::new(budget, memory)),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             switch.refuse();
             let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
             assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
@@ -2127,7 +2184,7 @@ mod tests {
                 largest: 0,
             };
             let error = Error::Log(log::Error::Pool(cause));
-            assert_eq!(Mesh::open(config).await.err(), Some(error));
+            assert_eq!(Mesh::start(config).await.err(), Some(error));
         });
     }
 
@@ -2141,7 +2198,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             switch.refuse();
             let refused = block::Error::Refused { requested: 1 };
             assert_eq!(pool.alloc(1).err(), Some(refused));
@@ -2164,7 +2221,7 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             lead(&mesh, &node.clock(), home(1)).await;
             node.clock().sleep(TICK).await;
             let _held = fill(&pool);
@@ -2512,7 +2569,7 @@ mod tests {
                 solo(move |node, tasks| async move {
                     let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]);
                     config.members.insert(at, second);
-                    let opened = Mesh::open(config).await.err();
+                    let opened = Mesh::start(config).await.err();
                     let duplicate =
                         Some(Error::Member(Unfit::Duplicate { key: key(2) }));
                     assert_eq!(opened, duplicate, "{case} at {at}");
@@ -2534,7 +2591,7 @@ mod tests {
                 private_key: private(2),
                 ..config(&node, &tasks, 1, &IDS, &[])
             };
-            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
+            assert_eq!(Mesh::start(config).await.err(), Some(Error::WrongKey));
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
             let text = "the private key of this node is not the key of its member";
             assert_eq!(Error::WrongKey.to_string(), text);
