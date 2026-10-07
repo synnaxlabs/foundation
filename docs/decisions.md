@@ -2947,7 +2947,13 @@ How to read this record:
   and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
   fixed hasher, so a simulated run replays. A map keyed by outside input will get a
   keyed hasher with its key from `env` randomness. Decided by the advisor under the
-  quality delegation.
+  quality delegation. The fixed hasher is the Fx hasher of `rustc-hash`
+  (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
+  8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
+  Iteration order never decides behavior, so a test that breaks on the new order
+  shows a defect in the code.
+  Decided by `laptop.architect` (2026-10-07T09:59Z):
+  https://github.com/synnaxlabs/foundation/issues/1321
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
