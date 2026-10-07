@@ -154,6 +154,10 @@ How to read this record:
   other. Decided by the architect, #756
   (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
   https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
+  `Kind` and `Data` take the edge form as a parameter, with `channel::Key` as the
+  default: `config` gives each edge as a name, and `plan` gives each name its key.
+  `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
