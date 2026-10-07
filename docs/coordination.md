@@ -124,22 +124,25 @@ Two cases skip the interface issue:
 ## Cloud machines
 
 Only `laptop.monitor` rents and ends machines, within the test budget
-(`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day. No other session
-holds AWS credentials. The person decided this
-(https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552).
+(`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day, and at most 15
+USD a day for #1139. No other session holds AWS credentials. The person decided this
+(https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
+2026-10-07T16:48:27Z).
 
-1. A session that needs one asks `laptop.monitor` on its issue or by message: the
-   purpose, instance types, count, and hours. A request outside the budget goes to the
-   person.
-2. Before launch, the renting session posts the cap on the spend ledger issue (#15):
-   on-demand price per hour times count times lifetime, with the instance, its type,
-   the issue, and the session that asked. The sum of caps stays inside the limit.
+1. A session that needs one asks `laptop.monitor` on its issue, then sends the link:
+   the purpose, instance types, count, and hours. A request outside the budget goes to
+   the person.
+2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15):
+   on-demand price per hour times count times lifetime, with the types, the issue, the
+   session that asked, and the end time. The sum of caps stays inside the limit. At
+   launch, it posts the instances.
 3. Every instance has the tags `project=foundation-bench` (or `foundation-test`) and
    `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
    termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
    is at most 240 minutes.
-4. The renting session terminates the instances when the run ends, checks that none of
-   its tagged instances still run, and posts the actual hours on the ledger.
+4. The asking session tells `laptop.monitor` on its issue when the run ends.
+   `laptop.monitor` then terminates the instances, checks that none of its tagged
+   instances still run, and posts the actual hours on the ledger.
 
 ## Messages
 
