@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use types::node;
 
-use crate::{Entry, Position, Term, Voters};
+use crate::{Change, Entry, Position, Term, Voters};
 
 /// One message between two nodes of a voter group.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +22,22 @@ pub struct Message {
     /// is silent through a quorum check. An answer to a message of a lower term
     /// carries the proof of the sender's term.
     pub proof: Option<Proof>,
+    /// The configuration entries of the sender's log below `term`, oldest first,
+    /// when the message carries a proof; else empty. A receiver that cannot count
+    /// `proof` against its own configuration counts it against the last link it
+    /// can trust, and keeps none of them.
+    pub chain: Vec<Link>,
+}
+
+/// A configuration entry that a message carries as proof of the configuration
+/// after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    /// Where the entry is in the sender's log.
+    pub at: Position,
+    /// The configuration, with the votes and the signature of the leader that
+    /// wrote it.
+    pub change: Change,
 }
 
 /// What a voter granted a candidate.
@@ -135,26 +151,31 @@ impl Proof {
 }
 
 impl Message {
-    /// Each claim the message carries, with its signature: the entries of its proof
-    /// in rising key order, then, for each change an append carries, its votes in
-    /// the entry's term and the leader's change, then the sender's grant when the
-    /// body grants. The caller checks each signature against its signer's key before
-    /// `step`, and refuses a `None`: `step` keeps each signature as it came.
-    pub fn claims(&self) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> + '_ {
+    // The claims of the proof in rising key order, then of each of `links`, then of
+    // each change an append carries, then the sender's grant. `Raft::claims` picks
+    // the links.
+    pub(crate) fn claims<'a>(
+        &'a self,
+        links: &'a [Link],
+    ) -> impl Iterator<Item = (Claim<'a>, Option<Signature>)> + 'a {
         let proof = self.proof.iter().flat_map(|proof| proof.claims(self.term));
+        let links = links.iter().flat_map(|link| link.change.claims(link.at));
         let changes = self.body.entries().iter().flat_map(Entry::claims);
         let granted = self
             .body
             .granted()
             .map(|(grant, signature)| (self.claim(grant), signature));
-        proof.chain(changes).chain(granted)
+        proof.chain(links).chain(changes).chain(granted)
     }
 
-    // Gives each grant with no signature, and each `None` of a change it carries,
-    // the signature `sign` makes for its claim.
+    // Gives each grant with no signature, and each `None` of a change it carries in
+    // its chain or in an append, the signature `sign` makes for its claim.
     pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim<'_>) -> Signature) {
         if let Some(proof) = &mut self.proof {
             proof.sign(self.term, sign);
+        }
+        for link in &mut self.chain {
+            link.change.sign(link.at, sign);
         }
         if let Body::Append { entries, .. } = &mut self.body {
             for entry in entries {

@@ -66,6 +66,7 @@ fn in_role(role: Role) -> Raft {
         term: Term(2),
         body,
         proof: None,
+        chain: Vec::new(),
     };
     if role != Role::Follower {
         raft.campaign();
@@ -113,6 +114,7 @@ fn vote_from_any_state() {
             term: new,
             body: Body::Vote { last },
             proof: Some(pre_votes.clone()),
+            chain: Vec::new(),
         })
         .unwrap();
         let replies = drain(&mut raft);
@@ -129,6 +131,7 @@ fn vote_from_any_state() {
                 answer: Answer::Granted(None),
             },
             proof: None,
+            chain: Vec::new(),
         };
         assert_eq!(replies, [reply], "{role:?}");
         assert_eq!(raft.role(), Role::Follower, "{role:?}");
@@ -160,6 +163,7 @@ fn prevote_from_any_state() {
             term: new,
             body: Body::PreVote { last },
             proof: None,
+            chain: Vec::new(),
         })
         .unwrap();
         let replies = drain(&mut raft);
@@ -174,6 +178,7 @@ fn prevote_from_any_state() {
                     answer: Answer::Granted(None),
                 },
                 proof: None,
+                chain: Vec::new(),
             };
             assert_eq!(replies, [reply], "{role:?}");
         }
@@ -229,6 +234,7 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 term,
                 body: request(last),
                 proof: None,
+                chain: Vec::new(),
             })
             .unwrap();
             let [reply] = &drain(&mut raft)[..] else {
@@ -422,6 +428,7 @@ fn leader_of_three() -> Raft {
             term: Term(1),
             body,
             proof: None,
+            chain: Vec::new(),
         })
         .unwrap();
     }
@@ -439,6 +446,7 @@ fn leader_stepdown_when_quorum_active() {
             term: Term(1),
             body: Body::HeartbeatReply,
             proof: None,
+            chain: Vec::new(),
         })
         .unwrap();
         raft.tick(0);

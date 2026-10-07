@@ -7,8 +7,10 @@ name = "acceptance"
 version = "0.0.0"
 dependencies = [
  "block",
+ "connector-influx",
  "env",
  "node",
+ "proptest",
  "sim",
  "types",
 ]
@@ -352,6 +354,7 @@ dependencies = [
 name = "connector-influx"
 version = "0.0.0"
 dependencies = [
+ "counting",
  "influxdb-line-protocol",
  "proptest",
  "types",
@@ -1219,6 +1222,8 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "raft"
 version = "0.0.0"
 dependencies = [
+ "counting",
+ "divan",
  "proptest",
  "types",
 ]
