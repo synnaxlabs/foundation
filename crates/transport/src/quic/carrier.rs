@@ -24,6 +24,7 @@ use types::time::Monotonic;
 use super::stream::{Incoming, Receiver, Sender};
 use super::wait::{self, RETRY};
 use super::{Endpoint, Event, connection};
+use crate::stream::Part;
 use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer, Status, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
@@ -405,9 +406,9 @@ impl Session {
         )
     }
 
-    /// Writes `message` when it is `Some`, and takes it. Ready once the stream holds
-    /// no message: it took all of `message`, or with `None`, all of the one before.
-    /// Ready with the error.
+    /// Writes `parts` of `message` when it is `Some`, as [`Endpoint::write`] does,
+    /// and takes the block. Ready once the stream holds no message: it took all of
+    /// `message`, or with `None`, all of the one before. Ready with the error.
     ///
     /// # Errors
     ///
@@ -421,9 +422,10 @@ impl Session {
         cx: &mut Context<'_>,
         sender: &Sender,
         message: &mut Option<Block>,
+        parts: &[Part],
     ) -> Poll<Result<(), Error>> {
         self.with(|endpoint, clock, slot, _| {
-            match endpoint.write(clock.now(), sender, message) {
+            match endpoint.write(clock.now(), sender, message, parts) {
                 Ok(Poll::Pending) => {
                     if let Some(error) = &slot.end {
                         return Poll::Ready(Err(error.clone()));
@@ -456,8 +458,8 @@ impl Session {
         })
     }
 
-    /// Puts `message` on `sender`'s stream when the stream can take it now, as
-    /// [`Endpoint::try_write`] does. Else gives it back.
+    /// Puts `parts` of `message` on `sender`'s stream when the stream can take it
+    /// now, as [`Endpoint::try_write`] does. Else gives the block back.
     ///
     /// # Errors
     ///
@@ -470,9 +472,10 @@ impl Session {
         &self,
         sender: &Sender,
         message: Block,
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
         self.with(|endpoint, clock, slot, _| {
-            let given = endpoint.try_write(clock.now(), sender, message)?;
+            let given = endpoint.try_write(clock.now(), sender, message, parts)?;
             match &slot.end {
                 Some(error) => Err(error.clone()),
                 None => Ok(given),

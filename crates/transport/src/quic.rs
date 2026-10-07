@@ -37,6 +37,7 @@ use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::message::Reader;
+use crate::stream::Part;
 use crate::{Class, Code, Config, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
@@ -322,10 +323,11 @@ impl Endpoint {
         connection.streams.accept(key)
     }
 
-    /// Puts `message`, when `Some`, on the stream after the messages before it, and
-    /// takes it. Leaves it while the stream holds part of an earlier message.
-    /// `Ready` when the stream holds no message: it took all of `message`, or with
-    /// `None`, all of the one before. Else `Pending`: write again after
+    /// Puts a message of `parts` of `message`, when `Some`, on the stream after the
+    /// messages before it, and takes the block: for each part, its range of the
+    /// block, then its zeros. Leaves it while the stream holds part of an earlier
+    /// message. `Ready` when the stream holds no message: it took all of `message`,
+    /// or with `None`, all of the one before. Else `Pending`: write again after
     /// [`Event::Writable`] to send the rest. `Pending` with nothing taken once the
     /// connection drained. The streams that wait for the connection take turns, by
     /// class with `Complete` ahead of `Latest` while it is owed bytes, then oldest
@@ -333,39 +335,46 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] when `message` is over the peer's largest message.
-    /// Nothing of it is sent, and it stays in `message`. Then [`Error::Reset`] with
-    /// `Code(0)` after an [`Endpoint::cancel`] reset the stream, and
-    /// [`Error::Stopped`] when the peer stopped it; each later write gives it too.
+    /// [`Error::TooLarge`] when the message, the sum of the range lengths and the
+    /// zeros, is over the peer's largest message. Nothing of it is sent, and the
+    /// block stays in `message`. Then [`Error::Reset`] with `Code(0)` after an
+    /// [`Endpoint::cancel`] reset the stream, and [`Error::Stopped`] when the peer
+    /// stopped it; each later write gives it too.
     /// The error of the connection's [`Event::Closed`] when it ended, until it
     /// drains.
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`.
+    /// When `message` is `Some` and a range starts after its end or ends past the
+    /// block. Then after an [`Endpoint::finish`] that gave `Ok`.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &Sender,
         message: &mut Option<Block>,
+        parts: &[Part],
     ) -> Result<Poll<()>, Error> {
+        let bytes = message
+            .as_ref()
+            .map(|block| stream::size(parts, block.len()));
         sender.check_open();
-        if let Some(message) = message {
-            stream::check_size(message.len(), sender.bytes_max())?;
+        if let Some(bytes) = bytes {
+            stream::check_size(bytes, sender.bytes_max())?;
         }
         let key = sender.key().connection;
         self.streams(now, key, Poll::Pending, |streams, inner, _, _| {
-            streams.write(inner, sender, message)
+            streams.write(inner, sender, message, parts)
         })
     }
 
-    /// Puts `message` on the stream after the messages before it when the stream
-    /// can take it now. Else gives it back with nothing of it sent: when the stream
-    /// still holds part of an earlier message once it wrote what it could of it,
-    /// when the send budget has no room for it or a stream that goes ahead of it
-    /// waits for room or its turn, or once the connection drained. The stream does
-    /// not wait for room for a message it gives back. Once taken, the stream sends
-    /// the rest of it by itself.
+    /// Puts a message of `parts` of `message` on the stream after the messages before
+    /// it, as [`Endpoint::write`] does, when the stream can take it now. Else gives
+    /// the block back with nothing of it sent: when the stream still holds part of
+    /// an earlier message once it wrote what it could of it, when the send budget
+    /// has no room for it or a stream that goes ahead of it waits for room or its
+    /// turn, or once the connection drained. The stream does not wait for room for
+    /// a message it gives back. Once taken, the stream sends the rest of it by
+    /// itself.
     ///
     /// # Errors
     ///
@@ -375,19 +384,21 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`.
+    /// As [`Endpoint::write`].
     pub(crate) fn try_write(
         &mut self,
         now: Monotonic,
         sender: &Sender,
         message: Block,
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
+        let bytes = stream::size(parts, message.len());
         sender.check_open();
-        stream::check_size(message.len(), sender.bytes_max())?;
+        stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
         self.streams(now, key, (), |streams, inner, _, _| {
-            streams.try_write(inner, sender, &mut message)
+            streams.try_write(inner, sender, &mut message, parts, bytes)
         })?;
         Ok(message)
     }
@@ -1152,8 +1163,12 @@ mod tests {
                 for _ in 0..testing::STREAMS_MAX - 1 {
                     let opened = client.open_sender(now, key, Class::Command);
                     let sender = opened.expect("a stream");
-                    let written =
-                        client.write(now, &sender, &mut Some(shard.block(&sent)));
+                    let written = pair::write(
+                        client,
+                        now,
+                        &sender,
+                        &mut Some(shard.block(&sent)),
+                    );
                     assert_eq!(written, Ok(Poll::Ready(())));
                 }
                 pair.run(Duration::from_secs(1));
@@ -1293,7 +1308,8 @@ mod tests {
                 let client = &mut pair.client.endpoint;
                 let opened = client.open_sender(now, key, Class::Command);
                 let sender = opened.expect("a stream");
-                let written = client.write(now, &sender, &mut Some(shard.block(&sent)));
+                let written =
+                    pair::write(client, now, &sender, &mut Some(shard.block(&sent)));
                 assert_eq!(written, Ok(Poll::Ready(())));
                 pair.run(Duration::from_millis(100));
                 assert!(pair.client.batch_max > 1, "{}", pair.client.batch_max);
