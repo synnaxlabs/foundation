@@ -8,13 +8,13 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{self, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::slice;
 use std::task::{Context, Poll, Waker};
 
-use block::{Block, Pool};
+use block::{Block, Pool, Unique};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{self, File, Files, Mode};
@@ -26,7 +26,8 @@ use types::time::Span;
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
-use crate::log::{self, Logs, Tail};
+use crate::log::{self, Logs, Mark, Tail};
+use crate::read::{Read, Reading};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
@@ -38,7 +39,9 @@ pub struct Config {
     /// The directory of this shard's ring, relative to the data directory. Its parent
     /// must be there and durable.
     pub dir: PathBuf,
-    /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
+    /// Blocks for record headers, recovery reads, and the entries a read gives. It
+    /// needs a class of 64 KiB. Its largest block bounds an entry, with
+    /// [`Limit::Block`].
     pub pool: Rc<Pool>,
     /// Deadlines of the group commit.
     pub clock: Clock,
@@ -46,15 +49,16 @@ pub struct Config {
     pub tasks: Tasks,
     /// The chain value of the restart record.
     pub entropy: Entropy,
-    /// The sizes of a new ring. An existing ring keeps the sizes in its header; a
-    /// change takes effect at the next create.
+    /// The sizes of a new ring. A ring with a checkpoint keeps the sizes in its
+    /// header. A ring with none, which a crash before the first checkpoint leaves,
+    /// takes these.
     pub layout: Layout,
     /// The longest time an entry waits for its group commit to start. An entry
     /// queued during a commit longer than `commit` waits until that commit ends.
     pub commit: Span,
 }
 
-/// Why an open failed.
+/// Why an open or a read failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The ring has no room for its restart record.
@@ -66,14 +70,15 @@ pub enum Error {
         /// before their end, whichever is less.
         free: u64,
     },
-    /// The pool has no block for a header, a recovery read, or the restart record.
+    /// The pool has no block for a header, a recovery read, the restart record, a
+    /// recovered entry, or a read.
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
-    /// The ring file has another length than its header, or the layout for a new
-    /// ring, says.
+    /// The ring file has another length than its header says, or it is not empty and
+    /// ends inside its header blocks.
     Length {
-        /// The length the header or the layout says.
+        /// The length the header says, or the length of a new ring.
         expected: u64,
         /// The length of the file.
         found: u64,
@@ -87,10 +92,16 @@ pub enum Error {
     Version(u16),
     /// The header holds sizes that make no ring.
     Unfit(Unfit),
-    /// A header block or a record at `offset` passed its CRC but cannot be read:
-    /// another version or a defect wrote it. The ring is not written to.
+    /// A header block passed its CRC but holds a tail off a block boundary: another
+    /// version or a defect wrote it. The ring reads as it did before the open.
+    Unaligned {
+        /// The tail offset that the header block holds.
+        tail: u64,
+    },
+    /// A record at `offset` passed its CRC but cannot be read: another version or a
+    /// defect wrote it. The ring reads as it did before the open.
     Invalid {
-        /// The offset in the ring file.
+        /// The offset of the record in the ring.
         offset: u64,
     },
 }
@@ -124,6 +135,11 @@ impl fmt::Display for Error {
                  bytes, which make no ring",
                 unfit.area, unfit.body_max
             ),
+            Self::Unaligned { tail } => write!(
+                f,
+                "the ring header holds a tail at {tail}, which is not on a block \
+                 boundary"
+            ),
             Self::Invalid { offset } => write!(
                 f,
                 "the ring holds bytes at {offset} that this build cannot read"
@@ -138,8 +154,8 @@ impl std::error::Error for Error {}
 /// the entries are dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rejected {
-    /// The batch alone is over a limit of one record, so it never fits this ring.
-    /// The limit is the first one it is over, in the order of [`Limit`].
+    /// The batch alone is over a [`Limit`], so this buffer never takes it. The
+    /// limit is the first one it is over, in the order of [`Limit`].
     Large(Limit),
     /// The ring has no room for the batch. Room returns only when records leave the
     /// ring at its tail, and never when the offsets left before their end are under
@@ -211,7 +227,9 @@ impl From<header::Error> for Error {
             header::Error::Damaged => Self::Damaged,
             header::Error::Version(version) => Self::Version(version),
             header::Error::Unfit(unfit) => Self::Unfit(unfit),
-            header::Error::Unaligned(_) => Self::Invalid { offset: 0 },
+            header::Error::Unaligned(unaligned) => Self::Unaligned {
+                tail: unaligned.offset,
+            },
         }
     }
 }
@@ -297,10 +315,12 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable tails past the synced `sealed` groups, keeps their records
-    /// as spares, and counts the commit.
+    /// Moves the durable tails past the synced `sealed` groups, tells the writer
+    /// that a trim can free them, keeps their records as spares, and counts the
+    /// commit.
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
+            self.writer.synced(record.ends());
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
                 self.logs
                     .sync(slot, header, record.offset())
@@ -320,16 +340,25 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Opens the ring in `config.dir`, or creates it, makes the ring and its
-    /// directory durable, and recovers the tail of every path from its records. Each
-    /// recovered index gets its slot from `slots`. Starts the commit task.
+    /// Opens the ring in `config.dir`, or creates it, makes the ring and its directory
+    /// durable, and recovers the tail of every path from its records. A ring file with
+    /// no checkpoint holds no record: the open makes it again. Each recovered index
+    /// gets its slot from `slots`. Starts the commit task. Each tail it reports is
+    /// durable. It reads the header and the records from the ring's tail and writes
+    /// them again, so its time grows with the records. Open one directory at most one
+    /// time at once. Opens at once can fail with `Busy`, `Files(Length)`, or
+    /// `Files(Full)`. Dropping this future before it ends and then opening the same
+    /// directory again in this process can lose the commits of the second open, because
+    /// a remove of the first can still run (#1310).
     ///
     /// # Errors
     ///
     /// [`Error::Files`], [`Error::Pool`], [`Error::Length`], [`Error::Missing`],
-    /// [`Error::Damaged`], [`Error::Version`], [`Error::Unfit`], and
-    /// [`Error::Invalid`] as each says. [`Error::Full`] when the ring has no block
-    /// for its restart record.
+    /// [`Error::Damaged`], [`Error::Version`], [`Error::Unfit`], [`Error::Unaligned`],
+    /// and [`Error::Invalid`] as each says. [`Error::Full`] when the ring has no block
+    /// for its restart record. [`Error::Pool`] with `TooLarge` when a recovered entry
+    /// is over the largest block of `pool`, which a read must give it in: a larger pool
+    /// must open the ring.
     ///
     /// # Panics
     ///
@@ -347,27 +376,11 @@ impl Buffer {
             commit,
         } = config;
         drop(pool.alloc(META_LEN)?);
-        let path = dir.join("ring");
-        let file = match files.open(&path, Mode::Write).await {
-            Ok(file) => file,
-            Err(files::Error::NotFound { .. }) => {
-                files.create_dir(&dir).await?;
-                let len = layout.file_len();
-                files.open(&path, Mode::Create { len }).await?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        // An open that stopped after it made the ring may not have made it durable.
-        if let Some(parent) = dir.parent() {
-            files.sync_dir(parent).await?;
-        }
-        files.sync_dir(&dir).await?;
-        let header = read_header(&file, &pool, &entropy, layout).await?;
+        let (file, header) = open_ring(&files, &dir, &pool, &entropy, layout).await?;
         let (cursor, logs) = walk(&file, &pool, &header, slots).await?;
         let chain = random(&entropy);
         let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
         write_restart(&file, &pool, sealed, chain).await?;
-        // A killed process may have written records that it never synced.
         file.sync().await?;
         let shared = Rc::new(Shared {
             file,
@@ -401,6 +414,13 @@ impl Buffer {
         self.shared.layout
     }
 
+    /// The block pool from [`Config::pool`]. Its largest block bounds an entry, with
+    /// [`Limit::Block`].
+    #[must_use]
+    pub fn pool(&self) -> &Pool {
+        &self.shared.pool
+    }
+
     /// Where `path` of the index at `slot` stands, with every appended entry.
     #[must_use]
     pub fn tail(&self, slot: Slot, path: Path) -> Tail {
@@ -411,6 +431,61 @@ impl Buffer {
     #[must_use]
     pub fn durable(&self, slot: Slot, path: Path) -> Tail {
         self.shared.state.borrow().logs.durable(slot, path)
+    }
+
+    /// The durable entries of `path` of the index at `slot` from `from`, in
+    /// order, until their blocks take `budget` pool bytes, by
+    /// [`block::footprint`] of each, a skip ahead starts, or the pool has no block
+    /// for the next entry. The last entry may pass the budget. An entry that holds
+    /// `from` comes whole. A read from a mark at or in the seqs a skip ahead left
+    /// out reports them as `gap` and goes on after them. The first read starts at
+    /// `Mark::at(0)`; each read continues at `next`, which a read that gives
+    /// nothing does not move. A read makes one file read for the table of each
+    /// record it visits, two when the record header and table pass 4 KiB, and one
+    /// per entry with bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool
+    /// has no block for the first entry or its table; the buffer goes on. When a
+    /// commit's file call fails before the read ends, the error that ended the
+    /// buffer.
+    pub async fn read(
+        &self,
+        slot: Slot,
+        path: Path,
+        from: Mark,
+        budget: usize,
+    ) -> Result<Read, Error> {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let mut reading = Reading::new(file, pool, *layout, path, from, budget);
+        let walked = self.walk(&mut reading, slot, path).await;
+        // After the walk: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        walked.map(|()| reading.finish())
+    }
+
+    /// Gives `reading` the records of `path` of the index at `slot` until it ends.
+    async fn walk(
+        &self,
+        reading: &mut Reading<'_>,
+        slot: Slot,
+        path: Path,
+    ) -> Result<(), Error> {
+        while let Some(from) = reading.next() {
+            let found = self.shared.state.borrow().logs.run(slot, path, from);
+            let Some((index, run)) = found else {
+                break;
+            };
+            if !reading.record(index, run).await? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// How many group commits ended since the open. It moves before the [`Commit`]
@@ -439,7 +514,8 @@ impl Buffer {
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
-    /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
+    /// `first`, and the tail, when `first + len` passes `u64::MAX`, or when an
+    /// entry's slot held another index on its path before.
     pub fn append(
         &self,
         entries: impl IntoIterator<Item = Entry>,
@@ -522,39 +598,109 @@ fn random(entropy: &Entropy) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
-/// Reads the newer checkpoint. Two zero blocks are a ring made and not yet
-/// written: the first checkpoint goes to both blocks.
-async fn read_header(
+/// Opens the ring file in `dir` and reads its checkpoint. Makes the ring with
+/// `layout`, and writes its first checkpoint, when the file is not there or holds no
+/// checkpoint. An open that stopped before its first checkpoint leaves such a file:
+/// it holds no record, and its length can be that of another layout.
+async fn open_ring(
+    files: &Files,
+    dir: &path::Path,
+    pool: &Pool,
+    entropy: &Entropy,
+    layout: Layout,
+) -> Result<(File, Header), Error> {
+    let written = open_written(files, dir, pool, layout).await?;
+    let (file, blocks) = if let Some(written) = written {
+        written
+    } else {
+        files.create_dir(dir).await?;
+        // A removed ring keeps its room until this sync, and the new ring needs it.
+        files.sync_dir(dir).await?;
+        let len = layout.file_len();
+        let file = files.open(&dir.join("ring"), Mode::Create { len }).await?;
+        // Another open can make this ring, commit to it, and close in between.
+        let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
+        (file, blocks)
+    };
+    // An open that stopped after it made the ring may not have made it durable.
+    if let Some(parent) = dir.parent() {
+        files.sync_dir(parent).await?;
+    }
+    files.sync_dir(dir).await?;
+    let header = if unwritten(&blocks) {
+        create_header(&file, pool, entropy, layout).await?
+    } else {
+        read_header(&file, blocks).await?
+    };
+    Ok((file, header))
+}
+
+/// True when `blocks`, the two header blocks of a ring file, hold no checkpoint.
+fn unwritten(blocks: &[u8]) -> bool {
+    blocks.iter().all(|&byte| byte == 0)
+}
+
+/// Opens the ring file in `dir` and reads its two header blocks. `None` when no file
+/// with a checkpoint is there. A file that is empty, or whose header blocks are
+/// zero, holds no checkpoint: this removes it.
+///
+/// # Errors
+///
+/// [`Error::Length`] when the file is not empty and ends inside its header blocks.
+async fn open_written(
+    files: &Files,
+    dir: &path::Path,
+    pool: &Pool,
+    layout: Layout,
+) -> Result<Option<(File, Unique)>, Error> {
+    let path = dir.join("ring");
+    let file = match files.open(&path, Mode::Write).await {
+        Ok(file) => file,
+        Err(files::Error::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let found = file.len();
+    if found != 0 {
+        if found < AREA_START {
+            let expected = layout.file_len();
+            return Err(Error::Length { expected, found });
+        }
+        let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
+        if !unwritten(&blocks) {
+            return Ok(Some((file, blocks)));
+        }
+    }
+    // The handle stays through the remove, so no other open takes this file.
+    files.remove(&path).await?;
+    drop(file);
+    Ok(None)
+}
+
+/// Reads the newer checkpoint of `blocks`, the two header blocks of `file`, and
+/// writes both blocks again, as read, for the reason [`walk`] gives.
+async fn read_header(file: &File, blocks: Unique) -> Result<Header, Error> {
+    let (first, rest) = blocks
+        .split_first_chunk::<ALIGN>()
+        .expect("invariant: `blocks` holds the two header blocks");
+    let second = rest
+        .first_chunk::<ALIGN>()
+        .expect("invariant: `blocks` holds the two header blocks");
+    let header = Header::decode(first, second)?;
+    let (expected, found) = (header.layout.file_len(), file.len());
+    if found != expected {
+        return Err(Error::Length { expected, found });
+    }
+    file.write_at(0, &[blocks.freeze()]).await?;
+    Ok(header)
+}
+
+/// Writes the first checkpoint of a new ring to both header blocks, and syncs it.
+async fn create_header(
     file: &File,
     pool: &Pool,
     entropy: &Entropy,
     layout: Layout,
 ) -> Result<Header, Error> {
-    let found = file.len();
-    let length = |layout: Layout| Error::Length {
-        expected: layout.file_len(),
-        found,
-    };
-    if found < AREA_START {
-        return Err(length(layout));
-    }
-    let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
-    let (first, rest) = blocks
-        .split_first_chunk::<ALIGN>()
-        .expect("invariant: the read gave two blocks");
-    let second = rest
-        .first_chunk::<ALIGN>()
-        .expect("invariant: the read gave two blocks");
-    if blocks.iter().any(|&byte| byte != 0) {
-        let header = Header::decode(first, second)?;
-        if found != header.layout.file_len() {
-            return Err(length(header.layout));
-        }
-        return Ok(header);
-    }
-    if found != layout.file_len() {
-        return Err(length(layout));
-    }
     let header = Header::new(layout, random(entropy));
     let mut block = pool.alloc(ALIGN)?;
     block.copy_from_slice(&header.encode());
@@ -564,8 +710,12 @@ async fn read_header(
     Ok(header)
 }
 
-/// Recovers the tail of every path from the records after the tail of `header`.
-/// Returns the cursor at the end of the walk and the logs.
+/// Recovers the tail of every path from the records after the tail of `header`,
+/// and writes each window that holds them again, as read. Returns the cursor at
+/// the end of the walk and the logs.
+///
+/// A read can see writes that a failed sync lost, from the cache. Written again,
+/// they read the same until the open's sync makes them durable.
 async fn walk(
     file: &File,
     pool: &Pool,
@@ -579,26 +729,36 @@ async fn walk(
         let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
         let offset = cursor.offset();
         match cursor.next(&bytes)? {
-            Step::Data(body) => recover(body, offset, slots, &mut logs)?,
+            Step::Data(body) => {
+                recover(body, offset, pool.largest(), slots, &mut logs)?;
+            }
             Step::Moved | Step::More => {}
             Step::End => break,
         }
+        let bytes = bytes.freeze();
+        file.write_at(AREA_START + place, slice::from_ref(&bytes))
+            .await?;
     }
     Ok((cursor, logs))
 }
 
 /// Feeds the logs the entries of a record body at `offset`, as appended and
-/// synced.
+/// synced. Fails when an entry is over `largest`, the pool's largest block.
 fn recover(
     body: Body<'_>,
     offset: u64,
+    largest: usize,
     slots: &mut Slots,
     logs: &mut Logs,
 ) -> Result<(), Error> {
     let unread = |_: entry::Invalid| Error::Invalid { offset };
     let misplaced = |_: log::Invalid| Error::Invalid { offset };
     for header in entry::parse(body.start, body.len).map_err(unread)? {
-        let header = header.map_err(unread)?;
+        let (header, _) = header.map_err(unread)?;
+        let requested = usize::try_from(header.bytes).unwrap_or(usize::MAX);
+        if requested > largest {
+            return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
+        }
         let slot = slots.assign(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;
@@ -693,8 +853,8 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             mem::swap(&mut state.queue, &mut taken);
         }
         for closed in taken.drain(..) {
-            let (record, next) = closed.seal(chain);
-            chain = next;
+            let record = closed.seal(chain);
+            chain = record.ends().record.chain();
             sealed.push(record);
         }
         let result = write(&shared, &sealed).await;
@@ -832,8 +992,8 @@ mod tests {
     }
 
     /// Three commits, the first with two appends in one record, make one run per
-    /// record and path. An open of the same ring walks the records into the same
-    /// runs.
+    /// record and path, each from the mark after the record before. An open of the
+    /// same ring walks the records into the same runs.
     #[test]
     fn the_walk_makes_the_runs_the_syncs_made() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -862,9 +1022,12 @@ mod tests {
                 buffer
             },
         );
-        let run = |first, offset| Run { first, offset };
+        let run = |seq, offset| Run {
+            start: Mark::at(seq),
+            offset,
+        };
         let live: Vec<Run> = written.runs(Slot::new(0), Path::Live).collect();
-        assert_eq!(live, [run(0, 4096), run(6, 8192), run(12, 12288)]);
+        assert_eq!(live, [run(0, 4096), run(6, 8192), run(9, 12288)]);
         let backfill: Vec<Run> = written.runs(Slot::new(1), Path::Backfill).collect();
         assert_eq!(backfill, [run(0, 4096), run(3, 8192), run(6, 12288)]);
         assert_eq!(written.durable(Slot::new(0), Path::Live).seq, 15);
@@ -877,5 +1040,36 @@ mod tests {
                 |buffer, _, _| async move { buffer },
             );
         assert_eq!(walked, written);
+    }
+
+    /// A commit gives the writer the boundaries of its records. No public call
+    /// shows them until a commit trims, so the test asks the writer.
+    #[test]
+    fn a_commit_gives_the_writer_the_boundaries_of_its_records() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let tail = Arc::new(Mutex::new(None));
+        let found = Arc::clone(&tail);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.assign(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                for commit in 0..60 {
+                    let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
+                    buffer.append(batch).expect("the ring has room");
+                    buffer.committed().await.expect("commits");
+                }
+                let trimmed = buffer.shared.state.borrow().writer.trimmed(None);
+                *found.lock().expect("no panic held the lock") = trimmed;
+                buffer
+            },
+        );
+        // The restart record and 60 records of one block are synced. The headroom
+        // is three records of two blocks.
+        let tail = tail.lock().expect("no panic held the lock");
+        assert_eq!(tail.map(crate::wal::Position::offset), Some(3 * 4096));
     }
 }

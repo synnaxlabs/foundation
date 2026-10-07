@@ -1,4 +1,5 @@
-//! Building and reading a frame or a view makes no heap allocation. This binary has
+//! Building and reading a frame or a view, and building a frame from the ends and
+//! series bytes that another node sends, make no heap allocation. This binary has
 //! no test harness: the count covers each thread, and a harness allocates on its own
 //! thread at any time.
 
@@ -6,7 +7,7 @@
 
 use types::channel::Key;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Mask, Path, Range, View};
+use types::frame::{self, Draft, Form, Layout, Mask, Path, Range, View};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -37,6 +38,7 @@ fn main() {
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     read_a_frame(&pool, &set);
     read_a_view(&pool, &set);
+    receive_a_frame(&pool, &set);
 }
 
 const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];
@@ -56,6 +58,10 @@ fn read_a_frame(pool: &block::Pool, set: &KeySet) {
         assert_eq!(drafted, 32, "the draft reads both series");
         let expected = Some(Range { seq: 9, count: 2 });
         assert_eq!(draft.range(0), expected, "the draft reads its range");
+        assert!(
+            draft.ranges().eq([(0, Range { seq: 9, count: 2 })]),
+            "the draft reads its ranges"
+        );
         let frame = draft.freeze(Path::Backfill);
         let copy = frame.clone();
         assert_eq!(frame.charge(), 192, "the frame charges its block");
@@ -64,6 +70,10 @@ fn read_a_frame(pool: &block::Pool, set: &KeySet) {
         assert_eq!(frame.form(), Form::Raw, "the frame keeps its form");
         assert_eq!(frame.series(1), None, "entry 1 is absent");
         assert_eq!(frame.range(1), None, "group 1 is absent");
+        assert!(
+            frame.ranges().eq([(0, Range { seq: 9, count: 2 })]),
+            "the frame reads its ranges"
+        );
         assert_eq!(
             frame.series(2),
             Some([2; 16].as_slice()),
@@ -100,19 +110,48 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
         .freeze(Path::Live);
     let narrow = Mask::new(set, [set.entries()[2].slot]);
     let full = Mask::new(set, set.entries().iter().map(|entry| entry.slot));
+    let slot = |entry: usize| set.entries()[entry].slot;
+    // Leaves out key 3, so the frame's only series left is the index.
+    let most = Mask::new(set, [0, 1, 3].map(slot));
     let (read, allocations) = ALLOCATOR.count(|| {
         let view = View::new(&frame, &narrow);
         let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
-        assert_eq!(view.charge(), 192, "the view charges both series");
         let view = View::new(&frame, &full);
         let full_read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
-        assert_eq!(
-            view.charge(),
-            frame.charge(),
-            "a full view charges the frame"
-        );
-        (read, full_read)
+        let view = View::new(&frame, &most);
+        let mut most_read = 0;
+        for (_, bytes) in view.iter() {
+            most_read += bytes.len();
+        }
+        (read, full_read, most_read)
     });
     assert_eq!(allocations, 0, "the view allocated");
-    assert_eq!(read, (32, 32), "each view reads the index and key 3");
+    assert_eq!(
+        read,
+        (32, 32, 16),
+        "the views read both series, then the index"
+    );
+}
+
+fn receive_a_frame(pool: &block::Pool, set: &KeySet) {
+    let lens = [(0, 3), (2, 16)];
+    let mut home = Draft::new(pool, set, Form::Raw, &lens).expect("the pool holds it");
+    home.series_mut(2).expect("entry 2 is present").fill(7);
+    let home = home.freeze(Path::Live);
+    let (received, allocations) = ALLOCATOR.count(|| {
+        let mut ends = [(0, 0); 2];
+        for (end, given) in ends.iter_mut().zip(frame::ends(lens)) {
+            *end = given;
+        }
+        let layout = Layout::from_ends(set, &ends).expect("the ends fit");
+        let charge = frame::charge(ends.len(), layout.body_len());
+        let mut draft = layout.draft(pool, Form::Raw).expect("the pool holds it");
+        draft.body_mut().copy_from_slice(&home.body());
+        draft.set_count(0, 1);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.charge(), charge, "both ends charge the frame alike");
+        frame.series(2) == Some([7; 16].as_slice())
+    });
+    assert_eq!(allocations, 0, "the receive allocated");
+    assert!(received, "the frame holds the bytes the home sent");
 }

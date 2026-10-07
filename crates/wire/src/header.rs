@@ -13,6 +13,11 @@ pub const LEN: usize = 3;
 /// 15 belong to the header; each protocol numbers its own codes from 16.
 pub const REJECTED: u32 = 1;
 
+/// The code that stops a stream when a message after the header does not decode,
+/// comes from the wrong side, or breaks a rule of its protocol. Every protocol may use
+/// it.
+pub const MALFORMED: u32 = 2;
+
 /// Returns the header of a stream or datagram that carries `protocol`, at
 /// [`VERSION`].
 #[must_use]
@@ -110,7 +115,7 @@ mod tests {
         for (protocol, number) in PROTOCOLS {
             assert_eq!(encode(protocol), [1, 0, number], "{protocol:?}");
         }
-        assert_eq!(REJECTED, 1);
+        assert_eq!((REJECTED, MALFORMED), (1, 2));
     }
 
     #[test]

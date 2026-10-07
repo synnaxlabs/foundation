@@ -1,0 +1,19 @@
+[package]
+name = "connector-influx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+sim = ["dep:influxdb-line-protocol"]
+
+[dependencies]
+influxdb-line-protocol = { workspace = true, optional = true }
+types = { path = "../types" }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

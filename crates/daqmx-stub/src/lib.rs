@@ -8,9 +8,9 @@
 //! - A physical channel `Dev1/ai0:3` holds the channels 0 to 3, `Dev1/ai3:0` holds
 //!   them in the other order, and `Dev1/ai0,Dev1/ai2` holds the two named.
 //! - A physical channel that starts with `fail/` fails the call that adds it with
-//!   [`FAIL`]. One that starts with `warn/` makes each read give [`WARN`], and one
-//!   that starts with `short/` makes each read and write take half the samples asked
-//!   for.
+//!   [`FAIL`]. One that starts with `warn/` makes each start, read, and write give
+//!   [`WARN`], which [`WARNING`] describes. One that starts with `short/` makes each
+//!   read and write take half the samples asked for.
 //! - A digital channel names lines. A port with no line (`Dev1/port0`) counts as one
 //!   line, not as each line of the port.
 //! - A task holds one kind of channel (analog or digital, input or output), and reads
@@ -46,10 +46,12 @@ pub const ARGUMENT: i32 = -201_004;
 /// The code of a channel added to a task of another kind, or a read or write of
 /// another kind.
 pub const DIRECTION: i32 = -201_005;
-/// The warning code of a read on a task with a `warn/` channel.
+/// The warning code of a start, read, or write on a task with a `warn/` channel.
 pub const WARN: i32 = 201_000;
 /// The message of each failure.
 pub const MESSAGE: &CStr = c"the stub refused the call";
+/// The description of [`WARN`].
+pub const WARNING: &CStr = c"the stub warns";
 
 const DEFAULT: i32 = -1;
 const VOLTS: i32 = 10_348;
@@ -242,7 +244,7 @@ unsafe fn write<T>(
     };
     // SAFETY: the caller's contract.
     unsafe { written.write(n) };
-    0
+    if task.warn { WARN } else { 0 }
 }
 
 /// Creates an empty task.
@@ -269,8 +271,9 @@ pub unsafe extern "system" fn DAQmxCreateTask(
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DAQmxStartTask(handle: *mut c_void) -> i32 {
     // SAFETY: the caller's contract.
-    unsafe { task(handle) }.running = true;
-    0
+    let task = unsafe { task(handle) };
+    task.running = true;
+    if task.warn { WARN } else { 0 }
 }
 
 /// Stops the task.
@@ -566,13 +569,40 @@ pub unsafe extern "system" fn DAQmxGetExtendedErrorInfo(
     out: *mut c_char,
     size: u32,
 ) -> i32 {
+    // SAFETY: the caller's contract.
+    unsafe { copy(MESSAGE, out, size) }
+}
+
+/// Copies [`WARNING`] into `out` for [`WARN`], and an empty text for any other
+/// `code`, cut to `size` bytes with its NUL.
+///
+/// # Safety
+///
+/// `out` is valid for `size` writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DAQmxGetErrorString(
+    code: i32,
+    out: *mut c_char,
+    size: u32,
+) -> i32 {
+    let text = if code == WARN { WARNING } else { c"" };
+    // SAFETY: the caller's contract.
+    unsafe { copy(text, out, size) }
+}
+
+/// Copies `text` into `out`, cut to `size` bytes with its NUL.
+///
+/// # Safety
+///
+/// `out` is valid for `size` writes.
+unsafe fn copy(text: &CStr, out: *mut c_char, size: u32) -> i32 {
     let Some(room) = usize::try_from(size)
         .ok()
         .and_then(|size| size.checked_sub(1))
     else {
         return 0;
     };
-    let bytes = MESSAGE.to_bytes();
+    let bytes = text.to_bytes();
     let len = bytes.len().min(room);
     // SAFETY: the caller's contract, and `len` is less than `size`.
     let out = unsafe {

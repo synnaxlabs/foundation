@@ -9,55 +9,24 @@
 )]
 
 use std::mem;
-use std::ops::Deref;
 use std::task::Poll;
 
-use block::{Block, Pool, Unique};
+use block::{Block, Unique};
 
 use crate::Error;
+use crate::varint::{self, Varint};
 
-/// The length prefix of one message, in the fewest bytes.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Prefix {
-    bytes: [u8; 8],
-    size: usize,
+/// The prefix of a message of `len` bytes.
+///
+/// # Panics
+///
+/// When `len` is 2^62 or more, which no peer's limit allows.
+pub(crate) fn prefix(len: usize) -> Varint {
+    Varint::new(len)
+        .unwrap_or_else(|| panic!("a message of {len} bytes is over the varint limit"))
 }
 
-impl Prefix {
-    /// The prefix of a message of `len` bytes.
-    ///
-    /// # Panics
-    ///
-    /// When `len` is 2^62 or more, which no varint holds.
-    pub(crate) fn new(len: usize) -> Self {
-        let value = u64::try_from(len)
-            .ok()
-            .filter(|&value| value < 1 << 62)
-            .unwrap_or_else(|| {
-                panic!("a message of {len} bytes is over the varint limit")
-            });
-        let (tag, size, shift) = match value {
-            0..64 => (0, 1, 56),
-            64..16_384 => (0x40 << 56, 2, 48),
-            16_384..1_073_741_824 => (0x80 << 56, 4, 32),
-            _ => (0xc0 << 56, 8, 0),
-        };
-        let bytes = (value.wrapping_shl(shift) | tag).to_be_bytes();
-        Self { bytes, size }
-    }
-}
-
-impl Deref for Prefix {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        self.bytes
-            .get(..self.size)
-            .expect("invariant: a prefix is at most 8 bytes")
-    }
-}
-
-/// Splits a stream's bytes into whole messages, each in one block from a pool.
+/// Splits a stream's bytes into whole messages, each in one block.
 #[derive(Debug)]
 pub(crate) struct Reader {
     bytes_max: usize,
@@ -66,23 +35,23 @@ pub(crate) struct Reader {
 
 #[derive(Debug)]
 enum State {
-    /// A length prefix, with `have` of its `size` bytes. `size` is 1 until the first
-    /// byte gives it. The bytes after `have` are zero.
+    /// A length prefix, with `have` of its `len` bytes. `len` is 1 until the first
+    /// byte gives it.
     Prefix {
-        bytes: [u8; 8],
+        bytes: [u8; varint::BYTES_MAX],
         have: usize,
-        size: usize,
+        len: usize,
     },
-    /// A message of this many bytes, with no block yet.
-    Sized(u64),
+    /// A message of `len` bytes, with no block yet.
+    Sized { len: u64 },
     /// A message's block, with `have` of its bytes.
     Body { block: Unique, have: usize },
 }
 
 const START: State = State::Prefix {
-    bytes: [0; 8],
+    bytes: [0; varint::BYTES_MAX],
     have: 0,
-    size: 1,
+    len: 1,
 };
 
 impl Reader {
@@ -94,39 +63,56 @@ impl Reader {
         }
     }
 
-    /// Reads the next whole message into a block from `pool`. `admit(len)` gives
-    /// whether the next message, of `len` bytes, may take a block now. `source(max)`
-    /// gives the stream's next 1 to `max` bytes, `Pending` when it has none now, or
-    /// `None` when the stream has ended. The reader never asks for a byte past the
-    /// current message, so later messages stay with the source.
+    /// A reader, as [`Reader::new`], that has read `first`, the first byte of the
+    /// stream's first message.
+    pub(crate) fn started(bytes_max: usize, first: u8) -> Self {
+        let len = varint::len(first);
+        let state = if len == 1 {
+            State::Sized {
+                len: varint::value(&[first]),
+            }
+        } else {
+            let mut bytes = [0; varint::BYTES_MAX];
+            let [head, ..] = &mut bytes;
+            *head = first;
+            State::Prefix {
+                bytes,
+                have: 1,
+                len,
+            }
+        };
+        Self { bytes_max, state }
+    }
+
+    /// Reads the next whole message into a block. `take(len)` gives a block of
+    /// exactly `len` bytes for the next message, or `None` when it may not have one
+    /// now. `source(max)` gives the stream's next 1 to `max` bytes, `Pending` when it
+    /// has none now, or `None` when the stream has ended. The reader never asks for a
+    /// byte past the current message, so later messages stay with the source.
     ///
-    /// Returns the message, `Pending` when `admit` refuses the message or the source
-    /// has no more bytes now, or `None` when the stream ended between two messages.
-    /// After `Pending`, the next call goes on where this one stopped. After an error
-    /// inside a message's body, the reader holds no block.
+    /// Returns the message, `Pending` when `take` gives no block or the source has
+    /// no more bytes now, or `None` when the stream ended between two messages. After
+    /// `Pending`, the next call goes on where this one stopped. After an error inside
+    /// a message's body, the reader holds no block.
     ///
     /// # Errors
     ///
     /// - [`Error::Broken`] when the peer breaks the framing: a message over
     ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
-    /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
-    ///   with the source; call again when the pool has room.
     /// - The source's error.
     ///
     /// # Panics
     ///
-    /// When the source gives no bytes or more than `max`, or when `pool` cannot hold
-    /// a message of `bytes_max` bytes.
+    /// When the source gives no bytes or more than `max`.
     pub(crate) fn read<B: AsRef<[u8]>>(
         &mut self,
-        pool: &Pool,
-        mut admit: impl FnMut(usize) -> bool,
+        mut take: impl FnMut(usize) -> Option<Unique>,
         mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
     ) -> Result<Poll<Option<Block>>, Error> {
         loop {
             match &mut self.state {
-                State::Prefix { bytes, have, size } => {
-                    let prefix = bytes.get_mut(..*size).expect("invariant: size <= 8");
+                State::Prefix { bytes, have, len } => {
+                    let prefix = bytes.get_mut(..*len).expect("invariant: len <= 8");
                     match pull(&mut source, prefix, have)? {
                         Poll::Pending => return Ok(Poll::Pending),
                         Poll::Ready(false) if *have == 0 => {
@@ -136,20 +122,15 @@ impl Reader {
                         Poll::Ready(true) => {}
                     }
                     let [first, ..] = *bytes;
-                    let (full, shift, mask) = match first >> 6 {
-                        0 => (1, 56, 0x3f),
-                        1 => (2, 48, 0x3fff),
-                        2 => (4, 32, 0x3fff_ffff),
-                        _ => (8, 0, 0x3fff_ffff_ffff_ffff),
-                    };
-                    *size = full;
-                    if *have == full {
-                        let value =
-                            u64::from_be_bytes(*bytes).wrapping_shr(shift) & mask;
-                        self.state = State::Sized(value);
+                    *len = varint::len(first);
+                    if *have == *len {
+                        let prefix = bytes.get(..*len).expect("invariant: len <= 8");
+                        self.state = State::Sized {
+                            len: varint::value(prefix),
+                        };
                     }
                 }
-                State::Sized(value) => {
+                State::Sized { len: value } => {
                     let Some(len) = usize::try_from(*value)
                         .ok()
                         .filter(|&len| len <= self.bytes_max)
@@ -161,10 +142,9 @@ impl Reader {
                             ),
                         });
                     };
-                    if !admit(len) {
+                    let Some(block) = take(len) else {
                         return Ok(Poll::Pending);
-                    }
-                    let block = alloc(pool, len)?;
+                    };
                     self.state = State::Body { block, have: 0 };
                 }
                 State::Body { block, have } => {
@@ -190,35 +170,6 @@ impl Reader {
                     }
                 }
             }
-        }
-    }
-}
-
-/// A block of `len` bytes from `pool`.
-///
-/// # Errors
-///
-/// [`Error::Pool`] when the pool has no room now.
-///
-/// # Panics
-///
-/// When the pool cannot hold `len` bytes.
-fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
-    match pool.alloc(len) {
-        Ok(block) => Ok(block),
-        Err(block::Error::Exhausted {
-            requested,
-            available,
-        }) => Err(Error::Pool {
-            bytes: requested,
-            available,
-        }),
-        Err(block::Error::Refused { requested }) => Err(Error::Pool {
-            bytes: requested,
-            available: 0,
-        }),
-        Err(error @ block::Error::TooLarge { .. }) => {
-            panic!("the pool cannot hold a message of `bytes_max`: {error}")
         }
     }
 }
@@ -256,7 +207,7 @@ fn pull<B: AsRef<[u8]>>(
 mod tests {
     use std::collections::VecDeque;
 
-    use block::{Config, Heap};
+    use block::{Config, Heap, Pool};
     use proptest::prelude::*;
 
     use super::*;
@@ -271,7 +222,7 @@ mod tests {
     fn encode(messages: &[Vec<u8>]) -> Vec<u8> {
         let mut stream = Vec::new();
         for message in messages {
-            stream.extend_from_slice(&Prefix::new(message.len()));
+            stream.extend_from_slice(&prefix(message.len()));
             stream.extend_from_slice(message);
         }
         stream
@@ -317,7 +268,8 @@ mod tests {
         pool: &Pool,
         source: &mut Source,
     ) -> Result<Poll<Option<Vec<u8>>>, Error> {
-        let read = reader.read(pool, |_| true, |max| Ok(source.take(max)))?;
+        let read =
+            reader.read(|len| pool.alloc(len).ok(), |max| Ok(source.take(max)))?;
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
@@ -337,43 +289,10 @@ mod tests {
         }
     }
 
-    mod prefix {
-        use super::*;
-
-        #[test]
-        fn takes_the_fewest_bytes() {
-            let lens = [
-                (0, 1),
-                (63, 1),
-                (64, 2),
-                (16_383, 2),
-                (16_384, 4),
-                ((1 << 30) - 1, 4),
-                (1 << 30, 8),
-                ((1 << 62) - 1, 8),
-            ];
-            for (len, bytes) in lens {
-                assert_eq!(Prefix::new(len).len(), bytes, "{len}");
-            }
-        }
-
-        #[test]
-        fn matches_rfc_9000() {
-            // RFC 9000 appendix A.1.
-            assert_eq!(
-                &*Prefix::new(151_288_809_941_952_652),
-                [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c]
-            );
-            assert_eq!(&*Prefix::new(494_878_333), [0x9d, 0x7f, 0x3e, 0x7d]);
-            assert_eq!(&*Prefix::new(15_293), [0x7b, 0xbd]);
-            assert_eq!(&*Prefix::new(37), [0x25]);
-        }
-
-        #[test]
-        #[should_panic(expected = "a message of 4611686018427387904 bytes")]
-        fn panics_at_2_to_the_62() {
-            let _ = Prefix::new(1 << 62);
-        }
+    #[test]
+    #[should_panic(expected = "a message of 4611686018427387904 bytes")]
+    fn prefix_panics_at_2_to_the_62() {
+        let _ = prefix(1 << 62);
     }
 
     mod reader {
@@ -391,6 +310,23 @@ mod tests {
                 let pool = pool(1 << 16);
                 let mut source = Source::new(encode(&messages), split);
                 let mut reader = Reader::new(300);
+                let read = read_all(&mut reader, &pool, &mut source);
+                prop_assert_eq!(read, Ok(messages));
+            }
+
+            #[test]
+            fn started_gives_what_new_gives_after_the_first_byte(
+                messages in prop::collection::vec(
+                    prop::collection::vec(any::<u8>(), 0..=20_000),
+                    1..4,
+                ),
+                split in 1_usize..400,
+            ) {
+                let pool = pool(1 << 16);
+                let mut bytes = encode(&messages);
+                let first = bytes.remove(0);
+                let mut source = Source::new(bytes, split);
+                let mut reader = Reader::started(20_000, first);
                 let read = read_all(&mut reader, &pool, &mut source);
                 prop_assert_eq!(read, Ok(messages));
             }
@@ -485,44 +421,12 @@ mod tests {
         }
 
         #[test]
-        fn when_pool_is_full_it_fails_then_goes_on() {
-            // A 100-byte block takes 192 bytes of the budget.
-            let pool = pool(300);
-            let held = pool.alloc(100).expect("room");
-            let mut source = Source::new(encode(&[vec![9; 100]]), 64);
-            let mut reader = Reader::new(1_000);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Err(Error::Pool {
-                    bytes: 100,
-                    available: 108
-                })
-            );
-            assert_eq!(source.given, 2);
-            drop(held);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Ok(vec![vec![9; 100]])
-            );
-        }
-
-        #[test]
-        #[should_panic(expected = "the pool cannot hold a message of `bytes_max`")]
-        fn when_pool_cannot_hold_bytes_max_it_panics() {
-            let pool = pool(300);
-            let mut source = Source::new(encode(&[vec![9; 200]]), 64);
-            let mut reader = Reader::new(1_000);
-            drop(read_all(&mut reader, &pool, &mut source));
-        }
-
-        #[test]
         fn when_source_fails_it_gives_the_error() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
             let read = reader
                 .read::<Vec<u8>>(
-                    &pool,
-                    |_| true,
+                    |len| pool.alloc(len).ok(),
                     |_| {
                         Err(Error::Reset {
                             code: crate::Code(16),
@@ -549,8 +453,7 @@ mod tests {
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
             let read = reader
                 .read::<Vec<u8>>(
-                    &pool,
-                    |_| true,
+                    |len| pool.alloc(len).ok(),
                     |_| {
                         Err(Error::Reset {
                             code: crate::Code(16),
@@ -568,18 +471,24 @@ mod tests {
         }
 
         #[test]
-        fn when_admit_refuses_it_takes_no_body_bytes_then_goes_on() {
+        fn when_take_gives_no_block_it_takes_no_body_bytes_then_goes_on() {
             let pool = pool(1 << 16);
-            let mut source = Source::new(encode(&[vec![4; 10]]), 64);
-            let mut reader = Reader::new(16);
-            let read = reader
-                .read(&pool, |_| false, |max| Ok(source.take(max)))
-                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
-            assert_eq!(read, Ok(Poll::Pending));
-            assert_eq!(source.given, 1);
+            let mut source = Source::new(encode(&[vec![4; 100]]), 64);
+            let mut reader = Reader::new(1_000);
+            let mut asked = Vec::new();
+            for _ in 0..2 {
+                let take = |len| {
+                    asked.push(len);
+                    None
+                };
+                let read = reader.read(take, |max| Ok(source.take(max)));
+                assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+            }
+            assert_eq!(asked, [100, 100]);
+            assert_eq!(source.given, 2);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
-                Ok(vec![vec![4; 10]])
+                Ok(vec![vec![4; 100]])
             );
         }
 
@@ -588,7 +497,10 @@ mod tests {
         fn when_source_gives_no_bytes_it_panics() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
-            drop(reader.read(&pool, |_| true, |_| Ok(Poll::Ready(Some([0_u8; 0])))));
+            drop(reader.read(
+                |len| pool.alloc(len).ok(),
+                |_| Ok(Poll::Ready(Some([0_u8; 0]))),
+            ));
         }
 
         #[test]
@@ -636,7 +548,7 @@ mod tests {
             let pool = pool(2 * block::footprint(bytes_max));
             let mut readers = Vec::new();
             for _ in 0..2 {
-                let mut source = Source::new(Prefix::new(bytes_max).to_vec(), 64);
+                let mut source = Source::new(prefix(bytes_max).to_vec(), 64);
                 source.open = true;
                 let mut reader = Reader::new(bytes_max);
                 assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
@@ -644,13 +556,7 @@ mod tests {
             }
             let mut source = Source::new(encode(&[vec![1; 10]]), 64);
             let mut reader = Reader::new(bytes_max);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Err(Error::Pool {
-                    bytes: 10,
-                    available: 0
-                })
-            );
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
             drop(readers);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),

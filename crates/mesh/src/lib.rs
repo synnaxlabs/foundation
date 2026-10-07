@@ -12,26 +12,52 @@
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod bytes;
+pub mod card;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
+mod claim;
+#[cfg(test)]
+mod common;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
+mod driver;
+mod ed25519;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod entry;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
-mod log;
+mod error;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
+)]
+mod log;
+mod member;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod message;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod region;
+pub mod status;
+#[cfg(any(test, feature = "sim"))]
+pub mod testing;
+pub mod ticket;
+
+pub use member::Member;

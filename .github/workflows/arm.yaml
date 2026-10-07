@@ -2,10 +2,23 @@ name: ARM
 
 on:
   pull_request:
-    paths-ignore: ['docs/**', '**.md']
+  merge_group:
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '**.md']
+    paths:
+      - 'crates/**'
+      - 'bench/**'
+      - 'fuzz/**'
+      - 'xtask/**'
+      - 'oracles/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'clippy.toml'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - '.github/workflows/**'
 
 # On main each run ends, and only the newest waiting commit runs next.
 concurrency:
@@ -13,7 +26,46 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A trigger path filter leaves a required check pending, and a skipped one passes. So
+  # `test` skips only when this filter ran and found no change. A merge queue push skips
+  # `test`, because the queue already ran it on the same commit.
+  changes:
+    if: github.event_name != 'push' || github.actor == 'github-merge-queue[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.code }}
+    steps:
+      # In the merge queue, the filter diffs the group's base and head in a clone.
+      - if: github.event_name == 'merge_group'
+        uses: actions/checkout@v4
+      - if: github.event_name != 'push'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        id: filter
+        with:
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
+          filters: |
+            code:
+              - 'crates/**'
+              - 'bench/**'
+              - 'fuzz/**'
+              - 'xtask/**'
+              - 'oracles/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - 'clippy.toml'
+              - 'rustfmt.toml'
+              - 'deny.toml'
+              - '.github/workflows/**'
+
   test:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.code != 'false'"
     runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v4

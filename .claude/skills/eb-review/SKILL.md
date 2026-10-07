@@ -40,10 +40,10 @@ Run every one, in order.
    `channel::ChannelKey`. A compound name that repeats a responsibility
    (`home::ControlGate`) means a module wants to split; propose the split and the
    simpler names. Keys, never IDs. Booleans are adjectives.
-3. **Anti-patterns and standards.** Read `CLAUDE.md`, `docs/claude/design.md`,
-   `docs/claude/rust.md`, `docs/claude/testing.md`, and `docs/claude/lessons.md`
-   before this lens. Check the work against each rule it touches, and check each of
-   the 14 red flags in `docs/claude/design.md` by name.
+3. **Anti-patterns and standards.** Read `docs/claude/design.md`, `docs/claude/rust.md`,
+   `docs/claude/testing.md`, and `docs/claude/lessons.md` before this lens. Check the
+   work against each rule it touches, and check each of the 14 red flags in
+   `docs/claude/design.md` by name.
 4. **Hacks.** Type erasure (`dyn Any`, downcasts, `Box<dyn>` where an enum fits),
    `as` casts that can truncate, `clone()` to quiet the borrow checker, needless
    `unsafe`, an `#[expect]` that hides a real problem, strings where a type belongs,
@@ -77,8 +77,8 @@ Nobody waits for a person's decision here. The line is how far the change reache
   PR: the choice, the alternatives, and why they lost.
 - **A change to another crate's public surface.** Follow "Interface changes" in
   `docs/coordination.md`.
-- **A change to a locked decision, a contract, or an oracle.** Message the
-  coordinator, who takes it to the person.
+- **A change to a locked decision, a contract, or an oracle.** Message
+  the crate's architect (`docs/factory.md`), who takes it to the person.
 
 A plan is cheap to change: revise it directly, shape included, and post the revised
 plan on the issue.

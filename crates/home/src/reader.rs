@@ -1,4 +1,4 @@
-//! The readers of a shard's indexes, and which of them to wake.
+//! The keys of the open readers of a shard.
 
 use std::mem;
 use std::ops::Range;
@@ -7,15 +7,38 @@ use buffer::Buffer;
 use delivery::{Position, Reader, Readers, Start};
 use types::channel::Slot;
 use types::frame::{Frame, Path};
-use types::time::Stamp;
 
-/// A reader on its shard: the slot of its index and its session there.
+/// An open reader on its shard, in either mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Key {
+pub struct Key {
     /// The slot of the reader's index.
     pub(crate) slot: Slot,
     /// The reader's session on the index.
     pub(crate) session: delivery::Key,
+}
+
+/// The key of a reader that takes every frame.
+pub mod complete {
+    use types::channel::Slot;
+
+    /// An open complete reader on its shard. It converts into a
+    /// [`reader::Key`](super::Key).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct Key {
+        /// The slot of the reader's index.
+        pub(crate) slot: Slot,
+        /// The reader's session on the index.
+        pub(crate) session: delivery::complete::Key,
+    }
+
+    impl From<Key> for super::Key {
+        fn from(key: Key) -> Self {
+            Self {
+                slot: key.slot,
+                session: key.session.into(),
+            }
+        }
+    }
 }
 
 /// The readers of each index of a shard, by the index's place in the shard, and the
@@ -27,7 +50,8 @@ pub(crate) struct Set {
     /// The place of each index whose readers may be
     /// [pending](delivery::Readers::pending), each once.
     listed: Vec<usize>,
-    /// Each reader to wake, with a frame to take. A key can repeat.
+    /// Each reader to wake: one with a frame to take, or a complete reader that missed
+    /// a frame with none waiting. A key can repeat.
     keys: Vec<Key>,
     /// The commits the buffer had ended at the last [`Set::woken`].
     commits: u64,
@@ -76,19 +100,10 @@ impl Set {
         readers.open(Reader::Unnamed, start, limit_bytes).key
     }
 
-    /// Opens an unnamed latest reader on the index at `place` at mesh time `now`. It
-    /// wakes at once when the index has a newest frame.
-    pub(crate) fn open_latest(
-        &mut self,
-        place: usize,
-        now: Stamp,
-    ) -> delivery::latest::Key {
-        let entry = &mut self.entries[place];
-        let opened = entry.readers.open_latest(None, now);
-        if opened.woken {
-            wake(&mut self.keys, entry.slot, &[opened.key]);
-        }
-        opened.key
+    /// Opens an unnamed latest reader on the index at `place`. It is not woken for the
+    /// newest frame it can take at once.
+    pub(crate) fn open_latest(&mut self, place: usize) -> delivery::latest::Key {
+        self.entries[place].readers.open_latest().key
     }
 
     /// Raises the credit of the complete reader `session` on the index at `place`, as
@@ -103,11 +118,11 @@ impl Set {
     }
 
     /// Takes the next frame of the reader `session` on the index at `place`, or `None`
-    /// when none waits.
+    /// when none waits or the reader is closed.
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
+    /// If the index never gave `session`.
     pub(crate) fn take(
         &mut self,
         place: usize,
@@ -116,15 +131,29 @@ impl Set {
         self.entries[place].readers.take(session)
     }
 
-    /// Closes the reader `session` on the index at `place` at mesh time `now`. Its
-    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it.
+    /// Whether the complete reader `session` on the index at `place` missed a frame.
     ///
     /// # Panics
     ///
-    /// If the reader is not open.
-    pub(crate) fn close(&mut self, place: usize, session: delivery::Key, now: Stamp) {
+    /// If the index never gave `session`.
+    pub(crate) fn behind(
+        &self,
+        place: usize,
+        session: delivery::complete::Key,
+    ) -> bool {
+        self.entries[place].readers.behind(session)
+    }
+
+    /// Closes the reader `session` on the index at `place`. Its waiting frames do not
+    /// go out, and [`woken`](Self::woken) does not name it. A close of a closed reader
+    /// changes nothing.
+    ///
+    /// # Panics
+    ///
+    /// If the index never gave `session`.
+    pub(crate) fn close(&mut self, place: usize, session: delivery::Key) {
         let entry = &mut self.entries[place];
-        entry.readers.close(session, now);
+        entry.readers.close(session);
         let key = Key {
             slot: entry.slot,
             session,
@@ -180,7 +209,7 @@ impl Set {
             });
         }
         keys.clear();
-        mem::swap(keys, &mut self.keys);
+        keys.append(&mut self.keys);
         keys.sort_unstable();
         keys.dedup();
     }
@@ -218,7 +247,7 @@ mod tests {
     use types::frame::{self, Draft, Form};
 
     use super::*;
-    use crate::common::{key, pool};
+    use crate::common::{create_pool, key};
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -233,7 +262,7 @@ mod tests {
                 data: &[],
             };
             Self {
-                pool: pool(4096),
+                pool: create_pool(4096),
                 set: Interner::new().intern(&[index]),
             }
         }
@@ -248,10 +277,6 @@ mod tests {
             draft.set_seq(0, seq.start);
             draft.freeze(path)
         }
-    }
-
-    fn now() -> Stamp {
-        "2026-10-06T00:00:00Z".parse().expect("a valid stamp")
     }
 
     /// A set that carries `indexes` indexes, at slots from 0, each with no live frame.
@@ -304,7 +329,7 @@ mod tests {
         fn wakes_the_latest_readers_of_a_live_frame_at_once() {
             let frames = Frames::new();
             let mut set = carried(2);
-            let latest = set.open_latest(1, now());
+            let latest = set.open_latest(1);
             assert_eq!(woken(&mut set), []);
             set.applied(1, frames.frame(Path::Live, 0..2), 0..2);
             assert_eq!(woken(&mut set), [reader(1, latest)]);
@@ -329,7 +354,7 @@ mod tests {
         fn gives_a_backfill_frame_to_no_reader() {
             let frames = Frames::new();
             let mut set = carried(1);
-            let latest = set.open_latest(0, now());
+            let latest = set.open_latest(0);
             let _ = set.open_complete(0, 0, u64::MAX);
             set.applied(0, frames.frame(Path::Backfill, 0..2), 0..2);
             assert_eq!(woken(&mut set), []);
@@ -348,7 +373,7 @@ mod tests {
         fn gives_a_live_frame_to_the_latest_readers_only() {
             let frames = Frames::new();
             let mut set = carried(1);
-            let latest = set.open_latest(0, now());
+            let latest = set.open_latest(0);
             let complete = set.open_complete(0, 0, u64::MAX);
             set.lost(0, frames.frame(Path::Live, 0..2));
             assert_eq!(woken(&mut set), [reader(0, latest)]);
@@ -383,12 +408,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn wakes_at_once_when_the_index_has_a_newest_frame() {
+        fn does_not_wake_for_the_newest_frame_it_can_take_at_once() {
             let frames = Frames::new();
             let mut set = carried(1);
             set.applied(0, frames.frame(Path::Live, 0..1), 0..1);
-            let latest = set.open_latest(0, now());
-            assert_eq!(woken(&mut set), [reader(0, latest)]);
+            let _woken = woken(&mut set);
+            let latest = set.open_latest(0);
+            assert_eq!(woken(&mut set), []);
             assert_eq!(taken(&mut set, 0, latest), [range(0, 1)]);
         }
     }
@@ -400,12 +426,12 @@ mod tests {
         fn drops_only_the_closed_reader_from_the_readers_to_wake() {
             let frames = Frames::new();
             let mut set = carried(2);
-            let first = set.open_latest(0, now());
-            let second = set.open_latest(1, now());
+            let first = set.open_latest(0);
+            let second = set.open_latest(1);
             assert_eq!(first, second, "each index numbers its own readers");
             set.applied(0, frames.frame(Path::Live, 0..1), 0..1);
             set.applied(1, frames.frame(Path::Live, 0..1), 0..1);
-            set.close(0, first.into(), now());
+            set.close(0, first.into());
             assert_eq!(woken(&mut set), [reader(1, second)]);
         }
     }

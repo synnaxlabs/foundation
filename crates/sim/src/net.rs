@@ -5,6 +5,7 @@ pub(crate) mod tcp;
 pub(crate) mod udp;
 mod wire;
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::Waker;
 
@@ -12,7 +13,8 @@ use env::net::Error;
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::{Crash, link};
+use crate::name::key;
+use crate::{Crash, link, name};
 use wire::{Packet, Wire};
 
 /// `10.0.0.0`: node `k` has `10.0.0.0` plus `k + 1`.
@@ -40,6 +42,11 @@ pub(crate) fn addresses(node: usize) -> [IpAddr; 2] {
     };
     let v6 = Ipv6Addr::from_bits(V6 + u128::from(host));
     [IpAddr::V4(Ipv4Addr::from_bits(V4 + host)), IpAddr::V6(v6)]
+}
+
+/// The bytes of the IP header of a packet to `ip`: 20 for IPv4, 40 for IPv6.
+fn ip_header(ip: IpAddr) -> usize {
+    if ip.is_ipv4() { 20 } else { 40 }
 }
 
 /// The node whose address is `ip`, if `ip` is an address that a node can have.
@@ -116,7 +123,7 @@ enum Fate {
     Duplicated,
     /// It arrived in a receive queue.
     Queued,
-    /// It arrived where nothing is bound, or at a full queue.
+    /// It arrived where nothing is bound, at a failed socket, or at a full queue.
     Dropped,
     /// It arrived at a TCP end or listener.
     Arrived,
@@ -127,6 +134,8 @@ pub(crate) struct Network {
     wire: Wire,
     udp: udp::Sockets,
     tcp: tcp::Sockets,
+    /// The names that [`Sim::name`](crate::Sim::name) gave.
+    names: BTreeMap<String, name::Config>,
 }
 
 impl Network {
@@ -135,7 +144,18 @@ impl Network {
             wire: Wire::new(default, rng),
             udp: udp::Sockets::default(),
             tcp: tcp::Sockets::default(),
+            names: BTreeMap::new(),
         }
+    }
+
+    /// Makes each lookup of `host` from now on go as `config` says.
+    pub(crate) fn name(&mut self, host: &str, config: name::Config) {
+        self.names.insert(key(host), config);
+    }
+
+    /// How a lookup of `host` that starts now goes.
+    pub(crate) fn lookup(&self, host: &str) -> name::Config {
+        self.names.get(&key(host)).cloned().unwrap_or_default()
     }
 
     /// Sets the link from node `from` to node `to`.
@@ -153,13 +173,23 @@ impl Network {
         tcp::Tcp::new(&mut self.tcp, &mut self.wire)
     }
 
-    /// Ends the TCP streams and listeners of `node` with no segment when its power is
-    /// cut, which comes before the drop of its futures. Returns their wakers, for the
-    /// caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Waker> {
+    /// Drops the packets of `node` that have not left their links by true time `now`,
+    /// and ends its TCP streams and listeners with no segment, when its power is cut.
+    /// This comes before the drop of its futures. Returns the wakers of the streams
+    /// and listeners, for the caller to drop after it releases the lock.
+    pub(crate) fn crash(
+        &mut self,
+        now: Monotonic,
+        node: usize,
+        crash: Crash,
+    ) -> Vec<Waker> {
         match crash {
             Crash::Process => Vec::new(),
-            Crash::Power => self.tcp().cut_power(node),
+            Crash::Power => {
+                self.wire.cut(now, node);
+                self.udp().cut_power(node);
+                self.tcp().cut_power(node)
+            }
         }
     }
 
@@ -168,15 +198,17 @@ impl Network {
         self.tcp.yet()
     }
 
-    /// The true time of the first arrival.
+    /// The true time of the first arrival, or of the first departure that frees a
+    /// send buffer.
     pub(crate) fn first(&self) -> Option<Monotonic> {
-        self.wire.first()
+        self.wire.first().into_iter().chain(self.udp.first()).min()
     }
 
-    /// Delivers the packets that arrive by true time `at`, and returns the wakers of
-    /// the ends that receive them.
+    /// Delivers the packets that arrive by true time `at`, and frees the send buffers
+    /// of the datagrams that leave by then. Returns the wakers of the ends that receive
+    /// and of the sends that find room.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
-        let mut wakers = Vec::new();
+        let mut wakers = self.udp().free(at);
         while let Some(packet) = self.wire.pop(at) {
             match packet {
                 Packet::Datagram(datagram) => {

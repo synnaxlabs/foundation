@@ -13,6 +13,7 @@ pub mod device;
 pub mod pdu;
 pub mod rtu;
 pub mod tcp;
+mod wait;
 
 /// Why a Modbus frame or PDU is not valid.
 #[derive(Clone, Debug, PartialEq, Eq)]

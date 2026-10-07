@@ -12,6 +12,7 @@
 
 pub mod line;
 pub mod link;
+pub mod name;
 pub mod node;
 pub mod shard;
 
@@ -28,6 +29,7 @@ mod tests;
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
+use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
@@ -157,6 +159,27 @@ impl Sim {
         lock(&self.shared).net().link(from, to, config);
     }
 
+    /// Makes each lookup of `host` that starts from now on, on any node, go as
+    /// `config` says. As in DNS, a name matches in any ASCII case and with or
+    /// without one final dot. A name that no call gave has no address.
+    ///
+    /// ```
+    /// let mut sim = sim::Sim::new(sim::Config::default());
+    /// let historian = "10.0.0.2".parse().expect("an address");
+    /// let answer = sim::name::Answer::Addresses(vec![historian]);
+    /// let config = sim::name::Config { answer, ..sim::name::Config::default() };
+    /// sim.name("historian.local", config);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When `config.delay` is negative, or when `host` is an IP literal, which
+    /// [`env::net::Net::resolve`] gives with no lookup.
+    pub fn name(&mut self, host: &str, config: name::Config) {
+        config.check(host);
+        lock(&self.shared).net().name(host, config);
+    }
+
     /// Sets the line that joins port `a_path` of `a` and port `b_path` of `b`, for the
     /// bytes sent from now on. An open of either path on its node opens that end.
     ///
@@ -213,7 +236,11 @@ impl Sim {
     ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let wakers = lock(&self.shared).net().crash(node, crash);
+        let wakers = {
+            let mut state = lock(&self.shared);
+            let now = state.now();
+            state.net().crash(now, node, crash)
+        };
         let panics = self.stop(|key| key == node);
         drop(wakers);
         let ended = lock(&self.shared).crash(node, crash);
@@ -376,13 +403,14 @@ impl Sim {
             self.drop_ended(done)
         }));
         lock(&self.shared).release();
-        let mut panics = run.unwrap_or_else(|payload| vec![message(&*payload)]);
-        if panics.is_empty() {
+        if matches!(&run, Ok(panics) if panics.is_empty()) {
             return Ok(());
         }
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Panicked { name: name.clone() };
         let ended = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
+        // The payload drops after the thread ends, as the thread's futures do.
+        let mut panics = run.unwrap_or_else(messages);
         panics.extend(self.drop_ended(ended));
         Err(Error::Panicked {
             thread: name,
@@ -457,16 +485,22 @@ impl Sim {
 }
 
 /// Drops each item on its own, as a second panic in one unwind aborts the process.
-/// Returns the message of each drop that panicked, in order.
+/// Returns the [`messages`] of each drop that panicked, in order.
 fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
     (items.into_iter())
         .filter_map(|item| panic::catch_unwind(AssertUnwindSafe(|| drop(item))).err())
-        .map(|payload| message(&*payload))
+        .flat_map(messages)
         .collect()
 }
 
-/// The Linux code for an I/O error (`EIO`), which a fault of a file or a port gives.
+/// The Linux code for an I/O error (`EIO`).
 const EIO: i32 = 5;
+
+/// The Linux code for a failure that may pass (`EAGAIN`).
+const EAGAIN: i32 = 11;
+
+/// The most payloads that [`messages`] drops in one chain.
+const CHAIN: usize = 16;
 
 /// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
@@ -480,6 +514,26 @@ fn message(payload: &(dyn Any + Send)) -> String {
     } else {
         "a payload that is not a string".to_owned()
     }
+}
+
+/// The message of `payload`, then of each panic in the drop of the payload before
+/// it. It drops at most [`CHAIN`] payloads, each in a catch, and forgets the payload
+/// past them, so that a drop that always panics cannot hang the run.
+fn messages(payload: Box<dyn Any + Send>) -> Vec<String> {
+    let mut messages = vec![message(&*payload)];
+    let mut next = payload;
+    for _ in 0..CHAIN {
+        match panic::catch_unwind(AssertUnwindSafe(|| drop(next))) {
+            Ok(()) => return messages,
+            Err(payload) => {
+                messages.push(message(&*payload));
+                next = payload;
+            }
+        }
+    }
+    #[expect(clippy::mem_forget, reason = "its drop may panic again")]
+    mem::forget(next);
+    messages
 }
 
 impl Drop for Sim {
@@ -522,6 +576,7 @@ pub enum Crash {
     /// - Other file calls in flight have no effect.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.
+    /// - Each packet that waits to be sent on a link from the node is lost.
     /// - Each TCP stream and listener ends with no segment, so a peer gets an RST
     ///   only when it sends.
     Power,
@@ -540,8 +595,9 @@ pub enum Error {
     Panicked {
         /// The thread's name.
         thread: String,
-        /// The panic message. When drops of the thread's futures panic after it, the
-        /// message of each follows, after ", then a drop panicked: ".
+        /// The panic message. When drops of the thread's futures or of a panic
+        /// payload panic after it, the message of each follows, after ", then a drop
+        /// panicked: ".
         message: String,
         /// The seed that replays the run.
         seed: u64,

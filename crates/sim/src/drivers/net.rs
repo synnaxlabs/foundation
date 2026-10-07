@@ -7,11 +7,13 @@ use std::num::NonZeroUsize;
 use std::task::{Context, Poll, ready};
 
 use env::net::udp::{self, Meta, Transmit, sender};
-use env::net::{Connect, Error, listener, tcp};
+use env::net::{Connect, Error, Resolve, listener, tcp};
 use types::time::Monotonic;
 
 use super::{Node, Owner};
-use crate::net::tcp::{Key, Tcp};
+use crate::EAGAIN;
+use crate::name::{self, Answer};
+use crate::net::tcp::{Pair, Tcp};
 use crate::net::udp::Bound;
 use crate::state::lock;
 
@@ -64,9 +66,9 @@ impl env::net::Driver for Node {
             let connect =
                 |tcp: &mut Tcp<'_>, now| tcp.connect(self.node, now, remote, options);
             let life = lock(&self.shared).life(self.node);
-            let key = self.tcp(|tcp, now| (connect(tcp, now), ()))?;
+            let (key, pair) = self.tcp(|tcp, now| (connect(tcp, now), ()))?;
             let stream: Box<dyn tcp::Driver> =
-                Box::new(Stream::new(self.clone(), key, life));
+                Box::new(Stream::new(self.clone(), key, pair, life));
             poll_fn(|cx| self.tcp(|tcp, _| tcp.connected(key, cx.waker()))).await?;
             Ok(stream)
         })
@@ -82,6 +84,28 @@ impl env::net::Driver for Node {
             local,
             owner: Owner::new(LISTENER, life),
         }))
+    }
+
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Resolve<'a> {
+        self.running("a lookup");
+        let name::Config { answer, delay } = lock(&self.shared).net().lookup(host);
+        let clock = env::clock::Clock::new(self.clone());
+        Box::pin(async move {
+            let Some(end) = clock.now().checked_add(delay) else {
+                return std::future::pending().await;
+            };
+            clock.sleep_until(end).await;
+            match answer {
+                Answer::Addresses(ips) if ips.is_empty() => Err(Error::NotFound {
+                    host: host.to_owned(),
+                }),
+                Answer::Addresses(ips) => Ok(ips
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, port))
+                    .collect()),
+                Answer::Failed => Err(Error::Io { code: EAGAIN }),
+            }
+        })
     }
 }
 
@@ -108,8 +132,9 @@ impl listener::Driver for Listener {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         self.owner.check(&self.node);
-        let key = ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
-        let stream = Stream::new(self.node.clone(), key, self.owner.life);
+        let (key, pair) =
+            ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
+        let stream = Stream::new(self.node.clone(), key, pair, self.owner.life);
         Poll::Ready(Ok(Box::new(stream)))
     }
 }
@@ -128,16 +153,18 @@ impl Drop for Listener {
 /// after a close.
 struct Stream {
     node: Node,
-    key: Key,
+    key: u64,
+    pair: Pair,
     owner: Owner,
 }
 
 impl Stream {
-    /// The end `key` of `node`, opened in `life` of the node.
-    fn new(node: Node, key: Key, life: u64) -> Self {
+    /// The end `key` of `node` at `pair`, opened in `life` of the node.
+    fn new(node: Node, key: u64, pair: Pair, life: u64) -> Self {
         Self {
             node,
             key,
+            pair,
             owner: Owner::new(STREAM, life),
         }
     }
@@ -145,11 +172,11 @@ impl Stream {
 
 impl tcp::Driver for Stream {
     fn local(&self) -> SocketAddr {
-        self.key.local
+        self.pair.local
     }
 
     fn peer(&self) -> SocketAddr {
-        self.key.peer
+        self.pair.peer
     }
 
     fn poll_read(
@@ -237,14 +264,14 @@ impl udp::Driver for Socket {
             meta,
         );
         drop(unused);
-        poll.map(Ok)
+        poll
     }
 }
 
 impl Drop for Socket {
     fn drop(&mut self) {
-        let waker = lock(&self.node.shared).net().udp().close(self.bound.key);
-        drop(waker);
+        let wakers = lock(&self.node.shared).net().udp().close(self.bound.key);
+        drop(wakers);
     }
 }
 
@@ -258,12 +285,12 @@ struct Sender {
 impl sender::Driver for Sender {
     fn poll_send(
         &mut self,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>> {
         self.owner.check(&self.node);
         let mut state = lock(&self.node.shared);
         let now = state.now();
-        Poll::Ready(state.net().udp().send(now, self.key, transmit))
+        state.net().udp().send(now, self.key, cx.waker(), transmit)
     }
 }

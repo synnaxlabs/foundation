@@ -11,14 +11,14 @@ use env::net::{Ecn, Error};
 use types::time::Monotonic;
 
 use super::wire::Wire;
-use super::{Fate, NOT_AVAILABLE, addresses, receives};
+use super::{Fate, NOT_AVAILABLE, addresses, ip_header, receives};
+use crate::EIO;
 
-/// The IPv4 and UDP header bytes of a datagram.
-const V4_HEADERS: usize = 28;
-/// The IPv6 and UDP header bytes of a datagram.
-const V6_HEADERS: usize = 48;
-/// The bytes of a receive queue that a datagram takes past its length. Linux also
-/// charges each datagram for its buffer (`truesize`), about this much for a small one.
+/// The bytes of the UDP header of a datagram.
+const HEADER: usize = 8;
+/// The bytes of a send buffer or a receive queue that a datagram takes past its length.
+/// Linux also charges each datagram for its buffer (`truesize`), about this much for a
+/// small one.
 const OVERHEAD: usize = 768;
 /// The batch maxes that each socket draws from, for sends and for receives.
 const BATCH_MAXES: [usize; 3] = [1, 8, 64];
@@ -40,7 +40,7 @@ pub(super) struct Datagram {
 }
 
 impl Datagram {
-    /// The bytes of a receive queue that it takes.
+    /// The bytes of a send buffer or a receive queue that it takes.
     fn charge(&self) -> usize {
         self.contents.len() + OVERHEAD
     }
@@ -51,6 +51,17 @@ impl Datagram {
 pub(super) struct Sockets {
     bindings: BTreeMap<u64, Binding>,
     next: u64,
+    /// The bytes of a send buffer that datagrams take until they leave their link, by
+    /// the true time they leave it, then the socket.
+    departures: BTreeMap<(Monotonic, u64), usize>,
+}
+
+impl Sockets {
+    /// The true time at which the first datagram that takes a send buffer leaves its
+    /// link.
+    pub(super) fn first(&self) -> Option<Monotonic> {
+        (self.departures.first_key_value()).map(|(&(at, _), _)| at)
+    }
 }
 
 /// The UDP sockets of a run, with the wire they send on.
@@ -59,26 +70,37 @@ pub(crate) struct Udp<'a> {
     wire: &'a mut Wire,
 }
 
-/// A bound UDP socket and its receive queue.
+/// A bound UDP socket, its send buffer, and its receive queue.
 struct Binding {
     node: usize,
     local: SocketAddr,
     recv_batch_max: NonZeroUsize,
+    /// The most bytes that the send buffer takes.
+    send_capacity: usize,
+    /// The bytes that the send buffer takes: those of each datagram that has not left
+    /// its link.
+    unsent: usize,
+    /// The wakers of the sends that found the send buffer full, no two of which wake
+    /// one task, so a send polled again while it waits adds none.
+    senders: Vec<Waker>,
     /// The most bytes that `queue` takes.
-    capacity: usize,
+    recv_capacity: usize,
     queue: VecDeque<Datagram>,
     /// The bytes that `queue` takes.
     queued: usize,
     /// The waker of the last receive that found the queue empty.
     waker: Option<Waker>,
+    /// From a fault until the socket drops: each receive gives `EIO` once the queue
+    /// is empty, and each arrival drops.
+    failed: bool,
 }
 
 impl Binding {
-    /// Queues `datagram` while the queue takes at most `capacity` bytes, so that, as
-    /// on Linux, the last datagram may go past it. Returns its fate, and the waker of
-    /// a receive to wake.
+    /// Queues `datagram` while the socket works and the queue takes at most
+    /// `recv_capacity` bytes, so that, as on Linux, the last datagram may go past it.
+    /// Returns its fate, and the waker of a receive to wake.
     fn push(&mut self, datagram: Datagram) -> (Fate, Option<Waker>) {
-        if self.queued > self.capacity {
+        if self.failed || self.queued > self.recv_capacity {
             return (Fate::Dropped, None);
         }
         self.queued += datagram.charge();
@@ -151,10 +173,16 @@ impl<'a> Udp<'a> {
             node,
             local,
             recv_batch_max,
-            capacity: config.recv_buffer_bytes,
+            // Linux raises a small send buffer to its least size, so an empty one
+            // takes a send.
+            send_capacity: config.send_buffer_bytes.max(1),
+            unsent: 0,
+            senders: Vec::new(),
+            recv_capacity: config.recv_buffer_bytes,
             queue: VecDeque::new(),
             queued: 0,
             waker: None,
+            failed: false,
         };
         self.sockets.next += 1;
         let key = self.sockets.next;
@@ -167,27 +195,57 @@ impl<'a> Udp<'a> {
         })
     }
 
-    /// Removes socket `key`, and returns its waker for the caller to drop after it
-    /// releases the lock.
-    pub(crate) fn close(&mut self, key: u64) -> Option<Waker> {
-        (self.sockets.bindings.remove(&key)).and_then(|binding| binding.waker)
+    /// Removes socket `key`, and returns its wakers for the caller to drop after it
+    /// releases the lock. Its datagrams still leave their links.
+    pub(crate) fn close(&mut self, key: u64) -> Vec<Waker> {
+        let binding = self.sockets.bindings.remove(&key);
+        (self.sockets.departures).retain(|&(_, socket), _| socket != key);
+        (binding.into_iter())
+            .flat_map(|binding| binding.waker.into_iter().chain(binding.senders))
+            .collect()
     }
 
-    /// Sends the datagrams of `transmit` from socket `key` at true time `now`.
+    /// Makes the socket of `node` bound at `local` fail. Returns a waker for the
+    /// caller to wake after it releases the lock: that of a receive that waits, or
+    /// one that does nothing. Returns `None` when no socket of `node` is bound at
+    /// `local`.
+    pub(crate) fn fail(&mut self, node: usize, local: SocketAddr) -> Option<Waker> {
+        let binding = (self.sockets.bindings.values_mut())
+            .find(|binding| binding.node == node && binding.local == local)?;
+        binding.failed = true;
+        Some((binding.waker.take()).unwrap_or_else(|| Waker::noop().clone()))
+    }
+
+    /// Sends the datagrams of `transmit` from socket `key` at true time `now`, or keeps
+    /// `waker` when the send buffer is full. As on Linux, the send buffer is full when
+    /// it is not empty and takes `send_buffer_bytes` or more, so the datagrams of a
+    /// send may go past it.
     pub(crate) fn send(
         &mut self,
         now: Monotonic,
         key: u64,
+        waker: &Waker,
         transmit: &Transmit<'_>,
-    ) -> Result<(), Error> {
-        let binding = &self.sockets.bindings[&key];
-        let (source, destination) = route(binding.node, binding.local, transmit)?;
-        let link = self.wire.path(binding.node, destination.ip());
-        let header = if destination.is_ipv4() {
-            V4_HEADERS
-        } else {
-            V6_HEADERS
+    ) -> Poll<Result<(), Error>> {
+        let Sockets {
+            bindings,
+            departures,
+            ..
+        } = &mut *self.sockets;
+        let binding = (bindings.get_mut(&key))
+            .expect("invariant: a socket lives while its driver does");
+        let (source, destination) = match route(binding.node, binding.local, transmit) {
+            Ok(addresses) => addresses,
+            Err(error) => return Poll::Ready(Err(error)),
         };
+        if binding.unsent >= binding.send_capacity {
+            if !binding.senders.iter().any(|sender| sender.will_wake(waker)) {
+                binding.senders.push(waker.clone());
+            }
+            return Poll::Pending;
+        }
+        let path = self.wire.path(binding.node, destination.ip());
+        let header = HEADER + ip_header(destination.ip());
         let contents = transmit.contents;
         let size = transmit.segment.map_or(usize::MAX, NonZeroUsize::get);
         for n in 0..contents.len().div_ceil(size).max(1) {
@@ -199,14 +257,58 @@ impl<'a> Udp<'a> {
                 ecn: transmit.ecn,
                 contents: part.to_vec(),
             };
-            let fate = if part.len() + header > link.mtu {
-                Fate::Lost
+            let bytes = part.len() + header;
+            let departure = if bytes > path.link.mtu {
+                None
             } else {
-                self.wire.fly(now, &link, datagram)
+                self.wire.depart(now, &path, bytes)
+            };
+            if let Some(departure) = departure.filter(|&departure| departure > now) {
+                *departures.entry((departure, key)).or_default() += datagram.charge();
+                binding.unsent += datagram.charge();
+            }
+            let fate = match departure {
+                Some(departure) => self.wire.fly(&path, departure, datagram),
+                None => Fate::Lost,
             };
             (self.wire).record((now, source, destination, part.len(), fate));
         }
-        Ok(())
+        Poll::Ready(Ok(()))
+    }
+
+    /// Frees the send buffers of the datagrams that leave their links by true time
+    /// `at`. Returns the wakers of the sends that then find room.
+    pub(super) fn free(&mut self, at: Monotonic) -> Vec<Waker> {
+        let mut wakers = Vec::new();
+        while let Some(departure) = self.sockets.departures.first_entry() {
+            if departure.key().0 > at {
+                break;
+            }
+            let ((_, key), charge) = departure.remove_entry();
+            let binding = (self.sockets.bindings.get_mut(&key))
+                .expect("invariant: a socket that closes drops its departures");
+            binding.unsent -= charge;
+            if binding.unsent < binding.send_capacity {
+                wakers.append(&mut binding.senders);
+            }
+        }
+        wakers
+    }
+
+    /// Drops the departures of the datagrams of `node`, which have not left their
+    /// links, when its power is cut. Its sockets never send again, so their send
+    /// buffers stay as they are.
+    pub(super) fn cut_power(&mut self, node: usize) {
+        let Sockets {
+            bindings,
+            departures,
+            ..
+        } = &mut *self.sockets;
+        departures.retain(|&(_, key), _| {
+            let binding = (bindings.get(&key))
+                .expect("invariant: a socket that closes drops its departures");
+            binding.node != node
+        });
     }
 
     /// Queues `datagram`, which arrives at true time `at`, at the socket that
@@ -225,17 +327,21 @@ impl<'a> Udp<'a> {
     }
 
     /// Receives batches from socket `key` into `buffers`, one per buffer, or keeps
-    /// `waker` when the queue is empty. Returns the count of batches, and a waker for
-    /// the caller to drop after it releases the lock.
+    /// `waker` when the queue is empty. Returns the count of batches, or `EIO` when
+    /// the socket failed and its queue is empty, and a waker for the caller to drop
+    /// after it releases the lock.
     pub(crate) fn recv(
         &mut self,
         key: u64,
         waker: Waker,
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
-    ) -> (Poll<usize>, Option<Waker>) {
+    ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
         let binding = (self.sockets.bindings.get_mut(&key))
             .expect("invariant: a socket lives while its driver does");
+        if binding.failed && binding.queue.is_empty() {
+            return (Poll::Ready(Err(Error::Io { code: EIO })), Some(waker));
+        }
         if binding.queue.is_empty() {
             return (Poll::Pending, binding.waker.replace(waker));
         }
@@ -247,7 +353,7 @@ impl<'a> Udp<'a> {
             *meta = binding.batch(buffer);
             count += 1;
         }
-        (Poll::Ready(count), Some(waker))
+        (Poll::Ready(Ok(count)), Some(waker))
     }
 }
 

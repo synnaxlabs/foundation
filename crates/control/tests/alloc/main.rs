@@ -4,7 +4,8 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use control::{Gate, Key, Lease, Writer};
+use control::lease::Lease;
+use control::{Gate, Key, Writer};
 use types::authority::Authority;
 use types::time::{Monotonic, Span};
 

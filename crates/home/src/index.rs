@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use control::{Gate, Handoff, Permit};
 use types::frame::{Draft, Frame, Path};
-use types::time::{Interval, Monotonic, Stamp};
+use types::time::{Monotonic, Stamp};
 
 use crate::order::{self, Order, Tail};
 use crate::{Refusal, split};
@@ -48,7 +48,7 @@ impl Accepted {
 
 impl Index {
     /// An index whose paths stand at `live` and `backfill`, with an empty gate.
-    pub(crate) fn new(limits: order::Config, live: Tail, backfill: Tail) -> Self {
+    pub(crate) fn new(limits: order::Limits, live: Tail, backfill: Tail) -> Self {
         Self {
             gate: Gate::new(),
             order: Order::new(limits, live, backfill),
@@ -62,9 +62,9 @@ impl Index {
     ///
     /// # Errors
     ///
-    /// In this order: [`Refusal::Control`] when `key` does not hold control,
-    /// [`Refusal::Codec`] with the error of `stamps`, and [`Refusal::Order`] when a
-    /// stamp breaks a rule.
+    /// In this order: [`Refusal::Waiting`], [`Refusal::Reserved`], or
+    /// [`Refusal::Expired`] when `key` does not hold control, [`Refusal::Codec`] with
+    /// the error of `stamps`, and [`Refusal::Order`] when a stamp breaks a rule.
     ///
     /// # Panics
     ///
@@ -75,14 +75,17 @@ impl Index {
         path: Path,
         stamps: Result<split::Stamps<'_>, split::Error>,
         now: Monotonic,
-        mesh: Interval,
+        mesh: Stamp,
     ) -> Result<Accepted, Refusal> {
-        let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
-        let mut stamps = stamps.map_err(Refusal::Codec)?;
-        let mut order = self.order.check(path, mesh);
+        let permit = self.gate.check(key, now).map_err(Refusal::control)?;
+        let mut stamps = stamps?;
+        // A codec error comes first, so the vectors after an order error still decode.
+        let mut order = Ok(self.order.check(path, mesh));
         while let Some(vector) = stamps.next() {
-            order = order.push(vector).map_err(Refusal::Order)?;
+            let vector = vector?;
+            order = order.and_then(|order| order.push(vector));
         }
+        let order = order.map_err(Refusal::Order)?;
         Ok(Accepted {
             order: order.end(),
             permit,
@@ -115,7 +118,8 @@ impl Index {
 mod tests {
     use std::sync::Arc;
 
-    use control::{Lease, Writer};
+    use control::Writer;
+    use control::lease::Lease;
     use types::authority::Authority;
     use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};
@@ -123,7 +127,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::pool;
+    use crate::common::create_pool;
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -138,7 +142,7 @@ mod tests {
                 data: &[],
             };
             Self {
-                pool: pool(4096),
+                pool: create_pool(4096),
                 set: Interner::new().intern(&[index]),
             }
         }
@@ -192,15 +196,12 @@ mod tests {
     }
 
     /// Mesh time in the tests: the latest stamp accepted is `s(61)`.
-    fn mesh() -> Interval {
-        Interval {
-            earliest: s(59),
-            latest: s(60),
-        }
+    fn mesh() -> Stamp {
+        s(60)
     }
 
     fn index() -> Index {
-        let limits = order::Config {
+        let limits = order::Limits {
             earliest: "2000-01-01T00:00:00Z".parse().expect("a valid stamp"),
             ahead: Span::SECOND,
         };
@@ -242,7 +243,7 @@ mod tests {
             let waiter = index.gate.open(writer("b", 5), None, at(0));
             let refusal = write(&mut index, waiter, &[1, 2], at(1))
                 .expect_err("b does not hold control");
-            assert_eq!(refusal, Refusal::Control(control::Error::Waiting));
+            assert_eq!(refusal, Refusal::Waiting);
             assert_eq!(
                 refusal.to_string(),
                 "not in control: another writer holds the gate"
@@ -258,7 +259,7 @@ mod tests {
             assert_eq!(write(&mut index, holder, &[5], at(1)), Ok(0..1));
             assert_eq!(
                 write(&mut index, waiter, &[4], at(2)),
-                Err(Refusal::Control(control::Error::Waiting))
+                Err(Refusal::Waiting)
             );
         }
 
@@ -315,7 +316,7 @@ mod tests {
             assert!(matches!(refused, Err(Refusal::Order(_))), "{refused:?}");
             assert_eq!(
                 write(&mut index, holder, &[6], at(12)),
-                Err(Refusal::Control(control::Error::Expired))
+                Err(Refusal::Expired)
             );
             assert_eq!(write(&mut index, waiter, &[6], at(13)), Ok(1..2));
         }
@@ -338,7 +339,7 @@ mod tests {
             let _ = index.gate.open(writer("b", 5), None, at(0));
             index.gate.recorded();
             let refusal = write(&mut index, holder, &[1], at(20));
-            assert_eq!(refusal, Err(Refusal::Control(control::Error::Expired)));
+            assert_eq!(refusal, Err(Refusal::Expired));
             assert_eq!(handed_to(&index), Some(writer("b", 5)));
         }
     }
@@ -504,7 +505,12 @@ mod tests {
                             let written = write(&mut index, key, &[stamp], now);
                             if let Err(refusal) = written {
                                 prop_assert!(
-                                    matches!(refusal, Refusal::Control(_)),
+                                    matches!(
+                                        refusal,
+                                        Refusal::Waiting
+                                            | Refusal::Reserved
+                                            | Refusal::Expired
+                                    ),
                                     "stamps in order were refused: {refusal}",
                                 );
                             }

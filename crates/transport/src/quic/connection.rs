@@ -19,7 +19,7 @@ use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
 /// that endpoint gets the same key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     /// noq-proto's handle, which it gives to a new connection after this one drains.
     pub(super) handle: ConnectionHandle,
@@ -29,7 +29,11 @@ pub(crate) struct Key {
 
 /// A fault of the peer's that closes the connection, with the reason.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Fault(pub(super) String);
+#[cfg_attr(
+    not(feature = "fuzzing"),
+    expect(unreachable_pub, reason = "only the fuzzing feature exports it")
+)]
+pub struct Fault(pub(super) String);
 
 /// One noq-proto connection, and what the caller knows of it.
 pub(super) struct Connection {
@@ -50,8 +54,9 @@ enum State {
     Accepting,
     /// The caller has the key.
     Open,
-    /// The caller has its [`Event::Closed`], or never had the key.
-    Ended,
+    /// The caller has its [`Event::Closed`] with `error`, or never had the key
+    /// (`None`).
+    Ended { error: Option<Error> },
 }
 
 impl Connection {
@@ -113,8 +118,12 @@ impl Connection {
                 break;
             }
         }
+        // After every event, so that each stop has reset its stream.
+        if self.live() {
+            self.streams.pump(&mut self.inner, events);
+        }
         assert!(
-            !drained || matches!(self.state, State::Ended),
+            !drained || !self.live(),
             "invariant: noq-proto ends a connection before it drains"
         );
         drained
@@ -147,10 +156,9 @@ impl Connection {
                 let expected = match self.end() {
                     State::Dialing { expected } => Some(expected),
                     State::Open => None,
-                    State::Accepting | State::Ended => return,
+                    State::Accepting | State::Ended { .. } => return,
                 };
-                let error = error(reason, expected);
-                events.push_back(Event::Closed { key, error });
+                events.push_back(self.closed(error(reason, expected)));
             }
             noq_proto::Event::Stream(event) if self.live() => {
                 assert!(
@@ -192,7 +200,15 @@ impl Connection {
 
     /// Whether the connection has not ended.
     pub(super) fn live(&self) -> bool {
-        !matches!(self.state, State::Ended)
+        !matches!(self.state, State::Ended { .. })
+    }
+
+    /// The error of the connection's [`Event::Closed`], once the caller has it.
+    pub(super) fn error(&self) -> Option<&Error> {
+        match &self.state {
+            State::Ended { error } => error.as_ref(),
+            _ => None,
+        }
     }
 
     /// Whether the handshake finished and the connection has not ended.
@@ -211,14 +227,13 @@ impl Connection {
         let known = match self.end() {
             State::Dialing { .. } | State::Open => true,
             State::Accepting => false,
-            State::Ended => panic!("invariant: a fault is found on a live connection"),
+            State::Ended { .. } => {
+                panic!("invariant: a fault is found on a live connection")
+            }
         };
         let code = VarInt::from_u64(1 << 32).expect("invariant: 2^32 is a varint");
         self.inner.close(now, code, Bytes::from(reason.clone()));
-        known.then_some(Event::Closed {
-            key: self.key,
-            error: Error::Broken { reason },
-        })
+        known.then(|| self.closed(Error::Broken { reason }))
     }
 
     /// Closes the connection with `code`, and gives its [`Event::Closed`] unless it
@@ -228,28 +243,52 @@ impl Connection {
     ///
     /// When the caller does not have the key yet.
     pub(super) fn close(&mut self, now: Instant, code: Code) -> Option<Event> {
-        match self.end() {
+        match self.state {
             State::Dialing { .. } | State::Open => {
+                self.end();
                 self.inner
                     .close(now, VarInt::from_u32(code.0), Bytes::new());
-                let error = Error::Closed { code };
-                Some(Event::Closed {
-                    key: self.key,
-                    error,
-                })
+                Some(self.closed(Error::Closed { code }))
             }
-            State::Ended => None,
+            // It keeps the error that the stream calls give.
+            State::Ended { .. } => None,
             State::Accepting => {
                 panic!("invariant: the caller has no key for a connection it never got")
             }
         }
     }
 
+    /// Ends a live connection after the socket broke, and gives its
+    /// [`Event::Closed`] with [`Error::Network`] when the caller has the key.
+    pub(super) fn fail(&mut self, error: &env::net::Error) -> Option<Event> {
+        if !self.live() {
+            return None;
+        }
+        let known = !matches!(self.end(), State::Accepting);
+        known.then(|| {
+            self.closed(Error::Network {
+                error: error.clone(),
+            })
+        })
+    }
+
     /// Ends the connection, frees the datagrams that no caller can take now, and
     /// gives the state it had.
     fn end(&mut self) -> State {
         self.datagrams = Received::default();
-        mem::replace(&mut self.state, State::Ended)
+        mem::replace(&mut self.state, State::Ended { error: None })
+    }
+
+    /// Keeps `error` for the stream calls, and gives the ended connection's
+    /// [`Event::Closed`].
+    fn closed(&mut self, error: Error) -> Event {
+        self.state = State::Ended {
+            error: Some(error.clone()),
+        };
+        Event::Closed {
+            key: self.key,
+            error,
+        }
     }
 
     /// The peer of a connected connection.

@@ -1,7 +1,7 @@
 # Security
 
-The threat model of Foundation. The `red-team` session owns this file and updates it
-when a surface lands. `docs/decisions.md` wins where they differ. A defect that an
+The threat model of Foundation. The red-team sessions own this file and update it when
+a surface lands. `docs/decisions.md` wins where they differ. A defect that an
 attacker can use is a GitHub issue with the `security` label and a failing test.
 
 ## What we protect
@@ -73,9 +73,9 @@ state on `main`.
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
   byte arrives). A connection now holds at most its receive budget (#467), and a
-  size takes the budget of a size with no block in use (#270). Still open: a test
-  that a stream on another connection reads while one connection holds its budget,
-  and many connections before admission (#563).
+  size takes the budget of a size with no block in use (#270). A stream on another
+  connection reads while one connection holds its budget (RECV WAITS). Still open:
+  many connections before admission (#563).
 - Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
   reset to each address it spoofs, with no limit), #620 (a stop after the peer's
   reset gives the peer the stream's window twice, so a peer grows the connection's
@@ -122,7 +122,14 @@ state on `main`.
 ### Node to node
 
 - Node-to-node traffic is authorized by role (BQ12). A new node joins only with a
-  signed ticket, and voters record membership (BQ11a). Not built (`mesh`).
+  signed ticket, and voters record membership (BQ11a). Every node checks each `Join`
+  change at apply: the card's signature, a name and status channel names that are not
+  reserved, under the region, not too long, and not held by a member, a key that is not
+  yet a member, status keys that no member holds, and the ticket's admission, scope,
+  uses, and expiry. A status holds at most 64 entries, so decode refuses more, and
+  checks no signature. So a forged card or a body that does not decode in a committed
+  entry is a refused change, not a stopped group. The proposing voter and the join
+  answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
@@ -133,24 +140,35 @@ state on `main`.
   append's term. A node that a change removed and that missed its release can win
   an election once no voter has a lease, and lead until it commits the leave
   (#483).
-- `raft` counts a reply only from a voter. But it takes a higher term from any
-  sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
-  #352 (a reply from a node that is not a voter makes the leader step down). #352
-  asks to change RAFT SURFACE for replies.
-- A node that may send to a group and lies can stop the group for good with one
-  message in term `u64::MAX`: each node writes that term to disk, and none can
-  campaign. Only a voter can: `mesh` admits a `raft` message only from a voter of the
-  newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
-  also break safety, because a false `AppendReply` counts as held, so `raft` trusts
-  its voters. No change in `raft` for that (RAFT SURFACE, #352 item 2). Proof of
-  election closes the `u64::MAX` case (#750).
-- A voter that does not lead can make a node commit a voter set alone. It sends a
-  heartbeat or an `Append` of a higher term, or a reply of a higher term and then
-  either, or an `Append` in the node's term before the node hears that term's
-  leader. The node follows the voter and writes and commits what it sends. So two
-  nodes can apply different entries at one index, and a forged voter set can take
-  the group over (RAFT LOG). Open by decision; `raft/tests/it/hostile.rs` pins it.
-  The long-term fix is a proof of election (#750).
+- `raft` drops a reply from a node that is not a voter, unless a change removed the node
+  and `raft` still sends to it (#352). It takes a higher term only with a proof that a
+  quorum of its configuration granted the sender, in every message but a `PreVote` and a
+  granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
+  proof of the refuser's term, so a node that is behind catches up.
+- A node that may send to a group and lies could stop the group for good with one
+  message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
+  also admits a `raft` request only from a voter of the newest configuration (RAFT
+  VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
+  voter that lies can still break safety, because a false `AppendReply` counts as held,
+  so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed `AppendReply` is
+  #882.
+- A voter that does not lead cannot make a node follow it: a heartbeat or an
+  `Append` of a higher term, or of a term whose leader the node does not know yet,
+  needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
+  A second leader of a term whose leader it knows is `Error::SecondLeader`.
+  `raft` counts the keys of a proof, and `mesh::claim` checks each signature
+  against the voter's public key. Until the driver (#471) runs that check before
+  `step`, a voter can forge the keys. `raft/tests/it/hostile.rs` pins the refusal.
+- A voter that was down through a configuration change holds the old configuration
+  and refuses a leader it cannot prove. It rejoins at the next election whose grants
+  are a quorum of what it holds. When a second node fails before that, the group
+  waits for an operator: wipe the voter's state and start it with no configuration.
+  The chain of proofs over configuration entries closes it (#881, a release
+  blocker). Its first PR gives each configuration entry the votes and the signature
+  of the leader that wrote it (`raft::Change`); the chain and its check are the
+  second PR (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  `raft/tests/it/behind.rs` pins both.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -198,22 +216,25 @@ state on `main`.
 ### Disk to `buffer`
 
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
-  of the ring. A chained CRC32C finds these. It does not stop a local user who writes
-  the file: the CRC is not a secret, and a header block has no tie to its ring.
+  of the ring. A chained CRC32C finds these, with two exceptions that are open on
+  `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
+  of each header block reads as zero, an open takes the file for a ring with no
+  checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
+  local user who writes the file: it is not a secret, and a header block has no tie
+  to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
-  ring. #234 and #300 are robustness defects of this boundary, with fixes in
-  review (#356, #348). They do not have the `security` label: each needs a writer
-  of the file, or, for the small body of #300, a `Layout` from the node's own
-  config (a new ring with a body of 4 to 54 bytes stops the node at its first
-  `append`).
-- Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open), #566 (a write of a dead process can land on a
-  ring that a new process opened), #572 (`append` takes a record over the pool's
-  largest block, and then each open fails), #657 (an open reports durable the
-  records a killed process never synced). Fixed: #553 (a power cut after the first
-  open lost the new ring: its directory was not synced in its parent), #393 (two
-  CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
-  hold both.
+  ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
+  #348. They do not have the `security` label: each needed a writer of the file, or,
+  for the small body of #300, a `Layout` from the node's own config (a new ring with
+  a body of 4 to 54 bytes stopped the node at its first `append`).
+- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Fixed: #392
+  (three ways a ring lost data it reported durable or could not open), #566 (a write
+  of a dead process could land on a ring that a new process opened), #572 (`append`
+  took a record over the pool's largest block, and then each open failed), #657 (an
+  open reported durable the records a killed process never synced), #553 (a power cut
+  after the first open lost the new ring: its directory was not synced in its parent),
+  #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
+  inputs hold the two fields of #393.
 
 ### Device to connector
 
@@ -279,6 +300,10 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
+| `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
+| `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -296,10 +321,12 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
-| `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
+| `types_sample` | `sample::Type` | Prints as the text it was read from |
+| `types_frame_ends` | `frame::Layout::from_ends`, `frame::check`, `frame::split` | Refuses exactly the ends that break a rule, with an error that names a broken rule; the layout is the one that `Layout::new` gives for the lengths; a frame drafted from the ends has them, and `split` cuts its series at them; `check` refuses exactly the ends that do not fit a body whose length the input gives, and `split` cuts a body that `check` took at them. Not reached: the panics of `split`, a body over 64 KiB |
+| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages (their encoding is in `mesh`), `spec` tree chunks (#64),
-`types::time::Rate`, and each connector's protocol parser.
+messages, `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
+tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.

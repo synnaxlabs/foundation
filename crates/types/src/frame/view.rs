@@ -1,13 +1,9 @@
 //! Views: a frame and the entries that one reader wants (M2).
 
 use std::cmp::Ordering;
-use std::iter;
 
 use super::key_set::{self, KeySet};
-use super::{
-    Form, Frame, Path, Range, body_start, bounds, charge_of, lead, next_end, parts,
-    to_u32, to_usize,
-};
+use super::{Form, Frame, Path, Range, bounds, lead, parts, to_u32, to_usize};
 use crate::channel;
 
 /// The entries of one key set that a reader wants, and the index of each. Made once
@@ -22,11 +18,31 @@ pub struct Mask {
 enum Held {
     /// Every entry of a key set that has at least one.
     Every,
-    /// The entries held and the groups whose index is held, each sorted.
-    Listed {
-        entries: Box<[u32]>,
-        groups: Box<[u32]>,
-    },
+    /// Some of the entries, or none.
+    Listed(Subset),
+}
+
+/// Sorted entries, and the sorted groups whose index is among them.
+#[derive(Debug)]
+struct Subset {
+    entries: Box<[u32]>,
+    groups: Box<[u32]>,
+}
+
+impl Subset {
+    fn new(set: &KeySet, entries: Vec<u32>) -> Self {
+        // Indexes in entry order are in group order (`KeySet::groups`).
+        let groups = entries
+            .iter()
+            .map(|&entry| to_usize(entry))
+            .filter(|&entry| set.index(entry) == entry)
+            .map(|index| set.entries()[index].group)
+            .collect();
+        Self {
+            entries: entries.into(),
+            groups,
+        }
+    }
 }
 
 impl Mask {
@@ -43,20 +59,10 @@ impl Mask {
             .collect();
         entries.sort_unstable();
         entries.dedup();
-        let held = if entries.is_empty() || entries.len() < set.entries().len() {
-            // Indexes in entry order are in group order (`KeySet::groups`).
-            let groups = entries
-                .iter()
-                .map(|&entry| to_usize(entry))
-                .filter(|&entry| set.index(entry) == entry)
-                .map(|index| set.entries()[index].group)
-                .collect();
-            Held::Listed {
-                entries: entries.into(),
-                groups,
-            }
-        } else {
+        let held = if !entries.is_empty() && entries.len() == set.entries().len() {
             Held::Every
+        } else {
+            Held::Listed(Subset::new(set, entries))
         };
         Self {
             set: set.key(),
@@ -67,7 +73,7 @@ impl Mask {
     /// Whether the mask holds no entry: the reader wants nothing of the key set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        matches!(&self.held, Held::Listed { entries, .. } if entries.is_empty())
+        matches!(&self.held, Held::Listed(held) if held.entries.is_empty())
     }
 }
 
@@ -119,9 +125,7 @@ impl<'a> View<'a> {
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
         match &self.mask.held {
-            Held::Listed { groups, .. } if groups.binary_search(&group).is_err() => {
-                None
-            }
+            Held::Listed(held) if held.groups.binary_search(&group).is_err() => None,
             _ => self.frame.range(group),
         }
     }
@@ -131,34 +135,14 @@ impl<'a> View<'a> {
     /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
     /// mask's entries.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &'a [u8])> + use<'a> {
-        let Held::Listed { entries, .. } = &self.mask.held else {
+        let Held::Listed(held) = &self.mask.held else {
             return Series::Every(self.frame.iter());
         };
         let (_, descriptors, body) = parts(&self.frame.0);
-        Series::Listed(join(descriptors, entries).map(move |n| {
+        Series::Listed(Join::new(descriptors, &held.entries).map(move |n| {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
         }))
-    }
-
-    /// The charge of a frame of only the view's series (CREDIT RULES): what a remote
-    /// complete reader spends. Equal to [`Frame::charge`] when the mask holds every
-    /// present series. Time is constant when the mask holds every entry, else as for
-    /// [`View::iter`].
-    #[must_use]
-    pub fn charge(&self) -> u64 {
-        let Held::Listed { entries, groups } = &self.mask.held else {
-            return self.frame.charge();
-        };
-        let (ranges, descriptors, _) = parts(&self.frame.0);
-        let ranges = join(ranges, groups).count();
-        let (mut series, mut bytes) = (0, 0);
-        for n in join(descriptors, entries) {
-            let (start, end) = bounds(descriptors, n);
-            series += 1;
-            bytes = next_end(bytes, end - start);
-        }
-        charge_of(body_start(ranges, series) + bytes)
     }
 }
 
@@ -189,28 +173,50 @@ impl<T, E: Iterator<Item = T>, L: Iterator<Item = T>> Iterator for Series<E, L> 
 /// The position of each record in `records` that leads with a key in `keys`, in order.
 /// Both are sorted. Each step skips ahead on both by [`gallop`], so time is
 /// O(m log(n/m)) for the shorter m and longer n.
-fn join<'a, const N: usize>(
+struct Join<'a, const N: usize> {
     records: &'a [[u8; N]],
-    mut keys: &'a [u32],
-) -> impl Iterator<Item = usize> + 'a {
-    let mut at = 0;
-    iter::from_fn(move || {
+    keys: &'a [u32],
+    at: usize,
+}
+
+impl<'a, const N: usize> Join<'a, N> {
+    fn new(records: &'a [[u8; N]], keys: &'a [u32]) -> Self {
+        Self {
+            records,
+            keys,
+            at: 0,
+        }
+    }
+}
+
+impl<const N: usize> Iterator for Join<'_, N> {
+    type Item = usize;
+
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it made a narrow walk 1.5 to 2.2 times slower"
+    )]
+    #[inline(always)]
+    fn next(&mut self) -> Option<usize> {
         loop {
-            let key = lead(records.get(at)?);
-            let &next = keys.first()?;
+            let key = lead(self.records.get(self.at)?);
+            let &next = self.keys.first()?;
             match next.cmp(&key) {
-                Ordering::Less => keys = &keys[gallop(keys, |&held| held < key)..],
+                Ordering::Less => {
+                    self.keys = &self.keys[gallop(self.keys, |&held| held < key)..];
+                }
                 Ordering::Greater => {
-                    at += gallop(&records[at..], |record| lead(record) < next);
+                    let records = &self.records[self.at..];
+                    self.at += gallop(records, |record| lead(record) < next);
                 }
                 Ordering::Equal => {
-                    keys = &keys[1..];
-                    at += 1;
-                    return Some(at - 1);
+                    self.keys = &self.keys[1..];
+                    self.at += 1;
+                    return Some(self.at - 1);
                 }
             }
         }
-    })
+    }
 }
 
 /// The first position in `items` where `before` is false, as `slice::partition_point`
@@ -241,9 +247,7 @@ mod tests {
     fn held(set: &KeySet, mask: &Mask) -> Vec<usize> {
         match &mask.held {
             Held::Every => (0..set.entries().len()).collect(),
-            Held::Listed { entries, .. } => {
-                entries.iter().map(|&entry| to_usize(entry)).collect()
-            }
+            Held::Listed(held) => held.entries.iter().map(|&n| to_usize(n)).collect(),
         }
     }
 
@@ -310,25 +314,6 @@ mod tests {
         assert_eq!(view.range(0), None);
         assert_eq!(view.range(1), frame.range(1));
         assert_eq!(view.range(1), Some(Range::default()));
-    }
-
-    /// One range, two descriptors, and 5 bytes, 3 of padding, and 1 byte of series.
-    #[test]
-    fn charges_a_frame_of_only_its_series() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask::new(&set, [Slot::new(4)]);
-        let len = 16 + 16 + 2 * 8 + 8 + 1;
-        let charge = u64::try_from(block::footprint(len)).unwrap();
-        assert_eq!(View::new(&frame, &mask).charge(), charge);
-    }
-
-    #[test]
-    fn charges_the_whole_frame_through_a_full_mask() {
-        let set = two_groups();
-        let frame = full(&set);
-        let mask = Mask::new(&set, [1, 2, 3, 4].map(Slot::new));
-        assert_eq!(View::new(&frame, &mask).charge(), frame.charge());
     }
 
     #[test]
@@ -407,6 +392,8 @@ mod tests {
                 .collect();
             prop_assert_eq!(held(&set, &mask), expected.clone());
             prop_assert_eq!(mask.is_empty(), expected.is_empty());
+            let every = !expected.is_empty() && expected.len() == entries;
+            prop_assert_eq!(matches!(mask.held, Held::Every), every);
         }
 
         #[test]
@@ -418,28 +405,15 @@ mod tests {
             let read: Vec<(usize, &[u8])> = view.iter().collect();
             let expected: Vec<(usize, &[u8])> =
                 frame.iter().filter(|(entry, _)| held.contains(entry)).collect();
-            prop_assert_eq!(read, expected);
+            prop_assert_eq!(&read, &expected);
+            let folded = view.iter().fold(Vec::new(), |mut folded, series| {
+                folded.push(series);
+                folded
+            });
+            prop_assert_eq!(folded, expected);
             for (group, &index) in (0..).zip(set.groups()) {
                 let range = frame.range(group).filter(|_| held.contains(&index));
                 prop_assert_eq!(view.range(group), range, "group {}", group);
-            }
-        }
-
-        /// The oracle for the charge: a frame that `Draft` makes of the view's series.
-        #[test]
-        fn view_charges_the_frame_of_its_series((case, wanted) in masked()) {
-            let (set, frame) = frame_of(&case);
-            let mask = Mask::new(&set, slots(&set, &wanted));
-            let view = View::new(&frame, &mask);
-            let series: Vec<(usize, usize)> =
-                view.iter().map(|(entry, bytes)| (entry, bytes.len())).collect();
-            let pool = pool(1 << 20);
-            let narrow = Draft::new(&pool, &set, frame.form(), &series)
-                .map_err(|error| TestCaseError::fail(error.to_string()))?
-                .freeze(frame.path());
-            prop_assert_eq!(view.charge(), narrow.charge());
-            if wanted.iter().all(|&wanted| wanted) {
-                prop_assert_eq!(view.charge(), frame.charge());
             }
         }
 
@@ -462,7 +436,7 @@ mod tests {
             let expected: Vec<usize> = (0..records.len())
                 .filter(|&n| held.contains(&lead(&records[n])))
                 .collect();
-            prop_assert_eq!(join(&records, &keys).collect::<Vec<_>>(), expected);
+            prop_assert_eq!(Join::new(&records, &keys).collect::<Vec<_>>(), expected);
         }
     }
 }

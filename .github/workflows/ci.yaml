@@ -2,8 +2,24 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
+    paths:
+      - 'crates/**'
+      - 'bench/**'
+      - 'fuzz/**'
+      - 'xtask/**'
+      - 'oracles/**'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'clippy.toml'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - '.github/workflows/**'
 
 # Each commit on main gets its own group, so a later merge never cancels its run.
 concurrency:
@@ -11,19 +27,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A skipped required job counts as passed. So a job skips only when this filter ran
+  # and found no change. A direct push or a failed filter runs every job. A merge queue
+  # push skips every job, because the queue already ran them on the same commit.
   changes:
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push' || github.actor == 'github-merge-queue[bot]'
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      deps: ${{ steps.filter.outputs.deps }}
-      models: ${{ steps.filter.outputs.models }}
+      rust: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.rust }}
+      deps: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.deps }}
+      models: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.models }}
     steps:
-      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+      # In the merge queue, the filter diffs the group's base and head in a clone.
+      - if: github.event_name == 'merge_group'
+        uses: actions/checkout@v4
+      - if: github.event_name != 'push'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: filter
         with:
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             rust:
               - 'crates/**'
@@ -60,9 +89,7 @@ jobs:
 
   check:
     needs: changes
-    if: >-
-      !cancelled() && (github.event_name == 'push' ||
-      needs.changes.outputs.rust == 'true')
+    if: "!cancelled() && needs.changes.outputs.rust != 'false'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,12 +106,16 @@ jobs:
         run: cargo xtask oracles
       - name: Test
         run: cargo test --workspace --all-features
+      # Root tests mount a filesystem. Only this runner, which is discarded after the
+      # job, runs them.
+      - name: Root tests
+        run: |
+          cargo clippy -p os --all-features --test root -- -D warnings
+          cargo test -p os --all-features --test root
 
   features:
     needs: changes
-    if: >-
-      !cancelled() && (github.event_name == 'push' ||
-      needs.changes.outputs.rust == 'true')
+    if: "!cancelled() && needs.changes.outputs.rust != 'false'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -97,9 +128,7 @@ jobs:
 
   deny:
     needs: changes
-    if: >-
-      !cancelled() && (github.event_name == 'push' ||
-      needs.changes.outputs.deps == 'true')
+    if: "!cancelled() && needs.changes.outputs.deps != 'false'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,9 +140,7 @@ jobs:
 
   loom:
     needs: changes
-    if: >-
-      !cancelled() && (github.event_name == 'push' ||
-      needs.changes.outputs.models == 'true')
+    if: "!cancelled() && needs.changes.outputs.models != 'false'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,9 +154,7 @@ jobs:
 
   shuttle:
     needs: changes
-    if: >-
-      !cancelled() && (github.event_name == 'push' ||
-      needs.changes.outputs.models == 'true')
+    if: "!cancelled() && needs.changes.outputs.models != 'false'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,9 +164,7 @@ jobs:
 
   miri:
     needs: changes
-    if: >-
-      !cancelled() && (github.event_name == 'push' ||
-      needs.changes.outputs.models == 'true')
+    if: "!cancelled() && needs.changes.outputs.models != 'false'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,8 +179,8 @@ jobs:
   mutants:
     needs: changes
     if: >-
-      github.event_name == 'pull_request' &&
-      needs.changes.outputs.rust == 'true'
+      !cancelled() && github.event_name == 'pull_request' &&
+      needs.changes.outputs.rust != 'false'
     # A mutant that hangs runs until its timeout, so the run needs parallel jobs and
     # memory that the 2-core hosted runner lacks.
     runs-on: [self-hosted, Linux, ARM64]

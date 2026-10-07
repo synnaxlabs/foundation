@@ -5,9 +5,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Hard, Message, Position, Raft, Role, Start, Term, Voters,
+    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Role,
+    Start, Term, Voters,
 };
 use types::node;
+
+use crate::network::change;
 
 fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
@@ -93,8 +96,8 @@ fn cluster(term: u64) -> BTreeMap<node::Key, Raft> {
     };
     let log = vec![
         entry(1, Data::Empty),
-        entry(2, Data::Voters(joint)),
-        entry(3, Data::Voters(new.clone())),
+        entry(2, change(key(1), joint)),
+        entry(3, change(key(1), new.clone())),
     ];
     [
         node(1, term, new.clone(), log.clone(), 3),
@@ -124,7 +127,11 @@ fn restarted(id: u8, old: Voters, log: &[Entry]) -> Raft {
             entries: rest.to_vec(),
             commit: 2,
         },
-        proof: None,
+        proof: Some(Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: [1, 2].map(|id| (key(id), None)).into(),
+        }),
     };
     raft.step(append).unwrap();
     let ready = raft.ready();

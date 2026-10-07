@@ -24,6 +24,10 @@ pub enum Error {
         /// Each address tried, with why it failed.
         attempts: Vec<(Address, Error)>,
     },
+    /// In [`Error::Unreachable`], the cause at an address this node cannot send to:
+    /// its port is 0, its IP is unspecified, or this node runs no carrier for its
+    /// kind.
+    Unroutable,
     /// The peer could not prove that it holds the key that was dialed.
     Authentication {
         /// The key that was dialed.
@@ -41,9 +45,12 @@ pub enum Error {
     },
     /// The peer was silent for longer than [`Config::idle`](crate::Config::idle).
     TimedOut,
-    /// The peer cancelled the stream before it finished sending.
+    /// The stream was cancelled before it finished sending: by the peer, or by a
+    /// [`send`](crate::stream::Sender::send) or
+    /// [`send_parts`](crate::stream::Sender::send_parts) future that dropped after
+    /// the stream sent part of its message.
     Reset {
-        /// The code the peer reset with.
+        /// The code of the reset: `Code(0)` for a dropped send future.
         code: Code,
     },
     /// The peer stopped reading the stream.
@@ -51,30 +58,28 @@ pub enum Error {
         /// The code the peer stopped with.
         code: Code,
     },
-    /// A message is larger than the peer accepts on a stream, or than a datagram
-    /// carries.
+    /// A message is larger than the peer accepts on a stream, than a datagram
+    /// carries, or than the buffer of a receive.
     TooLarge {
         /// The message's size.
         bytes: usize,
         /// The largest size allowed.
         bytes_max: usize,
     },
-    /// The connection ended on a fault: a protocol violation, a failed TLS check, or
-    /// a reset. A node that finds a violation of the stream protocol closes the
-    /// connection with application code 2^32 and the reason, and both sides get
-    /// this.
+    /// The connection ended on a fault: a protocol violation, a failed TLS check, a
+    /// reset, or a peer that refused the dial. A node that finds a violation of the
+    /// stream protocol closes the connection with application code 2^32 and the
+    /// reason, and both sides get this.
     Broken {
         /// What broke, for people to read.
         reason: String,
     },
-    /// The shard's pool has no room for a received message now. The message stays
-    /// queued; call again when a block frees.
-    Pool {
-        /// The message's size.
-        bytes: usize,
-        /// The bytes of the pool's budget that are free. A block for `bytes` needs
-        /// more.
-        available: usize,
+    /// The socket under the session broke. Every session on it ends with this. Each
+    /// later dial gets it, and so does each accept once it gave the sessions that
+    /// connected before the break.
+    Network {
+        /// What the socket gave.
+        error: env::net::Error,
     },
     /// A [`Config`](crate::Config) value is out of range.
     Config {
@@ -94,6 +99,7 @@ impl fmt::Display for Error {
                     write!(f, "; {address:?}: {error}")
                 })
             }
+            Self::Unroutable => write!(f, "this node cannot send to that address"),
             Self::Authentication { expected } => {
                 write!(f, "the peer did not prove key {expected}")
             }
@@ -115,10 +121,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::Broken { reason } => write!(f, "the connection broke: {reason}"),
-            Self::Pool { bytes, available } => write!(
-                f,
-                "no room for a received message of {bytes} bytes ({available} free)"
-            ),
+            Self::Network { error } => write!(f, "the socket broke: {error}"),
             Self::Config { field, rule } => write!(f, "config {field} {rule}"),
         }
     }
@@ -168,6 +171,11 @@ mod tests {
                     hex()
                 ),
             );
+        }
+
+        #[test]
+        fn says_this_node_cannot_send_to_the_address() {
+            check(&Error::Unroutable, "this node cannot send to that address");
         }
 
         #[test]
@@ -225,14 +233,13 @@ mod tests {
         }
 
         #[test]
-        fn gives_the_size_and_the_room_of_the_pool() {
-            let error = Error::Pool {
-                bytes: 10,
-                available: 4,
+        fn gives_what_broke_the_socket() {
+            let error = Error::Network {
+                error: env::net::Error::Io { code: 5 },
             };
             check(
                 &error,
-                "no room for a received message of 10 bytes (4 free)",
+                "the socket broke: network call failed with OS error 5",
             );
         }
 

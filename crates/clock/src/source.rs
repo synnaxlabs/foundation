@@ -2,8 +2,8 @@
 //! measure the node's monotonic clock against a time source.
 
 use estimate::Measurement;
-use estimate::exchange::{self, Exchange};
-use types::time::{Interval, Monotonic, Span, Stamp};
+use estimate::exchange::{Exchange, Reading};
+use types::time::{Interval, Monotonic, Span};
 
 use crate::DRIFT;
 
@@ -63,8 +63,8 @@ impl Wall {
 
     /// Reads the OS clock between two readings of the monotonic clock. The error is
     /// the OS bound plus half the time between the readings, grown by drift. With no
-    /// OS bound, or an error over 36500 days, the measurement is unknown
-    /// ([`Measurement::unknown`]).
+    /// OS bound, an edge of the bound past the range of a stamp, or an error of 36500
+    /// days or more, the measurement is unknown ([`Measurement::unknown`]).
     ///
     /// # Panics
     ///
@@ -73,56 +73,35 @@ impl Wall {
     pub fn measure(&self) -> Measurement {
         let sent = self.monotonic.now();
         #[expect(clippy::disallowed_methods, reason = "clock reads the OS clock")]
-        let reading = self.os.now();
+        let os = self.os.now();
         let returned = self.monotonic.now();
-        let bound = reading.error.inspect(|&bound| {
+        let edges = os.error.and_then(|bound| {
             assert!(
                 bound >= Span::ZERO,
                 "invariant: the OS error bound {bound} is negative"
             );
+            Some(Interval {
+                earliest: os.time.checked_sub(bound)?,
+                latest: os.time.checked_add(bound)?,
+            })
         });
-        let instant = Interval {
-            earliest: reading.time,
-            latest: reading.time,
-        };
         let exchange = Exchange {
             sent,
-            received: instant,
-            answered: instant,
+            reading: match edges {
+                Some(edges) => Reading::Known {
+                    received: edges,
+                    answered: edges,
+                },
+                None => Reading::Unknown(os.time),
+            },
             returned,
         };
-        let read = match exchange.measure(DRIFT) {
-            Ok(read) => read,
-            Err(exchange::Error::Bound { .. }) => {
-                return Measurement::unknown(
-                    returned,
-                    offset(reading.time, sent, returned),
-                );
-            }
-            // The OS reading is one instant, so only a clock that goes back crosses.
-            Err(exchange::Error::Crossed) => {
-                panic!(
-                    "invariant: the monotonic clock went from {sent:?} to {returned:?}"
-                )
-            }
-        };
-        let unknown = Measurement::unknown(read.at(), read.offset());
-        let Some(bound) = bound else {
-            return unknown;
-        };
-        let error =
-            Span::from_nanos(read.error().nanos().saturating_add(bound.nanos()));
-        Measurement::new(read.at(), read.offset(), error).unwrap_or(unknown)
+        // Both readings are one interval, so only a clock that goes back allows no
+        // offset.
+        exchange.measure(DRIFT).unwrap_or_else(|| {
+            panic!("invariant: the monotonic clock went from {sent:?} to {returned:?}")
+        })
     }
-}
-
-/// `time` minus the midpoint of `sent` and `returned`, or the nearest span when it is
-/// past that range.
-fn offset(time: Stamp, sent: Monotonic, returned: Monotonic) -> Span {
-    let mid = sent.0.midpoint(returned.0);
-    let nanos = (i128::from(time.nanos()) - i128::from(mid))
-        .clamp(i64::MIN.into(), i64::MAX.into());
-    Span::from_nanos(i64::try_from(nanos).expect("invariant: clamped to a span"))
 }
 
 #[cfg(test)]
@@ -138,8 +117,8 @@ mod tests {
 
     use super::Wall;
 
-    /// 36500 days, the largest error a measurement has.
-    const UNKNOWN: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
+    /// The largest error a measurement has.
+    const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
 
     /// A simulated node whose OS gives `wall_error`, with the default clocks.
     fn node(wall_error: Option<Span>) -> (sim::Sim, Node) {
@@ -219,6 +198,18 @@ mod tests {
     }
 
     #[test]
+    fn is_unknown_when_an_edge_of_the_os_bound_passes_the_stamps() {
+        let monotonic = i64::try_from(at().0).expect("one hour fits");
+        for wall in [i64::MAX - Span::DAY.nanos(), i64::MIN + Span::DAY.nanos()] {
+            let past = Span::from_nanos(Span::DAY.nanos() + 1);
+            let m = measure_at(Stamp::from_nanos(wall), Some(past));
+            let offset = Span::from_nanos(wall - monotonic);
+            assert_eq!(m, Measurement::unknown(at(), offset));
+            assert_eq!(m, measure_at(Stamp::from_nanos(wall), None));
+        }
+    }
+
+    #[test]
     fn follows_a_step_of_the_os_clock() {
         let (_sim, node) = node(None);
         node.step_wall(Span::HOUR);
@@ -288,10 +279,10 @@ mod tests {
     }
 
     #[test]
-    fn is_unknown_at_the_midpoint_when_the_reads_are_too_far_apart() {
+    fn is_unknown_at_the_center_when_the_reads_are_too_far_apart() {
         let returned = 7_000_000_000_000_000_000;
         let m = measure_between(0, returned, 10_000_000_000, Some(Span::ZERO));
-        let offset = Span::from_nanos(-3_499_999_990_000_000_000);
+        let offset = Span::from_nanos(-3_499_299_990_000_000_000);
         assert_eq!(m, Measurement::unknown(Monotonic(returned), offset));
     }
 
@@ -324,14 +315,18 @@ mod tests {
                 wall_error: error.map(Span::from_nanos),
                 ..node::Config::default()
             });
-            // Only the low end of a span can cut the offset, and the error covers the
-            // cut.
+            // An edge of the bound past the stamps gives unknown. Only the low end of a
+            // span can cut the offset, and the error covers the cut.
             let at = Monotonic(monotonic);
             let exact = i128::from(wall) - i128::from(monotonic);
             let offset = i64::try_from(exact).unwrap_or(i64::MIN);
             let cut = i128::from(offset) - exact;
             let offset = Span::from_nanos(offset);
+            let fits = |&error: &i64| {
+                wall.checked_sub(error).is_some() && wall.checked_add(error).is_some()
+            };
             let expected = error
+                .filter(fits)
                 .and_then(|error| i64::try_from(i128::from(error) + cut).ok())
                 .and_then(|error| Measurement::new(at, offset, Span::from_nanos(error)))
                 .unwrap_or(Measurement::unknown(at, offset));

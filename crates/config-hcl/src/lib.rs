@@ -629,9 +629,9 @@ mod tests {
                     error: "a.@".parse::<name::Name>().unwrap_err(),
                 },
                 "hcl.name",
-                "\"a.@\" has a segment that is not valid: \"@\"",
+                "a segment is not valid: \"@\" in \"a.@\"",
                 "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
-                 and no other character",
+                 after an optional leading `@`",
             ),
             (
                 Error::Number {
@@ -798,11 +798,7 @@ mod tests {
         }
         for part in unwritable::tests::every(None) {
             let code = Diagnostic::from(&part).code.as_str();
-            if matches!(part, Unwritable::TooDeep(_)) {
-                assert_eq!(code, "document.too-deep");
-            } else {
-                assert!(codes.insert(code), "{code} repeats: {part:?}");
-            }
+            assert!(codes.insert(code), "{code} repeats: {part:?}");
         }
     }
 

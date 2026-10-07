@@ -8,14 +8,32 @@ publish.workspace = true
 [dependencies]
 block = { path = "../block" }
 env = { path = "../env" }
-rustix = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+getrandom = { workspace = true }
+rustix = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+types = { path = "../types" }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["thread"] }
 
 [dev-dependencies]
+divan = { workspace = true }
+proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+# Needs `sudo`: only one CI step on a GitHub-hosted runner runs it.
+[[test]]
+name = "root"
+path = "tests/root/main.rs"
+test = false
+
+[[bench]]
+name = "now"
+harness = false
 
 [lints]
 workspace = true

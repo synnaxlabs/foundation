@@ -3,6 +3,13 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod clock;
 mod common;
+mod entropy;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod files;
 mod shards;
 mod threads;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod wall;

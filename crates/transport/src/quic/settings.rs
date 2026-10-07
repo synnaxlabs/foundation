@@ -1,11 +1,13 @@
 //! What noq-proto gets from a [`Config`]. Every option that changes behavior is set
 //! by name, and every random value outside TLS comes from `Entropy`.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aws_lc_rs::{hkdf, hmac};
 use env::entropy::Entropy;
+use env::net::udp::TRANSMIT_BYTES_MAX;
 use noq_proto::congestion::CubicConfig;
 use noq_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use noq_proto::crypto::{CryptoError, HandshakeTokenKey};
@@ -19,7 +21,7 @@ use types::time::Span;
 
 use super::{cid, hello};
 use crate::tls::{Epoch, Tls};
-use crate::{Config, PAYLOAD_IPV4};
+use crate::{Config, MESSAGE_BYTES_MIN, PAYLOAD_IPV4};
 
 const QUIC_V1: u32 = 1;
 
@@ -33,6 +35,15 @@ pub(super) const MTU_MIN: u16 = 1200;
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.
 const PAYLOAD_IPV6: u16 = 1452;
+const _: () = assert!(
+    MTU_MIN <= PAYLOAD_IPV6,
+    "no datagram this node sends may pass PAYLOAD_IPV6, which sets BATCH_MAX"
+);
+
+/// The most datagrams in one transmit: as many of the largest this node sends as one
+/// send takes. noq-proto bounds a batch only by its count.
+pub(super) const BATCH_MAX: NonZeroUsize =
+    NonZeroUsize::new(TRANSMIT_BYTES_MAX / PAYLOAD_IPV6 as usize).expect("not zero");
 
 /// The most bytes of QUIC datagrams that wait to be sent on one connection. When a
 /// new one does not fit, the oldest drops.
@@ -43,7 +54,7 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    PAYLOAD_IPV4 as usize >= hello::BYTES_MAX,
+    MESSAGE_BYTES_MIN >= hello::BYTES_MAX,
     "a stream window of at least message_bytes_max must take the peer's whole hello"
 );
 
@@ -180,6 +191,10 @@ fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
 fn transport(config: &Config) -> TransportConfig {
     let idle_ms = idle_ms(config.idle);
     let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
+    // noq-proto gives credit back in steps of 1/8 of a window, so a stream with the
+    // connection's credit can run out while the connection has room.
+    let stream_window = config.window_bytes.saturating_mul(2);
+    let stream_window = VarInt::try_from(stream_window).unwrap_or(VarInt::MAX);
     let streams = VarInt::from_u32(config.streams_max.get());
     // One more for the peer's hello, whose credit does not come back when it ends.
     let uni = u64::from(config.streams_max.get()) + 1;
@@ -193,7 +208,7 @@ fn transport(config: &Config) -> TransportConfig {
     transport
         .max_concurrent_bidi_streams(streams)
         .max_concurrent_uni_streams(uni)
-        .stream_receive_window(window)
+        .stream_receive_window(stream_window)
         .receive_window(window)
         .send_window(window.into_inner())
         .send_fairness(true)
@@ -313,14 +328,15 @@ mod tests {
         let (now, key) = (pair.now(), pair.client.key.expect("a connection"));
         let client = &mut pair.client.endpoint;
         let opened = client.open_sender(now, key, Class::Command);
-        let mut sender = opened.expect("a stream");
-        let written = client.write(now, &mut sender, shard.block(b"ping"));
+        let sender = opened.expect("a stream");
+        let written = client.write(now, &sender, &mut Some(shard.block(b"ping")));
         assert_eq!(written, Ok(Poll::Ready(())));
         pair.run(Duration::from_millis(100));
         let (now, key) = (pair.now(), pair.server.key.expect("a connection"));
         let server = &mut pair.server.endpoint;
         let mut incoming = server.accept(key).expect("a stream");
-        let read = server.read(now, &mut incoming.receiver).expect("read");
+        let read = server.read(now, &mut incoming.receiver, testing::alloc);
+        let read = read.expect("read");
         let Poll::Ready(Some(message)) = read else {
             panic!("no message");
         };

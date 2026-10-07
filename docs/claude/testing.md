@@ -22,18 +22,21 @@ behavior. Never print a pointer. No `thread_local!` state.
 | 1 | Unit and property tests (`proptest`) | Every commit |
 | 2 | Coverage-guided fuzzing (`cargo-fuzz`) of every decoder of outside input: wire, config, codecs, protocol parsers | Short run per merge, continuous nightly |
 | 3 | Deterministic simulation of a whole mesh: drops, partitions, crashes mid-write, clock jumps. A recorded random value replays a run | Thousands of runs per merge, millions nightly |
-| 4 | Unit benchmarks, per function | Every merge, 5% gate |
-| 5 | Component benchmarks | Every merge, 5% gate |
+| 4 | Unit benchmarks, per function | Every merge, 5% check (P1) |
+| 5 | Component benchmarks | Every merge, 5% check (P1) |
 | 6 | End-to-end performance against P1 on shared machines | Nightly and release |
 | 7 | Protocol simulators per connector | Every merge |
 | 8 | Hardware in the loop with real devices | Nightly and release |
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
 checks on each PR that agent-written tests catch real changes. A missed mutant fails
-CI. A mutant that makes a test hang (a timeout) counts as caught.
-`.cargo/mutants.toml` lists the few functions it skips, each with its reason. Miri and
-cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
-those gates use.
+CI. A mutant that makes a test hang (a timeout) counts as caught. An assertion on a
+private field is never the only kill. `.cargo/mutants.toml` lists the few functions it
+skips. Each entry is as narrow as one function. Its comment says why no caller or peer
+can see the mutant, or names the test that kills it in a job that the mutants run does
+not see (Miri, loom, another OS). A mutant that a test could kill but none does links
+its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
+`rust-toolchain-nightly`, that only those gates use.
 
 ## Fuzzing
 
@@ -52,6 +55,9 @@ again once to prove that the failure replays (r16 59).
 
 - **A bug fix starts with a failing regression test.** Show it fails for the reason you
   diagnosed, then fix the code.
+- **Test what the change is for.** When a change exists to remove work (a clock read, a
+  copy, an allocation, a round trip), a test counts that work and fails when the change
+  is reverted.
 - **Pin the exact error.** Assert the variant and its fields or message
   (`assert!(matches!(err, Error::Backwards { .. }))`, `assert_eq!(err.to_string(),
   "...")`), never only `is_err()`. Clippy denies `assertions_on_result_states`
@@ -62,10 +68,15 @@ again once to prove that the failure replays (r16 59).
 - **Test through the production path.** A component that passes its unit tests but
   fails when composed in `node` is broken. Production code never checks `cfg(test)`
   (r16 47).
+- **Assert through the public calls of the type.** A read of a private field, or a
+  compare of the `Debug` string of the type under test, checks private state: a new
+  field breaks the test while the behavior stays. Use one only with a written reason.
 - **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
   second test feature (r16 57).
 - **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
-  frames, bad offsets, stale fences) (r16 54).
+  frames, bad offsets, stale fences) (r16 54). A check against a bound has a test at
+  the bound and one on each side. `cargo mutants` turns `>=` only into `<`, so it
+  cannot show that the test past the bound is missing.
 - **Pair assertions.** Check data before it goes to disk or the wire, and again after
   it comes back (r16 55).
 - **No tautological tests.** Never repeat the implementation's formula or assert that
@@ -75,6 +86,11 @@ again once to prove that the failure replays (r16 59).
   a surface is `#[ignore = "waits on #<n>"]`.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
+- **A fixture helper is `create_*`.** A helper that builds the state a test runs
+  against is one: a resource (a pool, a store, files) or a collection that it fills (an
+  interner, the members of a region), also when it writes nothing. A helper that turns
+  its arguments into one value (`key(slot)`, `message(from, to, body)`), or builds the
+  type under test (`index()`, `carried(2)`), is named for that value.
 - **Snapshot tests for text output** (`plan`, diagnostics, formatted HCL, error
   `Display`) and **coverage marks** that prove a test reached a branch. Both need a
   dependency approval in `docs/dependencies.md` first (r16 51, 52).

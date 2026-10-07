@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use types::node;
 
-use crate::{Error, Position, Term, Voters};
+use crate::{Claim, Error, Position, Proof, Signature, Term, Voters};
 
 /// One entry of the replicated log.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,6 +13,27 @@ pub struct Entry {
     pub data: Data,
 }
 
+impl Entry {
+    // Each claim a change carries, with its signature; nothing for other data.
+    pub(crate) fn claims(
+        &self,
+    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        let change = match &self.data {
+            Data::Voters(change) => Some(change),
+            Data::Empty | Data::Bytes(_) => None,
+        };
+        change.into_iter().flat_map(|change| change.claims(self.at))
+    }
+
+    // Gives each `None` of a change the signature `sign` makes for its claim.
+    pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim<'_>) -> Signature) {
+        match &mut self.data {
+            Data::Voters(change) => change.sign(self.at, sign),
+            Data::Empty | Data::Bytes(_) => {}
+        }
+    }
+}
+
 /// What a log entry carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Data {
@@ -20,16 +41,64 @@ pub enum Data {
     Empty,
     /// What the caller proposed.
     Bytes(Vec<u8>),
-    /// A voter configuration. A node uses it from the time it writes the entry,
-    /// committed or not. The caller applies nothing.
-    Voters(Voters),
+    /// A voter configuration, with the proof that a leader of its term wrote it. A
+    /// node uses it from the time it writes the entry, committed or not. The caller
+    /// applies nothing.
+    Voters(Change),
+}
+
+/// A voter configuration that a leader wrote. A node that missed it checks it with
+/// `votes` and `signature`, then counts a later proof against it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    /// The configuration.
+    pub voters: Voters,
+    /// The votes that elected the leader that wrote the entry, in the entry's term.
+    pub votes: Proof,
+    /// The leader's signature of its [`Claim::Change`]. A `Raft` gives its own with
+    /// `None`, for the caller to sign.
+    pub signature: Option<Signature>,
+}
+
+impl Change {
+    // Each vote in the term of `at`, in rising key order, then the leader's change.
+    pub(crate) fn claims(
+        &self,
+        at: Position,
+    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        let change = Claim::Change {
+            leader: self.votes.candidate,
+            at,
+            voters: &self.voters,
+        };
+        self.votes
+            .claims(at.term)
+            .chain(std::iter::once((change, self.signature)))
+    }
+
+    // Gives each `None` the signature `sign` makes for its claim: a vote in the
+    // term of `at`, then the leader's signature of the change at `at`.
+    pub(crate) fn sign(
+        &mut self,
+        at: Position,
+        sign: &mut impl FnMut(&Claim<'_>) -> Signature,
+    ) {
+        self.votes.sign(at.term, sign);
+        if self.signature.is_none() {
+            self.signature = Some(sign(&Claim::Change {
+                leader: self.votes.candidate,
+                at,
+                voters: &self.voters,
+            }));
+        }
+    }
 }
 
 // The log in memory. Entry `i` has index `i + 1`, and terms start above zero and
 // never decrease. Three indexes trail the end: `committed` is what a quorum holds,
 // `applied` is the last entry given to the caller to apply, and `stable` is the
 // last entry given to the caller to write. `voters` is the index of the last
-// configuration entry, or 0 for `base`, the configuration before the entries.
+// configuration entry, or 0 for `base`, the configuration the node started with.
 #[derive(Debug)]
 pub(crate) struct Log {
     entries: Vec<Entry>,
@@ -99,26 +168,49 @@ impl Log {
         self.voters().0.index <= self.committed
     }
 
-    // The configuration before `index`: `base` with no configuration entry before.
-    fn voters_before(&self, index: u64) -> &Voters {
-        let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+    // The last committed configuration: the last configuration entry at or below
+    // `committed`, or the configuration before the entries.
+    pub(crate) fn committed_voters(&self) -> Voters {
+        self.voters_through(self.committed)
+    }
+
+    // The configuration before `index`: the one before the entries with no
+    // configuration entry before `index`.
+    pub(crate) fn voters_before(&self, index: u64) -> Voters {
+        self.voters_through(index.saturating_sub(1))
+    }
+
+    // The last configuration entry at or below `index`, or the configuration before
+    // the entries.
+    fn voters_through(&self, index: u64) -> Voters {
+        let end = usize::try_from(index).unwrap_or(usize::MAX);
         let end = end.min(self.entries.len());
-        self.entries[..end]
-            .iter()
-            .rev()
-            .find_map(voters_in)
-            .unwrap_or(&self.base)
+        match self.entries[..end].iter().rev().find_map(voters_in) {
+            Some(voters) => voters.clone(),
+            None => self.before_entries(),
+        }
+    }
+
+    // The configuration before the entries. A node that starts with no voters takes
+    // it from its first configuration entry: from index 1, the joint entry whose
+    // outgoing set is the founding configuration. A leave stands for its joint phase.
+    fn before_entries(&self) -> Voters {
+        if !self.base.incoming.is_empty() {
+            return self.base.clone();
+        }
+        let first = self.entries.iter().find_map(voters_in);
+        first.map_or_else(Voters::default, Voters::replaced)
     }
 
     // Every node in the configuration in force and, while that configuration is
     // uncommitted, in the one before it.
     pub(crate) fn nodes(&self) -> BTreeSet<node::Key> {
         let (at, voters) = self.voters();
-        let before = (!self.settled())
-            .then(|| self.voters_before(at.index).nodes())
-            .into_iter()
-            .flatten();
-        voters.nodes().chain(before).collect()
+        let before = (!self.settled()).then(|| self.voters_before(at.index));
+        voters
+            .nodes()
+            .chain(before.iter().flat_map(Voters::nodes))
+            .collect()
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
@@ -226,7 +318,7 @@ impl Log {
 
 fn voters_in(entry: &Entry) -> Option<&Voters> {
     match &entry.data {
-        Data::Voters(voters) => Some(voters),
+        Data::Voters(change) => Some(&change.voters),
         Data::Empty | Data::Bytes(_) => None,
     }
 }
@@ -416,10 +508,23 @@ mod tests {
         }
     }
 
+    // `voters` as a change that node 1 wrote with its own vote alone.
+    fn change(voters: Voters) -> Data {
+        Data::Voters(Change {
+            voters,
+            votes: Proof {
+                grant: crate::Grant::Vote,
+                candidate: node::Key::from_u128(1),
+                voters: [(node::Key::from_u128(1), None)].into(),
+            },
+            signature: None,
+        })
+    }
+
     fn config(term: u64, index: u64, id: u128) -> Entry {
         Entry {
             at: position(term, index),
-            data: Data::Voters(voters(id)),
+            data: change(voters(id)),
         }
     }
 
@@ -427,8 +532,8 @@ mod tests {
     fn holds_the_last_configuration_it_wrote() {
         let mut log = log(&[1]);
         assert_eq!(log.voters(), (Position::default(), &Voters::default()));
-        log.push(Term(1), Data::Voters(voters(1)));
-        log.push(Term(1), Data::Voters(voters(2)));
+        log.push(Term(1), change(voters(1)));
+        log.push(Term(1), change(voters(2)));
         log.push(Term(1), Data::Bytes(vec![9]));
         assert_eq!(log.voters(), (position(1, 3), &voters(2)));
         let log = Log::new(voters(9), vec![entry(1, 1), config(1, 2, 3)], 0).unwrap();
@@ -438,12 +543,59 @@ mod tests {
     }
 
     #[test]
+    fn the_committed_configuration_is_the_last_one_at_or_below_committed() {
+        let entries = [
+            entry(1, 1),
+            config(1, 2, 1),
+            config(1, 3, 2),
+            config(1, 4, 3),
+        ];
+        for (applied, id) in [(0, 9), (1, 9), (2, 1), (3, 2), (4, 3)] {
+            let log = Log::new(voters(9), entries.to_vec(), applied).unwrap();
+            assert_eq!(log.committed_voters(), voters(id), "committed {applied}");
+        }
+    }
+
+    #[test]
     fn gives_the_last_configuration_before_an_index() {
         let entries = vec![config(1, 1, 1), entry(1, 2), config(1, 3, 2), entry(1, 4)];
         let log = Log::new(voters(9), entries, 0).unwrap();
-        let before: Vec<&Voters> = (0..=6).map(|i| log.voters_before(i)).collect();
-        let (base, one, two) = (&voters(9), &voters(1), &voters(2));
-        assert_eq!(before, [base, base, one, one, two, two, two]);
+        let before: Vec<Voters> = (0..=6).map(|i| log.voters_before(i)).collect();
+        assert_eq!(before, [9, 9, 1, 1, 2, 2, 2].map(voters));
+    }
+
+    // The empty set a node with no voters starts with is no configuration.
+    #[test]
+    fn with_no_voters_the_first_configuration_shows_the_one_before_the_entries() {
+        let set =
+            |ids: &[u128]| ids.iter().map(|&id| node::Key::from_u128(id)).collect();
+        let joint = Voters {
+            incoming: set(&[1, 2]),
+            outgoing: set(&[1]),
+        };
+        let leave = joint.leave();
+        let cases = [
+            (Data::Empty, Voters::default()),
+            (change(joint), voters(1)),
+            (change(leave.clone()), leave),
+        ];
+        for (data, before) in cases {
+            let at = position(1, 2);
+            let entries = vec![entry(1, 1), Entry { at, data }, entry(1, 3)];
+            let log = Log::new(Voters::default(), entries, 1).unwrap();
+            assert_eq!(log.committed_voters(), before);
+            assert_eq!(log.voters_before(2), before);
+        }
+    }
+
+    #[test]
+    fn with_no_voters_a_truncated_configuration_shows_nothing() {
+        let config = config(1, 2, 1);
+        let mut log =
+            Log::new(Voters::default(), vec![entry(1, 1), config], 0).unwrap();
+        assert_eq!(log.committed_voters(), voters(1));
+        assert_eq!(log.append(run(position(1, 1), vec![entry(2, 2)])), Ok(2));
+        assert_eq!(log.committed_voters(), Voters::default());
     }
 
     #[test]

@@ -2,13 +2,9 @@ use estimate::combine::{self, combine};
 use estimate::discipline::{Cause, Discipline};
 use estimate::{Filter, Measurement, Slew};
 use types::hash::Map;
-use types::time::{Interval, Monotonic, Span};
+use types::time::{Interval, Monotonic};
 
-use crate::{DRIFT, source};
-
-/// The words of the cell that [`Reader`]s read: a [`Discipline`] as its kind, a
-/// [`Slew`], and a [`combine::Error`].
-const WORDS: usize = 9;
+use crate::{DRIFT, cell, source};
 
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
@@ -17,8 +13,7 @@ pub struct Clock {
     monotonic: env::clock::Clock,
     sources: Map<source::Key, Filter>,
     next: u64,
-    discipline: Discipline,
-    cell: ring::latest::Writer<WORDS>,
+    cell: cell::Writer,
 }
 
 impl Clock {
@@ -27,8 +22,7 @@ impl Clock {
     /// of the sources first agree.
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
-        let discipline = Discipline::Unsynced(combine::Error::NoSources);
-        let (cell, cell_reader) = ring::latest::new(encode(discipline));
+        let (cell, cell_reader) = cell::new();
         let reader = Reader {
             monotonic: monotonic.clone(),
             cell: cell_reader,
@@ -37,7 +31,6 @@ impl Clock {
             monotonic,
             sources: Map::default(),
             next: 0,
-            discipline,
             cell,
         };
         (clock, reader)
@@ -101,15 +94,12 @@ impl Clock {
     fn steer(&mut self) {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
         // A write that changes nothing makes the reads that overlap it run again.
-        let Some(change) = self.discipline.next(estimate, DRIFT) else {
+        let Some(change) = self.cell.discipline().next(estimate, DRIFT) else {
             return;
         };
         // A slew keeps mesh time from going back only against reads before its `now`,
         // so the clock reads inside the update.
-        self.cell.update(|_| {
-            self.discipline = change.at(self.monotonic.now(), DRIFT);
-            encode(self.discipline)
-        });
+        self.cell.update(|| change.at(self.monotonic.now(), DRIFT));
     }
 }
 
@@ -129,23 +119,37 @@ pub enum Status {
     Holdover(Measurement, Cause),
 }
 
-/// Reads mesh time from any thread with no lock. Clones read the same clock.
+/// The node's two clocks at one instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Time {
+    /// A reading of the node's monotonic clock.
+    pub monotonic: Monotonic,
+    /// Mesh time at `monotonic`. The true time is inside the interval, and its
+    /// midpoint is the clock's best guess. `None` until a majority of the clock's
+    /// sources first agree.
+    pub mesh: Option<Interval>,
+}
+
+/// Reads the node's clocks from any thread with no lock. Clones read the same clock.
 #[derive(Clone, Debug)]
 pub struct Reader {
     monotonic: env::clock::Clock,
-    cell: ring::latest::Reader<WORDS>,
+    cell: cell::Reader,
 }
 
 impl Reader {
-    /// Mesh time now. The true time is inside the interval. Its midpoint is the
-    /// clock's best guess, and it never goes back: a call that starts after another
-    /// returns gives a midpoint no earlier, while both edges fit a stamp (to 2162 with
-    /// an unknown error). `None` until a majority of the clock's sources first agree.
+    /// Reads the node's monotonic clock, and gives mesh time at that reading. The
+    /// midpoint of mesh time never goes back: a call that starts after another
+    /// returns gives a midpoint no earlier, while both edges fit a stamp (from 1777 to
+    /// 2162 with an unknown error).
     #[must_use]
-    pub fn now(&self) -> Option<Interval> {
-        self.cell.read(|words| {
-            let slew = decode(words).slew()?;
-            Some(slew.at(self.monotonic.now(), DRIFT).interval())
+    pub fn now(&self) -> Time {
+        self.cell.read(|discipline| {
+            let monotonic = self.monotonic.now();
+            let mesh = discipline
+                .slew()
+                .map(|slew| slew.at(monotonic, DRIFT).interval());
+            Time { monotonic, mesh }
         })
     }
 
@@ -155,163 +159,27 @@ impl Reader {
     /// [`Status::Unsynced`] until a majority of the sources first agree.
     #[must_use]
     pub fn status(&self) -> Status {
-        self.cell.read(|words| {
+        self.cell.read(|discipline| {
             let at = |slew: Slew| slew.at(self.monotonic.now(), DRIFT);
-            match decode(words) {
+            match discipline {
                 Discipline::Unsynced(error) => Status::Unsynced(error),
                 Discipline::Synced(slew) => Status::Synced(at(slew)),
                 Discipline::Holdover(slew, cause) => Status::Holdover(at(slew), cause),
             }
         })
     }
-}
 
-// A push that slews changes only words 1 to 5, and an update stores only the words
-// that change.
-fn encode(discipline: Discipline) -> [u64; WORDS] {
-    let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
-    let (kind, slew, failure) = match discipline {
-        Discipline::Unsynced(failure) => (0, None, Some(failure)),
-        Discipline::Synced(slew) => (1, Some(slew), None),
-        Discipline::Holdover(slew, Cause::NoEstimate(failure)) => {
-            (2, Some(slew), Some(failure))
-        }
-        Discipline::Holdover(slew, Cause::UnknownEstimate) => (3, Some(slew), None),
-    };
-    let [start, from, at, offset, error] = slew.map_or([0; 5], encode_slew);
-    let [sources, agreeing, empty] = match failure {
-        Some(combine::Error::NoMajority {
-            sources,
-            agreeing,
-            empty,
-        }) => [count(sources), count(agreeing), count(empty)],
-        Some(combine::Error::NoSources) | None => [0; 3],
-    };
-    [
-        kind, start, from, at, offset, error, sources, agreeing, empty,
-    ]
-}
-
-fn decode(words: [u64; WORDS]) -> Discipline {
-    let [
-        kind,
-        start,
-        from,
-        at,
-        offset,
-        error,
-        sources,
-        agreeing,
-        empty,
-    ] = words;
-    let slew = || decode_slew([start, from, at, offset, error]);
-    let count =
-        |word: u64| usize::try_from(word).expect("invariant: a count from a usize");
-    // `NoMajority` has at least 1 source.
-    let failure = || match sources {
-        0 => combine::Error::NoSources,
-        _ => combine::Error::NoMajority {
-            sources: count(sources),
-            agreeing: count(agreeing),
-            empty: count(empty),
-        },
-    };
-    match kind {
-        0 => Discipline::Unsynced(failure()),
-        1 => Discipline::Synced(slew()),
-        2 => Discipline::Holdover(slew(), Cause::NoEstimate(failure())),
-        3 => Discipline::Holdover(slew(), Cause::UnknownEstimate),
-        _ => panic!("invariant: the cell holds discipline {kind}"),
-    }
-}
-
-fn encode_slew(slew: Slew) -> [u64; 5] {
-    let span = |span: Span| span.nanos().cast_unsigned();
-    let target = slew.target;
-    [
-        slew.start.0,
-        span(slew.from),
-        target.at().0,
-        span(target.offset()),
-        span(target.error()),
-    ]
-}
-
-fn decode_slew(words: [u64; 5]) -> Slew {
-    let [start, from, at, offset, error] = words;
-    let span = |word: u64| Span::from_nanos(word.cast_signed());
-    let Some(target) = Measurement::new(Monotonic(at), span(offset), span(error))
-    else {
-        panic!("invariant: the cell holds a measurement");
-    };
-    Slew {
-        start: Monotonic(start),
-        from: span(from),
-        target,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use estimate::combine::Error;
-    use estimate::discipline::{Cause, Discipline};
-    use estimate::{Measurement, Slew};
-    use proptest::prelude::*;
-    use types::time::{Monotonic, Span};
-
-    use super::{decode, encode};
-
-    fn slew() -> impl Strategy<Value = Slew> {
-        let error = 0..=36_500 * Span::DAY.nanos();
-        let words = (
-            any::<u64>(),
-            any::<i64>(),
-            any::<u64>(),
-            any::<i64>(),
-            error,
-        );
-        words.prop_map(|(start, from, at, offset, error)| {
-            let target = Measurement::new(
-                Monotonic(at),
-                Span::from_nanos(offset),
-                Span::from_nanos(error),
-            );
-            Slew {
-                start: Monotonic(start),
-                from: Span::from_nanos(from),
-                target: target.expect("at most 36500 days"),
-            }
-        })
-    }
-
-    fn error() -> impl Strategy<Value = Error> {
-        let counts = (1..=usize::MAX, any::<usize>(), any::<usize>());
-        prop_oneof![
-            Just(Error::NoSources),
-            counts.prop_map(|(sources, agreeing, empty)| Error::NoMajority {
-                sources,
-                agreeing,
-                empty,
-            }),
-        ]
-    }
-
-    fn discipline() -> impl Strategy<Value = Discipline> {
-        let cause = prop_oneof![
-            error().prop_map(Cause::NoEstimate),
-            Just(Cause::UnknownEstimate)
-        ];
-        prop_oneof![
-            error().prop_map(Discipline::Unsynced),
-            slew().prop_map(Discipline::Synced),
-            (slew(), cause).prop_map(|(slew, cause)| Discipline::Holdover(slew, cause)),
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn a_discipline_round_trips_through_the_cell(discipline in discipline()) {
-            prop_assert_eq!(decode(encode(discipline)), discipline);
-        }
+    /// The clock's first estimate at `reading`, a reading of the node's monotonic
+    /// clock: its offset, with its error grown by drift to `reading` (200 ppm, 0.72 s
+    /// in one hour). Later estimates never change it. It stamps a reading no later
+    /// than the `monotonic` of a [`Time`] with no mesh time: its midpoint is then never
+    /// later than the midpoint of mesh time from any [`Reader::now`] that gives mesh
+    /// time, while the edges of both fit a stamp (from 1777 to 2162 with an unknown
+    /// error). `None` until a majority of the clock's sources first agree. A call that
+    /// starts after [`Reader::now`] gave mesh time gives an interval.
+    #[must_use]
+    pub fn first(&self, reading: Monotonic) -> Option<Interval> {
+        let slew = self.cell.first()?;
+        Some(slew.at(reading, DRIFT).interval())
     }
 }

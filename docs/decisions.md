@@ -129,6 +129,11 @@ How to read this record:
 - **A16** Units only, no ranges. A unit lives where the number is defined: on a
   primitive channel or on a struct field. Foundation maps common units to the standard
   codes that targets need.
+  A unit is 1 to 32 printable ASCII characters with no space, case-sensitive, and
+  stored as the text the file wrote. `spec::unit` maps each common unit, with one
+  spelling (`degC`, `ohm`, `m/s2`), to its UN/CEFACT Recommendation 20 code, the one
+  standard code. A unit that is not in the table is valid and has no code; a sink that
+  needs a code fails for that channel only and names the unit (coordinator, #213).
 - **A17** Calculated channels are in scope. Calculations write data channels only,
   never commands. Scaling is a calculation. Raw counts plus calculated scaling is the
   default way to meet P1's byte target.
@@ -141,7 +146,30 @@ How to read this record:
 - **S5** `Channel { key, name, kind: Kind }`, with
   `Kind::Index { error: Option<channel::Key>, control: Option<channel::Key> }` and
   `Kind::Data { index, quality: Option<channel::Key>, data_type, unit }`. No calculated
-  or virtual flag.
+  or virtual flag. Amended: no `name` field, because the name is the tree key, and
+  `Kind::Data(Data)` has private fields. An array or list of size 0 is valid: no
+  caller divides by its width, and a refusal, when one is needed, goes in
+  `sample::Type`, which every format reads. The spec numbers its scalar codes in its
+  own table, apart from STORED BODY, so a change to one format does not change the
+  other. Decided by the architect, #756
+  (https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098,
+  https://github.com/synnaxlabs/foundation/pull/1119#issuecomment-6031521522).
+  Amended: `Kind` and `Data` take the edge form as a parameter, with `channel::Key`
+  as the default: `config` gives each edge as a name, and `plan` gives each name its
+  key. `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
+  `types` owns the text of `sample::Type` both ways (`Display` and `FromStr`): exact
+  case, no leading zero in a count, and one space after the comma of a list; `Stamp` and
+  `Span` read and show as `timestamp` and `duration` (A9), so a text that reads shows as
+  itself. Decided by `laptop.architect` (2026-10-07T11:20:34Z):
+  https://github.com/synnaxlabs/foundation/issues/1208#issuecomment-6036837600, and
+  2026-10-07T14:40:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040351044, for the
+  variants, and 2026-10-07T14:55:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040630702, for the
+  scalar names and the `Lengths` fix, and 2026-10-07T15:17:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040868780, for a
+  scalar element with space around it as `Syntax`.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -162,13 +190,19 @@ How to read this record:
   policy.
 - **GATE RULES (write-path, 2026-10-04)** Writers that do not hold control wait. When
   the holder closes or its control lease runs out, the waiter with the highest
-  authority takes control; on a tie, the one that opened first. Each accepted write
-  renews the control lease. A writer whose control lease ran out stays out of the gate
-  until it reopens. Lease and grace times are the home's monotonic time, and the X18
-  grace is a positive span like a control lease. During the grace the recorded holder
-  ranks first: the first writer of its subject takes its place, and a higher authority
-  takes control. A handoff is recorded only when the
-  holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
+  authority takes control; on a tie, the one that opened first. Each group that the
+  home applies or loses renews the control lease of its index, and only that index: a
+  live group with no room is lost and renews, and a backfill frame that gets
+  `Error::Full` is neither and does not. A writer whose indexes have different rates
+  sets its lease by its slowest index. A writer whose control lease ran out stays out
+  of the gate until it reopens. Lease and grace times are the home's monotonic time,
+  and the X18 grace is a positive span like a control lease. During the grace the
+  recorded holder ranks first: the first writer of its subject takes its place, and a
+  higher authority takes control. A handoff is recorded only when the holder's subject
+  or authority changes. Basis: S11, X18, r8 trace (d). The renewal rule was decided by
+  the architect (#1092,
+  https://github.com/synnaxlabs/foundation/issues/1092#issuecomment-6031035230 and
+  https://github.com/synnaxlabs/foundation/issues/1092#issuecomment-6031117029).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It
   may sit on its own index (written on change; a value holds until the next) or share
@@ -206,11 +240,13 @@ How to read this record:
 
 ### 1.3 Delivery
 
-- **B1 (as revised by S10)** The home keeps a disk buffer for indexes whose retention
-  keeps data. Data stays while a holding reader has not received it, within one disk
-  budget per node. When the disk is full, the oldest data goes first, readers get an
-  explicit gap, and the node warns early and names the reader that holds the buffer.
-  Group commit every few ms. Complete readers get frames only after they are on disk.
+- **B1 (as revised by S10)** The home keeps a disk buffer for each index. Data stays
+  while a holding reader has not received it, up to the index's retention (RETENTION),
+  within one disk budget per node. When the disk is full, the oldest data goes first,
+  readers get an explicit gap, and the node warns early and names the reader that holds
+  the buffer. Group commit every few ms. Complete readers get frames only after they are
+  on disk. Amended: per S10 (architect, #895,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160).
 - **S10 (reader)** A reader is a session, not a definition: `Reader { name:
   Option<String>, select: Selector, mode: complete or latest, from: now, oldest, seq,
   time, or resume, max_age, hold: Duration (default 0) }`. Only complete mode holds.
@@ -218,6 +254,34 @@ How to read this record:
   takes over. Out connectors carry reader settings in their config. Current readers and
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
+- **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps by store
+  time the holds on the indexes it selects (READER RULES), so `buffer` may trim a sample
+  past the cap (STORE TRIM). Retention deletes nothing: a ring frees only at its tail,
+  so a time on one index cannot free its samples. It keeps no history window. An index
+  that no policy selects has no time cap. `keep` is zero or more. At `0s` the cutoff is
+  the mesh time of `home`, from its first estimate (READER RULES). A trim gives a reader
+  that is behind a gap at any `keep` (STORE TRIM). Most specific wins as a whole policy
+  (X25), equal specificity is a plan error (S12), and a data channel takes its index's
+  policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", a size cap
+  per index, and a read that reports each sample past `keep` as a gap while its bytes
+  are on disk. That read does not depend on disk pressure, but at `0s` a reader a few
+  milliseconds behind loses each sample it reads from disk, and each read needs `keep`
+  and a clock. Stale commands are the job of `max_age` (A20), not of retention. In
+  `config`, `select` and `keep` are both required. `keep` reads with
+  `document::read::span` (`document.bad-span`), where a negative span reads, and
+  `config` refuses it with `config.negative-span` at the `keep` value. The code names
+  the defect, so a later span bound (a reader `hold`, S10) uses it too. Ruling and
+  answers: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. The lost
+  read: decided by `laptop.architect`, 2026-10-07T12:30:53Z,
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637. The cap
+  by store time: decided by `laptop.architect`, 2026-10-07T13:39:39Z,
+  https://github.com/synnaxlabs/foundation/issues/1080#issuecomment-6039184732 (READER
+  RULES). It supersedes 6037946637 in its clauses "past `keep` after its store time, no
+  hold keeps a sample" and "At `0s` no hold keeps a sample after its store time".
+  Supersedes https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156
+  in its clause that `buffer` trims a sample past `keep`, also when a reader holds it.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on
   each write (B7) is the only source, and a write with no label is live. The person
@@ -236,16 +300,122 @@ How to read this record:
   has no backfill position. An open session holds all data it has not received. A closed
   named reader holds from its position until `hold` after the close, in mesh time; an
   unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
-  a negative hold (#94). The floor per path is the lowest held position, or none;
-  `buffer` trims below it, past retention (by store time), and under disk pressure. A
-  resume takes, per path, the position the reader's `hub` presents, then the position at
-  this home, then the home's fallback. A position below the floor or past the head is
-  accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
-  record at once when they open, close, or are taken over, and on the home's interval
-  when the position changed. A session open at a crash restores as closed at the
-  restore. Complete and latest sessions have separate key types, so a call in the
-  wrong mode does not compile (#725). Supersedes the B3 single position. Basis: A6,
-  A8, B2, B3, S10, X14, #41.
+  a negative hold (#94). The floor per path is the lowest held position, or none.
+  Retention caps the holds: the floor of a path is at least the lowest seq whose store
+  time is at or after the cutoff (the mesh time of `home` minus `keep`), or past its
+  last sample when no seq is (RETENTION). The cutoff moves with time, so `home` gives it
+  on its interval, not only when a position moves. After a failover the store times of a
+  path need not rise with its seq, so a sample stored before the cutoff can stay held a
+  little longer, and no sample stored at or after the cutoff loses its hold (decided by
+  `laptop.architect`, 2026-10-07T13:39:39Z:
+  https://github.com/synnaxlabs/foundation/issues/1080#issuecomment-6039184732). Before
+  its first estimate `home` has no mesh time and gives no cutoff, so the cap starts at
+  the first estimate (decided by `laptop.architect`, 2026-10-07T16:35:57Z:
+  https://github.com/synnaxlabs/foundation/issues/1080#issuecomment-6042343145). These
+  supersede, in their clauses that `home` gives `set_floor` the index's `keep`, that
+  `buffer` raises the floor past each sample stored more than `keep` ago, and that the
+  2.3 row "Holds and floors" stays, part 2 of
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637,
+  https://github.com/synnaxlabs/foundation/issues/1080#issuecomment-6037950577, and the
+  floor sentence of
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739. Part 3
+  of 6037946637 (at `0s` the floor is the stored mark) holds only after the first
+  estimate, and only when each store time of the path is before the mesh time of `home`.
+  After a failover, a copied store time can be after the mesh time of the new home. A
+  trim follows STORE TRIM: under disk pressure, at the tail of the ring, whatever the
+  floors (decided by `laptop.architect`, 2026-10-07T12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/89 in its clause that
+  `buffer` trims below the floor, past retention (by store time), and under disk
+  pressure. A resume takes, per path, the position the reader's `hub` presents, then the
+  position at this home, then the home's fallback. A position below the floor or past
+  the head is accepted as is; the `buffer` read reports any gap (B2). A resume starts a
+  `buffer` read at `Mark::at(position)`, so the entries with no samples at the position
+  come again. Between reads, the caller keeps the mark the last read gave, in memory
+  (#510). Named readers write a position record at once when they open, close, or are
+  taken over, and on the home's interval when the position changed. A session open at a
+  crash restores as closed at the restore. The home drops a grant, ack, or close for a
+  key it gave that is no longer open: a late message after a close or a takeover. A take
+  of such a key gives nothing. A key is the home's own value, in memory only, and keys
+  start again at a restore. No hub message carries a key: the home maps each one to a
+  key it gave, so a key it never gave is a defect of the home and panics. Complete and
+  latest sessions have separate key types, so a call in the wrong mode does not compile
+  (advisor, #725; the take and the key rule: architect, #1038). Only a named complete
+  session needs mesh time to close: `Readers::close_named` and
+  `Readers::open_named_latest` take a stamp, and no other open or close does, so the
+  home opens unnamed readers before the first estimate. A named complete session has a
+  `complete::Key`, and the wrong close of an open session panics; the architect decided
+  (#1024). Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+- **STORE TRIM (2026-10-06)** Under disk pressure, `buffer` frees its oldest records
+  itself, in the commit task, whatever the floors: a ring frees space only at its tail,
+  so a floor never changes which record goes (B1). The commit writes the new tail in the
+  same sync as its data, and reuses the space only after that sync. A trim never frees a
+  record that a read in progress holds (#510). `buffer` keeps its own headroom (at least
+  two records of `body_max`, or twice the records of the commit that trims), so a full
+  ring does not refuse a live write under steady pressure. `append` gives
+  `Rejected::Full` only when the records queued since the last commit do not fit after
+  the trim: the full disk queue of B5, which is the commit queue. A read reports the
+  trimmed seqs of a path as `Read::gap`, also when the path holds no entry, and the
+  gap's length is the count of samples lost (B2). An open of a full ring frees the
+  oldest record for its restart record, until segments exist (S4). `set_floor` and
+  `usage` wait for their first effect, the B1 warning (#1080). Lost: a `trim` call from
+  the home (it needs the commit rate, a late trim gives a second gap, and the edge cases
+  of the ring move up into `home`). Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6030836762). An open
+  frees to the same headroom as a commit. A checkpoint never passes the newest record of
+  a path unless a later synced record holds that path's tail (seq and stamp), so a
+  restart continues from the disk (A8). That record syncs before the checkpoint, in a
+  sync of its own: a crash can keep the checkpoint and lose a record of the same sync.
+  The cost of a trim grows with the paths that lose their newest record, not with all
+  paths. A carried tail is no sample: a read gives no entry for it, only the gap up to
+  it. The trim does not turn on without the carried tail, and the PR that builds it
+  records its form on disk here. Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
+  As built (#1222): the headroom is three times the larger of the largest record and the
+  records of the commit that trims, which are the records not yet synced. The space of a
+  trim is free only at its release, after its sync. From one trim to the release of the
+  next, the ring takes the records of two commits and the blocks that one wrap skips,
+  which are less than one largest record. So after commits of `c` bytes, the next commit
+  fits when it and the skip are at most `2c`, and the next two fit when they and the
+  skip are at most `3c`. A load that grows by the factor `g` with each commit fits while
+  `g + g²` times `c`, and the skip, are at most `3c`: under about 30 percent a commit.
+  Above that, `append` gives `Full`, the full commit queue of B5. A trim cannot free the
+  commit in its sync, so the bound also needs an area that holds three commits in a row
+  and one wrap skip: `3c` and the skip for a steady load, and `4c` and the skip when one
+  commit is `2c`. Lost: twice the records of the commit that trims (it refused a write
+  at each wrap), and twice those records plus one largest record (it refused each commit
+  that was more than one largest record over the commit before it). Each figure that
+  follows is measured with each commit placed while the one before it syncs. On a full
+  ring of 1024 blocks after commits of 40 records of one block, a commit of 80 records
+  is not refused and a commit of 81 is, and two commits of 60 records are not refused
+  and commits of 60 and 61 are. A commit of 20 records of four blocks is refused when it
+  wraps, because the wrap skips 3 blocks, and a commit of 19 is not. On a new ring of
+  1024 blocks, with records of one block, a steady load of 341 records in each commit is
+  not refused and one of 342 is, at its third commit. A commit of twice the commits
+  before it is not refused after commits of 256 records of one block, and is refused
+  after commits of 257. After commits of 64 records of four blocks, which are a quarter
+  of the area, a commit of 128 and the commit of 64 after it are not refused when no
+  record from the commit two before the 128 to the commit after it must skip a block at
+  a wrap. When a record must skip 3 blocks at a wrap in one of those four, the 128 or
+  the commit after it is refused. With one record in each commit, three records and the
+  blocks of one wrap skip must fit in the area. Four of the largest record less one
+  block always hold them, and a smaller ring can refuse a live write under a steady
+  load: with a largest record of four blocks, commits of 2, 4, 4, and 4 blocks get
+  `Full` on a ring of 13 or 14 blocks. `Layout::new` accepts two of the largest record
+  today, and #1276 sets the minimum to four before the trim turns on. That minimum is
+  for one record in each commit: on a ring of 16 blocks, a steady load of one record of
+  four blocks and one of two in each commit is refused at its third commit. A trim moves
+  the tail to the boundary after a record of any kind: a wrap record and a restart
+  record also end where a tail can go. Steady pressure in the ruling means a load whose
+  commits fit the area. The ring size for a real load is the sizing of `node` (SHARD
+  DISK), not the minimum of `Layout::new`. Decided by the architect: the headroom
+  (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033965557),
+  the area that the bound needs (#1222,
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034545693,
+  2026-10-07T08:57:53Z, and with the skip in the `4c` case
+  https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6034791932,
+  2026-10-07T09:12:31Z), and the boundaries and the deferral of the minimum to #1276
+  (#1222, https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -259,26 +429,26 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  costs its length plus the header and at most 64 bytes or a quarter of its length
-  more, and a frame with only empty series still costs its headers. The charge depends
-  only on the frame's length, so the home and the `hub` compute the same charge for
-  the same frame. A remote complete reader gets only the series of its view (M2): the
-  home sends a frame of those series, and both ends charge that frame. The person
-  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
-  charge is part of the wire contract: a change to `block`'s header or size classes
-  needs a new wire version (C9d). The classes changed to four per doubling under wire
-  version 1 (#188), because no release carries that version. The window counts
-  charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
-  and does not count. Credits apply only to complete delivery, which is reliable: a lost
-  frame would leak credit. The `hub` raises the limit only after it releases a frame,
-  and it bounds its decoded copies itself, since a small encoded frame can decode to
-  much more. It sends a `Credit` only when the room it has not announced reaches half
-  the window, and puts the grants for all sessions on one link into one message. It
-  sizes one window per reader from the link's bandwidth-delay product, adapts it, and
-  divides it among the indexes the reader reads. Each session with room can pass its
-  limit by one frame, so the `hub` counts one largest frame per such session against the
-  window, and a reader pins at most its window. Replaces r11 5.2 (a window beyond the
-  acknowledged position): flow control stays apart from durable acks.
+  costs its length plus the header and at most 64 bytes or a quarter of its length more,
+  and a frame with only empty series still costs its headers. The charge depends only on
+  the frame's length, so the home and the `hub` compute the same charge for the same
+  frame. A remote complete reader gets only the series of its view (M2): the home sends
+  a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
+  that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
+  frames"), #267. The charge is part of the wire contract: a change to `block`'s header
+  or size classes needs a new wire version (C9d). The classes changed to four per
+  doubling under wire version 1 (#188), because no release carries that version. The
+  window counts charges, not wire bytes. Per-connection framing in `wire` (X35) pins no
+  pool memory and does not count. Credits apply only to complete delivery, which is
+  reliable: a lost frame would leak credit. The `hub` raises the limit only after it
+  releases a frame, and it bounds its decoded copies itself, since a small encoded frame
+  can decode to much more. It sends a `Credit` only when the room it has not announced
+  reaches half the window, and puts the grants for all sessions on one link into one
+  message. It sizes one window per reader from the link's bandwidth-delay product,
+  adapts it, and divides it among the indexes the reader reads. Each session with room
+  can pass its limit by one frame, so the `hub` counts one largest frame per such
+  session against the window, and a reader pins at most its window. Replaces r11 5.2 (a
+  window beyond the acknowledged position): flow control stays apart from durable acks.
   Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
@@ -401,17 +571,63 @@ How to read this record:
   over 1023, an unknown path or presence byte, or bytes after the last entry is a
   wrong shape.
   For each path, memory holds one run per data record with an entry of it: the
-  `first` of the path's first entry in the record and the record's offset, oldest
-  first, 16 bytes per record and path in a deque that doubles, so at most 32/51
-  of the area. The recovery walk and each sync feed the runs in ring order; a
-  read starts from them (#510).
-  Recovery walks from the tail to the first record that does not follow the chain.
-  A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open, and so does an entry whose `first` is below the tail of its path or whose
+  mark before the path's first entry in the record and the record's offset, oldest
+  first, 24 bytes per record and path in a deque that doubles, so at most 48/51
+  of the area. A mark is a seq and the count of entries with no samples at it
+  already given, so a read resumes between two such entries. The recovery walk
+  and each sync feed the runs in ring order; a read starts from them. A read does
+  not check the record CRC: the open's walk checked each record, and a record
+  this process wrote is read as written. A read's budget counts the pool bytes
+  that its entries' blocks take (`block::footprint`), so an entry with no bytes
+  still costs its block. A read drops a record's table block before it takes the
+  blocks of the record's entries, so an entry of the pool's largest block reads
+  (#968). A read holds no record while it waits for a file read, so a change that
+  frees ring space must first hold the records of each read in progress (#510).
+  Recovery walks from the tail to the first record that does not follow the chain. A
+  block of kind 0 is no record and ends the walk, also when its CRC follows the chain:
+  no version writes kind 0, and a zeroed block must end the walk for every chain value
+  (decided by the architect, #1049:
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031201904). A
+  record that follows the chain but has an unknown kind or a wrong shape fails the open,
+  and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
-  durable: a killed process may have written records that it never synced (#657). The
-  restart record needs one free block: an open of a full ring first moves records at
-  the tail to a segment.
+  durable: a killed process may have written records that it never synced (#657). Before
+  that sync, the open writes again, as read, the two header blocks and each window the
+  walk reads before the one that ends the chain. A read can see, from the cache, writes
+  that a failed sync of an earlier process in the same boot lost, and the cache can drop
+  them between two reads. So an open writes again the header, 8 KiB, and the bytes it
+  walks, at most the area, and the first 52 KiB of each record over one block twice
+  (#698). Lost: a walk with direct I/O, which needs a new `env::files` read mode in each
+  driver and in `sim`. An open that fails with `Invalid` wrote only bytes that it read,
+  where it read them, and did not sync the ring: the ring reads as it did before the
+  open. That is a statement about what a read gives, not about what is durable. On a
+  disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
+  reads, which reads each record twice, and windows held until the walk ends, which
+  takes memory up to the area. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). A file
+  with no checkpoint is no case of its own: the open makes it again (#1254), so the walk
+  after the first checkpoint reads a zero area and ends. This supersedes the case "on a
+  file with no header" of
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971. Decided
+  by the architect (#1286,
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034555756,
+  2026-10-07T08:58:30Z). Each statement about a record holds only when no CRC gives a
+  false match. Decided by the architect (#1049,
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
+  `Unaligned` says that the header block that the open takes holds a tail off a block
+  boundary, and gives that tail. An open that gives `Unaligned` also leaves the ring as
+  read. The open does not check the tail of the other block. `Invalid` names a record
+  only: the first record of a ring is at offset 0. Lost: the tail in `Unfit`, which is
+  also the error of `Layout::new`, where a tail has no value. Decided by the architect
+  (#1093, https://github.com/synnaxlabs/foundation/issues/1093#issuecomment-6031034712).
+  The restart record needs one free block: an open of a full ring first frees its oldest
+  records (STORE TRIM). The writer keeps in memory the boundary after each synced record
+  past the tail (its offset and chain value, 16 bytes, at most one for each block of the
+  area), so a trim finds its new tail with no read of the ring. The walk holds one pool
+  block at a time and reads a longer record in pieces of the pool's largest block, so
+  the pool puts no bound on `body_max`.
+  An open with no such block free fails with `Pool`, and the next open recovers the
+  record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
@@ -435,21 +651,84 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
+  records. It also refuses with `Large` a batch with an entry whose parts, joined,
+  pass the largest block of the shard's pool (`Limit::Block`), because a read gives
+  each entry in one block (#968). An open fails with `Pool(TooLarge)` when a
+  recovered entry passes that block, as after a restart with a smaller budget; a
+  larger pool opens the ring. An open of a header with a smaller `body_max` fails
+  with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
   less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
   from its counts of entries, parts, and bytes, so the home checks a frame before it
-  takes the blocks of its entries (#795). An entry has no part, one, or two; `append`
-  takes them owned and drops them when it fails (#582).
-  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
-  and a random chain value.
-- **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
-  write: the writer's key set with only that group present, its range, and its
-  encoded series. The home stores it, keeps it as the index's newest frame, and later
-  gives it to readers. B7, the log, the seq, and reader positions are per index. A
-  write with more than one present group pays one copy of its series into the index
-  frames. Decided by the `write-path` builder; approved by the coordinator (#191).
+  takes the blocks of its entries (#795). It does not check `Limit::Block`, which
+  depends on the pool. An entry has no part, one, or two; `append` takes them owned
+  and drops them when it fails (#582).
+  `Layout::fit(len, body_max)` gives the largest ring whose file holds at most `len`
+  bytes, or `Small { len, min }` in file bytes, so a caller never learns the area
+  unit. Its `body_max` bounds panic, from the one check that `Layout::new` uses, and
+  `body_max` comes from a constant of `node`, never a config value; if it ever does,
+  the panic becomes an error first. Decided by the architect on #1166:
+  https://github.com/synnaxlabs/foundation/issues/1166#issuecomment-6032394297.
+  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0 and
+  a random chain value. A ring file with no checkpoint (an empty file, or two zero
+  header blocks) holds no record, because an open syncs the first checkpoint before it
+  writes a record. A crash before that sync leaves such a file. An open removes it and
+  makes the ring again with `Config::layout`, then syncs the directories and writes the
+  first checkpoint, so a ring with no checkpoint takes the layout of the open and a ring
+  with one keeps its own (#1254). The open holds its write handle of the old file
+  through the remove, so of two opens at once one gets `Busy`; an `os` open can still
+  take a removed file, which `os` is to close (#1297). An open that finds no ring while
+  other opens of the directory run can get an error from its create, and each commit
+  stays: `Files(Length)` when another open made a ring with another layout, and
+  `Files(Full)` on a disk with room for one ring when another open removed a ring with
+  no checkpoint and has not yet synced the directory. The open does not look again,
+  because no caller opens one directory two times at once. A dropped open can leave its
+  remove in flight, and a later open of the same directory in the process can lose its
+  ring (#1310). It syncs the directory before each create of a ring, because a disk
+  gives the room of a removed file back only then, and a kill after the remove leaves
+  such a file: the remake needs room for the larger of the two files, not for both.
+  `Length` stays for a ring with a checkpoint whose length does not fit its header, and
+  for a file that is not empty and ends inside its header blocks. A crash at any point
+  of the remake leaves a ring that the next open takes, or no ring. Lost: fit the layout
+  to the length of the file (a ring whose size no config gave), and keep the file when
+  its length fits (two paths for one case). It does not wait for `File::resize` (#1238).
+  Decided by `laptop.architect` (2026-10-07T07:47:16Z):
+  https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001. The held
+  handle, the sync before the create, and the `Length` text: decided by
+  `laptop.architect` (2026-10-07T09:08:16Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034721207. The
+  deferral of the dropped open to #1310: decided by `laptop.architect`
+  (2026-10-07T09:34:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6035164599. The open
+  that gets an error from its create: decided by `laptop.architect`
+  (2026-10-07T10:59:02Z and 2026-10-07T11:18:03Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036483605 and
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036799415.
+- **INDEX FRAMES (#191)** The home makes one index frame for each present group with
+  samples of a write: the writer's key set with only that group present, its range,
+  and its encoded series. The home stores it, keeps it as the index's newest frame,
+  and later gives it to readers. B7, the log, the seq, and reader positions are per
+  index. A write with more than one present group pays one copy of its series into
+  the index frames. Decided by the `write-path` builder; approved by the coordinator
+  (#191). A group with no samples gets no index frame and no data entry. It still
+  records its handoff (or keeps it waiting when it finds no room), renews its lease,
+  spends a seq range of zero, and is applied, also when another group of a live write
+  is lost or its own handoff finds no room in a live write. A backfill write with no
+  room gets `Full` whole (B5). A write with no samples still reports a failed commit.
+  Decided by the coordinator with the advisor at 2026-10-06T15:30:26Z (#885):
+  https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440
+  A group with no samples is confirmed with the entries appended before it. It appends
+  no entry of its own and moves no stored mark, but a handoff that it records does. A
+  lost range is durable only when a later live entry of its index, with samples or a
+  handoff, is on disk. A restart before that continues the index at the lost range's
+  first seq. Supersedes the confirm rule of
+  https://github.com/synnaxlabs/foundation/issues/885#issuecomment-6019665440.
+  Decided by `laptop.architect` (#1347), with the live write and `Full` text above,
+  in three comments (2026-10-07T11:46:56Z, 11:47:17Z, and 11:52:25Z, in this order):
+  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037240549
+  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037245942
+  https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037325066
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
@@ -465,30 +744,142 @@ How to read this record:
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
-  `len` 0, and `first` at the live tail. It records a handoff after the gate input
-  that gave it and before the next input or frame. Its bytes are empty when no writer
-  holds control, else `[authority: u8]` then the holder's subject as UTF-8; the entry
-  length gives the subject's length. A restart or a failover starts the gate from the
-  last record (X18): `Gate::recover` with its holder, or `Gate::new` when it names
-  none. Trimming must keep the last record of each index (#406). Until it does,
-  retention can remove that record, and a holder that held control for longer than
-  the retention gets no grace after a restart. The layout is part of the disk format
-  version (C9d). Copy mode checks each record once where remote records enter (X43),
-  and the read after it panics on a bad record.
-  Decided by the `write-path` builder; approved by the coordinator (#191).
+  `len` 0, and `first` at the live tail. It records a handoff after the gate input that
+  gave it and before the next input or frame. Its bytes are empty when no writer holds
+  control, else `[authority: u8]` then the holder's subject as UTF-8; the entry length
+  gives the subject's length. A restart or a failover starts the gate from the last
+  record (X18): `Gate::recover` with its holder, or `Gate::new` when it names none.
+  Trimming must keep the last record of each index (#406). Until it does, a trim
+  (STORE TRIM) can free that record, and a holder whose record a trim freed gets no
+  grace after a restart. Retention deletes nothing (decided by `laptop.architect`,
+  2026-10-07T12:30:53Z and 2026-10-07T12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637 and
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/402 in its clause that
+  retention can remove that record. The layout is part of the disk format version (C9d).
+  Copy mode checks each record once where remote records enter (X43), and the read after
+  it panics on a bad record. Decided by the `write-path` builder; approved by the
+  coordinator (#191).
 - **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
-  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
-  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  no block of the shard's pool holds, on either path, with `Large`. The pool bound is on
+  each entry's parts joined, the home's header part included (#968). No seq moves and
+  the home stores no part of the frame. The waiting handoffs of the frame's indexes are
   still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
   and writes each part. The home never splits a frame, because a frame applies whole
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
   size is checked only when the bodies are appended, after the handoffs: a frame whose
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
-  is known. Decided by the `write-path` builder (#191).
+  is known. Decided by the `write-path` builder (#191). After a failed commit, the home
+  gives `Disk` before it checks the size, so a frame that no record of the ring or no
+  block of the pool holds gets `Disk`, not `Large`, on either path (#1260). Decided by
+  `laptop.architect` (2026-10-07T09:21:07Z):
+  https://github.com/synnaxlabs/foundation/issues/1260#issuecomment-6034929252.
+- **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
+  `clock::Reader` in its `Config`, in each call that needs them. One
+  `clock::Reader::now` gives both at one instant, so a control lease and a stamp check
+  in one call see the same time, and a lease never compares readings of two clocks
+  (approved by the coordinator on 2026-10-06, #964). Before the node first has mesh
+  time, it opens no writer, with `writer::Error::Unsynced`. A write needs an open
+  writer, so it never meets that case. A reader opens with no mesh time: its open and
+  its close take no stamp (#1024; decided by the architect, #963). This is a patch: #523
+  decides where samples wait before the first estimate (CLOCK PEER ANSWER), and removes
+  or keeps `Unsynced`. Lost: time as arguments of each call, because each caller repeats
+  the same two reads and can pass an old one. Approved by the coordinator on 2026-10-05
+  (#191). Mesh time in the home (the ahead limit and the stamp of each entry) is the
+  midpoint of the mesh time of `clock::Reader::now`, which never goes back. Lost: the
+  latest edge, because it goes back when the error shrinks, and with an unknown error
+  (OS CLOCK BOUND) it is 36500 days ahead, so the ahead limit stops nothing and one bad
+  stamp makes each later true stamp `Backwards` (#952 review, 2026-10-06).
+- **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
+  `codec`, and `home` items, apart from two. `Config`, which only `node` builds, names
+  `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
+  shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool,
+  so `hub` takes no pool of its own and the two cannot differ (architect,
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051). `Config`
+  takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
+  for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
+  the caller gives it with no entry that waits for a commit. The condition is stated,
+  not checked: `node` appends nothing before `Shard::new`, and `Config` takes the
+  buffer by value, so no later append can come from outside (architect,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6033691871; lost: a
+  check in `Shard::new`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
+  PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
+  Until then, the shard is the only writer (architect,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6034204295).
+  `home::Error` holds only what `write` gives, and each other call has its own error.
+  Conversions from `control` errors are private. The `hub` row stays as it is. `Shard`
+  gives no stored seq until a caller needs one (architect review,
+  https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6031908363). Lost:
+  `control` and `delivery` in the `hub` row, because `hub` then knows how the home is
+  built and a `control` change becomes a `hub` change. Lost: no call surface, with
+  requests through a ring, because on one shard a call costs nothing and a message costs
+  a copy and a wake, and it adds a second protocol beside `wire`. Lost: one reader key
+  and a panic at a grant to a latest reader, because the precondition is not in the
+  type. Lost: one `home::Error` for every call, because `write` would list `Unsynced`
+  and `Lease`, which it never gives. The plan has the full text
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
+  by the architect, #963
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
+- **HOME TYPE REFUSAL (#963)** `Shard::open_writer` refuses a key set with a series of
+  a type the home does not write yet, with `writer::Error::Type` (the slot and the type
+  of the first such series). It decides after `Unsynced` and `Lease`, and changes no
+  state. `hub` adds no check of its own; it maps the variant to its own error and names
+  the channel. This is a patch: #1145 makes the home write every `sample::Type` and
+  removes the variant. Lost: a documented precondition on `hub` (a user can break it,
+  and each `hub` caller must keep it); a refusal in `config check` (a second place that
+  must track the home). Decided by the architect, #963
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
+  row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
+  `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
+  nothing outside a Tokio runtime. A complete session that misses a frame (one that
+  comes when the frames it has not given back, held or untaken, reach a window) gets no
+  later frame, as there is no catch-up from the buffer yet. The director chose that
+  `delivery` reports the miss and wakes the session, and that `next` then ends with an
+  error (2026-10-07T06:01:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
+  `delivery::Readers::release` also names a session that missed a frame and has none
+  waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
+  forwards it until #274 removes it. `next` gives a waiting frame, then `Ended::Behind`,
+  then `Ended::Buffer`. Lost: an error from `take`, which every caller, latest readers
+  too, then handles; a `behind` list beside the woken keys, a second list to drain for
+  an event that happens once per session. A `delivery` model property test and a 32-seed
+  `sim` test stand in for loom and shuttle: the wake never crosses a thread. Decided by
+  `laptop.architect` (2026-10-07T06:36:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). A waiting
+  hub reader has given back every frame, as it grants at each `next` call, so no hub
+  test reaches the wake of a session that missed a frame with none waiting. The
+  `delivery` tests and the home `sim` test
+  `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
+  `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
+  miss while a frame waits gives no wake. The hub `sim` test is
+  `ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window`: one
+  commit of more than a window wakes a waiting reader, which gets each frame before the
+  miss, then `Ended::Behind`, with no hang. Decided by `laptop.architect`
+  (2026-10-07T07:24:41Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119). #1170
+  sizes the window to one commit. After a warmup, a write and `next` make no heap
+  allocation, while frames wait, while a reader waits, and in the write that wakes a
+  latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
+  does not count the commit task. `next` gives a `types::frame::View` of the reader's
+  channels and their index (M2), never the frame. The view borrows the reader, which
+  releases the frame at the next call, not at its first poll, and grants credit for it
+  there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
+  keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
+  A writer on a channel of a type the home does not write gets `writer::Error::Type`
+  with the channel's name (HOME TYPE REFUSAL). Decided by `laptop.architect`
+  (2026-10-07T05:53:24Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
+  2026-10-07T05:57:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
+  2026-10-07T07:12:40Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929). The
+  surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -503,17 +894,28 @@ How to read this record:
   reader); within 2x at 100k channels; latest-mode p99 under 250 us over one encrypted
   LAN hop; under 4 bytes per sample for typical sensor data, timestamps included;
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
-  the dedicated machine blocks a merge.
+  the dedicated machine needs a written judgment before merge. The judgment states how
+  often the path runs (per sample, frame, session, or start), its absolute cost against
+  the P1 budget, the noise of the machine, and what the change buys. The architect
+  accepts or rejects it on those facts (the person, 2026-10-07: "YES"). The person
+  decided on 2026-10-06 (#1047): "we need to make sure that we semantically understand
+  benchmarks. A regression of 11% can be ok in the right contexts". Supersedes: a
+  regression over 5% blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
-- **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set. A mask holds the index of each channel it holds, so the
-  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
-  mask is a sorted list, or no list when it holds every entry, so a view's cost grows
-  with the smaller of its frame's series and its mask's entries (rule 11). A view
-  borrows its frame and mask, so making one takes no reference count. Approved by the
-  coordinator (#157).
+- **M2 (revised 2026-10-06)** Readers get a view: the frame plus a mask cached per
+  key set and reader. The home routes by key set. A mask holds the index of each
+  channel it holds, so the series of a view make a frame. A mask is a sorted list of
+  the entries it holds, or no list when it holds every entry. A view's walk grows with
+  the smaller of its frame's series and its mask's entries (rule 11). A view borrows
+  its frame and mask, so making one takes no reference count. Approved by the
+  coordinator (#157). A view has no charge: a remote reader charges the frame it builds
+  (FRAME LAYOUT), so `View::charge` and the list of the entries a mask leaves out,
+  which only the charge used, are gone (architect, #1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827 and
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
+  Supersedes: the list of the entries left out (#755, the gate of PR #873).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -539,11 +941,25 @@ How to read this record:
   entry or group count: an entry or group past the key set is absent. A frame is at
   most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
   their order and padding are part of the disk and wire format version (C9d). A change
-  to either needs a new version. The padding is at most 7 bytes for each present
-  series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
-  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
-  records enter (X43). Decided by the coordinator (#306).
+  to either needs a new version. A `Draft` writes zeros in the padding, and no reader
+  reads it, so `frame::check` does not check it. A frame from a peer may hold other
+  bytes there, which `replica` stores and copy mode (X43) sends as they are (decided by
+  the architect, #1064:
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031091642, worded in
+  https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6031226370). The
+  padding is at most 7 bytes for each present series: at most 1% of encoded bytes at
+  1024 samples, and up to 34% at 10 samples (measured on #317). `frame::split` cuts a
+  body at its `(tag, end)` pairs and panics on ends that do not fit. Copy mode runs
+  `frame::check` once where remote records enter (X43). Decided by the coordinator
+  (#306). A frame from another node is built from its ends (HUB WIRE):
+  `Layout::from_ends` checks them before a block is taken, and `Draft::body_mut` takes
+  the body as it arrives. `frame::ends` gives the ends of series of given lengths, so
+  the rule of 8 has one home. Both nodes charge such a frame with
+  `frame::charge(series, body_len)`, one function on each side, so the charges are
+  equal by construction; a `Layout::charge` would be a second way. Decided by the
+  architect (#1068:
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359 and
+  https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -639,8 +1055,8 @@ How to read this record:
   at `now`, given or grown by drift, votes only when no bound is known. A vote for it
   lost: it turned a peer split into a wide estimate that no peer gave. The person chose
   this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
-  the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
-  Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
+  the coordinator (#314). A known bound votes at any width, so a wide one (a Linux
+  bound of 15 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
   is unknown too, at the center of the same hull. Approved by the coordinator (#437),
   with the hull of #344. When drift grows unknown bounds so that this hull spans more
@@ -649,13 +1065,20 @@ How to read this record:
   bounds. Decided by the `time` builder (#344). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
-  (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
-  whose readings allow one before drift gives `None`: a stopped bound stored as a
-  measurement could miss the true offset. Decided by the `time` builder (#258). Each
-  function returns only the errors it can give: one `Error` per module (`exchange`,
-  `overlap`, `combine`), and `Option` where a caller does the same for each cause
+  (#144). An exchange with an error over 36500 days gives an unknown measurement,
+  centered between its edges or at the nearest span, so no caller maps a failure to one.
+  It cuts no known bound, because an unknown bound votes only when no bound is known. An
+  unknown reading (`exchange::Reading::Unknown`) gives an unknown measurement, because
+  two unknown readings sent as intervals whose centers move apart by more than the round
+  trip, or one interval clamped at the end of the stamp range, can give a known bound
+  (#930). An overlap whose readings allow an error over 36500 days before drift gives
+  `None`, as an overlap with no edge does, because no caller needs an unknown device
+  measurement yet. A device source can ask for one when it calls `Overlap::at`. Decided
+  by the `time` builder (#258), and for the exchange approved by the coordinator (#903).
+  Each function returns only the errors it can give: one `Error` per module (`overlap`,
+  `combine`), and `Option` where a caller does the same for each cause
   (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
-  (#272).
+  (#272). `Exchange::measure` has one cause left, so it gives `Option` (#903).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -738,7 +1161,7 @@ How to read this record:
   fires when both bounds hold.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
-  `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
+  `ntp_gettime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
   `clock` reads that as `Measurement::unknown` (36500 days): a node alone with no known
   estimate (CLOCK HOLDOVER) still gets OS time, with an error that says "unknown", and
   beside a known bound the reading does not vote (ESTIMATE COMBINE). A fixed invented
@@ -748,10 +1171,17 @@ How to read this record:
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
-  the OS bound to the error of its own read, so the error is never less than the OS
-  bound. An error over 36500 days reads as unknown, the same as no bound (the
-  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` gives
+  the OS reading to the exchange as an interval, its time plus or minus its bound, so
+  the error is never less than the OS bound. An error of 36500 days or more reads as
+  unknown, the same as no bound (the coordinator, #144). So does an edge of the bound
+  past the range of a stamp, centered at the reading as with no bound: a known bound
+  with such an edge needs a reading after 2162 or before 1777, so it cannot hold a true
+  time between those years. The coordinator approved it with the advisor, #910. Lost:
+  the edge stopped at the range, because it narrows a bound of 36500 days or more into a
+  known one; edges in `i128` through a new `estimate` input, because it keeps a false
+  bound that votes (#314); `Measurement::widened`, a public item that keeps the OS
+  reading a special path. Only `clock` and `node` call `clock::source::Wall::measure`; a
   lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
   only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
   while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
@@ -759,25 +1189,40 @@ How to read this record:
   gives a false bound until its operator installs chrony. Lost: the Linux bound always
   unknown, because it also drops the good bound from chrony and ntpd; detecting
   timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
-  on 2026-10-06 ("A is still fine"), #689.
-- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
-  OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
-  each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
-  bound (an unknown estimate, or an OS clock with no bound) says "unknown" and carries
-  its offset. The asking node pushes a `Measurement::unknown` that it builds itself,
-  so the answer cannot narrow into a known bound. A peer that never answers counts
-  against a majority, and `node` removes no source. Lost: a node with no time does
-  not answer, because then a mesh that starts cold never syncs; an answer of "no
-  time" that takes the source out of the vote, because a node with a bad OS clock then
-  syncs on itself; `node` removes a silent source after a timeout, a patch that puts
-  time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145.
-  So a node that starts while no peer answers stays unsynced, even with a good OS
-  bound. Its samples keep their local monotonic reading, and the node stamps them in
-  mesh time when the first estimate comes, with the error of that estimate at each
-  reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and a
-  node that never syncs fills it. Lost: drop the samples, a patch that loses data;
+  on 2026-10-06 ("A is still fine"), #689. `os` also gives `None` in clock state
+  `TIME_ERROR`, and for a negative `maxerror` or one past the end of a `Span`, because
+  root can set any value. `os::wall()` reads once and returns `Error::Wall` when the OS
+  refuses the call, as a seccomp filter or systemd's `ProtectClock` can. A later
+  refusal panics (#117).
+- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its OS
+  reading and its OS bound. Cold nodes then vote with each other's OS clocks, and each
+  waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown bound
+  (an unknown estimate, or an OS clock with no bound) says "unknown" and carries its
+  offset. The asking node measures it as `exchange::Reading::Unknown`, so the answer
+  cannot narrow into a known bound (#930). A node answers from one read of its clock,
+  sent as both intervals, because two reads can straddle a sync and pair a known
+  interval with an unknown one. The read is after the request arrived and before the
+  answer left, so it bounds both ends of the exchange. An unknown answer carries
+  `Measurement::time`, because the midpoint of the interval moves after 2162 (#145). A
+  peer that never answers counts against a majority, and `node` removes no source. Lost:
+  a node with no time does not answer, because then a mesh that starts cold never syncs;
+  an answer of "no time" that takes the source out of the vote, because a node with a
+  bad OS clock then syncs on itself; `node` removes a silent source after a timeout, a
+  patch that puts time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's
+  fine"), #145. So a node that starts while no peer answers stays unsynced, even with a
+  good OS bound. Its samples keep their local monotonic reading, and the node stamps
+  them in mesh time when the first estimate comes, with the error of that estimate at
+  each reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and
+  a node that never syncs fills it. Lost: drop the samples, a patch that loses data;
   stamp them with OS time at once, a patch that writes a time the clock refused and
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
+  `clock::Reader::first` gives that stamp: the first estimate at a reading. Later
+  estimates never change it, so the stamps keep the order of their readings and are
+  never after mesh time (#523). `clock::Reader::now` gives a `clock::Time`: a reading
+  of the monotonic clock, and mesh time at that reading, from one read of the clock, so
+  a sample with no mesh time keeps that reading. Lost: mesh time at a reading the
+  caller made, which can go back while the clock slews down. Approved by the
+  coordinator on 2026-10-06 (#964).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -793,7 +1238,15 @@ How to read this record:
   is not hit: no daemon slews `mach_continuous_time`. Lost: `CLOCK_BOOTTIME` with a
   rule that the daemon slews within a limit, because a node cannot check it;
   `CLOCK_BOOTTIME` with a bound that can fail in a fast slew. The person decided on
-  2026-10-06 ("yes"), #688.
+  2026-10-06 ("yes"), #688. On macOS `os` reads `CLOCK_MONOTONIC_RAW`, which is
+  `mach_continuous_time`. Each `os::clock()` call starts a new clock at 0, so `node`
+  calls it once. Tokio's timer stops in a suspend on macOS and slews on Linux, so `os`
+  arms it for at most 1 s at a time: a sleep across a suspend completes up to 1 s late.
+  The vDSO and the macOS commpage read the counter with no fence that waits for earlier
+  stores or holds back later loads, so `os` adds them to give the order that
+  `env::clock` requires (#458): `mfence; lfence` before the read and `lfence` after on
+  x86-64, `dsb ish; isb` before and `isb` after on arm64. Other architectures do not
+  build. Cost: 38 ns against 16 ns for one read without the fences (M3 Max) (#117).
 - **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
   sources of one clock in one task on the clock's shard. `node` builds the source table
   and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
@@ -855,31 +1308,120 @@ How to read this record:
   message: a kind byte, then little-endian fields of 8 bytes. A request (kind 1)
   carries `sent`, the monotonic reading of the node that asks. An answer echoes `sent`,
   so the node that asks keeps no open requests, and carries the peer's time (CLOCK
-  PEER ANSWER). Kind 2 is a known bound, with the interval when the request arrived
-  and the interval when the peer answered. Kind 3 is an unknown bound, with the
-  peer's best guess of the time when it answered. The offset of CLOCK PEER ANSWER is
-  this stamp less the asking node's own time, because the peer's offset has no
-  meaning without the peer's monotonic clock. A message has 9, 41, or 17 bytes, and
-  `decode` refuses each other length. `decode` does not check the order of an
-  interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
+  PEER ANSWER). Kind 2 is a known bound, with an interval read after the request
+  arrived and one read before the answer left. Kind 3 is an unknown bound, with the
+  peer's best guess, read after the request arrived and before the answer left. The
+  offset of CLOCK PEER ANSWER is this stamp less the asking node's own time, because the
+  peer's offset has no meaning without the peer's monotonic clock. A message has 9, 41,
+  or 17 bytes, and `decode` refuses each other length. `decode` does not check the order
+  of an interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
   Lost: a request number, because the node that asks must then keep and remove open
-  requests and still needs the send time of a late answer; each message 41 bytes, as
-  the header has one length (a request then sends 32 zero bytes); `encode` into a
-  `&mut [u8]` that returns a length (a short buffer then needs an error); a second
-  byte for the kind of time (two checks where one kind byte does the work).
-- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
-  however many shards it runs, so each site's firewall needs one known port per
-  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
-  issues encodes that shard. A receive loop on one shard reads the UDP socket in
-  batches and hands each batch to the owning shard over the C2 ring; every shard
-  sends on the same socket. The TCP listener accepts and moves each stream to its
-  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
-  and a send half that any shard may use, and `sim` models the split. Rejected: a
-  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
-  by address, breaks on NAT rebinding), and one shard doing all network work. If the
-  receive loop saturates on Linux, add a reuse-port group steered by the same
-  connection ID. Decided by the design session under the architecture delegation
-  (#53).
+  requests and still needs the send time of a late answer; each message 41 bytes, as the
+  header has one length (a request then sends 32 zero bytes); `encode` into a
+  `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
+  for the kind of time (two checks where one kind byte does the work).
+- **HUB WIRE (#561)** A remote reader session is one hub stream of class `Complete` or
+  `Latest`. After the header, the reader's node sends `wire::hub::Open`: the mode and
+  the number of channels, all on one index. A latest session gets the newest live frame
+  before its commit. A complete session gets each live frame after its commit, and
+  `Open` carries its first grant in bytes (CREDIT RULES). The home answers `Opened`; the
+  reader sends `Credit`, its total grant since the open; the home sends each frame as a
+  `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
+  `Head` has no form. The body holds only the series of the reader's view, the index
+  series too, written from the frame's block as slices, and both ends charge the frame
+  that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
+  in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
+  frame (its slot order), the index too, so a place is an entry of the reader's frame
+  and a session has `channels` places. An open whose keys do not hold the index is not
+  valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
+  `UNKNOWN`; the architect, 2026-10-07,
+  https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
+  of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
+  message. The rest is one run of bytes, in messages of at most the peer's
+  `message_bytes_max`, back to back with no prefix: after `Open`, the keys; after
+  `Head`, the place and end of each series in the body, then the body. A message never
+  splits a key or an end, so each side decodes each message as it arrives. The keys run
+  holds exactly `channels` keys and the ends run exactly the head's number of series, so
+  each side counts them to find where a run ends, and the body starts a new message. So
+  no count of channels or series has a cap, and the reader fills one block of its
+  frame's length: the header, the range, a descriptor for each series, and the body to
+  the last end. A run message with more keys or ends than remain is not valid. A head of
+  no series is not valid, since a frame holds its index. The home checks each key as it
+  arrives and never allocates by the peer's count. A head with more series than places,
+  or an end with a place the session does not have or that is not above the place before
+  it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
+  the ends, so the reader holds no more ends than it has places. The ends and the body
+  are in place order: the home writes the series of each place it has, from 0, each from
+  the frame's block as a slice, with ends it computes in that order. At the open it
+  makes the list of each place and its home entry, sorted by place, and writes each ends
+  message from it with `wire::hub::ends::encode`, which sizes the message by its buffer,
+  so no scratch buffer holds the ends (the architect, #1146,
+  https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
+  takes exactly the ends the buffer holds and no more, so one iterator passed with
+  `by_ref()` splits a run into messages; the caller owns the count of the run (the
+  architect,
+  https://github.com/synnaxlabs/foundation/pull/1258#issuecomment-6033667563). The first
+  series starts at 0, and each other at the end before it rounded up to a multiple of 8.
+  So the body is the series bytes of the reader's own frame (FRAME LAYOUT), and the
+  reader builds that frame in one block: the header and descriptors that `types` writes,
+  then the body as it arrives, with no copy of a series after the receive. An end below
+  the start of its series is not valid; `types` refuses it, as `frame::check` does. The
+  padding may hold any bytes (FRAME LAYOUT). Each direction has its own messages: the
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
+  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
+  decode, comes from the wrong side, or breaks a rule above), which every protocol may
+  use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
+  a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
+  because the home knows its index and a second copy needs a check; the whole
+  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
+  open needs no mesh time (READER RULES), and a later named open can add one; grants for
+  many sessions in one message, which wait until a link carries a second session; a
+  public series count on `View`, for a home that writes the ends from `View::iter`,
+  which gives the home's entry order and not place order (the architect,
+  https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). The
+  coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
+  2026-10-06) and the run, the index place, and `MALFORMED` on #1064
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
+  whole keys and ends and one message type for each direction
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
+  open of no channel and the place checks in `hub`
+  (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030906615). Amended
+  (2026-10-07, #1068): the body follows the places, not the home's entry order, so an
+  end whose place is not above the place before it is not valid; both ends charge the
+  reader's frame. Lost: a copy of each series at the reader (one per sample at every
+  remote reader at P1 rates, which the home's free order cannot justify,
+  `docs/claude/performance.md` rule 10); a reader key set in the home's order (key sets
+  are sorted by slot); a start in each descriptor (a disk and wire format change, C9d).
+  Decided by the architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359). The
+  byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
+  `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
+  is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
+  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`. Amended
+  (2026-10-07, #1196): the message order, the runs, and the head bound move from `hub`
+  to two stateful decoders in `wire`, `hub::Home` at the home and `hub::Reader` at the
+  reader's node, each with an exact error for each broken rule, so `hub` checks no wire
+  rule. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
+  the same port number, however many shards it runs, so each site's firewall needs one
+  known port per conduit. Each QUIC connection belongs to one shard, and every
+  connection ID a node issues encodes that shard. A receive loop on one shard reads the
+  UDP socket in batches and hands each batch to the owning shard over the C2 ring; every
+  shard sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner and
+  a send half that any shard may use, and `sim` models the split. Rejected: a port per
+  shard (a port range in every firewall), kernel reuse-port hashing (routes by address,
+  breaks on NAT rebinding), and one shard doing all network work. If the receive loop
+  saturates on Linux, add a reuse-port group steered by the same connection ID. Decided
+  by the design session under the architecture delegation (#53). The same port number
+  (2026-10-06): with port 0, UDP takes a free port and TCP binds the same one. When TCP
+  finds it in use, the node closes the UDP socket and tries a new port, up to 8 tries,
+  then gives the last error: TCP and UDP have separate port spaces, and no OS call gives
+  a port free in both. A fixed port that fails gives its error at once. Approved by the
+  coordinator on #990.
 - **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
   random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
   as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
@@ -891,7 +1433,8 @@ How to read this record:
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 - **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and accepts;
-  the node's sockets and relays sit in one node-level part (ONE PORT PER NODE). A
+  the node's sockets and relays sit in one node-level part, `transport::Port` (ONE
+  PORT PER NODE), which `node` binds once and splits into one part for each shard. A
   `Session` goes to one peer over one path, direct or relayed, fixed for its life, and
   runs every class on one carrier. A second carrier for some classes waits for the
   measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99 holds while
@@ -910,69 +1453,113 @@ How to read this record:
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
-  first message. A stream that ends or resets before its class byte drops: the peer
-  never accepts it, and resets the reply half of a two-way stream with code 0. Each
+  first message. The peer queues a stream for accept at the first byte of its first
+  message. A stream that ends or resets before that byte drops: the peer never accepts
+  it, and resets the reply half of a two-way stream with code 0 (amended:
+  https://github.com/synnaxlabs/foundation/pull/1380#issuecomment-6038160446). Each
   message is a QUIC varint length, then that many bytes, at most the receiver's
   `message_bytes_max`. A node accepts the waiting streams highest class first. Each
   stream sends at the QUIC priority of its class, `Command` first, and streams of one
   class share in turn. The priority is strict: a class sends nothing, resends too, while
   a higher class has bytes to send, so a steady higher class starves the lower ones. It
   orders only the bytes that QUIC holds. All classes share one QUIC send window, so a
-  message can wait for bytes of a lower class to be acknowledged (#797). `Complete` gets
-  a guaranteed minimum share in the class-ordered send budget, not in QUIC (#819, before
-  the alpha). The budget bounds what QUIC holds to `window_bytes`, so QUIC's strict
-  order acts only inside that bound. Lost: a connection per class, because four
-  handshakes and four congestion controllers compete on one path (#55). Settled by the
-  advisor and the coordinator under the person's delegation (#789). A node resets a
-  stream with the stop's code when the stop arrives. A peer breaks the protocol
+  message can wait for bytes of a lower class to be acknowledged (#797). The QUIC send
+  window, not the send budget, bounds what QUIC holds. A message that QUIC does not take
+  in full waits its turn, by class, then oldest first. Only the first sender in turn
+  writes, and only it wakes when QUIC has room. A write of a class ahead of every
+  waiter goes first; any other write waits, and a `try_send` gives the message back.
+  Stream credit is twice the connection window, so a stream never waits on its own
+  credit while the connection has room. This relies on reader-granted credits (B3): a
+  node takes every byte it granted credit for. A peer that gives less stalls only its
+  own connection (#819). The turn goes `Command`, then `Latest` and `Complete` by share,
+  then `CatchUp`. While streams of both `Latest` and `Complete` hold a message to send,
+  QUIC takes 3 bytes of `Complete` for each byte of `Latest`, within about one window:
+  `Complete` goes ahead while it is owed bytes. A class alone makes no debt and no
+  credit, and pays off what it owes or is owed. Room that a stream got and its caller
+  has not taken counts for neither class, and a message that `try_send` gave back is not
+  held. The send budget gives room in the order of the turn. Room that a message of the
+  owed class frees waits for that class's next message while the other class holds room,
+  so neither class can take the share through the budget (#819). Lost: a connection per
+  class, because four handshakes and four congestion controllers compete on one path
+  (#55). Settled by the advisor and the coordinator under the person's delegation
+  (#789). A node resets a stream with the stop's code when the stop arrives, and frees
+  the stream's room in the send budget and its turn (#1308). A peer breaks the protocol
   when it sends another class byte, ends a stream inside a message, sends a message over
   the limit, or resets or stops a stream with a code over 32 bits. The node then closes
   the connection with application code 2^32 and the reason as text, and the caller gets
-  `Error::Broken`. Each connection keeps two budgets, which count the length of each
-  message. A sender starts a message only when the messages it started and the streams
-  have not taken in full stay within the peer's `window_bytes`; else the write waits for
-  `Writable`. A message starts only when it fits and no stream of its class or a higher
-  class waits for room. Room that frees goes to the waiting streams highest class first,
+  `Error::Broken`.
+  Each connection keeps two budgets, which count the length of each message. A sender
+  starts a message only when the messages it started and the streams have not taken in
+  full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
+  message starts only when it fits and no stream of its class or a class ahead of it
+  waits for room. Room that frees goes to the waiting streams by class in that order,
   then oldest first, until the next one does not fit, and only those streams wake
   (#611). A send that does not wait (`try_send`) starts a message only by the same rule
   and when, after a flush, the stream holds no part of an earlier one; else it gives the
   message back with no byte of it sent, and the stream does not wait for room (#597). A
-  receiver takes a block by the same rule, within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that wait for
-  a block never use up the credit that a started message needs, and a peer that breaks
-  the send rule holds at most the receive budget and stops only its own connection. Each
-  node's first one-way stream is its hello, with no class byte: (id, value) pairs, both
-  QUIC varints, ids strictly increasing, then the stream end. Id 0 is `window_bytes` and
-  id 1 is `message_bytes_max`; both are required. A node ignores an id it does not know,
-  so an advisory field needs no new ALPN; a field that the peer must understand needs
-  one. The acceptor sends its hello at 0.5-RTT, once it has the whole ClientHello and so
-  the peer's transport parameters, or at its `Connected` when a HelloRetryRequest holds
-  them back. The dialer sends at its `Connected`. So the hello adds no round trip. The
-  hello has its own one-way stream: a node lets the peer open `streams_max` + 1 one-way
-  streams, and does not give back the credit of the peer's hello stream when it ends,
-  so after the hello the peer has at most `streams_max` open. Until the peer's hello
-  arrives, a node opens and accepts no stream; the caller bounds that wait, with its
-  other limits before admission (#563). A sender obeys only the peer's values: each
-  message is at most the peer's `message_bytes_max`, and the send budget is the peer's
-  `window_bytes`. A value over what the node can count counts as the largest it can
-  count. A peer breaks the protocol when its hello ends inside a
+  receiver takes a block by the same rule, highest class first, within `window_bytes`
+  plus `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that
+  wait for a block never use up the credit that a started message needs, and a peer that
+  breaks the send rule holds at most the receive budget and stops only its
+  own connection. Each node's first one-way stream is its hello, with no class byte:
+  (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
+  0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
+  an id it does not know, so an advisory field needs no new ALPN; a field that the peer
+  must understand needs one. The acceptor sends its hello at 0.5-RTT, once it has the
+  whole ClientHello and so the peer's transport parameters, or at its `Connected` when a
+  HelloRetryRequest holds them back. The dialer sends at its `Connected`. So the hello
+  adds no round trip. The hello has its own one-way stream: a node lets the peer open
+  `streams_max` + 1 one-way streams, and does not give back the credit of the peer's
+  hello stream when it ends, so after the hello the peer has at most `streams_max` open.
+  Until the peer's hello arrives, a node opens and accepts no stream; the caller bounds
+  that wait, with its other limits before admission (#563). A sender obeys only the
+  peer's values: each message is at most the peer's `message_bytes_max`, and the send
+  budget is the peer's `window_bytes`. A value over what the node can count counts as
+  the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
-  `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
-  transport parameters cannot take this node's whole hello at once (no one-way stream,
-  or a stream or connection window under the hello) also breaks it, with the reason `a
-  peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
-  `Connected` before it, and an accept gives the caller no event. Before the handshake
-  is confirmed, QUIC gives the peer no reason, only APPLICATION_ERROR. A Foundation node
-  always has room: `streams_max` is at least 1, and `window_bytes` is at least
-  `message_bytes_max`, which is at least 1472. A compile-time assertion holds 1472 at or
-  above the hello limit, so only a foreign peer gets this. Lost: send the hello later
-  when credit comes, because `open` then needs a second gate and a state that only a
-  foreign peer reaches. `Endpoint::write` gives `Error::TooLarge` for a message over the
-  peer's limit; a caller that forwards a writer's frame gives the writer `Large`, and
-  the writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by
-  the coordinator on PR #407. The budgets: proposed by `network` in #228. The room
-  order: approved by the advisor on #611. The hello: proposed by `network` in #55;
-  settled by the advisor and the coordinator under the person's delegation (#55).
+  `message_bytes_max` below 1472 (architect, #1198:
+  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it, or
+  resets. A peer whose QUIC transport parameters cannot take this node's whole hello at
+  once (no one-way stream, or a stream or connection window under the hello) also breaks
+  it, with the reason `a peer with no room for the hello`. A dial that breaks so gets
+  `Error::Broken` with no `Connected` before it, and an accept gives the caller no
+  event. Before the handshake is confirmed, QUIC gives the peer no reason, only
+  APPLICATION_ERROR. A Foundation node always has room: `streams_max` is at least 1, and
+  `window_bytes` is at least `message_bytes_max`, which is at least 1472. A compile-time
+  assertion holds 1472 at or above the hello limit, so only a foreign peer gets this.
+  Lost: send the hello later when credit comes, because `open` then needs a second gate
+  and a state that only a foreign peer reaches. `Endpoint::write` gives
+  `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
+  writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
+  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
+  budgets: proposed by `network` in #228. The room order: approved by the advisor on
+  #611. The hello: proposed by `network` in #55; settled by the advisor and the
+  coordinator under the person's delegation (#55). A sender can send one message from
+  parts of one block (`send_parts`, `try_send_parts`), and the budgets count it as one
+  message, of the sum of its parts. A `stream::Part` is a range of the block, then at
+  most 255 zeros. The stream never sends a byte of the block outside the ranges, because
+  those bytes can hold stale data of another channel; the padding is zeros, which `hub`
+  computes from FRAME LAYOUT. Lost: a range that runs past the series, because it sends
+  stale block bytes; a pad rule in the stream, because it puts the hub layout in
+  `transport` and is wrong for a series split across messages (architect, #1197:
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032606575, after
+  HUB WIRE
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032579333). The
+  stream sends the zeros from one static constant of 255 zero bytes, and `Part` holds no
+  invariant, so its fields are public. Lost: the cap of 7, because it is FRAME LAYOUT's
+  alignment inside `transport` and adds a panic; private fields and a fallible
+  constructor for that cap. `stream::Sender::bytes_max` gives the peer's
+  `message_bytes_max`, which the hello gives before any stream opens, and `hub` cuts
+  each run at it. Lost: a `send_parts` that cuts a run into messages, because the stream
+  knows no key or end of HUB WIRE and `try_send_parts` could then send part of a run; a
+  probe with `TooLarge`, a guess with one failed call for each session (architect,
+  #1197: https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6033870280).
+  A receiver can receive into its own buffer (`recv_into`). A message longer than the
+  buffer gives `Error::TooLarge` and stays queued, and so does a message whose future
+  drops; HUB WIRE makes that `TooLarge` a broken session, not a size probe. Lost: the
+  `Message` type of the proposal, because it changes `send` and `try_send` for each
+  caller and must own its ranges (architect, #1197:
+  https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
@@ -994,35 +1581,86 @@ How to read this record:
   WAITS. Proposed by `network` in #55; approved by the coordinator on #55, and the
   `datagram` doc on #565.
 - **RECV WAITS (#581, 2026-10-05)** `stream::Receiver::recv` waits while it has no
-  block, because the pool has no room or the system refused a commit. It gives the
-  next message, `None` at the end, `Error::Reset` when the sender cancelled the
-  stream, or the error that ended the session. It never returns `Error::Pool`, and a
-  refused commit gets no error variant. Its doc says that it waits. The message stays
-  queued, and the carrier's per-stream flow control holds the peer, as a read already
-  waits for `Readable` (STREAM WIRE); TLS over TCP must do the same (TRANSPORT SHAPE
-  LOCKED). One timer for each `Transport` retries all of its waiting reads, for both
-  causes; each retry's `alloc` takes back the blocks returned since the last try. The
-  retry interval is a `transport` constant that simulation tunes (5.3). The waiting
-  reads of one `Transport` take blocks highest class first, then oldest first, so
-  `CatchUp` reads cannot starve `Command` reads; other users of the shard pool (M4)
-  are not in this order. `transport` counts the time that reads wait and each refused
-  commit, and `node` publishes them on status channels (BQ11b); the new counts go
-  through the interface process in #68. A caller ends a wait when it drops the future;
-  it can then call `stop`. `datagram::Receiver::recv` never returns `Error::Pool`
-  either: a datagram with no block drops and is counted, and the read waits for the
-  next one. `hub` writes no retry for a read. B5 on the remote hop: the writer's `hub`
-  never waits on a live send. When the stream cannot take a live frame now, `hub`
-  drops it and adds its samples and stamps to one pending gap for each index. When the
-  stream can take a message again, `hub` sends the pending gap first, and the home
-  records it and warns. The writer gets the same answer as for a frame the home
-  dropped, and never resends it (B7). Backfill waits. The live send is
-  `stream::Sender::try_send` (#597). `block` gets no wake when a block returns until
-  simulation shows that the resume latency matters; then `memory` proposes one wake,
-  which home backfill shares. Until then, home backfill also retries on a timer.
+  block, because the pool has no room or the system refused a commit. It gives the next
+  message, `None` at the end, `Error::Reset` when the sender cancelled the stream, or
+  the error that ended the session. A full pool and a refused commit get no error:
+  `transport::Error` has no `Pool` variant, and the read path's "no room now"
+  stays private (architect, #68:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032721674). Its doc
+  says that it waits. The message stays queued, and the carrier's per-stream flow
+  control holds the peer, as a read already waits for `Readable` (STREAM WIRE); TLS over
+  TCP must do the same (TRANSPORT SHAPE LOCKED). One timer for each `Transport` retries
+  all of its waiting reads, for both causes; each retry's `alloc` takes back the blocks
+  returned since the last try. The retry interval is a `transport` constant that
+  simulation tunes (5.3). The waiting reads of one `Transport` take blocks highest class
+  first, then oldest first, so `CatchUp` reads cannot starve `Command` reads; other
+  users of the shard pool (M4) are not in this order. A waiting read that then waits
+  for room in its connection's receive budget keeps its place but holds no turn, so a
+  connection that holds its budget stops no read of another connection (STREAM WIRE).
+  `transport` counts the time that reads wait and each refused commit, and `node`
+  publishes them on status channels (BQ11b). `Transport::status` gives
+  `Status { waited, refusals }`, pulled, not pushed: `waited` is the time that at least
+  one read waited, not the sum over reads (architect, #68:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032541901). A caller
+  ends a wait when it drops the future; it can then call `stop`.
+  `datagram::Receiver::recv` gives no such error either: a datagram with no block drops
+  and is counted, and the read waits for the next one. `hub` writes no retry for a read.
+  B5 on the remote hop: the writer's `hub` never waits on a live send. When the stream
+  cannot take a live frame now, `hub` drops it and adds its samples and stamps to one
+  pending gap for each index. When the stream can take a message again, `hub` sends the
+  pending gap first, and the home records it and warns. The writer gets the same answer
+  as for a frame the home dropped, and never resends it (B7). Backfill waits. The live
+  send is `stream::Sender::try_send` (#597). `block` gets no wake when a block returns
+  until simulation shows that the resume latency matters; then `memory` proposes one
+  wake, which home backfill shares. Until then, home backfill also retries on a timer.
   Rejected: each caller retries (each caller writes the same timer, and the pool's
   states leak into `hub`), and the stream ends (memory pressure becomes stream churn and
   lost messages, and `Command` streams drop first). Decided by the advisor under the
   delivery and wire internals delegation.
+- **DIAL ORDER (#68, 2026-10-07)** `Transport::dial` tries a peer's addresses UDP, then
+  TCP, then relays, in the given order within a kind. It starts the next address 250 ms
+  after the newest attempt started, or at once when the newest fails, and keeps the
+  first session that completes; dropping the others closes them. Before it starts a
+  carrier, it checks each address: port 0, an unspecified IP, or a kind with no carrier
+  on this node is the cause `Error::Unroutable` in `Error::Unreachable`, so
+  `Endpoint::connect` keeps its invariant panic. A broken socket ends the dial with
+  `Error::Network`. Rejected: the carrier maps noq-proto's invalid address to an error
+  (each later carrier would need its own check), and `Network` with neutral text (one
+  variant with two meanings: a caller cannot tell a dead socket from a bad address). An
+  attempt that connected before the break still wins, and its session ends with
+  `Error::Network`, as `accept` gives such a session, so the result does not depend on
+  the order of the attempts. The order and the stagger: proposed by `box2.builder-5`
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6022920297), decided
+  by the architect in review of #1067. `Unroutable`: decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030703879). The
+  connected attempt: proposed by `box2.builder-5`, decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030913321).
+- **CANCELLED SEND (#68, 2026-10-07)** A `stream::Sender::send` or `send_parts` future
+  that drops after the stream sent a byte of its message (its header counts), and
+  before it completes, resets the stream with `Code(0)`. One that drops before that
+  sends nothing and changes nothing, and the stream stays open. That includes a drop
+  before its first poll, while it waits behind an earlier message, while it waits for
+  its turn, and while it waits for room in the send budget. The core takes the message
+  out and gives back its room in the send budget and its place in the turn, as a
+  completed write does. After a reset, each `send`, `try_send`, `send_parts`,
+  `try_send_parts`, and `finish` on the sender gives `Error::Reset { code: Code(0) }`
+  after the checks below, and the `Error::Reset` doc names both causes: the peer, or a
+  dropped `send` future. A dropped future is a normal cancel in async code, such as a
+  timeout in a select, so it must not panic; in both cases the caller opens a new
+  stream. Rejected: a panic, as after `finish` (a timeout the caller handles would
+  become a crash). Proposed by `box2.builder-5`, decided by the architect, #68
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6030986313). Amended
+  by the architect
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035156093): reset
+  only when bytes of the message may have gone. Amended again
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035820204): the
+  rule names the fact, a byte went, and not the proxy, the stream took it. `send`,
+  `try_send`, `send_parts`, and `try_send_parts` check in this order: the range panic
+  (`*_parts`), the panic after `finish`, `Error::TooLarge`, then the state errors
+  (`Reset` after a dropped send future, `Stopped`, or the error that ended the
+  session). The limit is fixed for the session, so a size defect shows in every state
+  of the stream
+  (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035220831).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1068,15 +1706,65 @@ How to read this record:
   last index the caller applied). `Hard` holds the term, the vote, the leader of the
   term (this node when it led), and the proof that moved the node to the term: its
   own pre-votes when it campaigned, else the proof of the message that moved it. A
-  `Proof` is a `Grant` (pre-vote or vote), the candidate, and the voter keys, the
-  candidate included; `raft` counts the keys, and `mesh` holds and checks the
-  signatures. `Message.proof` carries one: a `Vote` carries the candidate's
-  pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
-  answers once in the term, and a late vote joins them; an answer to a message of a
-  lower term carries the sender's hard proof. The rules that check a proof, and
-  `Error::Unproven`, follow in the second PR of #750; until then a received proof is
-  stored, not checked. The advisor required a proof on every message and on each
-  refusal, signatures only, and the proof in the hard state (#750, 2026-10-05).
+  `Proof` is a `Grant` (pre-vote or vote), the candidate, and each voter's key with its
+  `Signature`, the candidate included. It proves the term of the message or hard state
+  that holds it. A granted `PreVoteReply` or `VoteReply` carries the voter's signature
+  in its `Answer`, and the candidate copies it into its proof. `raft` counts the keys
+  and carries the signatures as opaque bytes: it does no crypto. A signature attests
+  a `Claim`: a `Grant` (the voter, the grant, the term, and the candidate) or a
+  `Change` (the leader, the position of a configuration entry, and its voters; RAFT
+  VOTERS). `raft` owns the rule that gives each signature its claim: a proof entry
+  claims the proof's grant to its candidate in the term of the message or hard
+  state, a granted reply claims its grant from the sender to the receiver in the
+  message's term, and a configuration entry claims its change from the leader whose
+  votes it holds. `Claim::signer` is the node whose signature a claim needs
+  (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
+  `raft` gives this node's own entries, grants, and changes with no signature
+  (`None`).
+  `Ready::sign` gives each `None` the signature that the caller's closure makes for
+  its claim, in the hard proof, in each message, and in each change this node wrote
+  (in `entries`, in `committed`, and in each append), before the write and the
+  sends. `raft` keeps each claim that it makes unsigned, and a claim that it reads at
+  start keeps its signature. So `Ready::sign` signs each copy of an unsigned claim that
+  a `Ready` holds, and a resend again. Ed25519 gives each copy the same bytes. A data
+  entry carries no claim, so the cost does not grow with the data rate. The most
+  frequent case is a leader with a voter that does not answer: each heartbeat to it
+  carries the votes, so the leader signs once for each tick (100 ms). A node that
+  campaigned for its term signs each refusal of a lower term in the same way, because
+  the refusal carries its own pre-votes. Lost: `raft` keeps the signed copy, which puts
+  the signer in `raft` and changes the conformance oracle (architect, #1187,
+  2026-10-07T15:25:42Z,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6041049761). The
+  caller checks each pair that `Message::claims` gives before `step` and refuses a
+  `None`: `step` keeps each signature as it came, so an unchecked `None` of another
+  voter reaches `Ready::sign`. `Message::claims` also gives each claim of a change an
+  append carries: its votes in the entry's term, then the change (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032381078).
+  `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
+  `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
+  again after the receiver is silent through a quorum check;
+  an answer to a message of a lower term carries the sender's hard proof, and a node
+  with no proof of its term sends no refusal. `step` checks a proof before anything
+  changes. A `PreVote`, or a granted `PreVoteReply`, of a higher term needs none.
+  Every other message of a higher term needs a proof that fits its body (a `Vote`
+  the sender's pre-votes, a `Heartbeat` or `Append` the sender's votes, a reply any
+  proof of the term) whose voters are a quorum of this node's configuration in
+  force or last committed; else `Error::Unproven`, and nothing changes or is sent. A
+  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of
+  the term joins the proof its candidate carries. The known gap: a voter that was
+  down through a change holds the old configuration and refuses a leader whose votes
+  are no quorum of it until an election whose grants are. When a second node fails
+  first, the group waits for an operator, who wipes the voter and starts it with no
+  configuration (a node with no configuration proves anything). The chain of proofs over
+  configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
+  pins both, and the random runs skip exactly such a voter until #881. The first PR of
+  #881 gives each configuration entry the votes and the signature of the leader that
+  wrote it; the chain and its check are the second PR (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  The advisor required a proof on every message and on each refusal, signatures
+  only, and the proof in the hard state (#750, 2026-10-05). `mesh` signs and checks
+  the signatures (MESH LOG).
   `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
@@ -1089,23 +1777,25 @@ How to read this record:
   its voter got a lease back still counts, and costs one needless election; safety
   holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
   changes the message format and closes only the case of two pre-campaigns. Decided by
-  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
-  its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check that a sender is a voter (a voter can learn late
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that may not
+  campaign (RAFT VOTERS) still votes and follows.
+  `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
-  may send. A node that may send can stop a group for good with one message in term
-  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
-  as it is. It trusts its voters: one that lies can already break safety, because a
-  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Later: a sender
-  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
-  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
-  `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
-  before its write, so no peer counted a vote or an answer that a lost `hard` held. The
-  caller writes `hard` and `entries` in any order, with no atomic write. Lost: the
-  `Ready` doc requires `hard` before `entries`, a patch that each caller must keep and
-  that shows only at a restart. The person decided on 2026-10-05 ("I approve long term
-  fix on 522"), #522.
+  may send. `step` drops a reply with no check when its sender is not in `voters()`,
+  unless the configuration in force removed the sender and the node still sends to it:
+  only `raft` knows whom it asked (#352). A node that may send can stop a group for good
+  with one message in term `u64::MAX`: each node writes that term, and none can
+  campaign. `raft` takes the term as it is. It trusts its voters: one that lies can
+  already break safety, because a false `AppendReply` counts as held, so a bound on the
+  term would guard nothing. No bound on a term jump spares an honest node that was down,
+  either. Later: a sender proves a term jump by a signed term, which needs `mesh`
+  (#750). The person decided on 2026-10-05 ("(a) is fine", #352 item 2). When the term
+  of the last entry is above `hard.term`, `Raft::new` starts at that term with no vote.
+  The node sends nothing before its write, so no peer counted a vote or an answer that a
+  lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
+  write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
+  caller must keep and that shows only at a restart. The person decided on 2026-10-05
+  ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -1114,24 +1804,21 @@ How to read this record:
   (its hint for the next `prev`). `step` checks a message against the log before it
   changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
-  log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
-  be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
-  sender is faulty. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
-  node other than the leader it knows is `Error::SecondLeader`: one term has one
-  leader, and a node keeps the leader of its term until the term ends, through a
-  step-down and a campaign. A node that knows no leader of its term, after its vote,
-  takes the first; `Hard.leader` keeps it through a restart (#750). The person approved
-  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing. A forged
-  message that passes these checks
-  does, until a leader proves its election (#750). After a heartbeat or an `Append`
-  of a higher term from a voter that does not lead, or a reply of a higher term and
-  then either, a node follows the sender and writes and commits what it sends. So
-  two nodes can apply different entries at one index, and a forged voter set can
-  take the group over. The first leader after a vote is the same gap. Tests pin it.
-  Lost: a lease that drops a heartbeat or an `Append` of a higher term from a node
-  that is not the leader. A reply of a higher term ends any node's lease, and a
+  log is `Error::IndexPastLog`, unless `step` drops the reply (RAFT SURFACE). An
+  append's `prev` and `commit` and a vote's `last` can be past the log of a node that is
+  behind. An `Append` with an entry whose term is above the message's term is
+  `Error::TermBehindLog`: no leader sends one, so the sender is faulty. The conformance
+  oracle changed to match; the person decided on 2026-10-05 ("a is fine", #232). A
+  heartbeat or an append of this node's term from a node other than the leader it knows
+  is `Error::SecondLeader`: one term has one leader, and a node keeps the leader of its
+  term until the term ends, through a step-down and a campaign. A node that knows no
+  leader of its term takes the first that proves a quorum of its votes, else
+  `Error::Unproven`; `Hard.leader` keeps it through a restart (#750). The person
+  approved it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
+  A voter that does not lead cannot make a node follow it: a leader claim needs a
+  quorum of grants (RAFT SURFACE, #750). A false `AppendReply` still counts as held
+  (#882). Lost: a lease that drops a heartbeat or an `Append` of a higher term from a
+  node that is not the leader. A reply of a higher term ends any node's lease, and a
   leader must step down on one; the lease also changed three etcd oracle tests. The
   coordinator decided on 2026-10-06 under the person's delegation (#391). The person
   may change it.
@@ -1165,11 +1852,33 @@ How to read this record:
   (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
   a leader keeps its lead through its own removal. A configuration travels in the
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
-  term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
-  its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
-  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  term), `Bytes` (a proposal), or `Voters(Change)`. A `Change` is the `voters`, the
+  `votes` of the leader that wrote the entry (its election proof as it held it at
+  the write: a vote that arrives later joins the leader's proof, not an entry it
+  already wrote), and the leader's `signature` of the entry (`None` until
+  `Ready::sign`). After the second PR of #881 (the chain), a node that missed the
+  change checks the entry with them before it counts a later proof against it, and
+  refuses a change whose votes are not `Vote` (architect, #881,
+  https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
+  A node uses the latest `Voters` entry in its log from the time it writes it;
+  `Start.voters` is the configuration before `Start.entries`. A node that joins
+  starts with the founding voters from the answer to its join (decided by the
+  architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). An empty
+  `Start.voters` is a voter that an operator wiped. It takes any proof until it holds a
+  `Voters` entry (#1004). Then its first `Voters` entry shows the configuration before
+  the entries: a joint entry's outgoing set, or for a leave its own set (#928,
+  coordinator, 2026-10-06). A log starts at index 1, so that entry is the joint entry of
+  the group's first change, and the node checks proofs as a founder with the same log
+  does, gaps included (#881, #1005). Lost: an empty committed set proves nothing (the
+  node then refuses a leader that the outgoing set elects when the old leader fails
+  before the joint entry commits); a joining node starts with the group's current
+  configuration (the caller must know it, and it removes the operator's recovery of a
+  wiped voter); the founding configuration as entry 1, as in etcd (a wider change that
+  alone leaves the node open until it holds that entry). A `Voters` entry with an empty
+  `incoming` set, in `Start.entries` or in an `Append`, is `Error::NoVoters`: a group
+  with no voter can never commit or elect.
+  A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
@@ -1182,12 +1891,15 @@ How to read this record:
   over a whole quorum check period is released at that check instead, and the next
   configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
-  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request
   only from a voter of the newest configuration in this node's log, and a node whose
-  committed configuration lacks the sender answers `removed`. The removed node takes
+  committed configuration lacks the sender answers `removed`. A request is a PreVote, a
+  Vote, a heartbeat, or an append. The rule covers requests only, and `raft` decides
+  which replies count (RAFT SURFACE). The person approved this on 2026-10-06, and the
+  coordinator gives the person's words in its comment on #647. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
   region. `raft` sends such a node no entries, only answers. A voter with a lease drops
-  its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
+  its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's
   term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
   this has no effect. Once no voter has a lease, as after the leader fails, the voters
   can elect the node: it commits an entry of its term, which commits the leave, and
@@ -1196,9 +1908,22 @@ How to read this record:
   decided on 2026-10-05 ("(a)"), #482. Readmit in
   `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
   decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
-  sends the commit and steps down. A node outside an uncommitted configuration still
-  campaigns: the entry may be truncated, and a removed leader that lost its lead before
-  the leave reached a peer is the only node that can win the election that commits it.
+  sends the commit and steps down. A node may campaign when it is a voter, incoming or
+  outgoing, of the configuration in force, or, while that configuration is not
+  committed, of the configuration before it. No other node campaigns. The rule is
+  exact: a leader appends a configuration entry only after the last one commits, so
+  by Log Matching only the last configuration entry in a log can be truncated, and
+  the one before it is committed. The fallback keeps two cases: a truncation gives
+  the configuration before back, and a removed leader that lost its lead before the
+  leave reached a peer is the only node that can win the election that commits it. A
+  follower whose commit index lags lets the configuration before campaign for
+  longer, which costs liveness, never safety. The `mesh` admission check stays
+  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
+  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
+  Neither is a second guard for the other. Decided by the coordinator and the
+  advisor on 2026-10-06 (#659). After compaction a snapshot carries the
+  configuration in force at its index, so the configuration before the last entry
+  stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory; any other file there is
   `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
@@ -1208,37 +1933,221 @@ How to read this record:
   changed, and the entries, so one sync makes both durable; two slots for the hard state
   lost, because they need a second sync and a second torn-write rule. The hard state is
   the term, then the vote, the leader, and the proof, each behind a presence byte; the
-  proof is a grant byte, the candidate, and the voter keys as a count and the keys in
-  rising order (#750). A `raft` message on the wire carries its proof in the same
-  form, after the term and before the body. The signatures follow in the third PR of
-  #750. The format version stays 1: no log has shipped. A later record replaces the
-  entries from its first index. A file is 1 MiB, or the length of its first
-  record when that is more, and a record that does not fit starts the next file. In a
-  file with no record, it makes that file again, larger, so each file but the last
-  holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
-  header never crosses a `SECTOR`: a record whose header would cross one starts at the
-  next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
-  header is whole or absent. At a restart, zeros where a record should start, or a good
-  header with a torn body, are the end of the log. Anything else, or a record after a
-  torn one, is `Error::Corrupt`, and the node does not start. Open zeroes the bytes
-  after the end, so a torn record leaves nothing that a later open reads as a header.
-  Then it syncs the end file, the directory, and its parent, because `raft` acts on
-  what open gives and a crash can leave any of them with no sync. One check over the
-  whole record lost: a damaged length then reads as a torn end, and the log drops the
-  good records after it. Zeros over the header of a durable record, which only a disk
-  fault makes, read as the end, and open drops the records after it in that file. A
-  search past the end for a record lost: a body can hold the bytes of a record, so a
-  power cut could then stop the node. Nothing trims the log until snapshots (#253).
+  proof is a grant byte, the candidate, a count of voters, then each voter's key (16
+  bytes) and signature (64 bytes) in rising key order (#750). A `raft` message on the
+  wire carries its proof in the same form, after the term and before the body. A
+  granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
+  is the byte 0 alone. An entry is its term and index (8 bytes each), then a data
+  byte: empty (0) alone; bytes (1), an 8-byte length, and the bytes; voters (2), the
+  incoming keys, the outgoing keys (each an 8-byte count, then the keys in rising
+  order), the votes in the proof form, and the leader's signature (64 bytes). No
+  form holds a grant or a change with no signature: encode panics on one, because
+  the caller signs before each write and send. `mesh::claim` signs each claim with
+  the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
+  little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
+  endian), and the candidate (16 bytes, little endian). A change signs
+  `foundation/voters/1`, the leader (16 bytes), the term and the index (8 bytes
+  each), and the incoming and the outgoing keys, each with its count as in the
+  entry, not the 4-byte count of the plan: one form for both (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
+  The signer in the bytes keeps two members that share a key from sharing a
+  signature. Grants name no region; a second region adds the region key under
+  `foundation/grant/2`. The driver (#471)
+  checks each claim of a message against the public keys of the members before each
+  `step`. The format version stays 1: no log has shipped. A later record replaces the
+  entries from its first index. A file is 1 MiB, or the length of the record that the
+  log made it for when that is more. A record that does not fit starts the next file.
+  In a file with no record, it makes that file again, larger, so each file but the last
+  holds a record. After a stopped write that made a file, the next record starts that
+  file. Decided by `laptop.architect` (2026-10-07T10:38:51Z, and the last sentence at
+  2026-10-07T11:05:15Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036182314 and
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6036600297. A write
+  puts its record in blocks, one block of the pool at a time and of 64 KiB at most, from
+  the end of the record to its start, and then syncs one time. Each block but the one at
+  the end of the record ends at a multiple of the block size in the file, so no two
+  blocks share a sector. The block with the header is the last that it writes, so a
+  write that the pool stops (`Error::Pool`) leaves no header: the log holds what it
+  held, and the bytes of the stopped write stay after its end. Decided by
+  `laptop.architect` (2026-10-07T09:12:02Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034784720. So a pool
+  that opens holds each write. A write that a file call fails, or that its caller drops,
+  poisons the log (`Error::Poisoned`), and a write that the pool stops does not. The
+  next write puts zeros over the bytes of the stopped write and syncs, and only then
+  writes its record: with one sync, a power cut can keep the record and not the zeros
+  (SIM CRASH), and an open then reads the old bytes as a header (PR 1 of #1091, approved
+  by the architect, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973, and the
+  text of this rule, 2026-10-07T08:42:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A header
+  never crosses a `SECTOR`: a record whose header would cross one starts at the next
+  sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
+  whole or absent. At a restart, zeros where a record should start, or a good header
+  with a torn body, are the end of the log. Anything else, or a record after a torn one,
+  is `Error::Corrupt`, and the node does not start. Open writes again, whole, the end
+  file that it finds: the records as it read them, then zeros to the end of the file. So
+  a torn record leaves nothing that a later open reads as a header. Each read and each
+  write of the open is whole sectors, so a header gets one write. An open with a pool
+  whose largest block is less than one sector gives `Error::Pool(TooLarge)` before it
+  reads or makes a file. Then it syncs the end file, the directory, and its parent,
+  because `raft` acts on what open gives and a crash can leave any of them with no sync.
+  The write is there because a read sees, from the cache, the writes that a failed sync
+  of this boot lost, and a later sync does not write them (SIM CRASH): an open that only
+  syncs gives records, or keeps zeros, that the disk does not hold (#1066; the ring has
+  the same rule, #698). Each file before the end file is durable, because a failed write
+  poisons the log, and the next open has the file of that write as its end file or
+  removes it. An open of a log that has a file thus writes and syncs 1 MiB or more, for
+  each region. P1 gives a Raspberry Pi 4 under 1 s to start, and no one has measured
+  this cost there (#1140). Lost: zeros only after a torn end (the first shape), which is
+  the defect; and a read with direct I/O, which not each driver can give: macOS does not
+  promise a read that skips the cache (decided by the architect, #1128,
+  2026-10-07T05:37:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
+  check over the whole record lost: a damaged length then reads as a torn end, and the
+  log drops the good records after it. Zeros over the header of a durable record, which
+  only a disk fault makes, read as the end, and open drops the records after it in that
+  file. A search past the end for a record lost: a body can hold the bytes of a record,
+  so a power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
-  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
-  proposal that a follower forwards to the leader, and its two answers (the position
-  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
-  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
-  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
-  format version. A message has one byte form, and a decode takes nothing else. The
-  log (MESH LOG) and the messages share the byte form of an entry. Decided by
-  `consensus`, approved by the coordinator (#471).
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
+  that a follower forwards to the leader, and its two answers (the position of the
+  entry, or "not the leader" with the leader the receiver knows). `wire` does not carry
+  them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and `wire` must
+  not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the format
+  version. A `raft` message travels on a one-way stream. A member forwards a proposal as
+  one two-way stream of `Class::Command`: the stream carries one proposal, the leader
+  writes one answer on its reply half, and then both halves end. So a proposal and its
+  answers name no sender and carry no request number (#779): a request number makes the
+  node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
+  and HUB WIRE already answers on the stream that asks. A two-way stream whose first
+  message is not a proposal, or a proposal on a one-way stream, breaks the protocol, and
+  the receiver ends the stream with code 2 (`wire::header::MALFORMED`) (decided by the
+  architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
+  has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
+  messages share the byte form of an entry. Decided by `consensus`, approved by the
+  coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
+  gives the fuzz target `mesh_change` the decode and encode of a change record; no
+  change type is public (decided by the architect, 2026-10-07T11:17:12Z:
+  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855).
+- **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
+  shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
+  the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
+  task and a writer task lost: they need a second waker. A tick is 100 ms, a heartbeat
+  is 1 tick, and an election timeout is 10 ticks. A tick that comes due in a write is
+  lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
+  this order: the peer holds the key of the member that the message names
+  (`Error::Spoofed`), a request comes from a voter of this node's configuration
+  (`Error::NotVoter`), and each claim holds (`Error::Claim`). So a node with a
+  configuration refuses a leader that is not a voter of that configuration, when a
+  change that the node does not hold made that leader a voter. The node does not get the
+  log from that leader (a known defect, #1096, that #1107 fixes). A node with no
+  configuration takes no request. Only a voter that an operator wiped is such a node
+  (#881), because a node that joins opens with the founding voters from its join answer
+  (decided by the architect, #242, 2026-10-07T04:20:40Z:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
+  `propose` returns the position of its entry only after the write that holds the entry
+  ends: a lone voter leads before its term is on disk, and after a power cut the same
+  position can hold another change. A second call that waits for the write lost: no
+  caller needs a position that is not on disk, and a caller that skips the wait gets
+  that defect again (decided by the architect, 2026-10-07T08:18:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033920665). When the
+  append of a new leader replaces the entry before a write holds it, `propose` gives
+  "not the leader": the task tells each proposal whether the `Ready` that it wrote held
+  the entry, by index and term, and the first `Ready` after the call decides (approved
+  by the architect, 2026-10-07T10:17:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035860357). A node
+  that gets a forwarded proposal (MESH WIRE) proposes the change, and its answer is the
+  position, or "not the leader" with the leader that it knows. A proposal from a peer
+  whose key no voter of this node's configuration holds is refused
+  (`Error::PeerNotVoter`, with the key of the peer, because a forwarded change names no
+  sender; `Error::NotVoter` names the sender of a message; decided by the architect,
+  2026-10-07T10:38:49Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6036181809); a
+  member that is not a voter proposes with join (#336). The leader does not check the
+  home of a forwarded change: `Error::NotMember` checks only the argument of a local
+  caller, and the check of a home at apply on each node is #1273. A forwarded change
+  applies at least one time: a member that got no answer forwards it again, and the
+  leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
+  state of a call that took effect last. `Change::Join` is safe to repeat while no
+  change removes a member: a repeat finds its node a member and is refused
+  (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
+  must keep a repeat of an older `Join` from admitting the node again, and needs a
+  ruling before it lands (decided by `laptop.architect`, 2026-10-07T12:55:06Z:
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6038355946). A later
+  `Change` kind that is not safe to repeat needs a ruling before a member forwards it
+  (decided by the architect, 2026-10-07T08:15:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
+  messages for one member wait in a queue of 64 that drops its oldest, because `raft`
+  sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
+  system refuses memory for (`Refused`), does not stop the group, because each may
+  succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,
+  and until then no message leaves, nothing applies, and the group gets no tick. From
+  the write that finds no block until the write ends, `propose` and `receive` give
+  `Error::Pool` with the cause of the wait, so the group takes no proposal and no
+  message, and what `raft` holds does not grow. A forwarded proposal that gets it did
+  not reach the group. A leader that waits sends no heartbeat, so the other voters elect
+  a new leader. A follower that waits answers no message and falls behind until its
+  write ends (decided by the architect, #1091, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973; the text
+  of the variant decided by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501; the text
+  of the two cases by the architect, 2026-10-07T12:08:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037581525). The group
+  checks the wait before each other check of a message or of a forwarded proposal, so
+  each gets `Error::Pool` in a wait, also one that a check refuses with no wait. The
+  other order lost: it gives the exact refusal, but the group drops each of them in a
+  wait in both orders, and a node that is short of memory then also pays for the
+  signature checks (decided by the architect, 2026-10-07T12:31:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1366#issuecomment-6037964937). A write
+  holds one block of the pool at a time (MESH LOG), so no record is too large for a
+  pool that opens, and a write does not wait for a block of its own (decided by the
+  architect, 2026-10-07T08:42:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A free
+  block of a size with a block in use keeps its budget (#291), so a write can wait while
+  the budget has room for its block, until the other user of the pool drops its block
+  (#1134). A pool whose largest block is less than one sector does not open (MESH LOG),
+  so no write gives `TooLarge` and the group does not stop for it (decided by the
+  architect, 2026-10-07T06:32:47Z:
+  https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
+  `Refused` wait decided by the architect, 2026-10-07T04:39:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
+  stops when a write of the log fails, when a committed change has 0 bytes or a kind
+  that this build does not know, or when each `Mesh` drops: this build cannot judge such
+  an entry, and a newer build can. An entry with no change (the first entry of a leader)
+  is not a change of 0 bytes. A committed entry of a known kind whose body does not
+  decode is `Refused::Body` on every node, and the group goes on, so one voter that
+  proposes bad bytes cannot halt the region. So a change to the body or to a cap of a
+  known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
+  only after the format flag (C9d) allows it; a node of an older build stops at it and
+  never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
+  call gives `Error::Stopped` with the first cause, and a watch gives it also after each
+  `Mesh` drops. `member` has no error (#562): it gives the record that the node holds,
+  also after a stop (approved by the architect, 2026-10-07T08:07:48Z:
+  https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
+  group does not start again: the node opens the mesh again, and the open makes durable
+  what it gives (MESH LOG). The task ends soon after the last `Mesh` drops, a write in
+  progress ends first, and a write that waits for a block ends at the next tick; until
+  then a new open gives `Error::Log`. Each open applies the log from index 1, until
+  snapshots (#253). A watch does not keep the group running, and a dropped watch leaves
+  no waker. `open` refuses a node or a voter that is not a member (`Error::NotMember`),
+  and a private key that is not the key of this node's member (`Error::WrongKey`).
+  `Config.members` is a list, and the region state holds each record under the key of
+  its card, so the key of a member has one copy. `open` is the one check of a list for
+  two records of one node: a decoder of a join answer passes its records on and does not
+  check them again (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
+  reverses the map of the ruling below). The key of a member is the key that its card's
+  signature covers, and `open` refuses a member that the region cannot hold, or two
+  members with one key (`Error::Member`, with the `region::Unfit`). The signature does
+  not show that the node owns its public key. The admission does, and `Join` (#336)
+  refuses the `node::Key` of a member (decided by `laptop.architect`,
+  2026-10-07T08:33:14Z:
+  https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). Proposed
+  by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
+  https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1274,7 +2183,18 @@ How to read this record:
   across regions is ordinary access policy. A change that spans regions commits per
   region in dependency order. Supersedes: D7 linked meshes, K5 parent-owned voters.
 - **REGION BLOCK (tunable syntax)** `region "site_a" { voters = [...] }` declares a
-  region by name prefix. Regions nest like names. Supersedes: K5 voters policy.
+  region by name prefix. Regions nest like names. Supersedes: K5 voters policy. The
+  prefix is a `types::name::Prefix`, which can be empty: the root prefix
+  (`Prefix::ROOT`, text `""`) contains each name, so the root region holds each node.
+  `mesh` holds it in `driver::Config.region` and `region::State`, and checks each name
+  against the region with `Prefix::contains`; `ticket::Options.prefix` stays a `Name`.
+  Decided by `laptop.architect` (2026-10-07T12:47:19Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each
+  field that holds a region's prefix is a `Prefix`: also `ticket::Ticket`'s region (the
+  region that the joining node opens with) and the `region` of `Unfit::Outside` and
+  `Refused::Outside`, so a ticket for the root region exists. Decided by
+  `laptop.architect` (2026-10-07T13:32:35Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6039051758.
 - **r4 reconciliation (SETTLED BY ME)** Definition references (index, quality, error,
   control) stay inside one region. Placement is not a key reference (rules in 1.9).
 - **VOCABULARY + REGION LOCKED** "Region" names the governed part of the tree. Docs say
@@ -1291,6 +2211,134 @@ How to read this record:
   voters record membership, and the join is logged on the changes channel. Files name
   nodes only where they matter (voters, placement). Ephemeral nodes are removed after a
   set time offline. Tickets are secrets.
+- **MEMBER RECORD (#242)** The region's record of a node is a `mesh::Member`: a
+  `card::Signed` (name, Ed25519 public key, seal key, addresses, and version, which the
+  node signs over `foundation/card/1`, its `node::Key` (16 bytes), and the card's one
+  byte form), the join ticket's signature over the first card, `ephemeral` (for an
+  ephemeral node, the time offline after which the region removes it), and the key of
+  each status channel (X27) by its name relative to the node's name (`clock.offset`,
+  never the full name); `card.name` is the one copy of the node's name.
+  The joining node gives its own release's names; the voters assign the keys at join
+  (X27). A status name keeps its meaning and data type in every release, and a change
+  takes a new name, so `hub` resolves a status channel from the record alone. The byte
+  form (#336) writes the status entries in name order. A list in the order of a table in
+  `node` lost, because `hub` cannot read that table and a new release would change what
+  a stored position means. Cost: about 40 bytes of names per member (architect, #242:
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205). The
+  card's byte form is the name behind a length byte, the public key (32 bytes), the seal
+  key (32 bytes), a count of addresses (8 bytes), at most 32, each address, and the
+  version (8 bytes). An address is a kind byte (UDP 0, TCP 1, relay 2, which adds the
+  relay's public key of 32 bytes), a family byte (4 or 6), the IP (4 or 16 bytes, in
+  network order), and the port (2 bytes). An IPv6 address has no flow info and no scope,
+  because each means something only on the node that sets it. Every number but the IP is
+  little endian. The cap is part of the byte form because every member keeps every card:
+  without it, one node sets the size of each member's state. Lost: a bound from a MESH
+  WIRE frame limit, which ties what a valid card is to a link setting and bounds no
+  region state. Decided by the architect, #336
+  (https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6032881587). It
+  lives only in `mesh` region state (X1), with no voter flag (the raft configuration is
+  the one source) and no lease. The seal key is inside the signed card (S8). A join is
+  one `Join` change. Every node that applies it checks the card, and the admission
+  against the ticket's public key, scope, uses, and expiry at the change's mesh time
+  (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a join
+  stamps the `Join` with the later edge of its mesh time interval, so the error of the
+  voter clock never admits a request that comes at or after the expiry. Every node
+  checks the expiry against the stamp, not against the time of the commit, so a join
+  that commits after the expiry still admits its node, and every node checks the same
+  stamp at every replay. A voter with no mesh time with a known error at or after the
+  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
+  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
+  region whose voters all have an unknown clock error admits no node by ticket, and the
+  operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
+  Windows node with a peer of known error. Decided by `laptop.director`
+  (2026-10-07T13:12:52Z):
+  https://github.com/synnaxlabs/foundation/issues/1397#issuecomment-6038688551. The
+  stamping voter makes each status key (UUIDv7, X27) from the stamp and its entropy,
+  and the byte form refuses a name twice. Decided by `laptop.architect`
+  (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The voter
+  that admits a join answers with the founding voters and their cards, and the node
+  opens with them as `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region
+  whose founders all left cannot admit a node. `secret` finds no key itself: `ops` and
+  `node` read the member and pass its seal key. A rotation, a new card, and `Remove`
+  wait for a caller; a rotation that only the node signs lets a stolen key lock the node
+  out. Lost: a record that only the admitting voter checks (a voter that lies admits any
+  key, against BQ12). A `card::Signed` holds the `node::Key` that its signature covers
+  (`Signed::key`): the key cannot come from the public key, which can rotate, so the
+  signed card is its one place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). A
+  `Signed` comes only from `sign` or from `Unchecked::check`. `Signed::decode`
+  (crate-private) checks the signature and gives `None` when it does not hold; a change
+  record holds an `Unchecked` card, which each node checks at apply. Approved by
+  `laptop.architect` (2026-10-07T11:17:10Z):
+  https://github.com/synnaxlabs/foundation/pull/1323#issuecomment-6036785467. The field
+  is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
+  (`Stamp`) with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302). Decided
+  by the architect, #242
+  (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A
+  `mesh::ticket::Ticket` is the secret part that an operator carries: the private key,
+  the region's prefix, and the voters to dial first (X37), at least one. Its `Debug`
+  writes the region and the public key only, and it has no `Display`, `Clone`, or
+  equality. `Ticket::admission` signs `foundation/admission/1`, the card's node key, and
+  the card's byte form. The region's `ticket::Record` holds the public key, the
+  `Options` (prefix, reusable, expiry, ephemeral), and the use count. `Record::admit`
+  refuses, in this order, a forged admission, a name outside the prefix, a join at or
+  after the expiry, and a second use of a single-use ticket, and counts a use only when
+  all checks pass, so a refused join never uses up a ticket. The expiry is the first
+  mesh time at which the ticket admits no node, so the `Expired` text is "ticket
+  {public_key} expired at {expiry}, and the join is at {at}". The text and the admit
+  order approved by `laptop.architect` (2026-10-07T11:03:29Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6036571225. The
+  ephemeral expiry of a `Member` comes from its ticket, because the admin decides what a
+  ticket admits (BQ11a) and the joining node is outside input. Lost: a bearer secret in
+  the `Join`, which every member could replay and which binds to no card. Decided by
+  `laptop.architect` (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. A
+  `ticket::Voter` holds only the node key, the public key to pin, and the addresses, not
+  a signed card: the ticket is the trust root, so a voter's signature over its own card
+  checks nothing that the ticket does not give. The ticket's text form can reuse the
+  byte form of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:14:01Z):
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302. A `Ticket`
+  change (kind 3) records a ticket's public key and `Options`. Apply refuses a second
+  record for one public key and a prefix that is not under the region's prefix; the
+  signature of the admin who made the ticket waits for #1213. A `Join` change (kind 2)
+  carries the ticket's public key, a `Stamp` (the later edge of the admitting voter's
+  mesh time interval; a voter with no mesh time of known error at or after the Unix
+  epoch stamps no `Join`), the node key, the card and its signature, the admission,
+  and the status keys, which the voter assigns (UUIDv7). Apply refuses, in this order,
+  a forged card, a reserved name (A3), a name outside the region, a status channel
+  `<name>.<status>` that is longer than a name can be or reserved, a key that is
+  already a member, a name that a member holds, a status key that a member holds or
+  that the join repeats (A4), an unknown ticket, and each refusal of `Record::admit`.
+  So no refusal counts a use. A member's names are its card name and each
+  `<name>.<status>`, and two names are equal when they differ only in ASCII case (A3,
+  X27), so each full name maps to at most one member. Region state cannot see the keys
+  of the spec, so the status key check covers members only. The name and key checks are
+  one function, which `State::new` also runs on the founding members; both give a
+  `region::Unfit`, which `Refused::Unfit` wraps. A member and a `Join` hold at most 64
+  status entries, as the 32 of `Addresses`. Decided by `laptop.architect`
+  (2026-10-07T10:44:26Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
+  `mesh::status::Status` holds the cap of 64: `Status::new` refuses more (`Many`), and
+  the decode refuses more before it reads an entry. So each `Member` that `encode`
+  writes decodes, and `region::Unfit` has no count check. Lost: `Unfit::Many` in the
+  member checks, which covers only where they run. Decided by `laptop.architect`
+  (2026-10-07T11:11:49Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036702954. A refused
+  change is a no-op on every node, so a forged card in the log cannot stop a node. A
+  `Join` holds a `card::Unchecked`, not a `card::Signed`: it has the byte form of a
+  signed card, decode keeps a join whose signature does not hold, and apply refuses it
+  as `Forged`. Each number in a change is little endian; a `Ticket` is the public key,
+  the prefix behind a length byte, a reusable byte (0 or 1), the expiry (8 bytes), and
+  the ephemeral span behind a presence byte. Decided by `laptop.architect`
+  (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The
+  reserved name check is region state, not a ticket check, because "no member name is
+  reserved" holds for every member, like "no key twice". Decided by `laptop.architect`
+  (2026-10-07T10:14:51Z):
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035813123.
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
   is one per region (X29).
@@ -1300,9 +2348,20 @@ How to read this record:
 - **A1 (current part)** One home per index orders samples, keeps the buffer, and runs
   the gate. Reads may come from a copy. Supersedes: A1 channel home field, A1 standby in
   the mesh file.
-- **S12 (placement part) + B7** Placement is a policy: `placement { select, standby,
-  copies }`. With no placement, an index's home is the node of the connector that writes
-  it (precedence in X22).
+- **S12 (placement part) + B7** Placement is a policy: `placement { select, home,
+  standby, copies }`. Each node field is optional, but a placement names at least one
+  node, and no node has two roles. When no placement selects the index, or the winning
+  placement names no home, an index's home is the node of the connector that writes it
+  (precedence in X22). Amended: the `home` field restores the recorded intent
+  ("placement decides home", r8 Q8), which the bootstrap list left out (architect,
+  #1150, https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+  `config` refuses a node with two roles with `config.role-overlap` at the last value in
+  source order that names it. A `copies` list is one value (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151). A
+  placement that names no node is `config.empty-placement`, at the `copies` value when
+  the block has one, else at the block. `copies = []` next to a home or a standby is
+  valid (architect, #1150,
+  https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037713864).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
@@ -1385,11 +2444,167 @@ How to read this record:
   runtime-loaded bindings, NI functions declared by hand. Codecs: built. Crypto: rustls
   with aws-lc-rs and blake3. Tooling: clap, schemars, toml_edit, tracing. Our own thin
   MCP server, Prometheus text output, and InfluxDB line protocol. FIPS build later.
+  HTTP: one client for all connectors, on `hyper` (HTTP/1.1 and HTTP/2) over the `env`
+  network seam with `rustls`, in the connector component library. InfluxDB, a general
+  HTTP connector, alarms, webhooks, and remote write use it. No HTTP parser of our own.
+  Every clock read and name lookup of the client goes through `env`, and no Tokio
+  feature of `hyper` or `hyper-util` is on. TLS takes a configured CA, and no setting
+  turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
+  person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
+  binary larger is fine." "we should be careful about writing raw HTTP transports.",
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an `httparse`
+  reader) closed: the person told `connector` to use the `hyper` client on 2026-10-06.
+  `httparse` comes in only as a dependency of `hyper`. The client is HTTP/1.1 only for
+  now: `h2` 0.4 reads the OS clock to expire a reset stream, so HTTP/2 turns on only
+  when `h2` takes its clock through `env`, by an upstream change. Decided by the
+  coordinator with `advisor` on 2026-10-06 (#341). The client keeps one idle connection
+  for each origin. It does not reuse one that is idle longer than 90 s (the `hyper-util`
+  default), read on the `env` clock, and the next send closes it: the client sends no
+  keep-alive, and a firewall or NAT may drop the state of an idle stream. Decided by the
+  coordinator with `advisor` on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). A
+  request that fails on a reused connection before its response goes once more on a new
+  connection, when the connection did not write it, or when its method is idempotent and
+  no byte of a response came (RFC 9112, as in Go). The pool key is the origin, and it
+  keeps the host name, because a TLS connection is verified for one name and must never
+  carry a request for another. Decided by the architect on #1111
+  (https://github.com/synnaxlabs/foundation/pull/1111#issuecomment-6031412223). The key
+  is the host name in lower case and the port. `influx.` and `influx` are two keys,
+  because a resolver may expand a name with no final dot. The client takes only `http`
+  today; with TLS, the key also holds the scheme. A new connection looks up the host
+  through `env` and tries each address in order, as Go does: each address gets an equal
+  share of the time left to the deadline, but at least 2 s or all that is left. A
+  refused address moves the dial to the next at once, and no connect starts once the
+  time is up. A reused connection does no lookup. Lost: Happy Eyeballs (RFC 8305), which
+  needs more code and streams; a separate error variant for a failed lookup, which a
+  caller handles as a failed connect; no limit for each address, where one that drops
+  the SYN uses the whole timeout. Proposed by `connector` in the plan on #341
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6031334051) and in
+  the review of #1135
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031807435,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031903363,
+  https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6031982713). The key
+  text after the #1111 link, the dial rule, and the `Error::Connect` doc: approved by
+  `laptop.architect-2` on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6032674524).
+  A refused URI gives one error for each cause: `Scheme`, `UserInfo`, `Host`, and
+  `Port`, checked in that order, so no error holds text from a URI with user info.
+  Text after `]` is part of the host up to a `:`, so `http://[fd00::2]8086/` gives
+  `Host` (https://github.com/synnaxlabs/foundation/issues/1179#issuecomment-6032542190).
+  A `[` in a host that is not in brackets gives `Host`. A built URI with an empty path
+  sends `/`. Lost: one `Uri` variant that holds the URI with its user info removed,
+  because the message must name the cause; and a `Uri` whose `Display` drops the user
+  info, because `Debug` and the field still hold the password. Decided by
+  `laptop.architect-2` on #1159
+  (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
+- **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
+  names one sample of an index on each path (X31), and InfluxDB keys a point by
+  measurement, tag set, and time, so a resend stores each sample once. Each run of
+  explicit gaps before a sample is one line,
+  `foundation_gaps,connector=<connector>,index=<index>,path=<path> count=<n>i <stamp>`:
+  `<path>` is `live` or `backfill` (amendment below), `<stamp>` is the stamp of the
+  first sample after the gaps, and `count` is the number of seqs from the first trimmed
+  seq up to that sample. The gap line goes in the request of that sample, and the
+  position is acked only after InfluxDB confirms it (B3). The count is signed, because
+  InfluxDB 1 OSS refuses `u`. The `connector` tag keeps two connectors that write one
+  index to one database from replacing each other's gap lines. Until a later sample
+  comes, the connector keeps one gap per index, and from #1270 one per index and path.
+  After a restart the buffer reports the gap again (READER RULES), so a lost gap line is
+  sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
+  data measurement.
+  Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
+  reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, with
+  `seq(stamp)` from the lab's write record. Its gaps are the union of these ranges
+  minus the stored seqs, as maximal runs. Each run is one gap: `after` is the count
+  of stored samples before the run, and the count is the run's length. A gap line
+  whose stamp is not in the write record on the path of its tag, or whose range starts
+  below the first written seq, is a lab failure (panic), not data. The property test
+  also asserts no silent loss: each seq from the first written seq to the last stored
+  seq is stored or in a gap range. After a lost confirmation, a resend, and a later
+  trim, gap lines can overlap, so the sum of `count` in `foundation_gaps` is an upper
+  bound on the loss from trims. Before #1270 (amendment below) that is the whole loss,
+  and the exact loss is the union of the ranges minus the stored samples.
+  Lost: a seq field (about 20 bytes a line), a seq tag (one series per sample), a gap
+  point in the data measurement (a field type conflict), a configurable gap
+  measurement, and a `first=<seq>i` field on each gap line. That field puts a seq,
+  which is internal to the node, into each user's InfluxDB; the lab does not need
+  it; a reader still cannot get the exact loss, as the stored samples hold no seq;
+  and it makes each gap line longer when the store is under pressure. Decided by the
+  architect (`laptop.architect-2`), #1151
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032215953,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428,
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032802085), and
+  in the review of #1225
+  (https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032761284,
+  https://github.com/synnaxlabs/foundation/pull/1225#issuecomment-6032817985).
+  Amended on #1151: with #1270 (M2), the connector is a recording reader and writes the
+  samples of both paths (A6, A8). Until then it reads the live path only, and the
+  store-and-forward tests use the live path only. The `path` tag of each gap line is
+  `live` until then, so the format does not change at M2. The `path` tag keeps a live
+  gap line and a backfill gap line at one stamp as two points, so the sum of `count`
+  stays an upper bound on the loss from trims. Data lines get no `path` tag, so a live
+  sample and a backfill sample of one index at one stamp are one point, and the later
+  write sets its fields. The earlier sample is a loss that no gap line counts. The fold
+  takes the path of a gap line from its tag, and `seq(stamp)` on that path from the
+  write record. From #1270, the fold, `after`, the first written seq, and the
+  no-silent-loss assertion each run on each path apart. A data point whose stamp the
+  write record holds on both paths of one index is a lab failure (panic), because the
+  lab cannot tell which seq the point holds, so the property test writes no such stamp.
+  From #1270, a separate test reads the points of the simulated InfluxDB and pins the
+  overwrite. Lost: a `path` tag on data lines, which makes two series for each channel
+  and puts the path, which is internal to the node, in each user's data schema.
+  `foundation_gaps` is Foundation's own measurement, so its `path` tag costs the user's
+  data nothing. Decided by `laptop.architect-2` on #1151 (2026-10-07T08:07:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033743748; amended
+  2026-10-07T08:18:10Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6033910167;
+  corrected 2026-10-07T16:52:35Z:
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042660446).
+  Supersedes the gap line with no `path` tag of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032474515 and of
+  point 3 of 6033743748, and the loss bound of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032756428.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
-  calculation with its own index. Raw and reduced data live side by side through
-  retention.
+  calculation with its own index. Raw and reduced data live side by side, each index
+  under its own retention policy.
+- **SIM INFLUX (#1151)** `connector_influx::sim::Store` is a simulated InfluxDB, behind
+  the cargo feature `sim`, off by default. It parses with `influxdb-line-protocol`,
+  InfluxData's own parser, so it is independent of our writer. A point is named by its
+  measurement, tag set, and time; a later write of the same point replaces the fields
+  that it sets. It refuses a line that a writer must never write: a line that does not
+  parse; no time, or a time outside `i64::MIN + 2 ..= i64::MAX - 1`; the key `time`, or
+  a name or key that starts with `_`; a key more than once in tags and fields together;
+  a float that parses to infinity; and a tag or field whose type differs from the type
+  stored for that key in the measurement, where a tag is a type, as InfluxDB 3 gives
+  each column one type, also across shards, where InfluxDB 1 checks each shard only.
+  Each refusal is a typed `sim::Error` variant. `write` stores each valid line, also
+  after a line that is not valid, and returns the first error; a body that is not UTF-8
+  gives `Error::Utf8`, and nothing is stored. Where InfluxDB versions differ in a rule
+  that it keeps, the store keeps the strictest one. It keeps no size limit (the series
+  key length, 65535 bytes in InfluxDB 1 and 2, and the columns per table in InfluxDB 3),
+  because each depends on the server's version or config, and the writer owns them
+  (#1265). The InfluxDB 3 parser also refuses some lines that InfluxDB 1 stores, such as
+  a tab in a measurement name; the writer refuses them too. It splits lines, and skips
+  blank lines and comments, as InfluxDB 3 does, so a writer that writes a measurement
+  name with a leading `#` loses that line with no error; a test that reads the points
+  sees the loss. It stores a `u` integer, which InfluxDB 1 OSS refuses, until the writer
+  stops writing `u` (#1210). Lost: a store that gives a time to a line with none, and
+  one that takes a type conflict, as each hides a writer bug; and a test that a line is
+  refused if and only if the writer refuses its input, as the writer also refuses some
+  names that InfluxDB stores, such as a backslash or NUL, so the two sets differ by
+  design. Decided by the architect (`laptop.architect-2`), #1151
+  (https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032723969), and in
+  the review of #1239
+  (https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032923332,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6032970676,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033050251,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033093344,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033140752,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033409699,
+  https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033688614).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
@@ -1437,14 +2652,19 @@ How to read this record:
   one byte string, with no spans: a version byte, then tagged values, blocks in the
   producer's order, keys in byte order, and fixed-width little-endian integers (`u64`
   counts and lengths, `i128` integers, and `f64` floats as their bits). `decode`
-  refuses every byte string that `encode` cannot write. Both refuse nesting past 64
-  levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
-  `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
-  `check` refuses the same Documents as `encode` without writing, so another writer
-  (`config-hcl`) uses the same limit (#287). `spec` stores and hashes these bytes.
-  Pinned bytes are an oracle in `oracles/conformance/document/`. A new format takes a
-  new version byte. Decided by the `config` builder; approved by the coordinator
-  (#62).
+  refuses every byte string that `Checked::encode` cannot write. Only a `Checked`
+  Document encodes: `Checked::new` refuses nesting past 64 levels with `TooDeep`, so
+  `Checked::encode` cannot fail, and `decode` gives a `Checked` or an `Error`. Front
+  ends refuse files that nest deeper. `spec` holds a connector config as a `Checked`,
+  and `config-hcl` `write` and `update` take one. Lost: a depth on each tree type,
+  which makes each producer of a tree pay for a rule that only the writers (the
+  encoding and `config-hcl`) need. `spec` stores and hashes these bytes. Pinned bytes
+  are an oracle in `oracles/conformance/document/`. A new format takes a new version
+  byte. Decided by the `config` builder; approved by the coordinator (#62). `Checked`
+  decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030763787, and
+  for `write` and `update`,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
@@ -1483,20 +2703,23 @@ How to read this record:
   letter or `_`, or that is `true`, `false`, or `null`, has no reference form, and
   `write` refuses it with `Unwritable::Reference`. A file writes such a name as a string
   where a kind takes a name: a kind reads a string or a reference as the same `Name`,
-  through one reader in `document::read` (#474). `export` and `discover` write every
-  name as a string (`"site_a.pt_1"`): they need no HCL rule, and a generated file reads
-  back as exactly the Document it came from. This replaces the #363 ruling that a file
-  writes a reserved name only as a string. The advisor decided (names and architecture
-  delegations, 2026-10-05), #536 and #701. Lost: a reserved call `name("40001.x")`,
-  which reserves a function name and adds an error for names that a string already
-  carries; it can be added later without breaking a file. Lost: bare names in generated
-  files, which changes only how a file looks. Lost: `export` and `discover` write only
-  such a name as a string, which copies HCL's identifier rule into `config` and layer 3.
-  Lost: `write` gives such a reference as a string, which reads back as a `String` and
-  changes the spec hash. Lost: A3 segments that start with a letter or `_`, which
-  shrinks the name model to fit one file format. The person decided on 2026-10-05 ("a is
-  fine"), #519. Lost: a new `Expected` variant for a name after `.`, a public change
-  when the error already names what may come at the `.`. #363.
+  through `document::read::name` (#474). `read::names` reads one name or a list, in
+  order with repeats, and `read::label` reads a block label (architect, #1150,
+  [ruling](https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151)).
+  `export` and `discover` write every name as a string (`"site_a.pt_1"`): they need no
+  HCL rule, and a generated file reads back as exactly the Document it came from. This
+  replaces the #363 ruling that a file writes a reserved name only as a string. The
+  advisor decided (names and architecture delegations, 2026-10-05), #536 and #701. Lost:
+  a reserved call `name("40001.x")`, which reserves a function name and adds an error
+  for names that a string already carries; it can be added later without breaking a
+  file. Lost: bare names in generated files, which changes only how a file looks. Lost:
+  `export` and `discover` write only such a name as a string, which copies HCL's
+  identifier rule into `config` and layer 3. Lost: `write` gives such a reference as a
+  string, which reads back as a `String` and changes the spec hash. Lost: A3 segments
+  that start with a letter or `_`, which shrinks the name model to fit one file format.
+  The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
+  for a name after `.`, a public change when the error already names what may come at
+  the `.`. #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -1540,13 +2763,22 @@ How to read this record:
   can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
   `update` a `Refusal`: the problems in the old text, or else the parts of the new
   Document that HCL text cannot hold. Nesting past the depth limit is
-  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
-  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
-  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
-  shared type (#370); a checked Document type, which gives each caller two calls; and
-  an `update` that takes the Document that `read` gave for the text, so it gives only
-  `Unwritable`, but writes wrong text with no error when a caller gives another
-  Document. Decided by the `config` builder; approved by the coordinator (#330).
+  `Error::TooDeep` from `read`, with `document`'s diagnostic; `write` and `update`
+  take a `Checked` Document, so they cannot meet it. Lost: one `Error` for all three,
+  so each caller of `read` handled a variant that `read` never gives; a `write` that
+  takes a plain Document and clones it into a `Checked`, which copies each tree only
+  to check its depth and keeps `Unwritable::TooDeep`; and an `update` that takes the
+  Document that `read` gave for the text, so it gives only `Unwritable`, but writes
+  wrong text with no error when a caller gives another Document. Decided by the
+  `config` builder; approved by the coordinator (#330). `write` and `update` take a
+  `Checked`, and `read` does not change: decided by the architect (#828,
+  https://github.com/synnaxlabs/foundation/issues/828#issuecomment-6030891911).
+  Trigger for `read` to give a `Checked`: the first production code that calls
+  `Checked::new` on a `read` result, or writes one back with `write`, files an
+  `interface` issue that names it. Until then no code checks the depth twice, and a
+  checked whole Document does not make a checked connector body. Decided by the
+  architect (#1089,
+  https://github.com/synnaxlabs/foundation/pull/1089#issuecomment-6031438972).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1561,7 +2793,14 @@ How to read this record:
   beside them, so `config`, `ops`, and `node` never match a producer's variants. An
   error from a crate below `document` that a producer shows as a diagnostic gives its
   message with `Display` and its fix with `fix()`; the producer adds the code and the
-  span. `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
+  span. A fix that shows a value in a Document shows it as the file writes it, so
+  `document.bad-size` quotes the size for `Syntax` and `Range` (`Use at most
+  "16777215TiB"`), while `byte::Error::fix` stays bare for a flag (architect,
+  https://github.com/synnaxlabs/foundation/issues/1070#issuecomment-6032077046).
+  `size_fix` stays in `document` (#650): it works on the text the reader read, and its
+  only caller is the reader. It moves to `types` when a second reader of sizes needs it
+  (same ruling).
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
   breaks no producer. No severity field: the warnings in K2 and R13-10 belong to plan
   output.
   `ops` operation error codes use `Code` too, so the grammar has one home. A code
@@ -1571,6 +2810,13 @@ How to read this record:
   places). Codes go into `oracles/conformance/document/` at the first stable release;
   the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
   builder; approved by the coordinator (#137).
+  A message or a fix quotes text from a file with `types::text::Quoted`: U+0020 to
+  U+007E as written, except `\"`, `\\`, and `$` or `%` for a `$` or `%`
+  before `{`; each other character as `\u` and four upper-case hex digits, or `\U` and
+  eight above U+FFFF. HCL, YAML, and TOML read the form back as the text, and a
+  look-alike shows. The `config-hcl` writer keeps its own rule, because a person edits
+  what it writes. Lost: Rust's `Debug` form, which no file reads; `$$` and `%%`, which
+  only HCL reads. Decided by the architect (#941).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -1592,14 +2838,84 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
+  that selects node names: `node_settings "<name>" { select, disk, pool }`, such as
+  `select = "site_a.*"` and `disk = "200GiB"`. Each budget is optional and above zero.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
-  default. The data directory is node-local: a start argument of `foundation`, with a
-  default, because the spec is stored in it. Node-local config for the budgets lost:
-  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
-  decided on 2026-10-05 ("Yeah mesh node"), #342.
+  default. A policy that sets no budget is a user mistake, refused as normal
+  validation with a fix (DIAGNOSTICS, #869, #1000). The data directory is node-local:
+  a start argument of `foundation`, with a default, because the spec is stored in it.
+  Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
+  change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
+  #342. The `config` builder added the label and the bound above zero (#474).
+  Each shard's part of the pool budget must hold the largest block its buffer takes;
+  a smaller part stops the node at start with `Error::Buffer`. `config` cannot check
+  it, because the shard count belongs to the node, so the buffer is the one place
+  that refuses it. Decided by the architect on #1062:
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
+- **SHARD DISK (2026-10-07)** Until segments exist, `node` gives each shard's ring
+  `disk / n` of the node's disk budget (`node::Config::disk`, a `types::byte::Size`),
+  and shard 0 also gets the remainder, as SHARD POOLS does. The budget bounds each new
+  ring file: `node` takes the largest ring whose file fits each part
+  (`buffer::Layout::fit`), so the format stays in `buffer`. When a part holds no ring,
+  no shard starts, and `join` gives `Error::Disk` with the budget, the shard count, and
+  the least budget (`n` times the least ring that `fit` gives, capped at the largest
+  `Size`); `config` cannot check it, as for the pool part (NODE SETTINGS). The ring is
+  the whole store. A ring with a checkpoint keeps its size, which can be more than its
+  part, until `Buffer::resize` exists (#451). A ring with none is made again at its part
+  (#1254). So oldest first (B1) holds per shard, not per node. This is a patch. The
+  long-term path is small rings for commits, then segments that draw from one node-wide
+  allowance (#1081). The 5.5 lab sizes the budget for the shard that holds the index.
+  With `Buffer::resize`, `node` computes the `Layout` with `fit` and calls
+  `Buffer::resize`, nothing more: `buffer` sets the file length itself, so `node` never
+  extends or cuts the ring file and does not learn the format (after
+  https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843).
+  Decided by the architect, #342:
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
+  https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447, and, for
+  a ring with no checkpoint (2026-10-07T08:52:34Z),
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034449677.
+- **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
+  policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
+  at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
+  channel name. A policy belongs to the region that governs its name (X2: the longest
+  region prefix that contains it), and it may select only names in that region and its
+  descendants (X26). When a `region` block is added or removed, `plan` checks X26 again
+  for each policy whose region changes, lists each policy that moves to other voters,
+  and refuses one whose reach fails. Lost: the region from the selector (a wider pattern
+  would move the policy to other voters silently, and X26 could never fail), and the
+  region from the directory (K2 makes the layout a default only; r3 rejected a
+  `region =` attribute). The advisor approved it on 2026-10-05, #474.
+  The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
+  `@node_settings`, `@compression` (compression section), `@placement` (S12),
+  `@retention` (#895), and `@time`. No time keyword was on record (C6 shows `[[time]]`,
+  and X36 replaced its content), so the architect decided `time`. A connector has no
+  segment: it is at its own name, and its channels are its children (#758, 2.2, C8). A
+  channel has no segment either: it is at its own name (#756,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
+  check still applies to both names. A region record is at `<prefix>.@region` in the
+  parent's tree (#758). This is not an exception to X2: the region that holds the record
+  is the longest region prefix that contains `<prefix>`, other than `<prefix>` itself.
+  The root region has no record and no key: no parent records it (X3), and its voters
+  live only in its Raft config. The one place that maps a key to its region applies
+  this, so no caller tests for `@region`. Decided by the architect, #1001
+  (https://github.com/synnaxlabs/foundation/issues/1001#issuecomment-6031305302; #758
+  for the connector and the region). The kind is `spec::definition::Kind`, and the
+  module `spec::key` holds the whole key rule: the segments, the `@` rule, the bound,
+  `Kind::key`, and `key::Error`. Lost: a module `spec::kind`, because in `spec` "kind"
+  also names a connector's driver. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031286198 and
+  https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031290037).
+  `Kind::key` takes the label as text and checks it in this order: the bound
+  (`key::Error::Long`, the one length error for every kind, with `Name::MAX_BYTES` for a
+  connector), then the name (`key::Error::Name`), then the `@` rule. So the user gets
+  the true bound in one round. Lost: a `&Name` label, whose parse gives its own length
+  error with the wrong bound. Decided by the architect, #1109
+  (https://github.com/synnaxlabs/foundation/pull/1109#issuecomment-6031559597).
 
 ### 1.12 Access, identity, and secrets
 
@@ -1615,6 +2931,12 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
+- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
+  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+  `Prefix::contains` holds, so no caller writes the root case. Decided by
+  `laptop.architect` on 2026-10-07T12:47:19Z
+  ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
+  applied in #1402.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -1642,8 +2964,6 @@ How to read this record:
 
 ### 1.13 Operations, agents, and the factory
 
-- **Factory constraint** Two people, each on an individual Max plan. The factory runs in
-  attended, locally started sessions, not as an unattended daemon.
 - **BENCH SPEND (2026-10-04, replaced by the test budget in 5.5 on 2026-10-05)** Linux
   benchmarks that need real machines run on rented AWS machines. The person: "you're
   welcome to provision AWS machines. SET STRICT COST LIMITS. I don't want more than $100
@@ -1678,42 +2998,21 @@ How to read this record:
   `synnaxlabs/foundation`, with one Cargo workspace: `crates/` (crate list in section
   4), `xtask/`, `oracles/`, and later `sdk/` and `bench/`. Every PR runs the layer
   check (`cargo xtask layers`).
-- **MULTI-SESSION FACTORY** One coordinator session and several builder sessions work
-  at once, each builder in its own worktree. Work is tracked in GitHub issues and PRs.
-  Sessions message each other with `SendMessage`, but records live in the repo. Builders
-  run under `/goal`; the coordinator runs `/loop /coordinate`. Details:
-  `docs/coordination.md`.
-- **MODELS** Fable 5.1 for the `memory`, `consensus`, and `storage` builders and for
-  reviewers of `raft`, `mesh`, `block`, `ring`, `buffer`, crash recovery, lock-free
-  code, and wake protocols. Opus 5.5 for the coordinator, the other builders, and other
-  reviewers. Sonnet 5.5 for mechanical work and the code quality and drift crew agents.
-  Sessions compact at 300k tokens of context.
-- **NINE BUILDERS (2026-10-04)** The person approved five more builders (advisor
-  brief): `write-path`, `storage` (Fable), `time`, `config`, and `network`. Builders
-  file the issues for their own crates; the coordinator keeps interfaces, decisions,
-  and the merge queue. Ownership: `docs/coordination.md`.
 - **C9b** Work loop: a planning session splits a phase into tasks that own crates
-  (amended by NINE BUILDERS: each builder splits its own phase); one agent per task in
-  its own worktree; machine gates (build, lints, layer and stand-alone checks, unit and
-  property tests, thousands of simulation runs, short fuzz, the 5% benchmark gate,
-  mutation testing on the diff); two fresh adversarial reviewers; a person reads and
-  merges; cleanup agents follow.
-- **C9b2** A quality crew of six single-job agents (code quality, tests, architecture,
-  performance, failure triage, drift), each with a person-owned rulebook. One command
-  starts the daily run.
+  (amended by MILESTONES: builders file the issues on the milestone path); one agent per
+  task in its own worktree; machine gates (build, lints, layer and stand-alone checks,
+  unit and property tests, thousands of simulation runs, short fuzz, the 5% benchmark
+  check (P1), mutation testing on the diff); fresh adversarial reviewers (amended by
+  REVIEW TIERS); the merge queue (amended by MERGE QUEUE).
 - **C9c** Oracles are enforced by visibility. A script writes an oracle section at the
   top of each PR summary and flags weakening. Each flagged change gets its own
-  adversarial reviewer. A person merges every PR, except routine PRs (MERGE RULE).
-  Supersedes: T2 enforcement level.
-- **MERGE RULE (2026-10-05)** The coordinator merges a routine PR that the person has
-  not merged 30 minutes after `ready`, and then tells the person; `docs/coordination.md`
-  defines routine. It lets builders go on while the person is away. The person decided
-  on 2026-10-05 ("Yes, that narrow set").
+  adversarial reviewer. PRs merge through the merge queue (MERGE QUEUE). Supersedes: T2
+  enforcement level.
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
 - **R16-1 (2026-10-04)** Release builds keep integer overflow checks
   (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
-  `wrapping_*`. The 5% gate measures the cost. Decided by the advisor under the
-  quality delegation.
+  `wrapping_*`. The P1 benchmark check measures the cost. Decided by the advisor under
+  the quality delegation.
 - **R16-2 (2026-10-04)** Release builds set `panic = "abort"`. A broken invariant
   crashes the node, and crash recovery restarts it. Tests keep unwinding. Confirmed by
   the person on 2026-10-04.
@@ -1737,46 +3036,80 @@ How to read this record:
   `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
   backtrace capture costs time on hot paths. Decided by the advisor under the quality
   delegation.
-- **FACTORY HOST (2026-10-05)** The person approved one AWS c7i.16xlarge (64 vCPU, 128
-  GiB, about 69 USD a day) for builder sessions: "that 480 a week is fine. let's only
-  allocate a day at a time in budget". It is outside the test budget. The advisor
-  launched it; the coordinator owns it from then on. Each boot stops it after 24 hours.
-  Each day, at least two hours before the stop, the coordinator asks the person to renew
-  one more day. On a yes it runs `sudo shutdown -c; sudo shutdown -h +1440` on the host
-  and posts the day on the ledger (#163). Without a yes, the host stops. The person's
-  laptop keeps the first nine builders, the coordinator, and the advisor. On the host,
-  sessions use a fine-grained GitHub token for `synnaxlabs/foundation` only (contents,
-  issues, and pull requests), not the person's login, and an instance role that can
-  start and stop only instances tagged `project=foundation-test`.
-- **REMOTE CONTROL (2026-10-05)** Sessions on the laptop and on the factory host
-  message each other through Remote Control ("remote control is fine"). Every session
-  name is unique across both machines. There is one coordinator. If Remote Control
-  fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
-  socket. The factory host runs on a second Claude account, so Remote Control cannot
-  reach it, and its sessions use the fallback (2026-10-05, "Yes It was the otehr
-  login"). A host session comments on `inbox:coordinator`, and the coordinator
-  comments on the host session's inbox. Laptop sessions reach host sessions through
-  the coordinator.
-- **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
-  asked for `audit` and `ux`. `verify` owns the MVP acceptance tests (in `acceptance`,
-  written before the pieces land) and the chaos lab. `red-team` attacks merged code,
-  security and vulnerabilities included, and owns `fuzz/` and additions under
-  `oracles/`. `audit` checks architecture boundaries, software practices, and
-  performance across merged code. `ux` checks the end user's experience: CLI, files,
-  errors, plan output, MCP, and docs. Each finding is an issue; `verify` and `red-team`
-  findings come with a failing test.
-- **BREAKER REVIEW (2026-10-05)** Every PR gets a third reviewer, the `breaker`, whose
-  only output is a test that fails against the PR, or nothing. It runs on Fable for
-  layer 1 and layer 2 crates, in its own worktree.
-- **CLOUD ROUTINES (2026-10-05)** The person has 250 USD of cloud session credits: "we
-  should use up the usage credits quickly", and the quality passes "should be running
-  more often than nightly". `audit`, `ux`, and the `red-team` attack pass on layer 1
-  and layer 2 code run as Claude Code routines in the cloud, one run per merged PR,
-  plus an hourly sweep for merges whose event was dropped. Each run files issues and
-  needs no reply, so the one-way messaging of cloud sessions does not matter. A pilot
-  checks first that a run can use `gh`. After the pilot, the `breaker` moves to a
-  routine on each opened PR. `red-team` keeps a host session for fuzzing, simulation
-  swarms, and the threat model.
+- **MILESTONES (2026-10-06)** The unit of work is the next acceptance scenario, one
+  milestone. Only issues on its path are admitted, a WIP limit stops breadth work while
+  it is open, and a new public item needs a caller on the path. Three factories, one per
+  machine, each a workstream of crates that change together: box1 (`foundation-factory`)
+  the slice core, box2 (`foundation-factory-2`) the edges, and the laptop the
+  composition (`node`, `config`, `ops`). The split is in `docs/factory.md`. The person:
+  "Yes, I agree, but we'll have three factories."
+- **ENGINEERS (2026-10-06)** Each engineer runs one machine's sessions on their own
+  Claude account and approves that machine's PRs to the risk crates: `raft`, `buffer`,
+  `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`, and `transport`. The
+  person: "Yes, I agree."
+- **TWO LANES (2026-10-06)** A watched day lane for open questions, public surfaces,
+  decisions, and risk-crate code, with flexible hours. An unwatched night lane takes
+  only issues marked ready during the day (the contract on `main` and compiling, the
+  acceptance tests named and present, no open decision, one crate of the session's
+  machine), plus simulation, fuzz, and mutants. The person: "Yes". Supersedes: Factory
+  constraint.
+- **MERGE QUEUE (2026-10-06)** A ruleset on `main` requires the CI checks, a merge
+  queue, and code-owner review, with zero other approvals. Agents act as one GitHub App,
+  `synnax-foundation-factory`, with one private key per machine; branches start with the
+  machine. The person owns `oracles/`, the decisions, `.github/`, `CLAUDE.md`,
+  `.claude/`, and each `public-api.txt`; the engineers own the risk crates. The person:
+  "Yes, I agree"; one App: "Yes please". Supersedes: C9c merge exception, MERGE RULE.
+- **MESSAGES (2026-10-06, a trial)** Same machine: `SendMessage`. Across machines: the
+  factory Claude Code mod over MQTT on AWS IoT Core, which wakes an idle session and
+  acks without model tokens. No session polls. GitHub stays the record. The person: "I'm
+  willing to give it a try", after a local prototype; IoT Core: "Yes I approve. Let's
+  get things set up". Supersedes: REMOTE CONTROL.
+- **AWS CEILING (2026-10-06)** 4,000 USD a month for Foundation on AWS, with alerts at
+  50, 80, and 100% of the forecast and a budget action that stops both boxes and the ARM
+  runners at 100% actual. Each resource stops 72 h after its last renewal; the person
+  renews every 3 days (ledger #163). A new resource needs the person's yes with its
+  exact price. The person: "Yes, that's fine. I want 3 days deadlines though".
+  Supersedes: FACTORY HOST.
+- **FACTORY ROLES (2026-10-06)** Fifteen Opus sessions (`docs/factory.md`). Laptop: a
+  thin coordinator (board, milestone, ready issues, routing), the architect (crate map,
+  boundaries, contracts; takes over the advisor role), two integrators, and the monitor.
+  box1: four builders and a red-team. box2: three builders, a connector builder mostly
+  on the night lane, and a red-team. `verify`, the daily crew, and the `audit` and `ux`
+  routines are retired; `code-quality` and `drift` run weekly. The person: "If you think
+  this is the right architecutre i'm ok with it". Supersedes: MULTI-SESSION FACTORY,
+  NINE BUILDERS, C9b2, QUALITY SESSIONS, CLOUD ROUTINES.
+- **REVIEW TIERS (2026-10-06)** `reviewer` on every PR; `architecture` and `breaker` on
+  every code PR; `performance` on hot paths, with measured numbers. A second round runs
+  `reviewer` and `breaker` again on the fix commits only, with the earlier findings. A
+  deferral in a risk crate needs the architect's explicit OK (the person, 2026-10-07:
+  "YES"). 4 of the 5 worst escaped defects came in through a fix or a deferral that
+  nothing checked again. Decided by the advisor under the quality delegation.
+  Supersedes: BREAKER REVIEW.
+- **REVIEW CHECK (2026-10-07)** The required status `review` (`cargo xtask review`,
+  `.github/workflows/review.yaml`) passes a PR only when its review is done. It reads
+  only round comments by the factory bot, in the format of `/review`, "Round comment".
+  Each round names the reviewers REVIEW TIERS requires; `performance` is never required.
+  The last round finds none and ends at the head, or at a commit that reaches the head
+  through clean merges of the base (`git merge-tree`). When the last round is a later
+  round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
+  trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
+  any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
+  added. An earlier round's skip is taken as written, since a rebase can drop its range
+  from the clone. An earlier round in the fixed format that does not parse fails. A
+  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  status is `success` on `merge_group`. Decided by the director on #1169
+  (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
+  in messages on #1193.
+- **FACTORY MODELS (2026-10-06)** Opus 5.5 for every session and reviewer. Fable only on
+  an issue that the person or the architect labels `model:fable`. Sonnet for
+  `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
+  delegation. Supersedes: MODELS.
+- **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
+  own PR through the queue when the gate, the review rounds, and CI pass; agents may run
+  `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
+  `.claude/`. The person: "Great, make the fucking changes and do your fucking job
+  shipping software". Fuzz inputs in `oracles/fuzz/` need no approval either: they only
+  add tests. The person: "Yes". Supersedes: the approvals in ENGINEERS and MERGE QUEUE.
 
 ### 1.14 Testing
 
@@ -1785,13 +3118,21 @@ How to read this record:
   coverage-guided fuzzing of every decoder of outside input, short per merge and
   continuous nightly, crashes kept as regression inputs; (3) deterministic simulation of
   a whole mesh, thousands of runs per merge and millions nightly; (4) unit benchmarks
-  and (5) component benchmarks on the dedicated machine with the 5% gate; (6) end-to-end
+  and (5) component benchmarks on the dedicated machine with a 5% check; (6) end-to-end
   performance against P1 on shared infrastructure, nightly and per release; (7) a
   protocol simulator per connector on every merge; (8) Synnax HITL runners with real NI,
   LabJack, and PLC hardware, nightly and per release. Mutation testing runs on the diff
   (C9b).
 - **T2** Oracles are person-owned: simulation invariants, P1 targets and baselines,
   conformance suites, fuzz inputs (agents add, never remove). Agents write most tests.
+- **BENCH BASELINES (2026-10-06)** The committed baselines and the CI bench job with
+  the 5% check (P1) come with #715. Until then, a PR that touches a hot path gives its
+  benchmark results, with the machine named. When a result is near 5%, the
+  coordinator runs it again on a quiet Linux host; a result still over 5% needs the P1
+  judgment. Once a day, the coordinator runs the hot-path benchmarks on a quiet Linux
+  host against a fixed commit, which finds a slowdown that no PR expected. Patch; #715
+  is the long-term fix. The person decided on 2026-10-06 ("I am ok with deferring
+  #715").
 - **CANONICAL LIBRARY RULE (testing part)** Protocol simulators and HITL test C-backed
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
@@ -1800,13 +3141,30 @@ How to read this record:
   and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
   fixed hasher, so a simulated run replays. A map keyed by outside input will get a
   keyed hasher with its key from `env` randomness. Decided by the advisor under the
-  quality delegation.
+  quality delegation. The fixed hasher is the Fx hasher of `rustc-hash`
+  (`FxBuildHasher`), not SipHash with fixed keys: SipHash cost the `transport` write
+  8.5 ns of 131 ns per 64 B message (Xeon 8488C), and its public keys stop no flood.
+  Iteration order never decides behavior, so a test that breaks on the new order shows a
+  defect in the code. Decided by `laptop.architect` (2026-10-07T09:59:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1321
+  "Outside input" is a value that a party outside the node chooses freely. A QUIC stream
+  ID is not: a peer must use its stream IDs in order, and `streams_max` limits how many
+  are open, so a set of keys that collide costs the peer many streams and a lookup at
+  most that many compares. Decided by `laptop.architect` (2026-10-07T14:37:40Z):
+  https://github.com/synnaxlabs/foundation/pull/1434#issuecomment-6040288730
 - **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
   global. `clippy.toml` denies the macro. Decided by the advisor under the quality
   delegation.
 - **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
+- **R16-10 (#340)** One exception to one path per item (r16 2): `hub` re-exports each
+  item of another layer-2 crate that its public surface names, at the same path under
+  a module named for that crate (`hub::home::Error` for `home::Error`). Layer 3 names
+  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
+  re-exports, and only items its own signatures use. Layer 2 and `node` name the item
+  at its home. Copies of the types lost: each change in `home` needs a change in
+  `hub`. Decided by the architect (#340).
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
@@ -1840,7 +3198,39 @@ How to read this record:
   adapter hides the gap between frames, so a seam that split frames would act
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
-  thread panics.
+  thread panics. Amended (2026-10-07, #995): `env::net` also gives name lookups.
+  `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
+  lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a
+  retry may fix, and a caller matches the variant, not the code. On `os`,
+  `getaddrinfo` maps `EAI_NONAME` and `EAI_NODATA` to `NotFound`, `EAI_SYSTEM` to
+  `Io` with `errno`, `EAI_AGAIN` to `Io` with `EAGAIN`, `EAI_MEMORY` to `Io` with
+  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Decided by the
+  architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
+  mean to a caller. Amended (2026-10-07, #1117): `Mode::Create` makes a missing file
+  with `len` zeroed bytes. It treats an empty file that is there as missing and
+  allocates it, because a crash between the create and the allocation leaves one. It
+  opens any other file that is there as it is. A create that gives `Full` leaves no
+  file at the path and keeps no blocks. Another error can leave an empty file at the
+  path, as a crash can. `os` and `sim` both do this. Lost: an atomic create through a
+  temporary name and a rename, so that the path never shows an empty file; the
+  temporary file would show in `list` and need a sweep after a crash. Decided by the
+  architect, #1117
+  (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031488357).
+  Amended (2026-10-07, #1112): on `os`, a write open can lock a new empty file before
+  its create does. The create gives `Busy`, the empty file stays, and the next create
+  allocates it. A caller that opens with `Create` only never meets it. Lost: Linux
+  `O_TMPFILE` with `linkat`; macOS has no equivalent, so the two platforms would
+  differ in this rule. Decided by the architect, #1112
+  (https://github.com/synnaxlabs/foundation/pull/1112#issuecomment-6031672142). The
+  text of the failure rule: the architect, #1117
+  (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031721563).
+  Text of the failure rule amended by the architect, #1112
+  (https://github.com/synnaxlabs/foundation/pull/1112#issuecomment-6032450864): only
+  `Full` promises no file; a flock, stat, or name check error after `openat` can leave
+  the empty file that the create made. Lost: a promise that any failed create leaves no
+  file it made.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -1861,7 +3251,42 @@ How to read this record:
   not depend on `transport`. `transport` owns the carriers and the session model, and
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
-  session under the architecture delegation.
+  session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
+  as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
+  datagrams that arrive at it are lost, and a send still works. Approved by the
+  coordinator on #907. Built by `simulation` in #926. Amended (2026-10-06, #943):
+  `link::Config::rate` limits a link to that many bytes per second, counted as IP
+  packets with their IP and UDP or TCP headers. Each direction of a link sends one
+  packet at a time: a packet starts when it is sent or when the packet before it has
+  left, whichever is later, and leaves after its bytes at the rate. Packets sent back
+  to back at one rate leave at the rate of their total bytes, so the rounding of each
+  to a nanosecond does not add up. A packet sent after the rate is removed still waits
+  for the packets before it. Then it takes the delay and the jitter. A power cut drops
+  the packets of the node that wait to leave. With no rate, a link adds no events and
+  no draws, so the digest of a run does not change. A UDP datagram takes its length
+  plus 768 bytes of its socket's send buffer until it leaves its link or a power cut
+  drops it. As on Linux, a send goes whole while the send buffer is empty or takes
+  less than `send_buffer_bytes`, and is pending from then. When a datagram leaves and
+  the send buffer is no longer full, each send that waits wakes in the same step.
+  Approved by the coordinator. Amended (2026-10-07, #995): `Net::resolve` gives the
+  addresses of a host name. An IP literal gives its one address with no lookup, and
+  no lookup is cached. `Sim::name` sets the answer to each lookup of a name in the
+  run, on any node: its addresses in order, none (`NotFound`), or a failure (`Io`
+  with `EAGAIN`), after a delay on the clock of the node. A lookup reads the answer
+  at its first poll and sends no packet, so a partition does not stop it. Decided by
+  the architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  From the review of #1018: a name matches in any ASCII case and with or without one
+  final dot, as in DNS. An IP literal as a name panics, because no lookup reads it.
+  A lookup that would end past the end of the clock never answers. The match in any
+  case and with a final dot was confirmed by the architect on #1018, in place of its
+  earlier exact match
+  (https://github.com/synnaxlabs/foundation/pull/1018#issuecomment-6031438649). Amended
+  (2026-10-07, #1255): a receive of a failed UDP socket first gives the datagrams queued
+  before the fault, then `EIO`. A broken socket still holds its receive queue, so the
+  queue stays readable. A pulled serial adapter takes its buffer with it, so
+  `Node::fail_serial` loses its unread bytes. Decided by `laptop.architect-2`, #1255
+  (https://github.com/synnaxlabs/foundation/issues/1255#issuecomment-6033324472).
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -1881,7 +3306,12 @@ How to read this record:
   the entries at its end. A removed file takes space until the removal is durable. The
   monotonic clock starts again and the wall runs on. `join` on a thread that a crash
   ended panics, because no process joins its own threads after it dies. Built by
-  `simulation` in #114, #535, #580, and #763.
+  `simulation` in #114, #535, #580, and #763. Amended (2026-10-06, #876): a failed
+  `sync` covers each write up to the last one that ended before it started, in the
+  order of the writes. As on Linux, these writes stay in the cache, clean: a read sees
+  them, and a later write goes over them. A power cut drops them, and at each read or
+  write of their sector the cache may drop them, by a coin. A sector with a write that
+  no `sync` covered is dirty, and the cache keeps it.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -1894,25 +3324,35 @@ How to read this record:
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
   The error gives every panic, the first one first: a drop that panics is a defect of
-  its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
-  same messages after the crash ends. At a crash, the start of each thread that has
-  not run drops the same way, after the futures. A thread that a drop starts on the
-  crashing node ends in the crash and never runs. Built by `simulation` in #548 and
-  #666.
-- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
-  segment is never lost or duplicated. It arrives after the delay and a jitter draw of
-  its link, and never before an earlier segment in its direction, so each direction
-  keeps its order. A connect is ready after one round trip and its accept after one
-  and a half. The receive buffer sets the window, the send buffer holds the bytes that
-  the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
-  sent. A drop before close, or with bytes unread, sends an RST; a drop after close
-  sends the bytes and the FIN. A process crash drops each stream. A power cut sends
-  nothing, so the peer gets an RST only when it sends. A case that `sim` does not
-  model panics with "sim does not simulate ... yet": a link with loss, `delayed`
-  sends, a connect to an address with no node, a full backlog, and a SYN to a live
-  stream. Rejected: retransmission over a lossy link (a full TCP state machine to
-  test before a carrier needs it), and a pipe of bytes with no segments (no window,
-  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
+  its own, even when an earlier panic caused the drop. A panic in the drop of a panic
+  payload is one more panic. At most 16 payloads of one chain drop, and the payload
+  past them is forgotten, so that a drop that always panics cannot hang the run. `os`
+  drops panic payloads with the same bound. `Sim::crash` panics with the same
+  messages after the crash ends. At a crash, the start of each thread that has not
+  run drops the same way, after the futures. A thread that a drop starts on the
+  crashing node ends in the crash and never runs. Built by `simulation` in #548, #666,
+  and #870.
+- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A segment
+  is never lost or duplicated. It arrives after the delay and a jitter draw of its link,
+  and never before an earlier segment in its direction, so each direction keeps its
+  order. Each segment carries the key of its stream, and only the end of that stream
+  takes it, so a late segment of an older stream on the same pair meets a closed port. A
+  connect is ready after one round trip and its accept after one and a half. The receive
+  buffer sets the window, the send buffer holds the bytes that the peer has not
+  received, and a write waits while `unsent_bytes_max` bytes are not sent. A drop before
+  close, or with bytes unread, sends an RST; a drop after close sends the bytes and the
+  FIN. A stream is done when an RST arrived, or each FIN arrived and its own is acked. A
+  drop of it sends nothing. An end that is done leaves its pair, as a Linux socket
+  leaves its table: a segment to the pair then meets a closed port, a SYN opens a new
+  stream, and a connect may take its port, also while a driver holds the old end. A
+  process crash drops each stream. A power cut sends nothing, so the peer gets an RST
+  only when it sends. A case that `sim` does not model panics with "sim does not
+  simulate ... yet": a link with loss, `delayed` sends, a connect to an address with no
+  node, a full backlog, and a SYN to a live stream. Rejected: retransmission over a
+  lossy link (a full TCP state machine to test before a carrier needs it), and a pipe of
+  bytes with no segments (no window, so no test of a writer that a slow reader stops).
+  Built by `simulation` in #113 and #944. Amended (2026-10-06, #874): a stream that is
+  done sends no RST at its drop and leaves its pair.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one
@@ -1943,6 +3383,11 @@ How to read this record:
   2026-10-05 ("Yeah taht's fine"), #461. `block::testing::{Scarce, Switch}`, behind
   the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
   above `block` tests a refused commit through its production path (#591).
+  `Pool::heap(config)` makes a pool on a `Heap` of `Config::reservation` bytes, so a
+  caller that wants heap memory does not size it. `Pool::new` stays for injected
+  memory, such as `os::memory::Memory` in `node` and `testing::Scarce` in a test
+  (decided by the architect, 2026-10-07T08:55:57Z, #1294:
+  https://github.com/synnaxlabs/foundation/issues/1294#issuecomment-6034509040).
 - **SHARD POOLS (2026-10-06)** `Node::start` makes one `block::Pool` for each shard
   and moves it into the shard, which drops it (M4). Each of `n` shards gets
   `budget / n`, and shard 0 also gets the remainder, so the parts add up to the node's
@@ -1955,6 +3400,80 @@ How to read this record:
   seam. The purge timer and `reclaim` on each loop turn land with the first PR that
   allocates from a pool, since no test can see either before then (#410). Proposed
   by `ops` in #410; approved by the coordinator on #806.
+- **SHARD BUFFERS (2026-10-07)** Each shard opens its write-ahead ring in directory
+  `shard-<i>` of the node's data directory and keeps it until the node stops.
+  `node::Config::files` is a maker with no core that `node` calls on the start
+  thread, in order of core, for each shard that gets its memory, just before its
+  start; the shard runs the function it gives on its own thread, because `Files` is
+  `Rc`, and a shard that does not start drops it unrun. A caller on the real OS makes
+  each shard's disk with `os::files` before the start and joins its I/O thread after
+  `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files` only
+  with a lock around a queue of disks. A fallible maker like `memory`, with a `node`
+  error for it, lost: `node` would then own I/O thread handles, which `sim` does not
+  have. Decided by the architect on #1062 (#1173):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+  `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
+  randomness. A ring that does not open stops the node, and `join` gives
+  `Error::Buffer` with the core, after `Start` and `Memory` and before `Panicked`. A
+  data directory made for another shard count, more or fewer, is refused before any
+  buffer opens (#1076); a reshard at start is the long-term path (#1077). Running the
+  stored count on another core count lost: it bends C2. Decided by the architect on
+  #1062:
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
+  count is an empty directory `shards-<n>` in the data directory, made and synced
+  before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the
+  head of the interner handoff. Another count gives `Error::Shards`, and a failed
+  file call `Error::Directory`. Any record of another count fails the start, also
+  next to `shards-<cores>`, and `stored` is the smallest such count, so the error
+  does not hang on the order of the list. A name counts only when the rest after
+  `shard-` or `shards-` is plain decimal that fits a `usize`: above zero for a
+  record, and below `usize::MAX` for a ring. Any other name (`shards-03`,
+  `shards-+3`, `shards-0`, `shard-<usize::MAX>`) is one the claim does not know, and
+  it ignores it, because no node can write it. The claim reads names only, so a file
+  with such a name counts as a directory would. Decided by the architect, #1214:
+  https://github.com/synnaxlabs/foundation/issues/1214#issuecomment-6032550887, as on
+  #1110 for `shards-0` and `shard-<usize::MAX>`:
+  https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. With
+  no record, rings up to `shard-<k>` are a record of `k + 1`, so a data directory
+  whose record a copy dropped is checked too; a crash cannot leave a ring with no
+  record. Each start syncs the data directory before `shard-0`, also when the record
+  is there, because a process crash can leave it unsynced. A one-sector file lost: it
+  needs a block, a write, two syncs, and a decode. Decided by the architect, #1076:
+  https://github.com/synnaxlabs/foundation/issues/1076#issuecomment-6031257049.
+  The rule of rings with no record stays, decided by the architect on #1178:
+  https://github.com/synnaxlabs/foundation/issues/1178#issuecomment-6032340796, with
+  the reasons at
+  https://github.com/synnaxlabs/foundation/pull/1110#issuecomment-6032339719. After a
+  stop, a shard starts no disk step: shard 0 checks the stop before the claim, and
+  each shard before its open. A started step runs to its end. A skipped step drops its
+  handoff, so each later shard skips too. A stop is not a failure, so `join` gives
+  `Ok` when no shard failed. Any failure stops the node, so a claim or open that has
+  not started does not start; `join` gives `Start` or `Memory`, else `Shards` or
+  `Directory`, else `Buffer` by core, else `Panicked` by core. Decided by the
+  architect on #1062 (#1174):
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
+- **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory.
+  Before the claim reads a name, shard 0 opens the file `lock` in the data directory
+  to write (`Mode::Create { len: 0 }`), and drops it after each shard of the node has
+  closed its ring. `Busy` on `lock` stops the start with `Error::Directory`, before
+  any name is read. The node never removes `lock`, so an open cannot race with a
+  remove. A crash frees the lock (`env::files`, #392). Lost: no lock, with the `Busy`
+  of each ring only, because two nodes with two core counts can each record a count,
+  and the loser's record then refuses every later start. Also lost: an atomic claim
+  with no lock, because an exclusive create guards one name, and two counts are two
+  names.
+  Decided by the architect, #1297:
+  https://github.com/synnaxlabs/foundation/issues/1297#issuecomment-6034758419 (#1300).
+- **SHARD HOMES (2026-10-07)** Each shard builds its `home::Shard` over its buffer
+  once the buffer opens, with the node's `clock::Reader`, and keeps the home until the
+  node stops. Its number is its core. It carries no index until the hub picks them
+  (#585). The stamp limits (A5) are a patch until #1285 makes them settings: earliest
+  2000-01-01T00:00:00Z, which refuses a clock that reads near 1970 but not one that
+  resets to 2000-01-01, and refuses backfill from before 2000; ahead 10 s, ten times
+  the MVP time error target of 1 s. A field of `node::Config` lost, because a setting
+  comes from the spec (NODE SETTINGS), not from the caller of `Node::start`.
+  Decided by the architect on #1287:
+  https://github.com/synnaxlabs/foundation/pull/1287#issuecomment-6034425115.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -1963,6 +3482,18 @@ How to read this record:
   length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
   lost: it clones the count for every view, and nothing needs a range yet. Decided
   by `memory`.
+  Amended (2026-10-07, #1068): `block::footprint(len)` gives `usize::MAX` when `len`
+  passes the largest payload, in place of a panic. No pool holds such a block, so
+  every budget refuses it. `frame::charge` of ends from a hostile peer gives
+  `u64::MAX`, and `Layout::draft` refuses it with
+  `Error::Pool(block::Error::TooLarge { .. })` and takes no block. A reader drafts
+  before it spends, so a spend adds only a charge that a pool holds, and a plain add
+  never overflows. Lost: an exported largest payload with a new `Error` variant, a
+  second check of a limit that `block` owns; a saturating spend, a second guard.
+  Decided by the architect, #1068
+  (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032386156,
+  corrected in
+  https://github.com/synnaxlabs/foundation/pull/1216#issuecomment-6032799083).
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -2004,6 +3535,16 @@ How to read this record:
   long as our systems are designed to cross compile i'm ok wiht only testing against
   linux for an alpha. as long as the system is designed for cross os deployment"
   (#574).
+- **ROOT TESTS (2026-10-07)** A test that needs `sudo` (to mount a small filesystem)
+  goes in its own `[[test]]` target with `test = false`, so `cargo test`, also with
+  `--all-targets`, does not run it. One step of the x86 `check` job in `ci.yaml` lints
+  and runs it on a GitHub-hosted runner, which is discarded after the job. No other
+  host runs it: box1, box2, and the self-hosted runners keep their state, and root
+  there is a security change that only the person can make. The ARM mutants job does
+  not run it, so the code that only such a test pins sits in one small function that
+  `.cargo/mutants.toml` excludes, with the name of the test. First user: the `root`
+  target of `os` (#1100). Decided by the architect, #1100
+  (https://github.com/synnaxlabs/foundation/issues/1100#issuecomment-6031260669).
 - **CI PACE (2026-10-06)** The ARM pool must not hold up the agents. The ARM workflow
   runs no loom step: loom is a software model, so the x86 `loom` job gives the same
   result. A PR run is cancelled by a newer push. A run on main is never cancelled while
@@ -2064,6 +3605,8 @@ How to read this record:
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
 | r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
+| Retention trims a held sample: the trim clauses of #895 (6032219156), of the READER RULES floor (#89), and of HANDOFF RECORD (#402) | RETENTION, READER RULES, HANDOFF RECORD, STORE TRIM |
+| `set_floor` takes `keep`, and the floor is past each sample stored more than `keep` ago: #1377 (6037946637, parts 1 and 2, and part 3 before the first estimate or while a store time of the path is at or after the cutoff; the floor sentence of 6038431739) and #1080 (6037950577) | READER RULES (the cutoff) |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -2085,6 +3628,15 @@ How to read this record:
 | Crate name `time` | `clock` (R9-D13) |
 | HOME SPLIT placement of `control` and `delivery` in layer 2 | SRP PASS layer-1 rule (X17) |
 | The old term for a region | "region" (REGION LOCKED) |
+| Factory constraint (two people, attended sessions only) | ENGINEERS, TWO LANES |
+| MULTI-SESSION FACTORY, NINE BUILDERS, C9b2 crew | FACTORY ROLES |
+| QUALITY SESSIONS (`verify`, `audit`, `ux`), CLOUD ROUTINES | FACTORY ROLES |
+| MODELS | FACTORY MODELS |
+| BREAKER REVIEW | REVIEW TIERS |
+| MERGE RULE, C9c "a person merges every PR" | MERGE QUEUE |
+| REMOTE CONTROL, `inbox:<name>` issues | MESSAGES |
+| FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
+| 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 
 ---
 
@@ -2108,9 +3660,9 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls it; commits). Two channels with one key are a defect and panic (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
-| Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
+| Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
@@ -2127,16 +3679,16 @@ Storage classes used in the table:
 | Control channel | Spec: `Index.control` pointer, placed with its index | Values: only the home, one sample per handoff (a published copy) | People, agents, auditors, new subscribers | `spec`; values through `home` |
 | Region | Files: `region "<prefix>" { voters }`. The parent's spec holds the delegation record `{ prefix, epoch, initial voters }`; the region's own Raft config holds current voters (X3) | Parent voters create, remove, or force takeover; the region changes its own voters | `mesh`, `plan`, every node | `spec` (definition), `mesh` (groups) |
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
-| Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `access` |
-| Retention policy | Spec; selects indexes | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
-| Placement policy | Spec; selects connectors and indexes: `{ select, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
+| Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
+| Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `home` (gives the cutoff to `buffer.set_floor`), `buffer` (caps holds by store time; a trim follows STORE TRIM) | `spec` |
+| Placement policy | Spec; selects connectors and indexes: `{ select, home, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
 | Compression policy | Spec; selects indexes; `mode` auto, raw, or max. The actual codec is a 1-byte tag per vector in the encoded bytes | Files | `codec` at the encoder (the home, or the writer's `hub`) | `spec`, `codec` |
 | Reduction policy | Spec; selects data channels; deadband checked against the channel's unit | Files | Connector library component through `hub.spec()` | `spec`, `connector` |
 | Time policy | Spec; selects node names; lists candidate peer nodes (default: the region's voters) | Files | `clock` | `spec`, `clock` |
 | Access policy | Spec; `{ subjects, select, allow, authority }` | Files | `access`, called by the owners (`home`, `mesh`) | `spec`, `access` |
 | Secret store policy | Spec; selects secret names | Files | The secret resolver | `spec` |
-| Connector | Files, then Spec as `spec::Connector { name, kind, node, config }` | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
+| Connector | Files, then Spec as `spec::connector::Connector { kind, node, config }`, keyed by its name | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
 | Kind config | Kind-owned: an opaque Document in the spec (canonical form, no source positions, so hashes stay stable) | Files | The kind's check at plan, `ctx.config()` at run | `connector-<kind>` |
 | Calculation | A connector of kind `calc`; program text is kind-owned; outputs on its own index | Files | `connector-calc` | `connector-calc` |
 | Open folder (A2) | Files, then Spec (mechanism: X28) | People | `hub`, `mesh` | `spec`, `mesh` |
@@ -2145,7 +3697,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, name, public key, seal key, version, ephemeral expiry }` in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; removal of an ephemeral node after its time offline | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
@@ -2168,7 +3720,7 @@ Storage classes used in the table:
 | Control state | Memory in `control` at the home; handoff records in the index log (HANDOFF RECORD; truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
-| Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |
+| Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed by `home` to `buffer.set_floor` with the retention cutoff | `delivery` | `home`, `buffer` | `delivery`, `buffer` |
 | Backfill dedup marks | Index log records | `home` | `replica`, a new home | `home` |
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
@@ -2467,9 +4019,18 @@ covers a connector and every index under its name. B7 gives indexes a default ho
 the connector's node. A placement selecting the same connector could name another node.
 Resolution: the connector's `node` is its required primary node (it is
 attached to a device, and `discover` writes it). A placement that selects a connector
-may add `standby` and `copies` but may not move its primary; `plan` fails if it tries.
+may add `standby` and `copies`, and may name only the connector's `node` as `home`;
+`plan` fails otherwise.
 An index's home, in order: a placement that selects the index, then the node of the
-connector that writes it (B7), then a plan error. Basis: BQ10, B7, C5 SHAPE.
+connector that writes it (B7), then a plan error. The placement resolves as a whole
+policy (X25): when the winning placement names no home, a less specific one does not
+give it (architect, #1150,
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6032212749).
+The order is `spec::placement::place`. Decided by architect-2 (#1150,
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6039572310). It
+names each placement by its tree key (architect-2,
+https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6039872584).
+Basis: BQ10, B7, C5 SHAPE.
 
 **X23. The `index` edge stated twice.**
 Conflict: S5 puts `index` on the data channel, and BQ9 re-indexes "by changing `index`
@@ -2496,7 +4057,13 @@ Conflict: BQ2 makes `spec::resolve` "the ONE policy resolver" with most-specific
 and S12 lists access as one of those policies. C8 makes access allow-only with no
 conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
-placement, transmission, compression, reduction, time, secret store). Access is
+placement, transmission, compression, reduction, time, secret store, node settings).
+For node settings, each budget resolves on its own: a policy that leaves a budget unset
+gives that budget to a less specific policy. Two policies of equal specificity that
+both set the same budget for one node are a plan error; two that set different budgets
+do not conflict. Per-budget resolution holds only because `disk` and `pool` are
+independent. It does not extend to kinds whose fields go together (such as placement),
+where values from different policies could make a combination nobody wrote. Access is
 evaluated only in `access`, as the union of matching allows; the authority cap is the
 highest authority among matching allows that grant `write`. Both use the one selector
 matcher in `types`. Basis: C8, SRP PASS (`access` split).
@@ -2509,10 +4076,10 @@ makes placement select connectors. r3 K2 forbids a policy from selecting outside
 region; r4 lets a root policy apply inside child regions.
 Resolution: each policy kind states its target: retention, transmission, and
 compression select indexes; placement selects connectors and indexes; reduction selects
-data channels; time selects nodes; access selects names (plus subjects anywhere);
-secret store selects secret names. A policy may select only names in its own region
-and that region's descendants; a descendant applies it as of the last parent version
-it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
+data channels; time and node settings select nodes; access selects names (plus
+subjects anywhere); secret store selects secret names. A policy may select only names
+in its own region and that region's descendants; a descendant applies it as of the
+last parent version it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
 
 **X27. Built-in channels have no spec definitions.**
 Conflict: S8 puts node status under the node's name, and S9 adds the changes channel.
@@ -2655,7 +4222,13 @@ constructs one interner per node, which owns the slot table, and passes that tab
 at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
 floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
 slot to each index it recovers; `node` opens every buffer before it opens sessions
-(#219, 2026-10-05). Approved by the coordinator on PR #449.
+(#219, 2026-10-05). Approved by the coordinator on PR #449. The shards open their
+buffers one after another, in order of core, and pass the interner along; a failed
+open does not pass it on, so no later shard opens. Start time is the sum of the
+opens. When that is too slow, the exit is a two-step `Buffer::open`: recover in
+parallel with no slots, then assign slots in one short step. Decided by the architect
+on #1062:
+https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
@@ -2749,6 +4322,11 @@ Rules:
    through `env`; everyone else asks `clock`. Only `node` builds real seams, and only
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
+8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
+   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
+   `buffer`, so its tests build a real `home::Shard`. The `hub` edge was decided by
+   the architect (#340). Lost: `buffer` in the `hub` row (hub code could call the
+   ring), the hub tests in `node`, and a second way to build a shard in `home`.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
@@ -2761,7 +4339,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -2772,7 +4350,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
@@ -2781,7 +4359,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `block`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
-| 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
+| 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home`; `buffer` as a dev-dependency only |
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. Seals a value to a node's seal key, and opens it. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
@@ -2841,13 +4419,15 @@ conclusion together". Each one is listed below.
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
-  voter's state when it sent the answer.").
+  voter's state when it sent the answer."), #352 item 1 (a reply from a node that is not
+  a peer).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
-  and generated names as strings (#701).
+  generated names as strings (#701), and POLICY NAMES (#474).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
-  the STREAM WIRE hello (#55), a reader session key type per mode (#725).
+  the STREAM WIRE hello (#55), a reader session key type per mode and the drop of a
+  late reader call (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
@@ -2877,7 +4457,8 @@ conclusion together". Each one is listed below.
   (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
   Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection, the retry
-  interval of a read that waits for a block (RECV WAITS).
+  interval of a read that waits for a block (RECV WAITS), the `Complete` share of the
+  turn (3 to 1, `LATEST_COST`).
 - Compression and reduction defaults; retention defaults; disk budget defaults.
 - Benchmark reruns owed: r1 handoff, r10 codecs, r11 memory on Linux x86-64 (pinned)
   and Raspberry Pi 4; `sim` binary size against P1 (BQ19); binary size and idle memory
@@ -2915,10 +4496,11 @@ a bad link:
   connector against a stub `libnidaqmx.so` (R7 loads the library at run time). NI's
   simulated devices run only on the factory host, if NI's driver builds for its kernel.
 - Store-and-forward: an edge node writes 1M samples/s (1% of P1) while its link to the
-  cloud is cut for one hour. With a disk budget that covers the hour, the InfluxDB out
-  connector (a named reader whose hold covers the cut) receives every sample, in seq
-  order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
-  equals the trimmed samples. `verify` runs both.
+  cloud is cut for one minute. With a disk budget that covers the minute, the InfluxDB
+  out connector (a named reader whose hold covers the cut) receives every sample, in
+  seq order. With a budget that covers 30 seconds, it receives exactly one gap, whose
+  count equals the trimmed samples. The `acceptance` tests run both. The cut was one
+  hour until 2026-10-07 (STORE AND FORWARD, amendment).
 - A time error bound on every sample. The bound must hold the true offset, and the
   MVP target is at most 1 s. A tighter target waits for the x86 and Pi 4 run (#260).
   The person accepted on 2026-10-05 ("as long as you've evaluated the performance
@@ -2955,3 +4537,25 @@ minimal `hub` (one writer and one reader session). Access, config files, and fai
 wait until its acceptance scenario passes. The plan and owners are on #462. The person
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
+
+**STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
+scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
+for one hour (one minute since the amendment below), and the `acceptance` tests run
+both disk budgets. It runs beside FIRST SLICE, which keeps priority. The person decided
+on 2026-10-06 ("Yes that is fine I approve", relayed by `monitor`).
+
+Amendment (2026-10-07): the cut is one minute, not one hour, at the same rate.
+Supersedes the one-hour cut of 5.5 and of this entry (#1072). The hour writes 3.6e9
+samples, and its edge buffer alone does not fit in `sim` on a CI runner
+(https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6034058219). The
+simulated InfluxDB store gets a compact form first (#1419). No scheduled run on a
+rented host runs the hour. The person decided ("Let's do a smaller scenario. It can
+still prove a significant amount of the behavior." and "Copy, yes I can agree with
+that"), relayed by `laptop.monitor` at 2026-10-07T14:10:57Z:
+https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221.
+
+5.5 sets no drain rate. Before the two tests lose `#[ignore]`, the lab runs a drain span
+after the heal in place of `OUTAGE`: two times the sum of the delay before the drain
+starts and the time to send `WRITTEN` at the drain rate measured in the lab.
+`laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
+https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).

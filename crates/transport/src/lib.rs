@@ -33,15 +33,18 @@ mod address;
 mod class;
 mod code;
 pub mod datagram;
+mod dial;
 mod error;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the QUIC carrier is the first user")
-)]
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod message;
+pub mod port;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "`Transport::new` is the first user")
+    expect(
+        dead_code,
+        reason = "the datagrams of `Session` are the next users (#68)"
+    )
 )]
 mod quic;
 mod session;
@@ -53,8 +56,13 @@ mod testing;
     expect(dead_code, reason = "the TCP and QUIC carriers are the first users")
 )]
 mod tls;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the QUIC carrier is the first user")
+)]
+mod varint;
 
-use std::marker::PhantomData;
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
@@ -65,22 +73,33 @@ pub use address::Address;
 pub use class::Class;
 pub use code::Code;
 pub use error::Error;
+pub use port::Port;
 pub use session::{Peer, Session};
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
 const PAYLOAD_IPV4: u16 = 1472;
 
+/// The smallest `message_bytes_max` of either side: a datagram fits in one message,
+/// and so does a hub head or key.
+const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
+
 /// The sessions of one shard. It dials peers and accepts the sessions the node
-/// routes to this shard. It stays on the thread that made it. The node's sockets and
-/// relays belong to one node-level part that every shard shares (#77).
-#[derive(Debug)]
+/// routes to this shard. It stays on the thread that made it. `node` binds one
+/// [`Port`] and splits it into one part for each shard.
+///
+/// Dropping it closes each session that no caller accepted with `Code(0)`, and the
+/// sessions it gave stay open. It refuses each dial from a peer until each of its
+/// connections drained: each session ended, and each handshake in flight finished
+/// or timed out. Then it frees its [`port::Part`], so a later dial gets no answer.
 pub struct Transport {
-    _shard: PhantomData<Rc<()>>,
+    carrier: quic::Carrier,
+    clock: env::clock::Clock,
 }
 
 impl Transport {
-    /// Starts this shard's part of the transport.
+    /// Starts this shard's transport on `part`, the shard's part of the node's
+    /// [`Port`].
     ///
     /// # Errors
     ///
@@ -89,31 +108,34 @@ impl Transport {
     /// or over `config.pool.largest()`.
     ///
     /// ```
-    /// use transport::{Config, Error, Transport};
+    /// use transport::{Config, Error, Transport, port};
     ///
-    /// fn start(config: Config) -> Result<Transport, Error> {
-    ///     Transport::new(config)
+    /// fn start(config: Config, part: port::Part) -> Result<Transport, Error> {
+    ///     Transport::new(config, part)
     /// }
     /// ```
-    pub fn new(config: Config) -> Result<Self, Error> {
+    pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         config.check()?;
-        drop(config);
+        let clock = config.clock.clone();
         Ok(Self {
-            _shard: PhantomData,
+            carrier: quic::Carrier::new(config, part),
+            clock,
         })
     }
 
     /// Connects to `peer` at one of `addresses`, and checks that the peer holds
     /// `peer`'s private key. It tries direct UDP addresses first, then direct TCP,
-    /// then relays. It starts the next address when the current one fails or has not
-    /// answered after a short stagger, and keeps the first session that completes
+    /// then relays. It starts the next address 250 ms after the newest attempt
+    /// started, or at once when it fails, and keeps the first session that completes
     /// (RFC 8305). An address where some other key answers counts as a failure,
     /// because addresses can be stale.
     ///
     /// # Errors
     ///
-    /// [`Error::Unreachable`] with the cause at each address when none gives a
-    /// session.
+    /// [`Error::Network`] when the socket is broken, or breaks before an attempt
+    /// connects, or [`Error::Unreachable`] with the cause at each address when none
+    /// gives a session. A session that connected before a break is given, and ends
+    /// with [`Error::Network`].
     ///
     /// ```
     /// use std::net::SocketAddr;
@@ -131,8 +153,8 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let _ = (peer, addresses);
-        todo!("#68")
+        let dialed = dial::dial(&self.carrier, &self.clock, peer, addresses).await;
+        dialed.map(Session::new)
     }
 
     /// Waits for the next session that a peer opened and the node routed to this
@@ -154,7 +176,35 @@ impl Transport {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Session, Error> {
-        todo!("#68")
+        self.carrier.accept().await.map(Session::new)
+    }
+
+    /// What this transport counted since [`Transport::new`].
+    ///
+    /// ```
+    /// fn refusals(transport: &transport::Transport) -> u64 {
+    ///     transport.status().refusals
+    /// }
+    /// ```
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.carrier.status()
+    }
+}
+
+/// What a [`Transport`] counted since [`Transport::new`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// The time that at least one stream read waited for a block from the shard's
+    /// pool, up to the call.
+    pub waited: Span,
+    /// The block commits that the system refused.
+    pub refusals: u64,
+}
+
+impl fmt::Debug for Transport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transport").finish_non_exhaustive()
     }
 }
 
@@ -227,7 +277,7 @@ impl Config {
         let message_bytes_max = self.message_bytes_max.get();
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
-        } else if message_bytes_max < usize::from(PAYLOAD_IPV4) {
+        } else if message_bytes_max < MESSAGE_BYTES_MIN {
             ("message_bytes_max", "must be at least 1472")
         } else if message_bytes_max > self.pool.largest() {
             ("message_bytes_max", "must be at most pool.largest()")
@@ -242,6 +292,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::num::NonZeroUsize;
     use std::rc::Rc;
 
@@ -251,6 +302,11 @@ mod tests {
 
     use super::{Config, Error, Transport};
     use crate::testing::{self, Shard};
+    use crate::tls::public;
+    use crate::{Code, Peer, Port};
+
+    const CLIENT: PrivateKey = PrivateKey([1; 32]);
+    const SERVER: PrivateKey = PrivateKey([2; 32]);
 
     const IDLE: Error = Error::Config {
         field: "idle",
@@ -290,7 +346,9 @@ mod tests {
         testing::run(0, |shard| {
             for message in [1472, largest(shard)] {
                 let config = config(shard, Span::NANOSECOND, message, message);
-                assert_eq!(Transport::new(config).err(), None, "{message} bytes");
+                let new = Transport::new(config, shard.part());
+                let shown = new.map(|transport| format!("{transport:?}"));
+                assert_eq!(shown, Ok("Transport { .. }".into()), "{message} bytes");
             }
         });
     }
@@ -309,7 +367,7 @@ mod tests {
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
-                    Transport::new(config).err(),
+                    Transport::new(config, shard.part()).err(),
                     Some(error),
                     "idle {idle:?}, window {window}, message {message}"
                 );
@@ -330,7 +388,7 @@ mod tests {
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
-                    Transport::new(config).err(),
+                    Transport::new(config, shard.part()).err(),
                     Some(error),
                     "idle {idle:?}, window {window}, message {message}"
                 );
@@ -349,11 +407,105 @@ mod tests {
                 let mut config = config(shard, Span::SECOND, message, message);
                 config.pool = Rc::clone(&pool);
                 assert_eq!(
-                    Transport::new(config).err(),
+                    Transport::new(config, shard.part()).err(),
                     Some(error),
                     "{message} bytes"
                 );
             }
         });
+    }
+
+    #[test]
+    fn a_refused_config_frees_the_socket() {
+        testing::run(0, |shard| {
+            let at = SocketAddr::new(shard.ip(), testing::PORT);
+            let config = config(shard, Span::ZERO, 1 << 16, 1 << 16);
+            let new = Transport::new(config, testing::part(shard.net(), at));
+            assert_eq!(new.err(), Some(IDLE));
+            assert_eq!(Port::bind(shard.net(), at).err(), None);
+        });
+    }
+
+    #[test]
+    fn accept_gives_the_session_a_peer_dialed() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, |transport, _| async move {
+            let session = transport.accept().await.expect("a session");
+            let peer = Peer::Node(public(&CLIENT));
+            assert_eq!(session.peer(), peer);
+            assert_eq!(
+                format!("{session:?}"),
+                format!("Session {{ peer: {peer:?}, .. }}")
+            );
+            assert!(!session.relayed());
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_after_the_transport_drops_is_refused() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, |transport, _| async move {
+            let session = transport.accept().await.expect("a session");
+            drop(transport);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(Span::SECOND).await;
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 100))
+                .await;
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let reason =
+                "aborted by peer: the server refused to accept a new connection";
+            let reason = String::from(reason);
+            assert_eq!(dialed.err(), Some(Error::Broken { reason }));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_after_each_session_ended_gets_no_answer() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            let session = transport.accept().await.expect("a session");
+            drop(transport);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            node.clock().sleep(testing::spans(testing::IDLE, 4)).await;
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            assert_eq!(dialed.err(), Some(Error::TimedOut));
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 }

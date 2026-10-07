@@ -1,31 +1,156 @@
 ---
 name: review
 description:
-  Adversarial review of a Foundation pull request by fresh reviewer agents. Use when a
-  builder opens a PR, when asked to review a PR, or when a PR changes after review.
-  Argument: the PR number.
+  Adversarial review of a Foundation pull request by fresh reviewer agents, by tier,
+  with a second round on the fix commits. Use when a builder's draft PR is open, when
+  asked to review a PR, or after fix commits. Argument: the PR number.
 ---
 
 # Review
 
-1. Read the PR: `gh pr view <n>` and `gh pr diff <n>`. Note which crates it touches
-   and which section of `docs/decisions.md` it builds.
-2. Launch fresh reviewers in parallel with the Agent tool. Give each one only the PR
-   number, the decisions section, and its job. Never give them your reasoning.
-   - `reviewer`: correctness, tests, error handling, and oracle changes. Always.
-   - `architecture`: layers, dependency direction, naming, principles. Always.
-   - `performance`: only when the PR's Performance section answers the six questions,
-     that is, it changes code a frame passes through.
-   - `breaker`: always, with `isolation: "worktree"`. Its only output is a test that
-     fails against the PR, or nothing. Run it with `model: "fable"` for layer 1 and
-     layer 2 crates.
-   - A second `reviewer` for each oracle weakening the PR flags, told to argue for
-     fixing the code instead.
-   - Run reviewers with `model: "fable"` when the PR touches `raft`, `mesh`, `block`,
-     `ring`, `buffer`, crash recovery, lock-free code, or a wake protocol. Other
-     reviewers inherit the session's model.
-3. Check each finding yourself against the code before you post it. Drop findings
-   you cannot confirm, and say so.
-4. Post one PR comment that lists the confirmed findings, most severe first, each with
-   the file and line, what goes wrong, and how to fix it.
-5. Fix or answer each finding, push, and reply on the PR.
+Run each reviewer in a fresh subagent with the Agent tool. Give it only the PR number,
+the decisions section the PR builds, and its job. Never give it your reasoning. Keep its
+findings, not its file reads. The author never does a reviewer's work: when a reviewer
+cannot start, another session runs it, and the round comment names that session.
+
+Before each round, read this skill as it is on `main` (`git fetch origin main`, then
+`git show origin/main:.claude/skills/review/SKILL.md`), and follow that text. The copy
+on a PR branch can be older, and a rule in an open PR does not apply yet.
+
+## Round 1
+
+Launch in parallel every reviewer the PR needs:
+
+| The PR | Reviewers |
+| --- | --- |
+| Every PR | `reviewer` |
+| A code PR: it changes a `.rs` file, a `Cargo.toml`, or `Cargo.lock` | add `architecture` and `breaker` |
+| A hot path: it changes code that runs once per sample, series, frame, or data message, or a public item that its caller on record calls at that rate, whatever its body says. A control message whose rate does not grow with the data (raft, membership) is not one. The `Hot path:` line of the `architecture` report decides | add `performance`. It must report measured numbers for `main` and the PR, with the machine. For a stub, it states what the surface makes each message and each part cost, read from the code under it, with no numbers. Run it again if it does not |
+| A flagged oracle weakening | add one `reviewer` per weakening, told to argue for fixing the code instead |
+
+When the PR changes a public surface or a crate's dependencies, also send its link to
+the crate's architect (`docs/factory.md`), which reviews it before the person. A public
+surface change includes a change to what a public item accepts, returns, or states in
+its doc, and any change from a surface or text that the architect approved. When the PR
+adds or changes a decision or a public doc that states what a crate on the other
+architect's list does, also send it to `laptop.architect`, which owns each contract
+between the two lists (`docs/factory.md`), and link its approval.
+
+When a new PR replaces one under review, close the old one first (`gh pr close <old>
+--comment "Replaced by #<new>"`), and link its round comments in the new round 1
+comment.
+
+The breaker makes its own worktree. Never give it another path: its permission check
+refuses every command outside that worktree. Remove the worktree when the breaker
+returns (`git worktree remove --force <path>`).
+
+## Findings
+
+1. Check each finding against the code yourself. Drop the ones you cannot confirm, and
+   say so.
+2. Post one PR comment for each round, also a round that finds nothing, after each of
+   its reviewers returns. It starts with the rating and summary from the `reviewer`'s
+   report, as given (Rating). Then its reviewers, its range (`<from>..<head sha>`), and
+   the confirmed findings, most severe first: file and line, what goes wrong, and the
+   fix. It ends with two lines. First `Deferred:` and `none`, or the issue of each
+   deferred finding, each with the link to the architect's OK in a risk crate. Then
+   `Public surface:` and `none`, or each public item and crate dependency that the PR
+   changes (the `architecture` report names them, and in a later round the `reviewer`
+   report names those of its range), each with the link to the architect's approval
+   once it exists.
+3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
+   states the item, linked in the answer, also when the code is already on `main` or
+   another crate does the work. A deferral to an existing issue is a comment on that
+   issue that names the item and links the round comment. A deferral in a risk crate
+   (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
+   `transport`) needs the explicit OK of the crate's architect: link its comment. A fix
+   or an answer that makes such a public surface change, or decides what a ruling means,
+   needs the architect's approval too: link its comment. So does a fix that reverses a
+   finding of the architect. So does an answer that accepts a regression over 5% (P1).
+   An answer to a run that cannot show the 5% check links the coordinator's rerun. A
+   dispute about what a rule in `CLAUDE.md` or `docs/claude/` means goes to
+   `laptop.director`. A refusal that names a trigger for later work is a deferral: file
+   its issue with the trigger, or write the trigger in the decisions entry that the
+   ruling cites. So is an answer that a later PR does the work, also a later PR of the
+   same issue. When the trigger is the work of another open issue, also comment the
+   deferral issue and its trigger on that issue.
+
+## Rating
+
+Each round comment, architect review, director verdict, and red-team approval starts
+with two lines for a person who has not read the code:
+
+1. `Quality: <n>/10` for the whole PR at its head. 10: nothing to improve. 8: small
+   fixes only. 5: it works, with real problems in tests, design, or performance. 3: a
+   defect or a missing test on a failure path. 1: the wrong design.
+2. A summary of its code quality in 2 or 3 short sentences.
+
+A reviewer that did not write the PR gives both. An author never rates its own PR.
+
+## Round comment
+
+The required check `review` (`cargo xtask review`) reads only comments by
+`synnax-foundation-factory[bot]`, and parses this text. Write each round comment so:
+
+```
+Quality: <n>/10
+<summary>
+
+## Review round <n>
+
+Reviewers: reviewer, architecture, breaker
+Range: `<from>..<head sha>`
+Findings: <count, or none>
+
+<the findings, most severe first>
+```
+
+`Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
+skips `breaker` adds the line
+``Breaker: skipped, the range changes no `.rs` line but comments``. The check reads the
+range of the last round: each `.rs` line it adds or removes, trimmed, must be empty or
+start with `//`, and it must change no `Cargo.toml` or `Cargo.lock` line. A moved file
+counts as each of its lines removed and added. A head that is the range end plus clean
+merges of the base needs no new round. A red-team PR labeled `oracle` also needs the
+director's verdict with the line ``Director: approved at `<sha>` `` at the head.
+
+## Second round
+
+In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that
+nothing checked again. So when round 1 led to fix commits:
+
+1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
+   with the round 1 comment and each architect review attached. Only a range that
+   changes no `.rs` line but comments skips `breaker`, and its round comment says so.
+   The `reviewer` also gets each answer that changed no code, and checks it against the
+   code. Its report gives the `Public surface:` and `Hot path:` lines for the range. The
+   round comment adds each item of the first to its own `Public surface:` line, and
+   copies the second. When the `Hot path:` line names a function, run `performance`
+   again on the range, and update the Performance section with its numbers.
+2. Handle their findings as above. Fix commits from this round get another round, until
+   one finds nothing. So does a fix that only edits the PR body: its range is
+   `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
+   of a round with no commit is low and in text, its comment gives `Findings: none` and
+   lists them under a line `Text fixes:`. The author applies each with the `reviewer`'s
+   words as given, and needs no further round.
+
+After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
+commits and the fix commits out of every round range. A clean merge, whose
+`git show --remerge-diff <merge>` is empty, needs no round. A merge with a resolution
+gets a round on that diff. When it changes no `.rs` line, the round runs `reviewer`
+alone, and its comment says so. Otherwise it runs as step 1 says.
+
+## Done
+
+Review is done when the last round comment ends at the PR head, or at a head before
+clean merges of `main`, and finds nothing (each `Text fixes:` item applied as "Second
+round" step 2 says), each round comment names each reviewer its round requires (round 1:
+the table; a later round: `reviewer`, `breaker` unless its range changes only comments,
+and `performance` with new numbers when its `Hot path:` line names a function), the
+`Deferred:` line of each round comment links the OK of each deferral in a risk crate,
+the `Public surface:` line of the last round comment links the architect's approval of
+each item, each finding of an architect review has its fix commit or a linked answer,
+and each later step that a round, an architect review, an architect's ruling, or an
+issue that the PR closes names is stated on an open issue that does it (a new issue, or
+a comment on an existing one) or as a trigger in the decisions entry. Only then does the
+author run `gh pr ready`.
