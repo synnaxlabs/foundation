@@ -463,12 +463,13 @@ How to read this record:
   disk that refuses a write, such an open can give `Files`. Lost: a first walk that only
   reads, which reads each record twice, and windows held until the walk ends, which
   takes memory up to the area. Decided by the architect (#1049,
-  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). One
-  case differs: on a file with no header, the open writes and syncs the first checkpoint
-  before the walk, so a false CRC match of the new chain value, 1 in 2^32, can give
-  `Invalid` after that write. Each statement about a record holds only when no CRC gives
-  a false match. Decided by the architect (#1049,
-  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971).
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6030897567). A
+  file with no checkpoint is no case of its own: the open makes it again (#1254), so the
+  walk after the first checkpoint reads a zero area and ends. This supersedes the case
+  "on a file with no header" of
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031034971. Each
+  statement about a record holds only when no CRC gives a false match. Decided by the
+  architect (#1049, the same comment).
   `Unaligned` says that the header block that the open takes holds a tail off a block
   boundary, and gives that tail. An open that gives `Unaligned` also leaves the ring as
   read. The open does not check the tail of the other block. `Invalid` names a record
@@ -533,7 +534,7 @@ How to read this record:
   crash at any point of the remake leaves a ring that the next open takes. Lost: fit the
   layout to the length of the file (a ring whose size no config gave), and keep the file
   when its length fits (two paths for one case). It does not wait for `File::resize`
-  (#1238). Decided by `laptop.architect`:
+  (#1238). Decided by `laptop.architect` (2026-10-07T07:47:16Z):
   https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
@@ -2222,20 +2223,23 @@ How to read this record:
   no shard starts, and `join` gives `Error::Disk` with the budget, the shard count, and
   the least budget (`n` times the least ring that `fit` gives, capped at the largest
   `Size`); `config` cannot check it, as for the pool part (NODE SETTINGS). The ring is
-  the whole store. A ring already there keeps its size, which can be more than its part,
-  until `Buffer::resize` exists (#451). So oldest first (B1) holds per shard, not per
-  node. This is a patch. The long-term path is small rings for commits, then segments
-  that draw from one node-wide allowance (#1081). The 5.5 lab sizes the budget for the
-  shard that holds the index. With `Buffer::resize`, `node` computes the `Layout` with
-  `fit` and calls `Buffer::resize`, nothing more: `buffer` sets the file length itself,
-  so `node` never extends or cuts the ring file and does not learn the format (after
+  the whole store. A ring with a checkpoint keeps its size, which can be more than its
+  part, until `Buffer::resize` exists (#451). A ring with none is made again at its part
+  (#1254). So oldest first (B1) holds per shard, not per node. This is a patch. The
+  long-term path is small rings for commits, then segments that draw from one node-wide
+  allowance (#1081). The 5.5 lab sizes the budget for the shard that holds the index.
+  With `Buffer::resize`, `node` computes the `Layout` with `fit` and calls
+  `Buffer::resize`, nothing more: `buffer` sets the file length itself, so `node` never
+  extends or cuts the ring file and does not learn the format (after
   https://github.com/synnaxlabs/foundation/issues/451#issuecomment-6032821843).
   Decided by the architect, #342:
   https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6030837040,
   https://github.com/synnaxlabs/foundation/issues/342#issuecomment-6032845187,
   https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033305257,
-  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672, and
-  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447.
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033404672,
+  https://github.com/synnaxlabs/foundation/pull/1180#issuecomment-6033884447, and, for
+  a ring with no checkpoint (2026-10-07T08:52:34Z),
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034449677.
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
   at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a

@@ -663,10 +663,10 @@ async fn open_written(
 async fn read_header(file: &File, blocks: Unique) -> Result<Header, Error> {
     let (first, rest) = blocks
         .split_first_chunk::<ALIGN>()
-        .expect("invariant: the read gave two blocks");
+        .expect("invariant: `blocks` holds the two header blocks");
     let second = rest
         .first_chunk::<ALIGN>()
-        .expect("invariant: the read gave two blocks");
+        .expect("invariant: `blocks` holds the two header blocks");
     let header = Header::decode(first, second)?;
     let (expected, found) = (header.layout.file_len(), file.len());
     if found != expected {

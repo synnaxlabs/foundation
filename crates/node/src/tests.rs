@@ -637,7 +637,7 @@ mod buffer {
         assert_eq!(ring_len(&mut sim, &host, 1), RING);
     }
 
-    /// A ring already there keeps its size, larger or smaller than its new part.
+    /// A ring with a checkpoint keeps its size, larger or smaller than its new part.
     #[test]
     fn a_restart_with_another_disk_budget_opens_the_rings_at_their_sizes() {
         for (first, ring, then) in
