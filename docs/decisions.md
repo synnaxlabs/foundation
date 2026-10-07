@@ -2901,10 +2901,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory.
   Before the claim reads a name, shard 0 opens the file `lock` in the data directory
-  to write (`Mode::Create { len: 0 }`), and holds it until each shard of the node has
-  closed its ring: shard `i` waits for shard `i + 1` to close, and shard 0 drops the
-  lock last. `Busy` on `lock` stops the start with `Error::Directory`, before any name
-  is read. The node never removes `lock`, so an open cannot race with a remove. A
+  to write (`Mode::Create { len: 0 }`), and drops it after each shard of the node has
+  closed its ring. `Busy` on `lock` stops the start with `Error::Directory`, before
+  any name is read. The node never removes `lock`, so an open cannot race with a remove. A
   crash frees the lock (`env::files`, #392). Lost: no lock, with the `Busy` of each
   ring only, because two nodes with two core counts can each record a count, and the
   loser's record then refuses every later start. Also lost: an atomic claim with no

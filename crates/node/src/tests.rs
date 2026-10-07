@@ -1476,25 +1476,18 @@ mod lock {
         })
     }
 
-    /// Starts a node on the cores of `host`, over the data directory of `disk`.
-    fn start_over(host: &sim::node::Node, disk: &sim::node::Node) -> Node {
-        let disk = disk.clone();
-        Node::start(Config {
-            files: Box::new(move || {
-                let disk = disk.clone();
-                Box::new(move || disk.files())
-            }),
-            ..config(host, Size::MEBIBYTE, Box::new(heap))
-        })
+    /// Starts a node on the cores and the data directory of `host`.
+    fn start_on(host: &sim::node::Node) -> Node {
+        Node::start(config(host, Size::MEBIBYTE, Box::new(heap)))
     }
 
     #[test]
     fn a_second_node_on_the_data_directory_of_a_running_node_is_refused() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        let first = start_over(&host, &host);
+        let first = start_on(&host);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
-        let second = start_over(&host, &host);
+        let second = start_on(&host);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
         let e = second.join();
         assert_eq!(e, Err(busy()));
@@ -1521,19 +1514,17 @@ mod lock {
                 ..sim::Config::default()
             });
             let host = host(&mut sim, 2);
-            let nodes = [start_over(&host, &host), start_over(&host, &host)];
+            let nodes = [start_on(&host), start_on(&host)];
             assert_eq!(sim.run_for(Span::SECOND), Ok(()), "seed {seed}");
-            let failed = nodes.each_ref().map(|n| n.shards[0].failed.get().cloned());
-            let claimed = usize::from(failed[0].is_some());
-            assert_eq!(failed[claimed], None, "seed {seed}");
-            assert_eq!(failed[1 - claimed], Some(busy()), "seed {seed}");
-            seen[claimed] = true;
             for node in &nodes {
                 node.stop();
             }
             assert_eq!(sim.run(), Ok(()), "seed {seed}");
             let joined = nodes.map(Node::join);
+            let claimed = usize::from(joined[0].is_err());
             assert_eq!(joined[claimed], Ok(()), "seed {seed}");
+            assert_eq!(joined[1 - claimed], Err(busy()), "seed {seed}");
+            seen[claimed] = true;
             let made = ["lock", "shard-0", "shard-1", "shards-2"].map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "seed {seed}");
         }
@@ -1550,11 +1541,11 @@ mod lock {
         for step in 0..400 {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
-            let first = start_over(&host, &host);
+            let first = start_on(&host);
             let after = Span::from_nanos(step * 5_000);
             assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
             first.stop();
-            let second = start_over(&host, &host);
+            let second = start_on(&host);
             assert_eq!(sim.run_for(Span::SECOND), Ok(()), "at {after:?}");
             second.stop();
             assert_eq!(sim.run(), Ok(()), "at {after:?}");
@@ -1574,12 +1565,61 @@ mod lock {
         assert_eq!(seen, [true; 3]);
     }
 
+    /// A stop at any point of the opens of three shards, then a probe that takes the
+    /// lock as soon as it is free: each ring has closed by then.
+    #[test]
+    fn the_lock_outlives_the_ring_of_each_shard() {
+        let mut held = false;
+        for step in 0..500 {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 3);
+            let node = start_on(&host);
+            let after = Span::from_nanos(step * 5_000);
+            assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+            node.stop();
+            let (waited, rings) = sim
+                .run_on(&host, |host, _| async move {
+                    let files = host.files();
+                    let clock = host.clock();
+                    let mut waited = false;
+                    let lock = loop {
+                        let mode = env::files::Mode::Create { len: 0 };
+                        match files.open(Path::new("lock"), mode).await {
+                            Err(env::files::Error::Busy { .. }) => {
+                                waited = true;
+                                clock.sleep(Span::from_nanos(1_000)).await;
+                            }
+                            opened => break opened.expect("the lock opens"),
+                        }
+                    };
+                    let mut rings = Vec::new();
+                    for core in 0..3 {
+                        let ring = crate::directory::shard(core).join("ring");
+                        let opened = files.open(&ring, env::files::Mode::Write).await;
+                        rings.push(opened.map(drop));
+                    }
+                    drop(lock);
+                    (waited, rings)
+                })
+                .expect("the probe ends");
+            held |= waited;
+            for ring in rings {
+                let busy = matches!(ring, Err(env::files::Error::Busy { .. }));
+                assert!(!busy, "at {after:?}: {ring:?}");
+            }
+            // A probe that takes the lock before the claim refuses the node.
+            let joined = node.join();
+            assert!(joined == Ok(()) || joined == Err(busy()), "at {after:?}");
+        }
+        assert!(held);
+    }
+
     /// A process crash frees the lock, so the next start claims the data directory.
     #[test]
     fn a_restart_after_a_process_crash_claims_the_data_directory() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
-        let node = start_over(&host, &host);
+        let node = start_on(&host);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
         sim.crash(&host, sim::Crash::Process);
         drop(node);

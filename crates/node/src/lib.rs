@@ -15,6 +15,7 @@ mod stop;
 mod tests;
 
 use std::fmt;
+use std::iter;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
@@ -169,14 +170,8 @@ impl Node {
         let stop = Stop::default();
         let (give, mut interner) = handoff::pair();
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
-        let mut first = Some(First {
-            mesh,
-            wall,
-            give,
-            cores: shards.cores().get(),
-        });
-        // No shard is before shard 0, so nothing waits for it to close.
-        let (mut closed, _) = handoff::pair();
+        let (first, mut ends) = First::new(mesh, wall, give, shards.cores().get());
+        let mut first = Some(first);
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
@@ -184,7 +179,7 @@ impl Node {
             // A shard that does not start drops `give`, so `interner` gives `None`.
             let (give, take) = handoff::pair();
             let take = std::mem::replace(&mut interner, take);
-            let close = Close::next(&mut closed);
+            let ended = ends.next().flatten();
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
                 Err(e) => {
@@ -212,7 +207,7 @@ impl Node {
             };
             let first = first.take();
             let make = files();
-            let main = move |tasks| open.main(first, make(), pool, tasks, guard, close);
+            let main = move |tasks| open.main(first, make(), pool, tasks, guard, ended);
             match shards.start(shard, main) {
                 Ok(handle) => started.push(Shard { handle, failed }),
                 Err(e) => {
@@ -304,26 +299,29 @@ struct First {
     wall: env::wall::Wall,
     give: Give<Interner>,
     cores: usize,
+    /// One end for each other shard, which ends once that shard has closed its ring.
+    closed: Vec<Take<()>>,
 }
 
-/// A shard's link in the chain that orders the ends of the shards: shard `i` waits
-/// for shard `i + 1` to close, then tells shard `i - 1`.
-struct Close {
-    /// Completes once each later shard has closed its ring.
-    later: Take<()>,
-    /// Dropped once this shard and each later one have closed their rings.
-    closed: Give<()>,
-}
-
-impl Close {
-    /// The link of the next shard, which tells `last`. `last` becomes the end that
-    /// the shard after it tells.
-    fn next(last: &mut Give<()>) -> Self {
-        let (tell, later) = handoff::pair();
-        Self {
-            later,
-            closed: std::mem::replace(last, tell),
-        }
+impl First {
+    /// Shard 0's steps, and the end that each shard drops once its ring has closed,
+    /// in order of core. Shard 0 gets none: it waits for the others.
+    fn new(
+        mesh: clock::Clock,
+        wall: env::wall::Wall,
+        give: Give<Interner>,
+        cores: usize,
+    ) -> (Self, impl Iterator<Item = Option<Give<()>>>) {
+        let (ends, closed): (Vec<_>, Vec<_>) =
+            (1..cores).map(|_| handoff::pair()).unzip();
+        let first = Self {
+            mesh,
+            wall,
+            give,
+            cores,
+            closed,
+        };
+        (first, iter::once(None).chain(ends.into_iter().map(Some)))
     }
 }
 
@@ -360,8 +358,9 @@ impl Open {
     /// Runs the shard to its end. With `first`, the shard first runs the mesh clock
     /// and claims the data directory. Then it opens its buffer and keeps its home
     /// until `guard` completes; a failed open drops `guard`, which stops the node.
-    /// Ends once each later shard has closed its ring, and holds the lock of the
-    /// data directory until then, so a node that takes the lock finds no ring open.
+    /// Drops `ended` once its ring has closed. Shard 0 holds the lock of the data
+    /// directory until each shard's ring has closed, so a node that takes the lock
+    /// finds no ring open.
     async fn main(
         self,
         first: Option<First>,
@@ -369,30 +368,37 @@ impl Open {
         pool: block::Pool,
         tasks: env::tasks::Tasks,
         guard: Guard,
-        close: Close,
+        ended: Option<Give<()>>,
     ) {
-        let lock = match first {
+        let (lock, closed) = match first {
             Some(First {
                 mesh,
                 wall,
                 give,
                 cores,
+                closed,
             }) => {
                 tasks.spawn(async { mesh.run(wall).await });
-                self.claim(&files, cores, give).await
+                (self.claim(&files, cores, give).await, closed)
             }
-            None => None,
+            None => (None, Vec::new()),
         };
         match self.run(files, Rc::new(pool), tasks).await {
             Some(home) => {
                 guard.await;
+                let commit = home.committed();
                 drop(home);
+                // Resolves once the buffer's task has written what was queued and
+                // ended, which closes the ring. Its error reaches no caller (#1329).
+                drop(commit.await);
             }
-            // Stops the node, so each later shard ends.
+            // Stops the node, so each other shard ends.
             None => drop(guard),
         }
-        close.later.await;
-        drop((close.closed, lock));
+        for shard in closed {
+            shard.await;
+        }
+        drop((ended, lock));
     }
 
     /// Claims the data directory for `cores` shards, gives the node's first interner,
