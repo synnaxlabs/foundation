@@ -1,4 +1,6 @@
+use std::future::poll_fn;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -6,14 +8,21 @@ use connector::http::{Client, Config};
 use env::net::tcp;
 use env::thread::Handle;
 use http::{Method, Request, StatusCode};
+use hyper::rt::Write as _;
 use sim::{Sim, node};
 use types::time::Span;
 
-use super::serve;
+use super::{Stream, serve};
 use crate::sim::Store;
 
 const PORT: u16 = 8086;
 const TIMEOUT: Span = Span::from_nanos(10_000_000_000);
+const OPTIONS: tcp::Options = tcp::Options {
+    send_buffer_bytes: 1 << 16,
+    recv_buffer_bytes: 1 << 16,
+    unsent_bytes_max: 1 << 14,
+    delayed: false,
+};
 
 fn shard(name: &str) -> env::shards::Config {
     env::shards::Config {
@@ -44,12 +53,7 @@ impl Network {
         let listen = tcp::Listen {
             local: remote,
             backlog: 4,
-            options: tcp::Options {
-                send_buffer_bytes: 1 << 16,
-                recv_buffer_bytes: 1 << 16,
-                unsent_bytes_max: 1 << 14,
-                delayed: false,
-            },
+            options: OPTIONS,
         };
         let listener = server.net().listen(&listen).expect("the port is free");
         let store = Arc::new(Mutex::new(Store::default()));
@@ -102,6 +106,49 @@ impl Network {
         self.handles.push(handle);
         self.sim.run_for(Span::MINUTE).expect("the run ends");
         std::mem::take(&mut *out.lock().expect("no panic under the lock"))
+    }
+
+    /// Writes `request` in one plain write of the adapter, and reads until the server
+    /// ends the stream. Gives the bytes written and the bytes read, or the read error.
+    fn exchange(&mut self, request: &'static [u8]) -> (usize, Result<String, String>) {
+        let (net, remote) = (self.client.net(), self.remote);
+        let out = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&out);
+        let handle = self
+            .client
+            .shards()
+            .start(shard("client"), move |_| async move {
+                let config = tcp::Config {
+                    remote,
+                    options: OPTIONS,
+                };
+                let tcp = net.connect(&config).await.expect("the server listens");
+                let mut stream = Stream(tcp);
+                assert!(
+                    stream.is_write_vectored(),
+                    "hyper copies each body into its buffer unless the stream is vectored"
+                );
+                let written = poll_fn(|cx| Pin::new(&mut stream).poll_write(cx, request))
+                    .await
+                    .expect("the write works");
+                let mut read = Vec::new();
+                let mut bytes = [0; 1024];
+                let ended = loop {
+                    match poll_fn(|cx| stream.0.poll_read(cx, &mut bytes)).await {
+                        Ok(0) => break Ok(String::from_utf8(read).expect("UTF-8")),
+                        Ok(n) => read.extend_from_slice(bytes.get(..n).expect("fits")),
+                        Err(error) => break Err(error.to_string()),
+                    }
+                };
+                *slot.lock().expect("no panic under the lock") = Some((written, ended));
+            })
+            .expect("the shard starts");
+        self.handles.push(handle);
+        self.sim.run_for(Span::MINUTE).expect("the run ends");
+        out.lock()
+            .expect("no panic under the lock")
+            .take()
+            .expect("the exchange ends")
     }
 
     fn request(&self, method: Method, path: &str, body: &str) -> Request<Bytes> {
@@ -240,4 +287,19 @@ fn serves_a_second_stream_while_the_first_stays_open() {
         ]
     );
     assert_eq!(network.times("m"), [1, 2]);
+}
+
+#[test]
+fn writes_a_whole_plain_write_and_ends_the_stream_on_connection_close() {
+    const REQUEST: &[u8] = b"POST /write?db=edge HTTP/1.1\r\nhost: a\r\n\
+        content-length: 7\r\nconnection: close\r\n\r\nm v=1 1";
+    let mut network = Network::new();
+    assert_eq!(
+        network.exchange(REQUEST),
+        (
+            REQUEST.len(),
+            Ok("HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n".into())
+        )
+    );
+    assert_eq!(network.times("m"), [1]);
 }

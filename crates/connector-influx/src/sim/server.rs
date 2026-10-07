@@ -42,7 +42,9 @@ pub async fn serve(mut listener: Listener, tasks: Tasks, store: Arc<Mutex<Store>
         tasks.spawn(async move {
             let service =
                 service_fn(move |request| answer(request, Arc::clone(&store)));
+            // The date would read the wall clock, which a simulation must not.
             let served = http1::Builder::new()
+                .auto_date_header(false)
                 .serve_connection(Stream(tcp), service)
                 .await;
             // `hyper` answers a request that breaks HTTP with 400 before it gives the
