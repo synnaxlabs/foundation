@@ -427,12 +427,17 @@ mod tests {
 
     impl Area {
         fn new() -> Self {
-            Self::with_body_max(BODY_MAX)
+            Self::with(AREA, BODY_MAX)
         }
 
+        /// An area of 64 blocks, which holds four records of 60 000 bytes.
         fn with_body_max(body_max: usize) -> Self {
-            let bytes = vec![0; index(AREA)];
-            let layout = Layout::new(AREA, body_max).expect("the sizes make a ring");
+            Self::with(2 * AREA, body_max)
+        }
+
+        fn with(area: u64, body_max: usize) -> Self {
+            let bytes = vec![0; index(area)];
+            let layout = Layout::new(area, body_max).expect("the sizes make a ring");
             let mut cursor = Cursor::new(layout, start(), 1 << 16);
             let Window { place, len } = cursor.window();
             let step = cursor.next(&bytes[index(place)..index(place) + len]);

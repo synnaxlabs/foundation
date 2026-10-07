@@ -598,7 +598,8 @@ mod buffer {
     /// takes first. A shard that waits for the interner does not open after it.
     #[test]
     fn a_shard_part_too_small_for_the_buffer_stops_the_node() {
-        let mut run = start_with(7, 32, &[], Size::MEBIBYTE, Box::new(heap));
+        let memory = Size::from_bytes(512 << 10);
+        let mut run = start_with(7, 16, &[], memory, Box::new(heap));
         assert_eq!(run.sim.run(), Ok(()));
         let e = run.node.join().unwrap_err();
         let pool = block::Error::TooLarge {
