@@ -8,13 +8,13 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{self, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::slice;
 use std::task::{Context, Poll, Waker};
 
-use block::{Block, Pool};
+use block::{Block, Pool, Unique};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{self, File, Files, Mode};
@@ -49,8 +49,9 @@ pub struct Config {
     pub tasks: Tasks,
     /// The chain value of the restart record.
     pub entropy: Entropy,
-    /// The sizes of a new ring. An existing ring keeps the sizes in its header; a
-    /// change takes effect at the next create.
+    /// The sizes of a new ring. A ring with a checkpoint keeps the sizes in its
+    /// header. A ring with none, which a crash before the first checkpoint leaves,
+    /// takes these.
     pub layout: Layout,
     /// The longest time an entry waits for its group commit to start. An entry
     /// queued during a commit longer than `commit` waits until that commit ends.
@@ -74,10 +75,10 @@ pub enum Error {
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
-    /// The ring file has another length than its header, or the layout for a new
-    /// ring, says.
+    /// The ring file has another length than its header says, or it is not empty and
+    /// ends inside its header blocks.
     Length {
-        /// The length the header or the layout says.
+        /// The length the header says, or the length of a new ring.
         expected: u64,
         /// The length of the file.
         found: u64,
@@ -339,11 +340,16 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Opens the ring in `config.dir`, or creates it, makes the ring and its
-    /// directory durable, and recovers the tail of every path from its records. Each
-    /// recovered index gets its slot from `slots`. Starts the commit task. Each tail
-    /// it reports is durable. It reads the header and the records from the ring's
-    /// tail and writes them again, so its time grows with the records.
+    /// Opens the ring in `config.dir`, or creates it, makes the ring and its directory
+    /// durable, and recovers the tail of every path from its records. A ring file with
+    /// no checkpoint holds no record: the open makes it again. Each recovered index
+    /// gets its slot from `slots`. Starts the commit task. Each tail it reports is
+    /// durable. It reads the header and the records from the ring's tail and writes
+    /// them again, so its time grows with the records. Open one directory at most one
+    /// time at once. Opens at once can fail with `Busy`, `Files(Length)`, or
+    /// `Files(Full)`. Dropping this future before it ends and then opening the same
+    /// directory again in this process can lose the commits of the second open, because
+    /// a remove of the first can still run (#1310).
     ///
     /// # Errors
     ///
@@ -370,22 +376,7 @@ impl Buffer {
             commit,
         } = config;
         drop(pool.alloc(META_LEN)?);
-        let path = dir.join("ring");
-        let file = match files.open(&path, Mode::Write).await {
-            Ok(file) => file,
-            Err(files::Error::NotFound { .. }) => {
-                files.create_dir(&dir).await?;
-                let len = layout.file_len();
-                files.open(&path, Mode::Create { len }).await?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        // An open that stopped after it made the ring may not have made it durable.
-        if let Some(parent) = dir.parent() {
-            files.sync_dir(parent).await?;
-        }
-        files.sync_dir(&dir).await?;
-        let header = read_header(&file, &pool, &entropy, layout).await?;
+        let (file, header) = open_ring(&files, &dir, &pool, &entropy, layout).await?;
         let (cursor, logs) = walk(&file, &pool, &header, slots).await?;
         let chain = random(&entropy);
         let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
@@ -607,41 +598,109 @@ fn random(entropy: &Entropy) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
-/// Reads the newer checkpoint and writes both blocks again, as read, for the
-/// reason [`walk`] gives. Two zero blocks are a ring made and not yet written: the
-/// first checkpoint goes to both blocks.
-async fn read_header(
+/// Opens the ring file in `dir` and reads its checkpoint. Makes the ring with
+/// `layout`, and writes its first checkpoint, when the file is not there or holds no
+/// checkpoint. An open that stopped before its first checkpoint leaves such a file:
+/// it holds no record, and its length can be that of another layout.
+async fn open_ring(
+    files: &Files,
+    dir: &path::Path,
+    pool: &Pool,
+    entropy: &Entropy,
+    layout: Layout,
+) -> Result<(File, Header), Error> {
+    let written = open_written(files, dir, pool, layout).await?;
+    let (file, blocks) = if let Some(written) = written {
+        written
+    } else {
+        files.create_dir(dir).await?;
+        // A removed ring keeps its room until this sync, and the new ring needs it.
+        files.sync_dir(dir).await?;
+        let len = layout.file_len();
+        let file = files.open(&dir.join("ring"), Mode::Create { len }).await?;
+        // Another open can make this ring, commit to it, and close in between.
+        let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
+        (file, blocks)
+    };
+    // An open that stopped after it made the ring may not have made it durable.
+    if let Some(parent) = dir.parent() {
+        files.sync_dir(parent).await?;
+    }
+    files.sync_dir(dir).await?;
+    let header = if unwritten(&blocks) {
+        create_header(&file, pool, entropy, layout).await?
+    } else {
+        read_header(&file, blocks).await?
+    };
+    Ok((file, header))
+}
+
+/// True when `blocks`, the two header blocks of a ring file, hold no checkpoint.
+fn unwritten(blocks: &[u8]) -> bool {
+    blocks.iter().all(|&byte| byte == 0)
+}
+
+/// Opens the ring file in `dir` and reads its two header blocks. `None` when no file
+/// with a checkpoint is there. A file that is empty, or whose header blocks are
+/// zero, holds no checkpoint: this removes it.
+///
+/// # Errors
+///
+/// [`Error::Length`] when the file is not empty and ends inside its header blocks.
+async fn open_written(
+    files: &Files,
+    dir: &path::Path,
+    pool: &Pool,
+    layout: Layout,
+) -> Result<Option<(File, Unique)>, Error> {
+    let path = dir.join("ring");
+    let file = match files.open(&path, Mode::Write).await {
+        Ok(file) => file,
+        Err(files::Error::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let found = file.len();
+    if found != 0 {
+        if found < AREA_START {
+            let expected = layout.file_len();
+            return Err(Error::Length { expected, found });
+        }
+        let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
+        if !unwritten(&blocks) {
+            return Ok(Some((file, blocks)));
+        }
+    }
+    // The handle stays through the remove, so no other open takes this file.
+    files.remove(&path).await?;
+    drop(file);
+    Ok(None)
+}
+
+/// Reads the newer checkpoint of `blocks`, the two header blocks of `file`, and
+/// writes both blocks again, as read, for the reason [`walk`] gives.
+async fn read_header(file: &File, blocks: Unique) -> Result<Header, Error> {
+    let (first, rest) = blocks
+        .split_first_chunk::<ALIGN>()
+        .expect("invariant: `blocks` holds the two header blocks");
+    let second = rest
+        .first_chunk::<ALIGN>()
+        .expect("invariant: `blocks` holds the two header blocks");
+    let header = Header::decode(first, second)?;
+    let (expected, found) = (header.layout.file_len(), file.len());
+    if found != expected {
+        return Err(Error::Length { expected, found });
+    }
+    file.write_at(0, &[blocks.freeze()]).await?;
+    Ok(header)
+}
+
+/// Writes the first checkpoint of a new ring to both header blocks, and syncs it.
+async fn create_header(
     file: &File,
     pool: &Pool,
     entropy: &Entropy,
     layout: Layout,
 ) -> Result<Header, Error> {
-    let found = file.len();
-    let length = |layout: Layout| Error::Length {
-        expected: layout.file_len(),
-        found,
-    };
-    if found < AREA_START {
-        return Err(length(layout));
-    }
-    let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
-    let (first, rest) = blocks
-        .split_first_chunk::<ALIGN>()
-        .expect("invariant: the read gave two blocks");
-    let second = rest
-        .first_chunk::<ALIGN>()
-        .expect("invariant: the read gave two blocks");
-    if blocks.iter().any(|&byte| byte != 0) {
-        let header = Header::decode(first, second)?;
-        if found != header.layout.file_len() {
-            return Err(length(header.layout));
-        }
-        file.write_at(0, &[blocks.freeze()]).await?;
-        return Ok(header);
-    }
-    if found != layout.file_len() {
-        return Err(length(layout));
-    }
     let header = Header::new(layout, random(entropy));
     let mut block = pool.alloc(ALIGN)?;
     block.copy_from_slice(&header.encode());
