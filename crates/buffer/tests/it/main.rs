@@ -48,8 +48,9 @@ const TAIL_AT: usize = 22;
 const CRC_AT: usize = 42;
 /// The bytes the header CRC covers.
 const COVER: usize = 512;
-/// The kind byte of a restart record. Its body is the chain value of the next
-/// record; after a data record, that value is the record's CRC.
+/// The kind bytes of a data record and of a restart record. The chain value of the
+/// next record is the CRC of a data record and the body of a restart record.
+const DATA: u8 = 1;
 const RESTART: u8 = 3;
 
 /// What one test gets on its shard.
@@ -132,7 +133,8 @@ impl Shard {
         let before = start - to_usize(BLOCK);
         let chain = match file[before + 8] {
             RESTART => u32_at(before + 9),
-            _ => u32_at(before + 4),
+            DATA => u32_at(before + 4),
+            kind => panic!("no record of one block before {offset}: kind {kind}"),
         };
         let mut body = file[start + 9..start + 9 + len].to_vec();
         body[at..at + bytes.len()].copy_from_slice(bytes);
@@ -2068,16 +2070,17 @@ fn a_record_over_the_most_entries_is_invalid() {
             }
             assert_eq!(body.len(), len);
             shard.tamper_record(BLOCK, 0, &body);
+            if !opens {
+                return shard.open_invalid(ring, BLOCK).await;
+            }
             let mut slots = Slots::new();
-            let opened = shard.open(ring, &mut slots).await;
-            let tails =
-                opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
-            let expected = if opens {
-                Ok(tail(count.into(), Some(count.into())))
-            } else {
-                Err(Error::Invalid { offset: BLOCK })
-            };
-            assert_eq!(tails, expected, "{count} entries");
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let tails = buffer.tail(slots.assign(key(1)), Path::Live);
+            assert_eq!(
+                tails,
+                tail(count.into(), Some(count.into())),
+                "{count} entries"
+            );
         });
     }
 }
@@ -2126,7 +2129,7 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
     });
 }
 
-/// The open writes the header blocks and the records before the invalid one again.
+/// The open writes the header blocks and the record before the invalid one again.
 #[test]
 fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
     run(107, Memory::default(), |shard| async move {
