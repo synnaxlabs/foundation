@@ -2208,6 +2208,20 @@ fn a_record_of_an_unknown_kind_is_invalid() {
     });
 }
 
+/// A zeroed block has kind 0, so kind 0 ends the walk for each chain value.
+#[test]
+fn a_block_of_kind_zero_that_follows_the_chain_ends_the_walk() {
+    run(113, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
+        shard.memory.put(RING, kind, &[0]);
+        shard.seal(2 * BLOCK);
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Ok(()));
+        assert_eq!(shard.memory.bytes(RING)[kind], RESTART);
+    });
+}
+
 #[test]
 fn an_open_that_finds_an_invalid_header_leaves_the_ring_as_read() {
     run(108, Memory::default(), |shard| async move {
