@@ -17,6 +17,15 @@ fn main() {
     let (sum, allocations) = ALLOCATOR.count(|| black_box(2_u64) + 2);
     assert_eq!((sum, allocations), (4, 0), "arithmetic does not allocate");
     counts_other_threads();
+    let before = ALLOCATOR.held();
+    let block = black_box(Box::new([0_u8; 64]));
+    assert_eq!(
+        ALLOCATOR.held().strict_sub(before),
+        64,
+        "a box holds its size"
+    );
+    drop(block);
+    assert_eq!(ALLOCATOR.held(), before, "a freed box holds nothing");
     let needle = [0xab; 32];
     let ((), found) =
         ALLOCATOR.freed_holding(&needle, || drop(black_box(Box::new(needle))));

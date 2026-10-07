@@ -1,7 +1,7 @@
 //! Counts heap allocations, so a test can assert that code does not allocate, counts
 //! the heap bytes held, so a test can bound the memory of a structure, and finds freed
-//! blocks that hold given bytes, so a test can assert that code erases a
-//! secret before it frees it.
+//! blocks that hold given bytes, so a test can assert that code erases a secret before
+//! it frees it.
 
 #![expect(unsafe_code, reason = "the allocator implements `GlobalAlloc`")]
 
@@ -14,7 +14,9 @@ use std::{fmt, hint, ptr, slice};
 /// An allocator that gets its memory from [`System`] and counts the allocations. Each
 /// `alloc`, `alloc_zeroed`, and `realloc` that succeeds counts as one; a failed one and
 /// `dealloc` do not count. A `realloc` always allocates a new block, copies, and frees
-/// the old block.
+/// the old block. It also counts the bytes it holds: each block that succeeds adds its
+/// `Layout` size, and `dealloc` subtracts it, so a `realloc` holds both blocks until
+/// the copy ends.
 ///
 /// ```
 /// #[global_allocator]
@@ -54,6 +56,8 @@ impl Allocator {
 
     /// The bytes in the blocks that this allocator gave out and did not free, on every
     /// thread. A block counts its `Layout` size, not what the system rounds it up to.
+    /// As the global allocator, read it in a binary with no test harness, like
+    /// [`Self::count`].
     #[must_use]
     pub fn held(&self) -> usize {
         self.held.load(Relaxed)
@@ -323,6 +327,12 @@ mod tests {
         assert_eq!(allocator.held(), 200);
         let layout = Layout::from_size_align(200, LAYOUT.align())
             .expect("invariant: 200 bytes at the alignment of `u64` is a layout");
+        // SAFETY: `allocator` returned `a` for `layout`, and 8 is not zero.
+        let a = unsafe { allocator.realloc(a, layout, 8) };
+        assert!(!a.is_null(), "the system has no memory for 8 bytes");
+        assert_eq!(allocator.held(), 8);
+        let layout = Layout::from_size_align(8, LAYOUT.align())
+            .expect("invariant: 8 bytes at the alignment of `u64` is a layout");
         free(&allocator, a, layout);
         assert_eq!(allocator.held(), 0);
     }
