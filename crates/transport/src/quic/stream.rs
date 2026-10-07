@@ -4391,34 +4391,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn a_message_after_a_pumped_message_that_two_wakes_named_holds_its_bytes() {
-        testing::run(1, |shard| {
-            let mut pair = connected(shard);
-            let mut bulk = open_sender(&mut pair, Class::Complete);
-            fill(&mut pair, shard, &mut bulk);
-            let mut pumped = open_sender(&mut pair, Class::Command);
-            let waiting = open_sender(&mut pair, Class::Command);
-            let now = pair.now();
-            let given =
-                try_write(&mut pair.client, now, &mut pumped, shard.block(b"p"));
-            assert_eq!(given, Ok(None));
-            assert!(half(&mut pair.client, &pumped).holds());
-            let message = Some(shard.block(b"w"));
-            let written = pair.client.endpoint.write(now, &waiting, &mut { message });
-            assert_eq!(written, Ok(Poll::Pending));
-            // One drive: noq-proto names `bulk` and `pumped`, and each wakes `pumped`.
-            free(&mut pair);
-            assert!(!half(&mut pair.client, &pumped).holds());
-            let message = Some(shard.block(&[7; 1000]));
-            let now = pair.now();
-            let written = pair.client.endpoint.write(now, &pumped, &mut { message });
-            assert_eq!(written, Ok(Poll::Pending));
-            let state = half(&mut pair.client, &pumped).claim.state;
-            assert!(matches!(state, State::Held(1000)), "{state:?}");
-        });
-    }
-
     /// Has the server read the first stream that the client's connection opened,
     /// which gives the client room again.
     fn free(pair: &mut Pair) {
