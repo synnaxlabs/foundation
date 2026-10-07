@@ -24,9 +24,12 @@ Never read the whole decisions file: read only the section that an issue names.
 
 - **Admit.** A builder sends new issues. Add the milestone and `ready` when the issue
   states its goal, crates, tests that must pass, and decisions section; the scenario
-  needs it; nothing blocks it; and its machine has fewer than two ready issues per
-  builder (the WIP limit). Else reply on the issue with the reason. Issues off the path
-  wait without a milestone.
+  needs it; and nothing blocks it. Else reply on the issue with the reason. Issues off
+  the path wait without a milestone.
+- **Refill.** On every wake, count the `ready` issues with no `owner:` label. While
+  there are fewer than builders, take the next open issues on the path from the
+  backlog, not only new ones, and admit each that passes. An idle builder is a failure
+  of this step.
 - **Route.** An issue that changes crates on two machines: split it into one issue per
   machine, linked, each with its `crate:` labels. A builder blocked on another machine's
   issue: admit that issue first, and `send` its link to the blocked builder only when it
