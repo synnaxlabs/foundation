@@ -56,7 +56,7 @@ mod message;
 )]
 mod region;
 pub mod status;
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 pub mod testing;
 pub mod ticket;
 
