@@ -670,6 +670,12 @@ mod tests {
         }
 
         #[test]
+        fn looks_up_a_literal_with_a_final_dot_as_a_name() {
+            let host = "10.0.0.2.".to_owned();
+            assert_eq!(resolve("10.0.0.2."), Err(Error::NotFound { host }));
+        }
+
+        #[test]
         fn looks_up_a_name_with_the_port() {
             let found = resolve("historian.local");
             assert_eq!(found, Ok(vec![address("10.0.0.9:4433")]));

@@ -203,10 +203,15 @@ fn a_name_that_is_an_ipv6_literal_in_brackets_panics() {
 }
 
 #[test]
-#[should_panic(expected = "10.0.0.2. is an IP literal, which no lookup reads")]
-fn a_name_that_is_an_ip_literal_with_a_final_dot_panics() {
-    let (mut sim, _) = one();
-    sim.name("10.0.0.2.", addresses(vec![v4(3)]));
+fn a_literal_with_a_final_dot_is_a_name() {
+    let (mut sim, node) = one();
+    for host in ["10.0.0.2.", "[fd00::2]."] {
+        sim.name(host, addresses(vec![v4(3)]));
+        let found = sim.run_on(&node, move |node, _| async move {
+            node.net().resolve(host, 4433).await
+        });
+        assert_eq!(found, Ok(Ok(vec![at(v4(3))])), "{host}");
+    }
 }
 
 #[test]

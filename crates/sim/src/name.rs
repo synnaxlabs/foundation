@@ -48,11 +48,10 @@ impl Config {
             delay >= Span::ZERO,
             "the lookup of {host} takes a negative delay of {delay}"
         );
-        let key = key(host);
-        let bracketed = key.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        let bracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
         let literal = match bracketed {
             Some(v6) => v6.parse::<Ipv6Addr>().is_ok(),
-            None => key.parse::<IpAddr>().is_ok(),
+            None => host.parse::<IpAddr>().is_ok(),
         };
         assert!(!literal, "{host} is an IP literal, which no lookup reads");
     }
