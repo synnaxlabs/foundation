@@ -243,20 +243,28 @@ How to read this record:
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
 - **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps the holds
-  on the indexes it selects: past `keep` after its store time, `buffer` trims a sample,
-  also when a reader holds it. It keeps no history window. An index that no policy
-  selects has no time cap. `keep` is zero or more. At `0s` no hold keeps a sample after
-  its store time, so a reader that is behind gets a gap. Most specific wins as a whole
-  policy (X25), equal specificity is a plan error (S12), and a data channel takes its
-  index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap", and a
-  size cap per index. In `config`, `select` and `keep` are both required. `keep` reads
-  with `document::read::span` (`document.bad-span`), where a negative span reads, and
+  on the indexes it selects: past `keep` after its store time, no hold keeps a sample,
+  so `buffer` may trim it (STORE TRIM). Retention deletes nothing: a ring frees only at
+  its tail, so a time on one index cannot free its samples. It keeps no history window.
+  An index that no policy selects has no time cap. `keep` is zero or more. At `0s` no
+  hold keeps a sample after its store time, so a reader that is behind gets a gap for
+  each sample that `buffer` trims before the reader gets it. Most specific wins as a
+  whole policy (X25), equal specificity is a plan error (S12), and a data channel takes
+  its index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap",
+  a size cap per index, and a read that reports each sample past `keep` as a gap while
+  its bytes are on disk. That read does not depend on disk pressure, but at `0s` a
+  reader a few milliseconds behind loses each sample it reads from disk, and each read
+  needs `keep` and a clock. Stale commands are the job of `max_age` (A20), not of
+  retention. In `config`, `select` and `keep` are both required. `keep` reads with
+  `document::read::span` (`document.bad-span`), where a negative span reads, and
   `config` refuses it with `config.negative-span` at the `keep` value. The code names
-  the defect, so a later span bound (a reader `hold`, S10) uses it too.
-  Ruling and answers:
+  the defect, so a later span bound (a reader `hold`, S10) uses it too. Ruling and
+  answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
-  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160.
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. The cap
+  and the lost read: decided by `laptop.architect`, 2026-10-07T12:30:53Z,
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on
   each write (B7) is the only source, and a write with no label is live. The person
@@ -275,8 +283,12 @@ How to read this record:
   has no backfill position. An open session holds all data it has not received. A closed
   named reader holds from its position until `hold` after the close, in mesh time; an
   unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
-  a negative hold (#94). The floor per path is the lowest held position, or none;
-  `buffer` trims below it, past retention (by store time), and under disk pressure. A
+  a negative hold (#94). The floor per path is the lowest held position, or none.
+  Retention caps the holds: `buffer` raises the floor past each sample stored more than
+  `keep` ago (RETENTION). A trim follows STORE TRIM: under disk pressure, at the tail
+  of the ring, whatever the floors (decided by `laptop.architect`,
+  2026-10-07T12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739). A
   resume takes, per path, the position the reader's `hub` presents, then the position at
   this home, then the home's fallback. A position below the floor or past the head is
   accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
@@ -699,11 +711,11 @@ How to read this record:
   holds control, else `[authority: u8]` then the holder's subject as UTF-8; the entry
   length gives the subject's length. A restart or a failover starts the gate from the
   last record (X18): `Gate::recover` with its holder, or `Gate::new` when it names
-  none. Trimming must keep the last record of each index (#406). Until it does,
-  retention can remove that record, and a holder that held control for longer than
-  the retention gets no grace after a restart. The layout is part of the disk format
-  version (C9d). Copy mode checks each record once where remote records enter (X43),
-  and the read after it panics on a bad record.
+  none. Trimming must keep the last record of each index (#406). Until it does, a
+  trim (STORE TRIM) can free that record, and a holder whose record a trim freed gets
+  no grace after a restart. The layout is part of the disk format version (C9d). Copy
+  mode checks each record once where remote records enter (X43), and the read after it
+  panics on a bad record.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
@@ -1949,9 +1961,14 @@ How to read this record:
   caller, and the check of a home at apply on each node is #1273. A forwarded change
   applies at least one time: a member that got no answer forwards it again, and the
   leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
-  state of a call that took effect last. A later `Change` kind that is not safe to
-  repeat needs a ruling before a member forwards it (decided by the architect,
-  2026-10-07T08:15:18Z:
+  state of a call that took effect last. `Change::Join` is safe to repeat while no
+  change removes a member: a repeat finds its node a member and is refused
+  (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
+  must keep a repeat of an older `Join` from admitting the node again, and needs a
+  ruling before it lands (decided by `laptop.architect`, 2026-10-07T12:55:06Z:
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6038355946). A later
+  `Change` kind that is not safe to repeat needs a ruling before a member forwards it
+  (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
@@ -1988,19 +2005,18 @@ How to read this record:
   `Refused` wait decided by the architect, 2026-10-07T04:39:07Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
-  that this build does not know, or when each `Mesh` drops: this build cannot judge
-  such an entry, and a newer build can. An entry with no change (the first entry of a
-  leader) is not a change of 0 bytes. A committed entry of a known kind whose body
-  does not decode is `Refused::Body` on every node, and the group goes on, so one voter
-  that proposes bad bytes cannot halt the region. So a change to the body or to a cap of
-  a known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
+  that this build does not know, or when each `Mesh` drops: this build cannot judge such
+  an entry, and a newer build can. An entry with no change (the first entry of a leader)
+  is not a change of 0 bytes. A committed entry of a known kind whose body does not
+  decode is `Refused::Body` on every node, and the group goes on, so one voter that
+  proposes bad bytes cannot halt the region. So a change to the body or to a cap of a
+  known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
   only after the format flag (C9d) allows it; a node of an older build stops at it and
   never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
   call gives `Error::Stopped` with the first cause, and a watch gives it also after each
   `Mesh` drops. `member` has no error (#562): it gives the record that the node holds,
-  also after a stop (approved by
-  the architect, 2026-10-07T08:07:48Z:
+  also after a stop (approved by the architect, 2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
   group does not start again: the node opens the mesh again, and the open makes durable
   what it gives (MESH LOG). The task ends soon after the last `Mesh` drops, a write in
@@ -2016,9 +2032,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
   reverses the map of the ruling below). The key of a member is the key that its card's
   signature covers, and `open` refuses a member that the region cannot hold, or two
-  members with one key (`Error::Member`, with the `region::Unfit`).
-  The signature does not show that the node owns its public key. The admission does, and
-  `Join` (#336) refuses the `node::Key` of a member (decided by `laptop.architect`,
+  members with one key (`Error::Member`, with the `region::Unfit`). The signature does
+  not show that the node owns its public key. The admission does, and `Join` (#336)
+  refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). Proposed
   by box1.builder-3, decided by the architect (#471), 2026-10-07T04:11:26Z:
@@ -2058,7 +2074,18 @@ How to read this record:
   across regions is ordinary access policy. A change that spans regions commits per
   region in dependency order. Supersedes: D7 linked meshes, K5 parent-owned voters.
 - **REGION BLOCK (tunable syntax)** `region "site_a" { voters = [...] }` declares a
-  region by name prefix. Regions nest like names. Supersedes: K5 voters policy.
+  region by name prefix. Regions nest like names. Supersedes: K5 voters policy. The
+  prefix is a `types::name::Prefix`, which can be empty: the root prefix
+  (`Prefix::ROOT`, text `""`) contains each name, so the root region holds each node.
+  `mesh` holds it in `driver::Config.region` and `region::State`, and checks each name
+  against the region with `Prefix::contains`; `ticket::Options.prefix` stays a `Name`.
+  Decided by `laptop.architect` (2026-10-07T12:47:19Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each
+  field that holds a region's prefix is a `Prefix`: also `ticket::Ticket`'s region (the
+  region that the joining node opens with) and the `region` of `Unfit::Outside` and
+  `Refused::Outside`, so a ticket for the root region exists. Decided by
+  `laptop.architect` (2026-10-07T13:32:35Z):
+  https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6039051758.
 - **r4 reconciliation (SETTLED BY ME)** Definition references (index, quality, error,
   control) stay inside one region. Placement is not a key reference (rules in 1.9).
 - **VOCABULARY + REGION LOCKED** "Region" names the governed part of the tree. Docs say
@@ -2105,27 +2132,44 @@ How to read this record:
   one `Join` change. Every node that applies it checks the card, and the admission
   against the ticket's public key, scope, uses, and expiry at the change's mesh time
   (BQ12), so a ticket is an Ed25519 key pair (#336). The voter that admits a join
-  answers with the founding voters and their cards, and the node opens with them as
-  `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region whose founders all left
-  cannot admit a node. `secret` finds no key itself: `ops` and `node` read the member
-  and pass its seal key. A rotation, a new card, and `Remove` wait for a caller; a
-  rotation that only the node signs lets a stolen key lock the node out. Lost: a record
-  that only the admitting voter checks (a voter that lies admits any key, against BQ12).
-  A `card::Signed` holds the `node::Key` that its signature covers (`Signed::key`): the
-  key cannot come from the public key, which can rotate, so the signed card is its one
-  place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
+  stamps the `Join` with the later edge of its mesh time interval, so the error of the
+  voter clock never admits a request that comes at or after the expiry. Every node
+  checks the expiry against the stamp, not against the time of the commit, so a join
+  that commits after the expiry still admits its node, and every node checks the same
+  stamp at every replay. A voter with no mesh time with a known error at or after the
+  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
+  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
+  region whose voters all have an unknown clock error admits no node by ticket, and the
+  operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
+  Windows node with a peer of known error. Decided by `laptop.director`
+  (2026-10-07T13:12:52Z):
+  https://github.com/synnaxlabs/foundation/issues/1397#issuecomment-6038688551. The
+  stamping voter makes each status key (UUIDv7, X27) from the stamp and its entropy,
+  and the byte form refuses a name twice. Decided by `laptop.architect`
+  (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The voter
+  that admits a join answers with the founding voters and their cards, and the node
+  opens with them as `Start.voters` (RAFT VOTERS). Until snapshots (#253), a region
+  whose founders all left cannot admit a node. `secret` finds no key itself: `ops` and
+  `node` read the member and pass its seal key. A rotation, a new card, and `Remove`
+  wait for a caller; a rotation that only the node signs lets a stolen key lock the node
+  out. Lost: a record that only the admitting voter checks (a voter that lies admits any
+  key, against BQ12). A `card::Signed` holds the `node::Key` that its signature covers
+  (`Signed::key`): the key cannot come from the public key, which can rotate, so the
+  signed card is its one place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). A
   `Signed` comes only from `sign` or from `Unchecked::check`. `Signed::decode`
   (crate-private) checks the signature and gives `None` when it does not hold; a change
   record holds an `Unchecked` card, which each node checks at apply. Approved by
   `laptop.architect` (2026-10-07T11:17:10Z):
-  https://github.com/synnaxlabs/foundation/pull/1323#issuecomment-6036785467. The
-  field is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
+  https://github.com/synnaxlabs/foundation/pull/1323#issuecomment-6036785467. The field
+  is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
   (`Stamp`) with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302). Decided
   by the architect, #242
-  (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
-  A `mesh::ticket::Ticket` is the secret part that an operator carries: the private key,
+  (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A
+  `mesh::ticket::Ticket` is the secret part that an operator carries: the private key,
   the region's prefix, and the voters to dial first (X37), at least one. Its `Debug`
   writes the region and the public key only, and it has no `Display`, `Clone`, or
   equality. `Ticket::admission` signs `foundation/admission/1`, the card's node key, and
@@ -2138,52 +2182,53 @@ How to read this record:
   {public_key} expired at {expiry}, and the join is at {at}". The text and the admit
   order approved by `laptop.architect` (2026-10-07T11:03:29Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6036571225. The
-  ephemeral expiry of a `Member` comes from its ticket, because the admin decides what
-  a ticket admits (BQ11a) and the joining node is outside input. Lost: a bearer secret
-  in the `Join`, which every member could replay and which binds to no card. Decided
-  by `laptop.architect` (2026-10-07T09:27:39Z):
+  ephemeral expiry of a `Member` comes from its ticket, because the admin decides what a
+  ticket admits (BQ11a) and the joining node is outside input. Lost: a bearer secret in
+  the `Join`, which every member could replay and which binds to no card. Decided by
+  `laptop.architect` (2026-10-07T09:27:39Z):
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. A
-  `ticket::Voter` holds only the node key, the public key to pin, and the addresses,
-  not a signed card: the ticket is the trust root, so a voter's signature over its own
-  card checks nothing that the ticket does not give. The ticket's text form can reuse
-  the byte form of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:14:01Z):
-  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302.
-  A `Ticket` change (kind 3) records a ticket's public key and `Options`. Apply refuses
-  a second record for one public key and a prefix that is not under the region's prefix;
-  the signature of the admin who made the ticket waits for #1213. A `Join` change (kind
-  2) carries the ticket's public key, a `Stamp` (the later edge of the admitting
-  voter's mesh time interval; a voter with no mesh time proposes no `Join`), the node
-  key, the card and its signature, the admission, and the status keys, which the voter
-  assigns (UUIDv7). Apply refuses, in this order, a forged card, a reserved name (A3), a
-  name outside the region, a status channel `<name>.<status>` that is longer than a
-  name can be or reserved, a key that is already a member, a name that a member holds,
-  a status key that a member holds or that the join repeats (A4), an unknown ticket,
-  and each refusal of `Record::admit`. So no refusal counts a use. A member's names are
-  its card name and each `<name>.<status>`, and two names are equal when they differ
-  only in ASCII case (A3, X27), so each full name maps to at most one member. Region
-  state cannot see the keys of the spec, so the status key check covers members only.
-  The name and key checks are one function, which `State::new` also runs on the
-  founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. A member
-  and a `Join` hold at most 64 status entries, as the 32 of `Addresses`. Decided by
-  `laptop.architect` (2026-10-07T10:44:26Z):
+  `ticket::Voter` holds only the node key, the public key to pin, and the addresses, not
+  a signed card: the ticket is the trust root, so a voter's signature over its own card
+  checks nothing that the ticket does not give. The ticket's text form can reuse the
+  byte form of `Addresses`. Decided by `laptop.architect` (2026-10-07T10:14:01Z):
+  https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302. A `Ticket`
+  change (kind 3) records a ticket's public key and `Options`. Apply refuses a second
+  record for one public key and a prefix that is not under the region's prefix; the
+  signature of the admin who made the ticket waits for #1213. A `Join` change (kind 2)
+  carries the ticket's public key, a `Stamp` (the later edge of the admitting voter's
+  mesh time interval; a voter with no mesh time of known error at or after the Unix
+  epoch stamps no `Join`), the node key, the card and its signature, the admission,
+  and the status keys, which the voter assigns (UUIDv7). Apply refuses, in this order,
+  a forged card, a reserved name (A3), a name outside the region, a status channel
+  `<name>.<status>` that is longer than a name can be or reserved, a key that is
+  already a member, a name that a member holds, a status key that a member holds or
+  that the join repeats (A4), an unknown ticket, and each refusal of `Record::admit`.
+  So no refusal counts a use. A member's names are its card name and each
+  `<name>.<status>`, and two names are equal when they differ only in ASCII case (A3,
+  X27), so each full name maps to at most one member. Region state cannot see the keys
+  of the spec, so the status key check covers members only. The name and key checks are
+  one function, which `State::new` also runs on the founding members; both give a
+  `region::Unfit`, which `Refused::Unfit` wraps. A member and a `Join` hold at most 64
+  status entries, as the 32 of `Addresses`. Decided by `laptop.architect`
+  (2026-10-07T10:44:26Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
   `mesh::status::Status` holds the cap of 64: `Status::new` refuses more (`Many`), and
   the decode refuses more before it reads an entry. So each `Member` that `encode`
   writes decodes, and `region::Unfit` has no count check. Lost: `Unfit::Many` in the
   member checks, which covers only where they run. Decided by `laptop.architect`
   (2026-10-07T11:11:49Z):
-  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036702954. A
-  refused change is a no-op on every node, so a forged card in the log cannot stop a
-  node. A `Join` holds a `card::Unchecked`, not a `card::Signed`: it has the byte form
-  of a signed card, decode keeps a join whose signature does not hold, and apply refuses
-  it as `Forged`. Each number in a change is little endian; a `Ticket` is the public
-  key, the prefix behind a length byte, a reusable byte (0 or 1), the expiry (8 bytes),
-  and the ephemeral span behind a presence byte. Decided by
-  `laptop.architect` (2026-10-07T09:27:39Z):
-  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918.
-  The reserved name check is region state, not a ticket check, because "no member name
-  is reserved" holds for every member, like "no key twice". Decided by
-  `laptop.architect` (2026-10-07T10:14:51Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036702954. A refused
+  change is a no-op on every node, so a forged card in the log cannot stop a node. A
+  `Join` holds a `card::Unchecked`, not a `card::Signed`: it has the byte form of a
+  signed card, decode keeps a join whose signature does not hold, and apply refuses it
+  as `Forged`. Each number in a change is little endian; a `Ticket` is the public key,
+  the prefix behind a length byte, a reusable byte (0 or 1), the expiry (8 bytes), and
+  the ephemeral span behind a presence byte. Decided by `laptop.architect`
+  (2026-10-07T09:27:39Z):
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6035046918. The
+  reserved name check is region state, not a ticket check, because "no member name is
+  reserved" holds for every member, like "no key twice". Decided by `laptop.architect`
+  (2026-10-07T10:14:51Z):
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035813123.
 - **S9 (changes log)** A built-in changes channel carries the small change records; seq
   is the Raft log index; any copy can serve it; readers resume from any source. There
@@ -2748,6 +2793,12 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
+- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
+  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+  `Prefix::contains` holds, so no caller writes the root case. Decided by
+  `laptop.architect` on 2026-10-07T12:47:19Z
+  ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
+  applied in #1402.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -2896,6 +2947,21 @@ How to read this record:
   "YES"). 4 of the 5 worst escaped defects came in through a fix or a deferral that
   nothing checked again. Decided by the advisor under the quality delegation.
   Supersedes: BREAKER REVIEW.
+- **REVIEW CHECK (2026-10-07)** The required status `review` (`cargo xtask review`,
+  `.github/workflows/review.yaml`) passes a PR only when its review is done. It reads
+  only round comments by the factory bot, in the format of `/review`, "Round comment".
+  Each round names the reviewers REVIEW TIERS requires; `performance` is never required.
+  The last round finds none and ends at the head, or at a commit that reaches the head
+  through clean merges of the base (`git merge-tree`). When the last round is a later
+  round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
+  trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
+  any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
+  added. An earlier round's skip is taken as written, since a rebase can drop its range
+  from the clone. An earlier round in the fixed format that does not parse fails. A
+  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  status is `success` on `merge_group`. Decided by the director on #1169
+  (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
+  in messages on #1193.
 - **FACTORY MODELS (2026-10-06)** Opus 5.5 for every session and reviewer. Fable only on
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
@@ -2994,7 +3060,29 @@ How to read this record:
   architect, #995
   (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
   From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
-  mean to a caller.
+  mean to a caller. Amended (2026-10-07, #1117): `Mode::Create` makes a missing file
+  with `len` zeroed bytes. It treats an empty file that is there as missing and
+  allocates it, because a crash between the create and the allocation leaves one. It
+  opens any other file that is there as it is. A create that gives `Full` leaves no
+  file at the path and keeps no blocks. Another error can leave an empty file at the
+  path, as a crash can. `os` and `sim` both do this. Lost: an atomic create through a
+  temporary name and a rename, so that the path never shows an empty file; the
+  temporary file would show in `list` and need a sweep after a crash. Decided by the
+  architect, #1117
+  (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031488357).
+  Amended (2026-10-07, #1112): on `os`, a write open can lock a new empty file before
+  its create does. The create gives `Busy`, the empty file stays, and the next create
+  allocates it. A caller that opens with `Create` only never meets it. Lost: Linux
+  `O_TMPFILE` with `linkat`; macOS has no equivalent, so the two platforms would
+  differ in this rule. Decided by the architect, #1112
+  (https://github.com/synnaxlabs/foundation/pull/1112#issuecomment-6031672142). The
+  text of the failure rule: the architect, #1117
+  (https://github.com/synnaxlabs/foundation/issues/1117#issuecomment-6031721563).
+  Text of the failure rule amended by the architect, #1112
+  (https://github.com/synnaxlabs/foundation/pull/1112#issuecomment-6032450864): only
+  `Full` promises no file; a flock, stat, or name check error after `openat` can leave
+  the empty file that the create made. Lost: a promise that any failed create leaves no
+  file it made.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -3299,6 +3387,16 @@ How to read this record:
   long as our systems are designed to cross compile i'm ok wiht only testing against
   linux for an alpha. as long as the system is designed for cross os deployment"
   (#574).
+- **ROOT TESTS (2026-10-07)** A test that needs `sudo` (to mount a small filesystem)
+  goes in its own `[[test]]` target with `test = false`, so `cargo test`, also with
+  `--all-targets`, does not run it. One step of the x86 `check` job in `ci.yaml` lints
+  and runs it on a GitHub-hosted runner, which is discarded after the job. No other
+  host runs it: box1, box2, and the self-hosted runners keep their state, and root
+  there is a security change that only the person can make. The ARM mutants job does
+  not run it, so the code that only such a test pins sits in one small function that
+  `.cargo/mutants.toml` excludes, with the name of the test. First user: the `root`
+  target of `os` (#1100). Decided by the architect, #1100
+  (https://github.com/synnaxlabs/foundation/issues/1100#issuecomment-6031260669).
 - **CI PACE (2026-10-06)** The ARM pool must not hold up the agents. The ARM workflow
   runs no loom step: loom is a software model, so the x86 `loom` job gives the same
   result. A PR run is cancelled by a newer push. A run on main is never cancelled while
@@ -3431,7 +3529,7 @@ Storage classes used in the table:
 | Region | Files: `region "<prefix>" { voters }`. The parent's spec holds the delegation record `{ prefix, epoch, initial voters }`; the region's own Raft config holds current voters (X3) | Parent voters create, remove, or force takeover; the region changes its own voters | `mesh`, `plan`, every node | `spec` (definition), `mesh` (groups) |
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
 | Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
-| Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
+| Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `home` (gives the cap to `buffer.set_floor`), `buffer` (caps holds by store time; a trim follows STORE TRIM) | `spec` |
 | Placement policy | Spec; selects connectors and indexes: `{ select, home, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
 | Compression policy | Spec; selects indexes; `mode` auto, raw, or max. The actual codec is a 1-byte tag per vector in the encoded bytes | Files | `codec` at the encoder (the home, or the writer's `hub`) | `spec`, `codec` |
@@ -3471,7 +3569,7 @@ Storage classes used in the table:
 | Control state | Memory in `control` at the home; handoff records in the index log (HANDOFF RECORD; truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
-| Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |
+| Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed by `home` to `buffer.set_floor`, which also applies retention | `delivery` | `home`, `buffer` | `delivery`, `buffer` |
 | Backfill dedup marks | Index log records | `home` | `replica`, a new home | `home` |
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
