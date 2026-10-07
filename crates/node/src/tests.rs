@@ -840,16 +840,18 @@ mod buffer {
     #[test]
     fn a_crash_during_the_opens_leaves_rings_the_next_start_opens() {
         for crash in [sim::Crash::Process, sim::Crash::Power] {
-            // The claim ends at about 250 us, and the opens at about 1.6 ms.
-            for step in 0..70 {
+            for after in (0..).step_by(25_000).map(Span::from_nanos) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
-                let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
-                let after = Span::from_nanos(step * 25_000);
+                let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                let opened = matches!(taken(&mut node), Poll::Ready(Some(_)));
                 sim.crash(&host, crash);
                 drop(node);
                 assert_eq!(run_on(&mut sim, &host), Ok(()), "{crash:?} at {after:?}");
+                if opened {
+                    break;
+                }
             }
         }
     }
@@ -861,13 +863,12 @@ mod buffer {
     fn a_crash_during_the_opens_then_another_disk_budget_opens() {
         let mut failed = Vec::new();
         for crash in [sim::Crash::Process, sim::Crash::Power] {
-            let mut last = None;
-            for step in 0..70 {
+            for after in (0..).step_by(25_000).map(Span::from_nanos) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
-                let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
-                let after = Span::from_nanos(step * 25_000);
+                let mut node = Node::start(config(&host, 1 << 20, Box::new(heap)));
                 assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                let opened = matches!(taken(&mut node), Poll::Ready(Some(_)));
                 sim.crash(&host, crash);
                 drop(node);
                 let lens = run_on_disk(&mut sim, &host, 2 * RING)
@@ -876,10 +877,11 @@ mod buffer {
                 if !lens.as_ref().is_ok_and(|lens| lens.iter().all(fits)) {
                     failed.push(format!("{crash:?} at {after:?}: {lens:?}"));
                 }
-                last = Some(lens);
+                if opened {
+                    assert_eq!(lens, Ok([DISK.bytes() / 2; 2]), "{crash:?}");
+                    break;
+                }
             }
-            // At the last cut each ring has its checkpoint: the cuts pass each create.
-            assert_eq!(last, Some(Ok([DISK.bytes() / 2; 2])), "{crash:?}");
         }
         assert_eq!(failed, Vec::<String>::new());
     }

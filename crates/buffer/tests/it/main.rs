@@ -1884,7 +1884,10 @@ fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
 
 /// A known defect, <https://github.com/synnaxlabs/foundation/issues/1310>: the
 /// remove of a dropped open can still run and remove the ring that the next open
-/// made, so a kill loses an entry that the next open committed. This pins the loss.
+/// made, so a kill loses an entry that the next open committed. This pins the loss
+/// on 6 runs that hang on the delay of each file call before the drop. A change that
+/// moves those delays makes them keep the entry, and the defect stays: the search in
+/// the issue then finds the runs again.
 #[test]
 fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
     let cases = [
