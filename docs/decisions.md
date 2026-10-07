@@ -610,6 +610,16 @@ How to read this record:
   and each `hub` caller must keep it); a refusal in `config check` (a second place that
   must track the home). Decided by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HUB SESSIONS (#1133)** `hub::Reader::next` yields once after 128 frames in a row: it
+  wakes its own task and returns `Pending`. So it yields under `sim` as under `os`, and
+  `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does nothing
+  outside a Tokio runtime. A complete session that misses a frame (a window of untaken
+  frames, or a commit of more than a window) gets no later frame and no error until it
+  closes; the docs of `Mode::Complete` and `next` state it. This is a patch until
+  catch-up from the buffer exists. After a warmup, a write and a read make no heap
+  allocation, which a counting allocator test binary checks (COUNTING ALLOCATOR).
+  `Hub::define` and `Config::pool` stand. Decided by the architect, #1133
+  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
