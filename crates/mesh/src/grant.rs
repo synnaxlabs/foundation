@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey};
+use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use raft::{Claim, Message, Ready, Signature};
 use types::node::{self, PrivateKey, PublicKey};
 
@@ -25,6 +25,11 @@ impl Signer {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
         Self { key, pair }
+    }
+
+    /// Whether `public` checks the grants that this signer signs.
+    pub(crate) fn owns(&self, public: PublicKey) -> bool {
+        self.pair.public_key().as_ref() == public.to_bytes()
     }
 
     /// Signs each grant in `ready` that has no signature, before the write and the

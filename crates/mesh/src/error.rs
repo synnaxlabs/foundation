@@ -26,8 +26,10 @@ pub(crate) enum Error {
     },
     /// A message carries a grant that does not hold.
     Grant(grant::Error),
-    /// The configuration names a node that is not a member of the region.
+    /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// This node's private key is not the key of its member.
+    WrongKey,
     /// The group stopped.
     Stopped(Stopped),
 }
@@ -48,6 +50,9 @@ impl fmt::Display for Error {
             Self::Grant(error) => error.fmt(f),
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
+            }
+            Self::WrongKey => {
+                f.write_str("the private key of this node is not the key of its member")
             }
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
         }

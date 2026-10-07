@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::poll_fn;
-use std::iter;
+use std::mem;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Poll, Waker};
@@ -59,6 +59,9 @@ pub(crate) struct Config {
 
 /// One node's part in the group of a region. Clones share it. The group runs until
 /// it stops or each clone drops. It stays on the shard that opened it.
+///
+/// The group's task ends soon after the last clone drops, and a write in progress
+/// ends first. Until then, a new open of the same directory gives [`Error::Log`].
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
@@ -72,11 +75,19 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
+    /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
+    ///   `config.members`.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
-        let mut named = iter::once(&config.key).chain(&config.voters);
-        if let Some(&key) = named.find(|key| !config.members.contains_key(key)) {
+        let signer = Signer::new(config.key, &config.private_key);
+        match config.members.get(&config.key) {
+            None => return Err(Error::NotMember(config.key)),
+            Some(&public) if !signer.owns(public) => return Err(Error::WrongKey),
+            Some(_) => {}
+        }
+        let mut voters = config.voters.iter();
+        if let Some(&key) = voters.find(|key| !config.members.contains_key(key)) {
             return Err(Error::NotMember(key));
         }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
@@ -101,9 +112,9 @@ impl Mesh {
             queues: BTreeMap::new(),
             stopped: None,
             task: None,
-            watches: Vec::new(),
+            watches: BTreeMap::new(),
+            watched: 0,
         }));
-        let signer = Signer::new(config.key, &config.private_key);
         let weak = Rc::downgrade(&group);
         config
             .tasks
@@ -113,8 +124,12 @@ impl Mesh {
 
     /// A watch of the home of `index`.
     pub(crate) fn watch(&self, index: channel::Key) -> Watch {
+        let mut group = self.group.borrow_mut();
+        let slot = group.watched;
+        group.watched = slot.wrapping_add(1);
         Watch {
             group: Rc::downgrade(&self.group),
+            slot,
             index,
             given: None,
             called: false,
@@ -206,6 +221,8 @@ impl Mesh {
 /// A watch of the home of one index.
 pub(crate) struct Watch {
     group: Weak<RefCell<Group>>,
+    // The key of this watch's waker in the group.
+    slot: u64,
     index: channel::Key,
     // What the last call of `next` gave.
     given: Option<node::Key>,
@@ -233,13 +250,21 @@ impl Watch {
             group.running()?;
             let home = group.state.home(self.index);
             if self.called && self.given == home {
-                register(&mut group.watches, cx.waker());
+                group.watches.insert(self.slot, cx.waker().clone());
                 return Poll::Pending;
             }
             (self.given, self.called) = (home, true);
             Poll::Ready(Ok(home))
         })
         .await
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(group) = self.group.upgrade() {
+            group.borrow_mut().watches.remove(&self.slot);
+        }
     }
 }
 
@@ -251,8 +276,10 @@ struct Group {
     stopped: Option<Stopped>,
     // The task of `run`, while it waits for an input.
     task: Option<Waker>,
-    // The tasks that wait in `Watch::next`.
-    watches: Vec<Waker>,
+    // The task of each watch that waits in `Watch::next`.
+    watches: BTreeMap<u64, Waker>,
+    // The count of watches made, which is the slot of the next one.
+    watched: u64,
 }
 
 impl Group {
@@ -287,7 +314,7 @@ impl Group {
             let change = Change::decode(&bytes)
                 .map_err(|cause| Stopped::Change { at, cause })?;
             if self.state.apply(change).is_some() {
-                self.watches.drain(..).for_each(Waker::wake);
+                self.wake_watches();
             }
         }
         Ok(())
@@ -297,14 +324,23 @@ impl Group {
         self.stopped = Some(stopped);
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
-        waiting.chain(self.watches.drain(..)).for_each(Waker::wake);
+        waiting.for_each(Waker::wake);
+        self.wake_watches();
+    }
+
+    fn wake_watches(&mut self) {
+        mem::take(&mut self.watches)
+            .into_values()
+            .for_each(Waker::wake);
     }
 }
 
 impl Drop for Group {
-    // A watch that waits must learn that each mesh dropped.
+    // The task must end and free the log, and a watch that waits must learn that
+    // each mesh dropped.
     fn drop(&mut self) {
-        self.watches.drain(..).for_each(Waker::wake);
+        self.wake();
+        self.wake_watches();
     }
 }
 
@@ -341,13 +377,6 @@ fn request(body: &Body) -> bool {
         | Body::HeartbeatReply
         | Body::AppendReply { .. }
         | Body::AppendReject { .. } => false,
-    }
-}
-
-// Adds `waker` to `wakers` unless one there wakes the same task.
-fn register(wakers: &mut Vec<Waker>, waker: &Waker) {
-    if !wakers.iter().any(|w| w.will_wake(waker)) {
-        wakers.push(waker.clone());
     }
 }
 
@@ -735,6 +764,22 @@ mod tests {
         }
     }
 
+    /// Makes each sync of the log fail, and gives why the group then stops.
+    fn fail_sync(node: &sim::node::Node) -> Error {
+        let path = Path::new(LOG).join("log-0");
+        node.fail_file(&path, Operation::Sync);
+        let cause = files::Error::Io {
+            path,
+            operation: Operation::Sync,
+            code: 5,
+        };
+        Error::Stopped(Stopped::Write(log::Error::Files(cause)))
+    }
+
+    fn term(mesh: &Mesh) -> Term {
+        mesh.group.borrow().raft.term()
+    }
+
     /// Whether `mesh` has no message for node `to` now.
     async fn quiet(mesh: &Mesh, to: u8) -> bool {
         let mut outgoing = pin!(mesh.outgoing(key(to)));
@@ -771,6 +816,7 @@ mod tests {
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 4).await);
+                assert_eq!(term(&mesh), Term(0));
             });
         }
 
@@ -818,11 +864,12 @@ mod tests {
                     spoofed.to_string(),
                     format!("a message names node {} {text}", key(2))
                 );
-                let stranger = message(9, 1, Body::HeartbeatReply);
+                let stranger = message(9, 1, Body::Heartbeat { commit: 0 });
                 let received = mesh.receive(public(9), stranger);
                 assert_eq!(received, Err(Error::Spoofed { from: key(9) }));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
+                assert_eq!(term(&mesh), Term(0));
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
@@ -844,6 +891,80 @@ mod tests {
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
+                assert_eq!(term(&mesh), Term(0));
+            });
+        }
+
+        #[test]
+        fn checks_the_peer_then_the_voter_then_the_grants() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
+                let forged = |leader| {
+                    let mut heartbeat =
+                        proven(leader, 1, Body::Heartbeat { commit: 0 });
+                    let proof = heartbeat.proof.as_mut().unwrap();
+                    proof.voters.get_mut(&key(1)).unwrap().as_mut().unwrap().0[63] ^= 1;
+                    heartbeat
+                };
+                let spoofed = Error::Spoofed { from: key(2) };
+                assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
+                let not_voter = Error::NotVoter { from: key(3) };
+                assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
+                let grant = Error::Grant(grant::Error::Forged { voter: key(1) });
+                assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
+            });
+        }
+
+        #[test]
+        fn takes_a_request_from_a_voter_that_leaves() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let at = Position {
+                    term: common::TERM,
+                    index: 1,
+                };
+                let joint = Voters {
+                    incoming: [key(1), key(2)].into(),
+                    outgoing: [key(1), key(2), key(3)].into(),
+                };
+                let append = Body::Append {
+                    prev: Position::default(),
+                    entries: vec![Entry {
+                        at,
+                        data: Data::Voters(joint),
+                    }],
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::AppendReply { last: 1 }));
+                let mut pre_vote = message(3, 1, Body::PreVote { last: at });
+                pre_vote.term = Term(common::TERM.0 + 1);
+                assert_eq!(mesh.receive(public(3), pre_vote), Ok(()));
+            });
+        }
+
+        // A known defect (#1065): a node that joins knows no voter, so it cannot tell
+        // the leader from a member that lies.
+        #[test]
+        fn a_member_that_is_not_a_voter_moves_a_node_that_joins_to_its_term() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &[]).await.unwrap();
+                let proof = raft::Proof {
+                    grant: raft::Grant::Vote,
+                    candidate: key(4),
+                    voters: [(key(4), None)].into(),
+                };
+                let mut lie = message(4, 1, Body::Heartbeat { commit: 0 });
+                (lie.term, lie.proof) = (Term(u64::MAX), Some(proof));
+                let mut ready = Ready {
+                    messages: vec![lie],
+                    ..Ready::default()
+                };
+                common::signer(4).sign(&mut ready);
+                let lie = ready.messages.remove(0);
+                assert_eq!(mesh.receive(public(4), lie), Ok(()));
+                assert_eq!(term(&mesh), Term(u64::MAX));
             });
         }
 
@@ -891,6 +1012,72 @@ mod tests {
     }
 
     #[test]
+    fn a_proposal_does_not_wait_for_the_next_tick() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let clock = node.clock();
+            let mut watch = mesh.watch(INDEX);
+            lead(&mesh, &clock, home(1)).await;
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Ok(Some(key(1))));
+            // The group now waits for a tick.
+            clock.sleep(TICK).await;
+            clock.sleep(Span::MILLISECOND).await;
+            let proposed = clock.now();
+            mesh.propose(home(2)).unwrap();
+            assert_eq!(watch.next().await, Ok(Some(key(2))));
+            let waited = clock.now() - proposed;
+            let half = Span::from_nanos(TICK.nanos() / 2);
+            assert!(waited < half, "the home came after {waited}");
+        });
+    }
+
+    #[test]
+    fn a_message_waits_for_the_write_of_its_ready() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let waiting = Rc::new(RefCell::new(None));
+            let (other, slot) = (mesh.clone(), Rc::clone(&waiting));
+            tasks.spawn(async move {
+                let message = other.outgoing(key(2)).await;
+                *slot.borrow_mut() = Some(message);
+            });
+            node.clock().sleep(Span::MILLISECOND).await;
+            let stopped = fail_sync(&node);
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            node.clock().sleep(TICK).await;
+            assert_eq!(waiting.take(), Some(Err(stopped)));
+        });
+    }
+
+    #[test]
+    fn a_change_waits_for_the_write_of_its_ready() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            lead(&mesh, &node.clock(), home(1)).await;
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let (mut watch, slot) = (mesh.watch(INDEX), Rc::clone(&seen));
+            // Its own task, so that it sees each home before the write ends.
+            tasks.spawn(async move {
+                loop {
+                    let next = watch.next().await;
+                    let stopped = next.is_err();
+                    slot.borrow_mut().push(next);
+                    if stopped {
+                        return;
+                    }
+                }
+            });
+            node.clock().sleep(TICK).await;
+            let stopped = fail_sync(&node);
+            mesh.propose(home(2)).unwrap();
+            node.clock().sleep(TICK).await;
+            assert_eq!(seen.take(), [Ok(None), Ok(Some(key(1))), Err(stopped)]);
+        });
+    }
+
+    #[test]
     fn a_log_that_cannot_write_stops_the_group() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
@@ -904,21 +1091,16 @@ mod tests {
                 let message = other.outgoing(key(2)).await;
                 *slot.borrow_mut() = Some(message);
             });
-            let path = Path::new(LOG).join("log-0");
-            node.fail_file(&path, Operation::Sync);
+            let stopped = fail_sync(&node);
             let at = Position {
                 term: Term(1),
                 index: 3,
             };
             assert_eq!(mesh.propose(home(2)), Ok(at));
-            let cause = files::Error::Io {
-                path,
-                operation: Operation::Sync,
-                code: 5,
-            };
-            let cause = log::Error::Files(cause);
-            let stopped = Error::Stopped(Stopped::Write(cause.clone()));
             assert_eq!(watch.next().await, Err(stopped.clone()));
+            let Error::Stopped(Stopped::Write(cause)) = &stopped else {
+                unreachable!()
+            };
             assert_eq!(stopped.to_string(), format!("the group stopped: {cause}"));
             node.clock().sleep(TICK).await;
             assert_eq!(waiting.take(), Some(Err(stopped.clone())));
@@ -964,6 +1146,76 @@ mod tests {
             assert_eq!(voter.err(), Some(refused.clone()));
             let text = format!("node {} is not a member of the region", key(3));
             assert_eq!(refused.to_string(), text);
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_private_key_that_is_not_the_key_of_the_member() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                key: key(1),
+                private_key: private(2),
+                members: common::members(&IDS),
+                voters: BTreeSet::new(),
+                files: node.files(),
+                clock: node.clock(),
+                entropy: node.entropy(),
+                tasks,
+                pool: pool(),
+            };
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
+            let text = "the private key of this node is not the key of its member";
+            assert_eq!(Error::WrongKey.to_string(), text);
+        });
+    }
+
+    #[test]
+    fn open_gives_the_error_of_the_log() {
+        solo(|node, tasks| async move {
+            let _first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let busy = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
+            let path = Path::new(LOG).join("log-0");
+            let cause = log::Error::Files(files::Error::Busy { path });
+            assert_eq!(busy.to_string(), cause.to_string());
+            assert_eq!(busy, Error::Log(cause));
+        });
+    }
+
+    #[test]
+    fn a_dropped_mesh_frees_its_log_before_the_next_tick() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            node.clock().sleep(Span::MILLISECOND).await;
+            drop(mesh);
+            node.clock().sleep(Span::MILLISECOND).await;
+            let again = open(&node, &tasks, 1, &[1], &[1]).await;
+            assert_eq!(again.err(), None);
+        });
+    }
+
+    #[test]
+    fn a_dropped_watch_leaves_no_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            for _ in 0..3 {
+                let mut watch = mesh.watch(INDEX);
+                tasks.spawn(async move {
+                    assert_eq!(watch.next().await, Ok(None));
+                    let mut next = pin!(watch.next());
+                    let waits =
+                        poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending()));
+                    assert!(waits.await);
+                });
+            }
+            let mut kept = mesh.watch(INDEX);
+            assert_eq!(kept.next().await, Ok(None));
+            let mut next = pin!(kept.next());
+            assert!(
+                poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending())).await
+            );
+            node.clock().sleep(TICK).await;
+            let slots: Vec<_> = mesh.group.borrow().watches.keys().copied().collect();
+            assert_eq!(slots, [3]);
         });
     }
 

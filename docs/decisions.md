@@ -1413,14 +1413,19 @@ How to read this record:
   configuration (`Error::NotVoter`), and each grant holds (`Error::Grant`). A node
   with no configuration takes a request from each member, because RAFT VOTERS makes
   an empty `Start.voters` a node that joins, and its first append comes before its
-  first `Voters` entry (#1054). The messages for one member wait in a queue of 64
-  that drops its oldest, because `raft` sends again. A group stops when a write of
-  the log fails (a write that gets no block from the pool is one), when a committed
-  entry is not a change that this build reads, or when each `Mesh` drops. Each later
-  call gives `Error::Stopped` with the cause. A stopped group does not start again:
-  the node opens the mesh again. Each open applies the log from index 1, until
-  snapshots (#253). A watch does not keep the group running. `open` refuses a node
-  or a voter that is not a member (`Error::NotMember`). Decided by `consensus`.
+  first `Voters` entry (#1054). Such a node cannot tell the leader from a member
+  that lies, so one member can move it to any term (#1065, open). The messages for
+  one member wait in a queue of 64 that drops its oldest, because `raft` sends
+  again. A group stops when a write of the log fails (a write that gets no block
+  from the pool is one), when a committed entry is not a change that this build
+  reads, or when each `Mesh` drops. Each later call gives `Error::Stopped` with the
+  cause. A stopped group does not start again: the node opens the mesh again (#1066
+  for an open after a failed sync). The task ends soon after the last `Mesh` drops,
+  and a write in progress ends first; until then a new open gives `Error::Log`.
+  Each open applies the log from index 1, until snapshots (#253). A watch does not
+  keep the group running, and a dropped watch leaves no waker. `open` refuses a
+  node or a voter that is not a member (`Error::NotMember`), and a private key that
+  is not the key of this node's member (`Error::WrongKey`). Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
