@@ -616,17 +616,27 @@ How to read this record:
   outside a Tokio runtime. A complete session that misses a frame (a window of untaken
   frames, or a commit of more than a window) gets no later frame, as there is no
   catch-up from the buffer yet. The director chose that `delivery` reports the miss and
-  wakes the session, and that `next` then ends with an error, in this PR; until that
-  lands, the session waits with no error. #1170 sizes the window to one commit
-  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). After a
-  warmup, a write and `next` make no heap allocation, while frames wait, while a reader
-  waits, and in the write that wakes a latest reader, which a counting allocator test
-  binary checks (COUNTING ALLOCATOR); it does not count the commit task. `next` gives a
-  `types::frame::View` of the reader's channels and their index (M2), never the frame.
-  The view borrows the reader, which releases the frame at the next call, so the grant
-  at the next take follows CREDIT RULES; a caller that keeps data copies it. A session
-  that ends gives `reader::Ended`. `Hub::define` stands. Decided by the architect,
-  except the stall, #1133
+  wakes the session, and that `next` then ends with an error
+  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
+  `delivery::Readers::release` also names a session that missed a frame and has none
+  waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
+  forwards it until #274 removes it. `next` gives a waiting frame, then `Ended::Behind`,
+  then `Ended::Buffer`. Lost: an error from `take`, which every caller, latest readers
+  too, then handles; a `behind` list beside the woken keys, a second list to drain for
+  an event that happens once per session. A `delivery` model property test and a 32-seed
+  `sim` test stand in for loom and shuttle: the wake never crosses a thread. Decided by
+  the architect
+  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). #1170
+  sizes the window to one commit. After a warmup, a write and `next` make no heap
+  allocation, while frames wait, while a reader waits, and in the write that wakes a
+  latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
+  does not count the commit task. `next` gives a `types::frame::View` of the reader's
+  channels and their index (M2), never the frame. The view borrows the reader, which
+  releases the frame at the next call, so the grant at the next take follows CREDIT
+  RULES; a caller that keeps data copies it. A session that ends gives `reader::Ended`.
+  `Hub::define` stands. A writer on a channel of a type the home does not write gets
+  `writer::Error::Type` with the channel's name (HOME TYPE REFUSAL). Decided by the
+  architect, #1133
   (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575 and
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at

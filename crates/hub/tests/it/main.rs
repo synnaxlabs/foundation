@@ -101,7 +101,6 @@ impl Test {
         let hub = Hub::new(hub::Config {
             home,
             interner,
-            pool: Rc::clone(&pool),
             tasks: tasks.clone(),
         });
         for (key, channel, data_type, index) in CHANNELS {
@@ -202,6 +201,7 @@ where
     unsynced_on(seed, (AREA, BODY_MAX), main);
 }
 
+/// Runs `main` as [`unsynced`] does, on a ring of the area and body max in `ring`.
 fn unsynced_on<F>(
     seed: u64,
     (area, body_max): (u64, usize),
@@ -434,10 +434,7 @@ fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
             .expect_err("an error");
         let unsynced = hub::home::writer::Error::Unsynced;
         assert_eq!(error, writer::Error::Home(unsynced));
-        assert_eq!(
-            error.to_string(),
-            "the node has no mesh time yet: open the writer again later"
-        );
+        assert_eq!(error.to_string(), "the node has no mesh time yet");
         test.sync().await;
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
@@ -601,6 +598,31 @@ fn releases_the_lent_frame_at_the_next_call() {
         let held = test.free();
         assert!(poll_once(reader.next()).is_pending());
         assert_eq!(test.free(), held + 1, "the lent frame is released");
+    });
+}
+
+#[test]
+fn opens_no_writer_on_a_channel_of_a_type_the_home_does_not_write() {
+    run(19, |test| async move {
+        test.hub.define(Channel {
+            key: channel::Key::from_u128(6),
+            name: name("text"),
+            data_type: Type::String,
+            index: channel::Key::from_u128(1),
+        });
+        let writer = test.hub.writer(config("a", &["value", "text"])).await;
+        let error = writer.expect_err("an error");
+        assert_eq!(
+            error,
+            writer::Error::Type {
+                name: name("text"),
+                data_type: Type::String,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "the home does not write channel text of String yet"
+        );
     });
 }
 
@@ -872,6 +894,28 @@ fn ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame() {
             );
         });
     }
+}
+
+#[test]
+fn ends_a_complete_reader_that_missed_a_frame_as_behind_after_a_failed_sync() {
+    run(20, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        for n in 0..200 {
+            write_wide(&mut writer, now, n);
+        }
+        test.clock.sleep(SETTLE).await;
+        let mut latest = test.reader(&["value"], Mode::Latest).await;
+        test.node.fail_file(FilePath::new(RING), Operation::Sync);
+        write_wide(&mut writer, now, 200);
+        test.clock.sleep(SETTLE).await;
+        let (_, ended) = take_all(&mut latest).await;
+        assert!(matches!(ended, Ended::Buffer(_)), "the sync failed");
+        let (_, ended) = take_all(&mut reader).await;
+        assert_behind(&ended);
+        assert_behind(&reader.next().await.expect_err("the reader ended"));
+    });
 }
 
 impl Wake for Flag {

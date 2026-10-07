@@ -129,7 +129,6 @@ async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
     let hub = Hub::new(hub::Config {
         home,
         interner,
-        pool,
         tasks,
     });
     for (key, channel, scalar) in

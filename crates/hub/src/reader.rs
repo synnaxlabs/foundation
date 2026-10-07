@@ -26,7 +26,7 @@ pub enum Mode {
     /// Each live frame, after the commit that holds it. A session that misses a frame
     /// ends with [`Ended::Behind`] after the frames before it: it misses one when it
     /// leaves a window of frames untaken, or when one commit holds more than a window
-    /// of frames. The hub has no catch-up from the buffer yet.
+    /// of frames.
     Complete,
     /// The newest live frame, before its commit.
     Latest,
@@ -162,9 +162,9 @@ impl Reader {
     }
 
     /// The next frame, as a view of the reader's channels. The view borrows the
-    /// reader, so the frame stays in use until the next call or the drop. After 128
-    /// frames in a row, it wakes its task and waits once, so a task that loops on it
-    /// lets the shard's other tasks run.
+    /// reader, so the frame stays in use until the next call or the drop. After a run
+    /// of frames, it yields once, so a task that loops on it lets the shard's other
+    /// tasks run.
     ///
     /// # Errors
     ///

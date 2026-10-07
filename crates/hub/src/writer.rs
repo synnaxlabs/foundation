@@ -35,7 +35,15 @@ pub struct Config {
 pub enum Error {
     /// No channel has this name.
     Unknown(Name),
-    /// The home refused the writer.
+    /// The home does not write samples of the channel's type yet.
+    Type {
+        /// The first channel of such a type.
+        name: Name,
+        /// The channel's type.
+        data_type: Type,
+    },
+    /// The home refused the writer for another reason. It is never
+    /// [`::home::writer::Error::Type`], which gives [`Error::Type`].
     Home(::home::writer::Error),
     /// The writer names no channel.
     Empty,
@@ -45,6 +53,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown(name) => write!(f, "no channel is named {name}"),
+            Self::Type { name, data_type } => {
+                write!(
+                    f,
+                    "the home does not write channel {name} of {data_type:?} yet"
+                )
+            }
             Self::Home(error) => error.fmt(f),
             Self::Empty => f.write_str("a writer names at least one channel"),
         }
@@ -110,7 +124,22 @@ impl Writer {
             lease,
             set: Arc::clone(&set),
         };
-        let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
+        let key = borrowed
+            .home
+            .open_writer(writer)
+            .map_err(|error| match error {
+                ::home::writer::Error::Type { slot, data_type } => {
+                    let key = set.entries().iter().find(|entry| entry.slot == slot);
+                    let key = key.expect("the home refuses a slot of the key set").key;
+                    let channel = borrowed.channels.values().find(|c| c.key == key);
+                    let name = channel
+                        .expect("the key set holds known channels")
+                        .name
+                        .clone();
+                    Error::Type { name, data_type }
+                }
+                error => Error::Home(error),
+            })?;
         borrowed.commit.appended();
         Ok(Self {
             state: Rc::clone(state),
@@ -137,19 +166,27 @@ impl Writer {
         form: Form,
         series: &[(usize, usize)],
     ) -> Result<Draft, frame::Error> {
-        Draft::new(&self.state.borrow().pool, &self.set, form, series)
+        Draft::new(self.state.borrow().home.pool(), &self.set, form, series)
     }
 
-    /// Applies `frame`, as [`::home::Shard::write`] does, and wakes each reader that
-    /// now has a frame to take. Does not wait.
+    /// Applies `frame` to each index it holds, whole or not at all per index, and wakes
+    /// each reader that now has a frame to take. Does not wait for the commit. Returns
+    /// the outcome of each present group, in group order: applied, lost (a live group
+    /// with no room, whose seq is a gap), or refused (no seq spent). The slice lives
+    /// until the next write.
     ///
     /// # Errors
     ///
-    /// As [`::home::Shard::write`].
+    /// No seq moves for any error. [`Error::Resend`](crate::home::Error::Resend) for a
+    /// frame labeled resend. [`Error::Full`](crate::home::Error::Full) for a backfill
+    /// frame with no room: write it again on a timer.
+    /// [`Error::Large`](crate::home::Error::Large) for a frame too large for one write:
+    /// split it. [`Error::Disk`](crate::home::Error::Disk) after a failed commit: the
+    /// shard takes no more frames.
     ///
     /// # Panics
     ///
-    /// As [`::home::Shard::write`], for a frame that is not of [`Self::set`].
+    /// If `frame` is not of [`Self::set`] and is not labeled resend.
     pub fn write(
         &mut self,
         label: Label,

@@ -4,8 +4,7 @@ use types::channel;
 use types::name::Name;
 use types::sample::Type;
 
-/// A channel that sessions may name. [`Hub::define`](crate::Hub::define) takes it
-/// until the hub reads channels from the spec.
+/// A channel that sessions may name, as [`Hub::define`](crate::Hub::define) takes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
     /// The channel's key.

@@ -1,6 +1,5 @@
-//! The one path for every read and write: sessions across homes, routing, live
-//! selectors, the server loop, authentication, encode and decode once, raw cursors for
-//! replicas, re-index stitching, and the layer-3 window.
+//! The one path for every read and write: writer and reader sessions on the channels
+//! of a shard's home.
 
 mod channel;
 mod commit;
@@ -16,12 +15,17 @@ use types::hash;
 use types::name::Name;
 
 pub use channel::Channel;
-pub use reader::Reader;
-pub use writer::Writer;
+use reader::Reader;
+use writer::Writer;
 
 /// The `home` items that hub calls give, so that layer 3 names them through `hub`.
 pub mod home {
-    pub use ::home::{Error, Outcome, Refusal, order};
+    pub use ::home::{Error, Outcome, Refusal};
+
+    /// Why the home refused the stamps of a frame.
+    pub mod order {
+        pub use ::home::order::Error;
+    }
 
     /// Why the home refused a writer.
     pub mod writer {
@@ -41,11 +45,8 @@ pub struct Config {
     /// The shard's home. Only the hub calls it.
     pub home: ::home::Shard,
     /// The node's key set interner, which owns the slot table that the home's buffer
-    /// opened with. The node runs one shard; interning across shards waits for a
-    /// second shard.
+    /// opened with.
     pub interner: Interner,
-    /// The pool of the home's buffer, for the frames that writers fill.
-    pub pool: Rc<block::Pool>,
     /// Where the hub spawns its commit task.
     pub tasks: env::tasks::Tasks,
 }
@@ -56,7 +57,6 @@ pub struct Config {
 struct State {
     home: ::home::Shard,
     interner: Interner,
-    pool: Rc<block::Pool>,
     channels: hash::Map<Name, Channel>,
     /// The index of each channel in `channels`, by key.
     indexes: hash::Map<types::channel::Key, types::channel::Key>,
@@ -70,20 +70,18 @@ struct State {
 }
 
 impl Hub {
-    /// A hub over `config.home` that knows no channel yet. Spawns the commit task on
-    /// `config.tasks`. The task holds the hub's state until the shard stops.
+    /// A hub over `config.home` that knows no channel yet. Spawns a task on
+    /// `config.tasks` that runs until the shard stops.
     #[must_use]
     pub fn new(config: Config) -> Self {
         let Config {
             home,
             interner,
-            pool,
             tasks,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
             interner,
-            pool,
             channels: hash::Map::default(),
             indexes: hash::Map::default(),
             wakers: hash::Map::default(),
@@ -126,9 +124,8 @@ impl Hub {
         state.channels.insert(channel.name.clone(), channel);
     }
 
-    /// Opens a writer session on `config.channels` and the index of each. A local
-    /// writer opens at the first poll and does not wait; a remote writer will wait for
-    /// its home.
+    /// Opens a writer session on `config.channels` and the index of each. It opens at
+    /// the first poll.
     ///
     /// # Errors
     ///
