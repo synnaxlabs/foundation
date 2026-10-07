@@ -2926,11 +2926,14 @@ How to read this record:
   round with `Breaker: skipped`, it fails if its range changes code: a `.rs` line that,
   trimmed, is not blank and does not start with `//` (a doctest line is a comment), or
   any `Cargo.toml` or `Cargo.lock` line. Each line of a moved file counts as removed and
-  added. A merge of the base in the range counts by its resolution, the change from the
-  tree that `git merge-tree` makes of its parents to the merge, not by what the base
-  brought in. A conflict in a `.rs` file is thus a code change (#1451). An earlier round's skip is taken as written, since a rebase can drop its range
-  from the clone. An earlier round in the fixed format that does not parse fails. A
-  red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
+  added. A merge of the base in the range counts only by its resolution: a conflict that
+  `git merge-tree` finds in a `.rs`, `Cargo.toml`, or `Cargo.lock` file is a code
+  change, and so is code in the change from the tree that `git merge-tree` makes of its
+  parents to the merge. Found by the director at 2026-10-07T14:50:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed
+  by #1451. An earlier round's skip is taken as written, since a rebase can drop its
+  range from the clone. An earlier round in the fixed format that does not parse fails.
+  A red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
   status is `success` on `merge_group`. Decided by the director on #1169
   (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and
   in messages on #1193.

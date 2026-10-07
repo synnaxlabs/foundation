@@ -100,8 +100,8 @@ fn exit(found: Result<Vec<String>, String>) -> ExitCode {
 /// `reaches` reports whether a commit (a SHA or its prefix) reaches `head` through
 /// clean merges of the base. A later round may skip `breaker` when the range of the
 /// last round changes no code; an earlier round's skip is taken as written.
-/// `code_change` gives the first change of a `.rs` line that
-/// is not a comment or blank in a range, as a phrase, or `None`.
+/// `code_change` gives the first code change in a range, with a merge of the base read
+/// by its resolution, as a phrase, or `None` (`History::code_change`).
 fn problems(
     record: &Record,
     head: &str,

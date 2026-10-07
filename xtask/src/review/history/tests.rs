@@ -376,9 +376,12 @@ fn a_merge_round_whose_resolution_changes_code_needs_the_breaker() {
     repo.git(&["merge", "--quiet", "--no-commit", "origin/main"]);
     std::fs::write(repo.dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
     repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
+    let merge = repo.head();
     assert_eq!(
-        repo.code_change(&end, &repo.head()),
-        Ok(Some("changes code at `a.rs:2`".to_string()))
+        repo.code_change(&end, &merge),
+        Ok(Some(format!(
+            "changes code at `a.rs:2` in the resolution of `{merge}`"
+        )))
     );
 }
 
@@ -395,9 +398,85 @@ fn a_merge_round_whose_resolution_resolves_a_conflict_needs_the_breaker() {
     assert_eq!(merge.status.code(), Some(1), "{merge:?}");
     std::fs::write(repo.dir.join("a.rs"), "// PR.\n// Main.\n").unwrap();
     repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
+    let merge = repo.head();
+    assert_eq!(
+        repo.code_change(&end, &merge),
+        Ok(Some(format!("resolves a conflict in `a.rs` in `{merge}`")))
+    );
+}
+
+#[test]
+fn a_merge_round_that_keeps_a_file_one_side_deleted_needs_the_breaker() {
+    for pr_deletes in [false, true] {
+        let (repo, _) = Repo::with_pr(&format!("merge-kept-{pr_deletes}"));
+        repo.advance_main("a.rs", "fn a() {}\n");
+        repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+        let changed = "fn a() {}\nfn b() {}\n";
+        let end = if pr_deletes {
+            repo.git(&["rm", "--quiet", "a.rs"]);
+            repo.git(&["commit", "--quiet", "-m", "rm a.rs"]);
+            repo.advance_main("a.rs", changed);
+            repo.head()
+        } else {
+            let end = repo.commit("a.rs", changed);
+            repo.git(&["switch", "--quiet", "main"]);
+            repo.git(&["rm", "--quiet", "a.rs"]);
+            repo.git(&["commit", "--quiet", "-m", "rm a.rs"]);
+            repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            repo.git(&["switch", "--quiet", "pr"]);
+            end
+        };
+        let merge = repo
+            .command()
+            .args(["merge", "--no-edit", "origin/main"])
+            .output()
+            .unwrap();
+        assert_eq!(merge.status.code(), Some(1), "{merge:?}");
+        std::fs::write(repo.dir.join("a.rs"), changed).unwrap();
+        repo.git(&["add", "a.rs"]);
+        repo.git(&["commit", "--quiet", "--no-edit"]);
+        let merge = repo.head();
+        assert_eq!(
+            repo.code_change(&end, &merge),
+            Ok(Some(format!("resolves a conflict in `a.rs` in `{merge}`"))),
+            "{pr_deletes}"
+        );
+    }
+}
+
+#[test]
+fn a_merge_of_a_main_made_of_merges_counts_by_its_resolution() {
+    let (repo, end) = Repo::with_pr("merge-merges");
+    for file in ["f.rs", "g.rs"] {
+        repo.git(&["switch", "--quiet", "-c", file, "main"]);
+        repo.commit(file, "fn f() {}\n");
+        repo.git(&["switch", "--quiet", "main"]);
+        repo.git(&["merge", "--quiet", "--no-ff", "--no-edit", file]);
+    }
+    repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    let docs = repo.commit("h.rs", "// H.\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(repo.code_change(&end, &repo.head()), Ok(None));
+    assert_eq!(repo.code_change(&docs, &repo.head()), Ok(None));
+    repo.commit("i.rs", "fn i() {}\n");
     assert_eq!(
         repo.code_change(&end, &repo.head()),
-        Ok(Some("changes code at `a.rs:1`".to_string()))
+        Ok(Some("changes code at `i.rs:1`".to_string()))
+    );
+}
+
+#[test]
+fn a_range_needs_the_base_ref() {
+    let (repo, end) = Repo::with_pr("merge-no-base");
+    repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    assert_eq!(
+        repo.code_change(&end, &end),
+        Err(
+            "git show-ref --verify --hash refs/remotes/origin/main: fatal: \
+             'refs/remotes/origin/main' - not a valid ref"
+                .to_string()
+        )
     );
 }
 
