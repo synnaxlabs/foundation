@@ -244,6 +244,45 @@ fn list_gives_the_bare_names_in_a_directory() {
 }
 
 #[test]
+fn a_failed_create_leaves_no_file() {
+    let results = run(0, 16 * KIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "empty", 0).await);
+        let mut results = Vec::new();
+        for path in ["missing", "empty"] {
+            let mode = Mode::Create { len: MIB };
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+            results.push(files.open(Path::new(path), Mode::Write).await.map(drop));
+        }
+        results
+    });
+    let expected = ["missing", "empty"].map(|path| {
+        [
+            Err(Error::Full { path: path.into() }),
+            Err(Error::NotFound { path: path.into() }),
+        ]
+    });
+    assert_eq!(results, expected.concat());
+}
+
+#[test]
+fn create_allocates_an_empty_file_that_is_there_once_no_writer_holds_it() {
+    let found = run(0, MIB, |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let empty = create(&node, "a", 0).await;
+        let mode = Mode::Create { len: 4 * KIB };
+        let held = files.open(Path::new("a"), mode).await.map(drop);
+        let free = files.free().await.unwrap();
+        drop(empty);
+        let file = create(&node, "a", 4 * KIB).await;
+        let bytes = read(&file, &pool, 0, 4_096).await;
+        (held, free, file.len(), bytes, files.free().await.unwrap())
+    });
+    let busy = Err(Error::Busy { path: "a".into() });
+    assert_eq!(found, (busy, MIB, 4 * KIB, vec![0; 4_096], MIB - 4 * KIB));
+}
+
+#[test]
 fn each_node_has_its_own_disk() {
     let mut sim = sim(0);
     let a = sim.node(node::Config::default());

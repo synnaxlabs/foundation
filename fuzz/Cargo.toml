@@ -26,6 +26,7 @@ ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
 spec = { path = "../crates/spec" }
+transport = { path = "../crates/transport", features = ["fuzzing"] }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
@@ -121,6 +122,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "transport_hello"
+path = "fuzz_targets/transport_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "types_byte_size"
 path = "fuzz_targets/types_byte_size.rs"
 test = false
@@ -144,6 +152,13 @@ bench = false
 [[bin]]
 name = "types_channel"
 path = "fuzz_targets/types_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_frame_ends"
+path = "fuzz_targets/types_frame_ends.rs"
 test = false
 doc = false
 bench = false
