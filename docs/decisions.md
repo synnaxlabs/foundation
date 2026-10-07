@@ -2484,7 +2484,9 @@ How to read this record:
   `Rc`, and a shard that does not start drops it unrun. A caller on the real OS makes
   each shard's disk with `os::files` before the start and joins its I/O thread after
   `join`. A `Fn` that each shard calls on its own thread lost: it fits `os::files` only
-  with a lock around a queue of disks. Decided by the architect on #1062 (#1173):
+  with a lock around a queue of disks. A fallible maker like `memory`, with a `node`
+  error for it, lost: `node` would then own I/O thread handles, which `sim` does not
+  have. Decided by the architect on #1062 (#1173):
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030.
   `node` alone names `shard-<i>`. `node::Config::entropy` gives the shards
   randomness. A ring that does not open stops the node, and `join` gives
