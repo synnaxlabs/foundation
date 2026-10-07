@@ -48,7 +48,7 @@ enum Create {
     Strings(fn() -> Vec<&'static str>),
 }
 
-const SHAPES: [Shape; 24] = [
+const SHAPES: [Shape; 26] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -73,7 +73,21 @@ const SHAPES: [Shape; 24] = [
     Shape::new("u64.ffor32", Scalar::U64, create_uniform::<32>, 1.982, FULL),
     Shape::new("u64.ffor55", Scalar::U64, create_uniform::<55>, 1.155, FULL),
     Shape::strings("str.state", create_state_names, 2.842, EVERY),
+    Shape::fixed("f32[6].imu", ARRAY, create_imu, 0.999, FULL),
+    Shape::fixed("f32[2][3].imu", MATRIX, create_imu, 0.999, FULL),
 ];
+
+/// Two 3-axis sensors in each sample, as one array and as rows of a matrix. Both
+/// encode as `f32[6]`, so they take the same time.
+const ARRAY: Type = Type::Array {
+    element: Scalar::F32,
+    len: 6,
+};
+const MATRIX: Type = Type::Matrix {
+    element: Scalar::F32,
+    rows: 2,
+    columns: 3,
+};
 
 impl Shape {
     const fn new(
@@ -83,9 +97,20 @@ impl Shape {
         ratio: f64,
         lens: &'static [usize],
     ) -> Self {
+        Self::fixed(name, Type::Scalar(scalar), create, ratio, lens)
+    }
+
+    /// A scalar, array, or matrix type, whose elements `create` gives.
+    const fn fixed(
+        name: &'static str,
+        data_type: Type,
+        create: fn() -> Vec<i64>,
+        ratio: f64,
+        lens: &'static [usize],
+    ) -> Self {
         Self {
             name,
-            data_type: Type::Scalar(scalar),
+            data_type,
             create: Create::Scalar(create),
             ratio,
             lens,
@@ -126,11 +151,18 @@ impl Shape {
     fn values(&self, len: usize) -> Vec<u8> {
         match self.create {
             Create::Scalar(create) => {
-                let width = self.data_type.width().expect("a scalar has a width");
+                let (Type::Scalar(element)
+                | Type::Array { element, .. }
+                | Type::Matrix { element, .. }) = self.data_type
+                else {
+                    panic!("invariant: a fixed shape has an element");
+                };
+                let width = element.width();
+                let sample = self.data_type.width().expect("a fixed type has a width");
                 create()
                     .into_iter()
-                    .take(len)
-                    .flat_map(|sample| sample.to_le_bytes().into_iter().take(width))
+                    .take(len * sample / width)
+                    .flat_map(|value| value.to_le_bytes().into_iter().take(width))
                     .collect()
             }
             Create::Strings(create) => {
@@ -317,6 +349,23 @@ fn create_walk<const BITS: u32>() -> Vec<i64> {
         .scan(0_i64, |value, _| {
             *value = value.wrapping_add((random.next() >> (64 - BITS)).cast_signed());
             Some(*value)
+        })
+        .collect()
+}
+
+/// `f32` bits of two 3-axis accelerometers, 6 values for each sample: gravity turning
+/// slowly through the axes, plus normal noise of 0.01 g.
+fn create_imu() -> Vec<i64> {
+    let mut random = Random(20);
+    (0..LEN * 6)
+        .map(|i| {
+            let i =
+                f64::from(u32::try_from(i).expect("invariant: `LEN * 6` fits a `u32`"));
+            let axis = i % 3.0;
+            let g = (TAU * (i / 6.0 / 65_536.0 + axis / 3.0)).sin();
+            #[expect(clippy::cast_possible_truncation, reason = "an `f32` sample")]
+            let value = (g + 0.01 * random.normal()) as f32;
+            i64::from(value.to_bits())
         })
         .collect()
 }
