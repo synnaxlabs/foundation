@@ -3,6 +3,7 @@
 mod chance;
 mod crash;
 mod files;
+mod name;
 mod net;
 mod run_on;
 mod serial;

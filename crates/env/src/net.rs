@@ -1,5 +1,5 @@
 //! The network of one node: UDP sockets that move batches of datagrams, TCP streams,
-//! and TCP listeners.
+//! TCP listeners, and name lookups.
 //!
 //! Every wait registers the waker of its [`Context`] and returns [`Poll::Pending`], so
 //! `sim` controls it. "A thread" below means a thread that `env` started; under `sim`
@@ -11,7 +11,7 @@ pub mod udp;
 
 use std::fmt;
 use std::io::IoSlice;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -115,6 +115,43 @@ impl Net {
     /// ```
     pub fn listen(&self, config: &tcp::Listen) -> Result<Listener, Error> {
         Ok(Listener(self.0.listen(config)?))
+    }
+
+    /// Gives one or more addresses of `host`, each with `port`, in the order that the
+    /// resolver gives them. A host that parses as an [`IpAddr`], or an IPv6 address
+    /// in brackets as in a URI, gives that address and does no lookup. Each call
+    /// looks up again: `resolve` keeps no cache. Dropping the future stops the wait,
+    /// not the lookup.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] when the name has no address. A retry gives the same
+    ///   answer until the name changes.
+    /// - [`Error::Io`] when the lookup fails, for example when no name server
+    ///   answers. A retry may give an answer. The code differs between systems, so
+    ///   match the variant, not the code.
+    ///
+    /// ```
+    /// use std::net::SocketAddr;
+    ///
+    /// async fn find(net: &env::net::Net) -> Result<Vec<SocketAddr>, env::net::Error> {
+    ///     net.resolve("historian.local", 4433).await
+    /// }
+    /// ```
+    pub async fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, Error> {
+        let bracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        let literal = match bracketed {
+            Some(v6) => v6.parse::<Ipv6Addr>().map(IpAddr::V6),
+            None => host.parse::<IpAddr>(),
+        };
+        if let Ok(ip) = literal {
+            return Ok(vec![SocketAddr::new(ip, port)]);
+        }
+        self.0.resolve(host, port).await
     }
 }
 
@@ -349,7 +386,7 @@ pub enum Ecn {
     Ce,
 }
 
-/// Why a network call failed. Each case names the address a caller acts on.
+/// Why a network call failed. Each case names the address or name a caller acts on.
 ///
 /// ```
 /// let local = "127.0.0.1:9000".parse().expect("an address");
@@ -383,6 +420,11 @@ pub enum Error {
         /// The remote address.
         remote: SocketAddr,
     },
+    /// The name has no address.
+    NotFound {
+        /// The name.
+        host: String,
+    },
     /// The OS or the simulation reported another failure.
     Io {
         /// The OS error code.
@@ -398,6 +440,7 @@ impl fmt::Display for Error {
             Self::Unreachable { remote } => write!(f, "{remote} is unreachable"),
             Self::Reset { remote } => write!(f, "{remote} reset the stream"),
             Self::TimedOut { remote } => write!(f, "{remote} did not answer in time"),
+            Self::NotFound { host } => write!(f, "name {host} has no address"),
             Self::Io { code } => write!(f, "network call failed with OS error {code}"),
         }
     }
@@ -414,6 +457,16 @@ impl std::error::Error for Error {}
 /// ```
 pub type Connect<'a> =
     Pin<Box<dyn Future<Output = Result<Box<dyn tcp::Driver>, Error>> + 'a>>;
+
+/// A lookup in flight, as a [`Driver`] gives it.
+///
+/// ```
+/// fn missing(host: &str) -> env::net::Resolve<'_> {
+///     Box::pin(async move { Err(env::net::Error::NotFound { host: host.into() }) })
+/// }
+/// ```
+pub type Resolve<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, Error>> + 'a>>;
 
 /// What `os` and `sim` implement to run a [`Net`]. Only they implement it.
 ///
@@ -442,6 +495,9 @@ pub trait Driver: Send + Sync {
     ///
     /// As [`Net::listen`].
     fn listen(&self, config: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error>;
+
+    /// Looks up a host that is not an IP literal, with the rules of [`Net::resolve`].
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Resolve<'a>;
 }
 
 #[cfg(test)]
@@ -507,7 +563,8 @@ mod tests {
         }
     }
 
-    /// Connects to any remote at once. It has no UDP.
+    /// Connects to any remote at once, and gives `historian.local` one address. It
+    /// has no UDP.
     struct Network;
 
     impl Driver for Network {
@@ -524,6 +581,15 @@ mod tests {
 
         fn listen(&self, _: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error> {
             Ok(Box::new(Accepting))
+        }
+
+        fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Resolve<'a> {
+            Box::pin(async move {
+                if host == "historian.local" {
+                    return Ok(vec![SocketAddr::from(([10, 0, 0, 9], port))]);
+                }
+                Err(Error::NotFound { host: host.into() })
+            })
         }
     }
 
@@ -567,6 +633,58 @@ mod tests {
                 panic!("the connect did not end");
             };
             assert_eq!(tcp.peer(), address("10.0.0.2:4433"));
+        }
+    }
+
+    mod resolve {
+        use super::*;
+
+        fn resolve(host: &str) -> Result<Vec<SocketAddr>, Error> {
+            let net = Net::new(Network);
+            let mut resolve = std::pin::pin!(net.resolve(host, 4433));
+            let Poll::Ready(result) = resolve.as_mut().poll(&mut cx()) else {
+                panic!("the lookup did not end");
+            };
+            result
+        }
+
+        #[test]
+        fn gives_an_ipv4_literal_with_no_lookup() {
+            assert_eq!(resolve("10.0.0.2"), Ok(vec![address("10.0.0.2:4433")]));
+        }
+
+        #[test]
+        fn gives_an_ipv6_literal_with_no_lookup() {
+            assert_eq!(resolve("fd00::2"), Ok(vec![address("[fd00::2]:4433")]));
+        }
+
+        #[test]
+        fn gives_an_ipv6_literal_in_brackets_with_no_lookup() {
+            assert_eq!(resolve("[fd00::2]"), Ok(vec![address("[fd00::2]:4433")]));
+        }
+
+        #[test]
+        fn looks_up_an_ipv4_literal_in_brackets_as_a_name() {
+            let host = "[10.0.0.2]".to_owned();
+            assert_eq!(resolve("[10.0.0.2]"), Err(Error::NotFound { host }));
+        }
+
+        #[test]
+        fn looks_up_a_literal_with_a_final_dot_as_a_name() {
+            let host = "10.0.0.2.".to_owned();
+            assert_eq!(resolve("10.0.0.2."), Err(Error::NotFound { host }));
+        }
+
+        #[test]
+        fn looks_up_a_name_with_the_port() {
+            let found = resolve("historian.local");
+            assert_eq!(found, Ok(vec![address("10.0.0.9:4433")]));
+        }
+
+        #[test]
+        fn gives_the_error_of_the_lookup() {
+            let host = "pump.local".to_owned();
+            assert_eq!(resolve("pump.local"), Err(Error::NotFound { host }));
         }
     }
 
@@ -666,6 +784,14 @@ mod tests {
         fn names_the_remote_that_timed_out() {
             let e = Error::TimedOut { remote: remote() };
             assert_eq!(e.to_string(), "10.0.0.2:4433 did not answer in time");
+        }
+
+        #[test]
+        fn names_the_host_with_no_address() {
+            let e = Error::NotFound {
+                host: "historian.local".into(),
+            };
+            assert_eq!(e.to_string(), "name historian.local has no address");
         }
 
         #[test]

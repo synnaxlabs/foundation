@@ -2114,7 +2114,17 @@ How to read this record:
   adapter hides the gap between frames, so a seam that split frames would act
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
-  thread panics.
+  thread panics. Amended (2026-10-07, #995): `env::net` also gives name lookups.
+  `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
+  lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a
+  retry may fix, and a caller matches the variant, not the code. On `os`,
+  `getaddrinfo` maps `EAI_NONAME` and `EAI_NODATA` to `NotFound`, `EAI_SYSTEM` to
+  `Io` with `errno`, `EAI_AGAIN` to `Io` with `EAGAIN`, `EAI_MEMORY` to `Io` with
+  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Decided by the
+  architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
+  mean to a caller.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -2152,7 +2162,17 @@ How to read this record:
   drops it. As on Linux, a send goes whole while the send buffer is empty or takes
   less than `send_buffer_bytes`, and is pending from then. When a datagram leaves and
   the send buffer is no longer full, each send that waits wakes in the same step.
-  Approved by the coordinator.
+  Approved by the coordinator. Amended (2026-10-07, #995): `Net::resolve` gives the
+  addresses of a host name. An IP literal gives its one address with no lookup, and
+  no lookup is cached. `Sim::name` sets the answer to each lookup of a name in the
+  run, on any node: its addresses in order, none (`NotFound`), or a failure (`Io`
+  with `EAGAIN`), after a delay on the clock of the node. A lookup reads the answer
+  at its first poll and sends no packet, so a partition does not stop it. Decided by
+  the architect, #995
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  From the review of #1018: a name matches in any ASCII case and with or without one
+  final dot, as in DNS. An IP literal as a name panics, because no lookup reads it.
+  A lookup that would end past the end of the clock never answers.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
