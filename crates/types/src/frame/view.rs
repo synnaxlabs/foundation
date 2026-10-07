@@ -55,9 +55,16 @@ impl Mask {
     /// `set`.
     #[must_use]
     pub fn new(set: &KeySet, wanted: impl IntoIterator<Item = channel::Slot>) -> Self {
-        let mut entries: Vec<u32> = wanted
-            .into_iter()
-            .filter_map(|slot| set.find(slot))
+        Self::of_entries(set, wanted.into_iter().filter_map(|slot| set.find(slot)))
+    }
+
+    /// The `entries` of `set`, and the index of each, as [`Mask::new`] gives for their
+    /// slots, with no search of `set`.
+    pub(super) fn of_entries(
+        set: &KeySet,
+        entries: impl Iterator<Item = usize>,
+    ) -> Self {
+        let mut entries: Vec<u32> = entries
             .flat_map(|entry| [entry, set.index(entry)].map(to_u32))
             .collect();
         entries.sort_unstable();
