@@ -1028,30 +1028,29 @@ How to read this record:
   since a frame holds its index. The home checks each key as it arrives and never
   allocates by the peer's count. A head with more series than places, or an end with a
   place the session does not have or that is not above the place before it, is not
-  valid; since a place is an entry of the reader's frame, `types` refuses it when the
-  reader lays out that frame, as it refuses an entry past the key set or not above the
-  entry before it. The ends and the body are in place order: the home writes the series
-  of each place it has, from 0, each from the frame's block as a slice, with ends it
-  computes in that order. The first series starts at 0, and each other at the end before
-  it rounded up to a multiple of 8. So the body is the series bytes of the reader's own
-  frame (FRAME LAYOUT), and the reader builds that frame in one block: the header and
-  descriptors that `types` writes, then the body as it arrives, with no copy of a series
-  after the receive. An end below the start of its series is not valid; `types` refuses
-  it, as `frame::check` does. The padding may hold any bytes (FRAME LAYOUT). Each
-  direction has its own messages: the reader sends `Open`, then `Credit`; the home sends
-  a `Reply`, `Opened` or `Head`. Stop codes: 16 `UNKNOWN` (a channel the home does not
-  know), 17 `NOT_HOME` (the node is not the home of the index), and 2
-  `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
-  or breaks a rule above), which every protocol may use. Lost: a `message_bytes_max` of
-  at least the largest pool block (a client or a foreign peer can set 1472, and it ties
-  `transport` to the pool); a cap of 91 channels a session, the most that fit in 1472
-  bytes; the index in its own field of `Open`, because the home knows its index and a
-  second copy needs a check; the whole `Frame::body` (a reader gets only its view); an
-  `UNSYNCED` code, because an unnamed open needs no mesh time (READER RULES), and a
-  later named open can add one; grants for many sessions in one message, which wait
-  until a link carries a second session. The coordinator approved the messages
-  (2026-10-05); the architect decided the rest (#561, 2026-10-06) and the run, the index
-  place, and `MALFORMED` on #1064
+  valid; the reader's `hub` checks this as the head and each end arrive, so it holds no
+  more ends than it has places. The ends and the body are in place order: the home
+  writes the series of each place it has, from 0, each from the frame's block as a
+  slice, with ends it computes in that order. The first series starts at 0, and each
+  other at the end before it rounded up to a multiple of 8. So the body is the series
+  bytes of the reader's own frame (FRAME LAYOUT), and the reader builds that frame in
+  one block: the header and descriptors that `types` writes, then the body as it
+  arrives, with no copy of a series after the receive. An end below the start of its
+  series is not valid; `types` refuses it, as `frame::check` does. The padding may hold
+  any bytes (FRAME LAYOUT). Each direction has its own messages: the reader sends
+  `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop codes: 16
+  `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not the home
+  of the index), and 2 `wire::header::MALFORMED` (a message that does not decode, comes
+  from the wrong side, or breaks a rule above), which every protocol may use. Lost: a
+  `message_bytes_max` of at least the largest pool block (a client or a foreign peer can
+  set 1472, and it ties `transport` to the pool); a cap of 91 channels a session, the
+  most that fit in 1472 bytes; the index in its own field of `Open`, because the home
+  knows its index and a second copy needs a check; the whole `Frame::body` (a reader
+  gets only its view); an `UNSYNCED` code, because an unnamed open needs no mesh time
+  (READER RULES), and a later named open can add one; grants for many sessions in one
+  message, which wait until a link carries a second session. The coordinator approved
+  the messages (2026-10-05); the architect decided the rest (#561, 2026-10-06) and the
+  run, the index place, and `MALFORMED` on #1064
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030652085), then
   whole keys and ends and one message type for each direction
   (https://github.com/synnaxlabs/foundation/pull/1064#issuecomment-6030699163), then the
