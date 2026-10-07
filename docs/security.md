@@ -68,8 +68,8 @@ state on `main`.
   limits how many are open in each session, so a lookup in a stream map of one session
   costs at most that many compares. Open: #1506 (the map of reads that wait for a block
   holds the streams of each session of a carrier, so that bound does not hold for it). A
-  map keyed by a value that a peer chooses freely needs the keyed hasher of R16-7, which
-  is not built.
+  map whose keys a peer picks is a `BTreeMap`, unless the node limits those keys to a
+  small count, as `streams_max` does for the streams of one session (R16-7).
 - A key of small order needs no private key. `types::node::PublicKey::new` refuses
   each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
   `types`; the TLS check uses it.
