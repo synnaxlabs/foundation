@@ -143,7 +143,9 @@ impl Float {
 pub enum Error {
     /// An empty part.
     Empty(Part),
-    /// A name with a character that line protocol cannot carry.
+    /// A name with a character that no name may hold: a backslash, a newline, a
+    /// carriage return, a tab, or NUL. In some part of a line, some InfluxDB version
+    /// splits, drops, or refuses each one.
     Character {
         /// The name.
         name: String,
@@ -187,8 +189,7 @@ impl fmt::Display for Error {
             Self::Empty(Part::FieldKey) => write!(f, "a field key is empty"),
             Self::Character { name, character } => write!(
                 f,
-                "the name {name:?} holds {character:?}, \
-                 which line protocol cannot carry"
+                "the name {name:?} holds {character:?}, which no name may hold"
             ),
             Self::Reserved(name) => {
                 write!(f, "InfluxDB keeps the name {name:?} for itself")

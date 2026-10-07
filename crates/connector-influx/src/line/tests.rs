@@ -193,7 +193,7 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 name: "a\\b".into(),
                 character: '\\',
             },
-            "the name \"a\\\\b\" holds '\\\\', which line protocol cannot carry",
+            "the name \"a\\\\b\" holds '\\\\', which no name may hold",
         ),
         (
             Measurement::new("m", &[("k", "a\nb")], &["f"]),
@@ -201,7 +201,7 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 name: "a\nb".into(),
                 character: '\n',
             },
-            "the name \"a\\nb\" holds '\\n', which line protocol cannot carry",
+            "the name \"a\\nb\" holds '\\n', which no name may hold",
         ),
         (
             Measurement::new("m", &[], &["f\r"]),
@@ -209,7 +209,7 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
                 name: "f\r".into(),
                 character: '\r',
             },
-            "the name \"f\\r\" holds '\\r', which line protocol cannot carry",
+            "the name \"f\\r\" holds '\\r', which no name may hold",
         ),
     ]);
 }
@@ -223,7 +223,7 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 name: "\t#m".into(),
                 character: '\t',
             },
-            "the name \"\\t#m\" holds '\\t', which line protocol cannot carry",
+            "the name \"\\t#m\" holds '\\t', which no name may hold",
         ),
         (
             Measurement::new("m\0x", &[], &["f"]),
@@ -231,7 +231,7 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 name: "m\0x".into(),
                 character: '\0',
             },
-            "the name \"m\\0x\" holds '\\0', which line protocol cannot carry",
+            "the name \"m\\0x\" holds '\\0', which no name may hold",
         ),
         (
             Measurement::new("m", &[("\tk", "v")], &["f"]),
@@ -239,7 +239,7 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 name: "\tk".into(),
                 character: '\t',
             },
-            "the name \"\\tk\" holds '\\t', which line protocol cannot carry",
+            "the name \"\\tk\" holds '\\t', which no name may hold",
         ),
         (
             Measurement::new("m", &[("k", "a\tb")], &["f"]),
@@ -247,7 +247,7 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 name: "a\tb".into(),
                 character: '\t',
             },
-            "the name \"a\\tb\" holds '\\t', which line protocol cannot carry",
+            "the name \"a\\tb\" holds '\\t', which no name may hold",
         ),
         (
             Measurement::new("m", &[], &["f", "\tf"]),
@@ -255,7 +255,7 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 name: "\tf".into(),
                 character: '\t',
             },
-            "the name \"\\tf\" holds '\\t', which line protocol cannot carry",
+            "the name \"\\tf\" holds '\\t', which no name may hold",
         ),
         (
             Measurement::new("m", &[], &["f\0g"]),
@@ -263,7 +263,7 @@ fn refuses_a_tab_or_nul_in_any_part() {
                 name: "f\0g".into(),
                 character: '\0',
             },
-            "the name \"f\\0g\" holds '\\0', which line protocol cannot carry",
+            "the name \"f\\0g\" holds '\\0', which no name may hold",
         ),
     ]);
 }
