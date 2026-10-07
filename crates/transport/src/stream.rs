@@ -985,7 +985,10 @@ mod tests {
                             }
                             sender.finish().expect("finished");
                             // Until the peer read the rest, which frees the stream.
-                            side.node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+                            side.node
+                                .clock()
+                                .sleep(spans(Span::MILLISECOND, 200))
+                                .await;
                             assert_eq!(count.0.load(Ordering::Relaxed), 0, "no waker");
                         }
                         Then::Drop => {
