@@ -1428,6 +1428,33 @@ mod tests {
         }
 
         #[test]
+        fn checks_a_retention_that_holds_a_block_as_a_whole() {
+            let [mut documents] =
+                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
+            documents.blocks[0]
+                .body
+                .blocks
+                .push(block(0, 50, "inner", &[], &[]));
+            assert_eq!(
+                check(&[documents]),
+                Err(vec![
+                    refused(
+                        "config.negative-span",
+                        at(0, 13),
+                        "a retention keeps -1s, which is below zero",
+                        "Write a keep time of zero or more",
+                    ),
+                    refused(
+                        "config.unknown-block",
+                        at(0, 50),
+                        "the `retention` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
         fn refuses_a_block_inside_a_retention() {
             let [mut documents] =
                 retention(&[("select", string("edge.**")), ("keep", string("3d"))]);
