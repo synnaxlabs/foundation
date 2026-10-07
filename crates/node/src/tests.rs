@@ -516,6 +516,33 @@ mod buffer {
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
         }
+        let len = sim
+            .run_on(&host, |host, _| async move {
+                let ring = Path::new("shard-1/ring");
+                let file = host.files().open(ring, env::files::Mode::Read).await;
+                file.expect("the ring opens").len()
+            })
+            .expect("the run ends");
+        // Two header blocks of 4 KiB, then the area.
+        assert_eq!(len, 8192 + (64 << 20));
+    }
+
+    /// A crash at any point of the first opens leaves rings that the next start
+    /// opens.
+    #[test]
+    fn a_crash_during_the_opens_leaves_rings_the_next_start_opens() {
+        for crash in [sim::Crash::Process, sim::Crash::Power] {
+            for step in 0..40 {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+                let after = Span::from_nanos(step * 25_000);
+                assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                sim.crash(&host, crash);
+                drop(node);
+                assert_eq!(run_on(&mut sim, &host), Ok(()), "{crash:?} at {after:?}");
+            }
+        }
     }
 
     #[test]
@@ -543,7 +570,7 @@ mod buffer {
         let ring = format!("shard-{core}/ring");
         run.host
             .fail_file(Path::new(&ring), env::files::Operation::Open);
-        while run.sim.run().is_err() {}
+        panics(&mut run);
         run.node.join().unwrap_err()
     }
 
