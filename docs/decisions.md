@@ -429,9 +429,13 @@ How to read this record:
   blocks of the record's entries, so an entry of the pool's largest block reads
   (#968). A read holds no record while it waits for a file read, so a change that
   frees ring space must first hold the records of each read in progress (#510).
-  Recovery walks from the tail to the first record that does not follow the chain.
-  A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open, and so does an entry whose `first` is below the tail of its path or whose
+  Recovery walks from the tail to the first record that does not follow the chain. A
+  block of kind 0 is no record and ends the walk, also when its CRC follows the chain:
+  no version writes kind 0, and a zeroed block must end the walk for every chain value
+  (decided by the architect, #1049:
+  https://github.com/synnaxlabs/foundation/issues/1049#issuecomment-6031201904). A
+  record that follows the chain but has an unknown kind or a wrong shape fails the open,
+  and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
   durable: a killed process may have written records that it never synced (#657). Before
   that sync, the open writes again, as read, the two header blocks and each window the
