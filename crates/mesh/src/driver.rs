@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::poll_fn;
+use std::iter;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Poll, Waker};
@@ -40,7 +41,8 @@ pub(crate) struct Config {
     /// The public key of each member of the region, this node included. A member's
     /// peer proves the key, and the key signs the member's grants.
     pub(crate) members: BTreeMap<node::Key, PublicKey>,
-    /// The voters, when the log holds no configuration. Empty for a node that joins.
+    /// The voters before the first entry of the log, the same at each open. Each is a
+    /// member. Empty for a node that joins.
     pub(crate) voters: BTreeSet<node::Key>,
     /// The mesh's directory.
     pub(crate) files: Files,
@@ -50,12 +52,13 @@ pub(crate) struct Config {
     pub(crate) entropy: Entropy,
     /// Runs the group's task.
     pub(crate) tasks: Tasks,
-    /// Gives the blocks of the log's reads and writes.
+    /// Gives the blocks of the log's reads and writes. A write that gets no block
+    /// stops the group.
     pub(crate) pool: Rc<Pool>,
 }
 
 /// One node's part in the group of a region. Clones share it. The group runs until
-/// it stops or each clone and each watch drops. It stays on the shard that opened it.
+/// it stops or each clone drops. It stays on the shard that opened it.
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
@@ -68,9 +71,14 @@ impl Mesh {
     ///
     /// # Errors
     ///
+    /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     pub(crate) async fn open(config: Config) -> Result<Self, Error> {
+        let mut named = iter::once(&config.key).chain(&config.voters);
+        if let Some(&key) = named.find(|key| !config.members.contains_key(key)) {
+            return Err(Error::NotMember(key));
+        }
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
         let start = Start {
             hard: stored.hard,
@@ -106,7 +114,7 @@ impl Mesh {
     /// A watch of the home of `index`.
     pub(crate) fn watch(&self, index: channel::Key) -> Watch {
         Watch {
-            group: Rc::clone(&self.group),
+            group: Rc::downgrade(&self.group),
             index,
             given: None,
             called: false,
@@ -197,24 +205,31 @@ impl Mesh {
 
 /// A watch of the home of one index.
 pub(crate) struct Watch {
-    group: Rc<RefCell<Group>>,
+    group: Weak<RefCell<Group>>,
     index: channel::Key,
     // What the last call of `next` gave.
     given: Option<node::Key>,
-    // Whether `next` gave a home.
+    // Whether `next` returned before.
     called: bool,
 }
 
 impl Watch {
-    /// Waits until the home of the index is not what the last call gave, and returns
-    /// it. The first call returns at once. `None` is an index with no home.
+    /// The first call returns the home of the index at once. Each later call waits
+    /// until the home differs from the one it last returned, and returns the newest:
+    /// two changes between calls give one result. `None` means that no applied entry
+    /// set a home for the index. It is never `None` after a home, because no change
+    /// clears a home.
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`], at once, when the group stopped.
+    /// [`Error::Stopped`] with the cause, at once, on each call after the group stops
+    /// or each [`Mesh`] of it drops.
     pub(crate) async fn next(&mut self) -> Result<Option<node::Key>, Error> {
         poll_fn(|cx| {
-            let mut group = self.group.borrow_mut();
+            let Some(group) = self.group.upgrade() else {
+                return Poll::Ready(Err(Error::Stopped(Stopped::Dropped)));
+            };
+            let mut group = group.borrow_mut();
             group.running()?;
             let home = group.state.home(self.index);
             if self.called && self.given == home {
@@ -255,16 +270,15 @@ impl Group {
         }
     }
 
-    // The last steps of a `Ready`, after its write: queues its messages and applies
-    // what it committed.
-    fn settle(
-        &mut self,
-        messages: Vec<raft::Message>,
-        committed: Vec<Entry>,
-    ) -> Result<(), Stopped> {
+    // Queues each message for its member.
+    fn send(&mut self, messages: Vec<raft::Message>) {
         for message in messages {
             self.queues.entry(message.to).or_default().push(message);
         }
+    }
+
+    // Applies each change in `committed`, and wakes the watches when a home moves.
+    fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
         for Entry { at, data } in committed {
             let bytes = match data {
                 Data::Bytes(bytes) => bytes,
@@ -284,6 +298,13 @@ impl Group {
         let queues = self.queues.values_mut();
         let waiting = queues.filter_map(|queue| queue.waker.take());
         waiting.chain(self.watches.drain(..)).for_each(Waker::wake);
+    }
+}
+
+impl Drop for Group {
+    // A watch that waits must learn that each mesh dropped.
+    fn drop(&mut self) {
+        self.watches.drain(..).for_each(Waker::wake);
     }
 }
 
@@ -371,11 +392,11 @@ async fn run(
             committed,
             ..
         } = ready;
-        let settled = match written {
-            Ok(()) => group.settle(messages, committed),
-            Err(error) => Err(Stopped::Write(error)),
-        };
-        if let Err(stopped) = settled {
+        let applied = written.map_err(Stopped::Write).and_then(|()| {
+            group.send(messages);
+            group.apply(committed)
+        });
+        if let Err(stopped) = applied {
             group.stop(stopped);
             return;
         }
@@ -930,6 +951,45 @@ mod tests {
             let text = "the group stopped: the committed entry at index 1 of term 5 is \
                         not a change: change kind 9 is unknown";
             assert_eq!(stopped.to_string(), text);
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_node_or_a_voter_that_is_not_a_member() {
+        solo(|node, tasks| async move {
+            let own = open(&node, &tasks, 1, &[2, 3], &[2, 3]).await;
+            assert_eq!(own.err(), Some(Error::NotMember(key(1))));
+            let voter = open(&node, &tasks, 1, &[1, 2], &IDS).await;
+            let refused = Error::NotMember(key(3));
+            assert_eq!(voter.err(), Some(refused.clone()));
+            let text = format!("node {} is not a member of the region", key(3));
+            assert_eq!(refused.to_string(), text);
+        });
+    }
+
+    #[test]
+    fn a_watch_gives_the_cause_when_each_mesh_drops() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let given = Rc::new(RefCell::new(None));
+            let slot = Rc::clone(&given);
+            tasks.spawn(async move {
+                let waited = watch.next().await;
+                *slot.borrow_mut() = Some((waited, watch.next().await));
+            });
+            node.clock().sleep(TICK).await;
+            assert_eq!(*given.borrow(), None);
+            drop(mesh);
+            node.clock().sleep(TICK).await;
+            let dropped = Error::Stopped(Stopped::Dropped);
+            assert_eq!(
+                given.take(),
+                Some((Err(dropped.clone()), Err(dropped.clone())))
+            );
+            let text = "the group stopped: each mesh of the group dropped";
+            assert_eq!(dropped.to_string(), text);
         });
     }
 

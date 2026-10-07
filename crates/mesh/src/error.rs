@@ -26,7 +26,9 @@ pub(crate) enum Error {
     },
     /// A message carries a grant that does not hold.
     Grant(grant::Error),
-    /// The group stopped. Open the mesh again.
+    /// The configuration names a node that is not a member of the region.
+    NotMember(node::Key),
+    /// The group stopped.
     Stopped(Stopped),
 }
 
@@ -44,6 +46,9 @@ impl fmt::Display for Error {
                 write!(f, "node {from} sent a request, but it is not a voter")
             }
             Self::Grant(error) => error.fmt(f),
+            Self::NotMember(key) => {
+                write!(f, "node {key} is not a member of the region")
+            }
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
         }
     }
@@ -72,15 +77,18 @@ impl From<grant::Error> for Error {
 /// Why a group stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Stopped {
-    /// A write of the log failed, so `raft` cannot go on.
+    /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
-    /// The committed entry at `at` is not a change that this build reads.
+    /// The committed entry at `at` is not a change that this build reads. A new open
+    /// stops at the same entry.
     Change {
         /// The position of the entry.
         at: Position,
         /// Why its bytes are not a change.
         cause: Malformed,
     },
+    /// Each `Mesh` of the group dropped.
+    Dropped,
 }
 
 impl fmt::Display for Stopped {
@@ -92,6 +100,7 @@ impl fmt::Display for Stopped {
                 "the committed entry at index {} of term {} is not a change: {cause}",
                 at.index, at.term.0
             ),
+            Self::Dropped => f.write_str("each mesh of the group dropped"),
         }
     }
 }

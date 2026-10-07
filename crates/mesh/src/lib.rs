@@ -12,7 +12,7 @@
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod bytes;
 #[cfg(test)]
@@ -24,7 +24,7 @@ mod common;
 mod driver;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod entry;
 #[cfg_attr(
@@ -34,21 +34,21 @@ mod entry;
 mod error;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod grant;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod log;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod message;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the driver of #471 is the first user")
+    expect(dead_code, reason = "the streams of #471 are the first user")
 )]
 mod region;
