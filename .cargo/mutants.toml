@@ -40,6 +40,9 @@ exclude_re = [
   # The bits never overlap: no function code has bit 7 set, and a shifted byte has
   # bit 0 clear. So `|` and `^` give the same result.
   'crates/connector-modbus/src/pdu\.rs:.*replace \| with \^ in (Request::decode_reply|pack)',
+  # `rows` fills bits 0 to 15 and `columns << 16` bits 16 to 31, so `|` and `^` give
+  # the same `n`.
+  'crates/home/src/stored\.rs:.*replace \| with \^ in codes',
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
