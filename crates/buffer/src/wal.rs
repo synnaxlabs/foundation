@@ -542,17 +542,16 @@ impl Writer {
     /// `kept`: the oldest record that must stay. Once the tail is durable,
     /// [`release`](Self::release) frees the records.
     ///
-    /// The headroom is twice the larger of the largest record and the records not
-    /// yet synced, plus one largest record. The space of a trim is free only at its
-    /// release. From one trim to the release of the next, the ring takes the next
-    /// commit, the records that come while that commit syncs, and the blocks that
-    /// one wrap skips.
+    /// The headroom is three times the larger of the largest record and the records
+    /// not yet synced. The space of a trim is free only at its release. From one trim
+    /// to the release of the next, the ring takes the records of two commits and the
+    /// blocks that one wrap skips.
     #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
     pub(crate) fn trimmed(&self, kept: Option<u64>) -> Option<Position> {
         let window = self.layout.window;
         let synced = self.ends.back().map_or(self.tail, |end| end.offset);
         let queued = self.head - synced;
-        let room = queued.max(window).saturating_mul(2).saturating_add(window);
+        let room = queued.max(window).saturating_mul(3);
         let spare = self.layout.area.saturating_sub(room);
         let want = self.head.saturating_sub(spare);
         if want <= self.tail {
@@ -926,7 +925,7 @@ mod tests {
     use super::*;
     use env::files::SECTOR;
     use proptest::prelude::*;
-    use std::mem;
+    use std::{iter, mem};
 
     const BLOCKS: u64 = 8;
     const AREA: u64 = BLOCKS * 4096;
@@ -1719,9 +1718,9 @@ mod tests {
         }
 
         #[test]
-        fn trimmed_leaves_twice_the_records_not_yet_synced_free_and_one_more() {
-            let mut writer = filled(10);
-            let queued: Vec<Ends> = (11..=14)
+        fn trimmed_leaves_three_times_the_records_not_yet_synced_free() {
+            let mut writer = filled(11);
+            let queued: Vec<Ends> = (12..=14)
                 .map(|chain| queue(&mut writer, 8, chain).expect("the ring has room"))
                 .collect();
             assert_eq!(writer.trimmed(None), Some(at(8, 7)));
@@ -1827,6 +1826,46 @@ mod tests {
             let lens = [BODY_MAX, BODY_MAX, 2 * ALIGN];
             let commits = (0..100_000).map(|commit| (vec![lens[commit % 3]], vec![]));
             assert_eq!(steady(layout, commits), None);
+        }
+
+        /// Each commit holds `counts` records of `len` bytes, in turn, and each
+        /// record comes while the commit before it syncs.
+        fn turns(blocks: u64, counts: [usize; 2], len: usize) -> Option<(usize, Full)> {
+            let layout = Layout::new(blocks * 4096, BODY_MAX).expect("a ring");
+            let commits =
+                (0..1000).map(|commit| (vec![len; counts[commit % 2]], vec![]));
+            steady(layout, commits)
+        }
+
+        #[test]
+        fn a_commit_larger_than_the_last_is_not_refused() {
+            assert_eq!(turns(256, [5, 7], BODY_MAX), None);
+            assert_eq!(turns(256, [5, 6], BODY_MAX), None);
+            assert_eq!(turns(1024, [50, 52], BODY_MAX), None);
+            assert_eq!(turns(256, [20, 28], 8), None);
+        }
+
+        /// Fills a ring of 1024 blocks with commits of 40 records of one block, then
+        /// runs the two commits of `then`. Each record comes while the commit
+        /// before it syncs.
+        fn stepped(then: [usize; 2]) -> Option<(usize, Full)> {
+            let layout = Layout::new(1024 * 4096, BODY_MAX).expect("a ring");
+            let counts = iter::repeat_n(40, 400).chain(then);
+            steady(layout, counts.map(|count| (vec![8; count], vec![])))
+        }
+
+        /// The headroom of a trim is free at its release, after the next commit is
+        /// in the ring and before the one after it.
+        #[test]
+        fn the_two_commits_after_a_trim_fit_in_three_times_its_commit() {
+            assert_eq!(stepped([80, 40]), None);
+            assert_eq!(stepped([60, 60]), None);
+            let full = Full {
+                needed: 4096,
+                free: 0,
+            };
+            assert_eq!(stepped([81, 40]), Some((400, full)));
+            assert_eq!(stepped([60, 61]), Some((401, full)));
         }
 
         proptest! {

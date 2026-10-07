@@ -299,18 +299,24 @@ How to read this record:
   paths. A carried tail is no sample: a read gives no entry for it, only the gap up to
   it. The trim does not turn on without the carried tail, and the PR that builds it
   records its form on disk here. Decided by the architect (#160,
-  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113). As
-  built (#1222): the headroom is twice the larger of the largest record and the last
-  commit, plus one largest record. The space of a trim is free only after its sync.
-  Until then the ring takes the next commit, the records that come while that commit
-  syncs, and the blocks that one wrap skips, which are less than one largest record.
-  Twice the last commit alone refused a write at each wrap. Measured with a largest
-  record of four blocks and one record in each commit, for 2000 commits: a ring of 13
-  blocks or more refuses no write, a ring of 12 blocks (three of the largest record)
-  refuses at most 2, and a ring of 8 to 11 blocks refuses up to one write in three.
-  Under three of the largest record the headroom is more than the area, so each trim
-  frees every synced record. A trim moves the tail to the boundary after a record of
-  any kind: a wrap record and a restart record also end where a tail can go.
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
+  As built (#1222): the headroom is three times the larger of the largest record and the
+  last commit. The space of a trim is free only after its sync. From one trim to the
+  release of the next, the ring takes the records of two commits and the blocks that one
+  wrap skips, which are less than one largest record. Twice the last commit alone
+  refused a write at each wrap. Twice the last commit plus one largest record refused
+  each commit that was more than one largest record over the commit before it. Measured
+  on a full ring of 1024 blocks after commits of 40 blocks: a commit of 80 blocks is not
+  refused and a commit of 81 is, and two commits of 60 blocks are not refused and
+  commits of 60 and 61 are. On a ring of 4096 blocks, a load that grows by 30 percent
+  with each commit, for 7 commits, is not refused, and a load that grows by 40 percent
+  is. Measured with a largest record of four blocks and one record in each commit, for
+  2000 commits: a ring of 13 blocks or more refuses no write, a ring of 12 blocks (three
+  of the largest record) refuses at most 2, and a ring of 8 to 11 blocks refuses up to
+  one write in three. Under three of the largest record the headroom is more than the
+  area, so each trim frees every synced record. A trim moves the tail to the boundary
+  after a record of any kind: a wrap record and a restart record also end where a tail
+  can go.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
