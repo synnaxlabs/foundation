@@ -52,12 +52,14 @@ n=$(($(cat "$STUB/sleeps" 2>/dev/null || echo 0) + 1))
 echo "$n" > "$STUB/sleeps"
 [ "$n" -lt 5 ] || kill "$PPID"
 STUB
-# Records the answer body, then runs the real gh. $6 is `query=...`. The real gh can
-# itself call gh from PATH, so it gets the PATH without this stub.
+# Records the answer body and the filter, then runs the real gh. $6 is `query=...` and
+# $8 the filter. The real gh can itself call gh from PATH, so it gets the PATH without
+# this stub.
 cat > "$tmp/live/gh" <<STUB
 #!/bin/sh
 PATH='$PATH'
 "$gh" api graphql -F n=1428 -f "\$6" < /dev/null > "$tmp/live/1428.json"
+printf %s "\$8" > "$tmp/live/filter"
 exec "$gh" "\$@"
 STUB
 cp "$tmp/bin/sleep" "$tmp/live/sleep"
@@ -267,4 +269,7 @@ fields=$(jq '.data.repository.pullRequest | . as $pr
   and all(.[]; .__typename != "StatusContext" or (.state | type) == "string"))' \
   "$tmp/live/1428.json")
 check "API on #1428 gives each field" 0 "$fields" 1 0 true 1
+# The stub runs the filter with this jq, and gh with its own engine.
+same=$(jq -r "$(cat "$tmp/live/filter")" "$tmp/live/1428.json")
+check "this jq reads #1428 as gh does" $? "$same" 1 0 merged 1
 exit $failed
