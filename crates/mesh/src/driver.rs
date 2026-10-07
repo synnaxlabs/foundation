@@ -1163,7 +1163,7 @@ mod tests {
                 mesh.propose(home(id)).unwrap();
             }
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-            assert_eq!(mesh.group.borrow().state.home(INDEX), Some(key(100)));
+            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(100))));
         });
     }
 

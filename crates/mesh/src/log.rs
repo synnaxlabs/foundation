@@ -16,10 +16,13 @@
 //! torn record leaves nothing that a later open reads as a header, and a record whose
 //! sync failed is durable.
 //!
-//! A write puts a record in blocks of whole sectors, one block of the pool at a time.
-//! When the pool gives no block for a part, the bytes of the parts before it stay after
-//! the end of the log. The next write puts zeros over them, and syncs, before it writes
-//! its record.
+//! A write puts a record in blocks, one block of the pool at a time, from the end of
+//! the record to its start. Each block but the one at the end of the record ends at a
+//! multiple of the block size in the file, so no two blocks share a sector. The block
+//! with the header is the last. So when the pool gives no block for a part, the log
+//! has no header of the record, and the bytes of the parts after it stay after the end
+//! of the log. The next write puts zeros over them, and syncs, before it writes its
+//! record.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -214,7 +217,7 @@ impl Log {
                 .get_mut(scan.offset..)
                 .expect("invariant: the log ends in its end file")
                 .fill(0);
-            write_in_blocks(&file, &pool, &mut 0, bytes).await?;
+            write_in_blocks(&file, &pool, 0, bytes).await?;
             file
         } else {
             let mode = Mode::Create { len: SEGMENT };
@@ -295,9 +298,9 @@ impl Log {
             // A scan reads bytes that stay after a later record as its next header.
             // The zeros get their own sync: with one sync, a power cut can keep the
             // record and not the zeros.
-            let mut at = wide(start(narrow(self.offset)));
+            let at = wide(start(narrow(self.offset)));
             let zeros = vec![0; narrow(end.saturating_sub(at))];
-            write_in_blocks(&self.file, &self.pool, &mut at, &zeros).await?;
+            write_in_blocks(&self.file, &self.pool, at, &zeros).await?;
             self.file.sync().await?;
             self.stale = None;
         }
@@ -320,9 +323,9 @@ impl Log {
             self.files.sync_dir(&self.dir).await?;
             (self.file, self.number, self.offset, start) = (file, number, 0, 0);
         }
-        let mut end = start;
-        let written = write_in_blocks(&self.file, &self.pool, &mut end, &record).await;
-        if written.is_err() && end > start {
+        let end = start.saturating_add(len);
+        let written = write_in_blocks(&self.file, &self.pool, start, &record).await;
+        if written.is_err() {
             self.stale = Some(end);
         }
         written?;
@@ -349,8 +352,8 @@ fn narrow(offset: u64) -> usize {
     usize::try_from(offset).expect("invariant: a file offset fits in memory")
 }
 
-// The most bytes in one block of an open: `CHUNK`, or less when the pool has no such
-// block. It is whole sectors, so no two of its reads or of its writes share a sector.
+// The most bytes in one block of a read or a write: `CHUNK`, or less when the pool has
+// no such block. It is whole sectors, and an open refuses a pool that gives 0.
 fn chunk(pool: &Pool) -> usize {
     let largest = pool.largest();
     largest.saturating_sub(largest % SECTOR).min(CHUNK)
@@ -398,24 +401,27 @@ async fn read(file: &File, pool: &Pool) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-// Writes `bytes` at `*at` of `file`, one block at a time, and moves `*at` past each
-// block that it wrote. Each block ends at a multiple of the block size in the file,
-// so no two blocks share a sector.
+// Writes `bytes` at `at` of `file`, one block at a time, from the end of `bytes` to
+// its start. Each block but the one at the end ends at a multiple of the block size
+// in the file, so no two blocks share a sector.
 async fn write_in_blocks(
     file: &File,
     pool: &Pool,
-    at: &mut u64,
+    at: u64,
     mut bytes: &[u8],
 ) -> Result<(), Error> {
     let chunk = chunk(pool);
     while !bytes.is_empty() {
-        let used = narrow(*at).checked_rem(chunk).unwrap_or(0);
-        let room = chunk.saturating_sub(used).min(bytes.len());
-        let (part, rest) = bytes.split_at(room);
+        let end = narrow(at).saturating_add(bytes.len());
+        let over = end
+            .checked_rem(chunk)
+            .expect("invariant: a block of the log is one sector or more");
+        let len = if over == 0 { chunk } else { over }.min(bytes.len());
+        let (rest, part) = bytes.split_at(bytes.len().saturating_sub(len));
         let mut block = pool.alloc(part.len())?;
         block.copy_from_slice(part);
-        file.write_at(*at, &[block.freeze()]).await?;
-        *at = at.saturating_add(wide(part.len()));
+        let offset = at.saturating_add(wide(rest.len()));
+        file.write_at(offset, &[block.freeze()]).await?;
         bytes = rest;
     }
     Ok(())
@@ -2118,25 +2124,27 @@ mod tests {
         );
     }
 
-    /// A log on a pool of 2,048 bytes, with one record to byte 400 and the first
-    /// block of a second record after it, to byte 1,536: the pool gave no second
-    /// block. Returns the log, its pool, and the block that keeps the pool full.
+    /// A log on a pool of 2,048 bytes, with one record to byte 1,236 and the last
+    /// block of a second record at bytes 1,536 to 1,576: the pool gave no block for
+    /// the 300 bytes before it. Returns the log, its pool, and the block that keeps
+    /// the pool full.
     async fn stopped(node: &sim::node::Node) -> (Log, Rc<Pool>, block::Unique) {
         let pool = odd_pool();
         let (mut log, _) = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
             .await
             .unwrap();
-        log.write(None, &[bytes(1, 340)]).await.unwrap();
-        assert_eq!(log.offset, 400);
-        let held = pool.alloc(448).unwrap();
-        let error = log.write(None, &[bytes(2, 3000)]).await.unwrap_err();
-        let expected = block::Error::Exhausted {
-            requested: 3 * SECTOR,
-            available: 192,
-        };
-        assert_eq!(error, Error::Pool(expected));
-        assert_eq!((log.offset, log.stale), (400, Some(1536)));
+        log.write(None, &[bytes(1, 1176)]).await.unwrap();
+        let held = pool.alloc(1792).unwrap();
+        let error = log.write(None, &[bytes(2, 280)]).await.unwrap_err();
+        assert_eq!(error, Error::Pool(exhausted(300, 64)));
         (log, pool, held)
+    }
+
+    fn exhausted(requested: usize, available: usize) -> block::Error {
+        block::Error::Exhausted {
+            requested,
+            available,
+        }
     }
 
     fn records(lens: &[usize]) -> Stored {
@@ -2155,45 +2163,95 @@ mod tests {
         let (mut sim, node) = sim(0);
         sim.run_on(&node, |node, _| async move {
             let (mut log, pool, held) = stopped(&node).await;
-            let again = log.write(None, &[bytes(2, 3000)]).await.unwrap_err();
-            assert_eq!(again, Error::Pool(pool.alloc(3 * SECTOR).unwrap_err()));
+            let again = log.write(None, &[bytes(2, 280)]).await.unwrap_err();
+            assert_eq!(again, Error::Pool(pool.alloc(300).unwrap_err()));
             drop(held);
-            log.write(None, &[bytes(2, 3000)]).await.unwrap();
+            log.write(None, &[bytes(2, 280)]).await.unwrap();
             log.write(None, &[bytes(3, 10)]).await.unwrap();
         })
         .unwrap();
-        assert_eq!(stored(&mut sim, &node), Ok(records(&[340, 3000, 10])));
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, 280, 10])));
     }
 
-    // The record ends at byte 500, so the header after it starts at byte 512, in a
-    // sector that held bytes of the stopped write.
+    // The body of the record is zeros, as the file is after byte 400. A write that
+    // puts the block with the header first leaves a whole record.
+    #[test]
+    fn a_stopped_write_of_a_record_that_ends_in_zeros_holds_what_it_held() {
+        let (mut sim, node) = sim(0);
+        sim.run_on(&node, |node, _| async move {
+            let pool = odd_pool();
+            let (mut log, _) = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
+                .await
+                .unwrap();
+            log.write(None, &[bytes(1, 340)]).await.unwrap();
+            let _held = pool.alloc(448).unwrap();
+            let zeros = entry(1, 2, Data::Bytes(vec![0; 3000]));
+            let error = log.write(None, &[zeros]).await.unwrap_err();
+            assert_eq!(error, Error::Pool(exhausted(3 * SECTOR, 1024)));
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[340])));
+    }
+
+    // The record ends at byte 1,536, so the header after it starts in the sector that
+    // holds the bytes of the stopped write.
     #[test]
     fn a_shorter_record_after_a_stopped_write_has_no_bytes_after_it() {
         let (mut sim, node) = sim(0);
         sim.run_on(&node, |node, _| async move {
             let (mut log, _, held) = stopped(&node).await;
             drop(held);
-            log.write(None, &[bytes(2, 40)]).await.unwrap();
-            assert_eq!(log.offset, 500);
+            log.write(None, &[bytes(2, 240)]).await.unwrap();
         })
         .unwrap();
-        assert_eq!(stored(&mut sim, &node), Ok(records(&[340, 40])));
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, 240])));
+    }
+
+    // The record ends one byte before the end of the stopped write.
+    #[test]
+    fn the_zeros_reach_the_end_of_the_stopped_bytes() {
+        let (mut sim, node) = sim(0);
+        sim.run_on(&node, |node, _| async move {
+            let (mut log, _, held) = stopped(&node).await;
+            drop(held);
+            log.write(None, &[bytes(2, 279)]).await.unwrap();
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, 279])));
+    }
+
+    // The pool has no block for the first zeros, which go over the bytes of the
+    // stopped write.
+    #[test]
+    fn a_pool_that_stops_the_zeros_keeps_the_stopped_bytes_known() {
+        let (mut sim, node) = sim(0);
+        sim.run_on(&node, |node, _| async move {
+            let (mut log, pool, held) = stopped(&node).await;
+            let other = pool.alloc(40).unwrap();
+            let error = log.write(None, &[bytes(2, 279)]).await.unwrap_err();
+            assert_eq!(error, Error::Pool(exhausted(40, 64)));
+            drop((held, other));
+            log.write(None, &[bytes(2, 279)]).await.unwrap();
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, 279])));
     }
 
     #[test]
-    fn a_record_in_a_new_file_after_a_stopped_write_has_no_bytes_before_it() {
+    fn a_write_after_a_stopped_write_can_start_a_new_file() {
         let (mut sim, node) = sim(0);
         let len = narrow(SEGMENT);
         sim.run_on(&node, move |node, _| async move {
             let (mut log, _, held) = stopped(&node).await;
             drop(held);
             log.write(None, &[bytes(2, len)]).await.unwrap();
-            assert_eq!(log.number, 1);
         })
         .unwrap();
-        assert_eq!(stored(&mut sim, &node), Ok(records(&[340, len])));
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[1176, len])));
     }
 
+    // The pool stops the first record of a new file after its last block. The record
+    // after it starts that file, and ends in the bytes of the stopped write.
     #[test]
     fn a_write_after_the_pool_stops_a_new_file_starts_that_file() {
         let (mut sim, node) = sim(0);
@@ -2206,17 +2264,17 @@ mod tests {
             log.write(None, &[bytes(1, 340)]).await.unwrap();
             let held = pool.alloc(448).unwrap();
             let error = log.write(None, &[bytes(2, len)]).await.unwrap_err();
-            assert_eq!(error, Error::Pool(pool.alloc(3 * SECTOR).unwrap_err()));
-            assert_eq!((log.number, log.offset, log.stale), (1, 0, None));
+            assert_eq!(error, Error::Pool(exhausted(3 * SECTOR, 192)));
             drop(held);
-            log.write(None, &[bytes(2, 10)]).await.unwrap();
+            log.write(None, &[bytes(2, len - 600)]).await.unwrap();
         })
         .unwrap();
-        assert_eq!(stored(&mut sim, &node), Ok(records(&[340, 10])));
+        assert_eq!(stored(&mut sim, &node), Ok(records(&[340, len - 600])));
     }
 
-    // As the test before it, with a power cut in the write of the shorter record.
-    // Zeros with no sync of their own can be lost when the record after them is not.
+    // A power cut in the write of a shorter record, which is in one sector: the bytes
+    // of the stopped write are in the sector after it. Zeros with no sync of their own
+    // can be lost when the record after them is not.
     #[test]
     fn a_power_cut_keeps_no_bytes_of_a_stopped_write_after_a_record() {
         let mut kept = [0, 0];
@@ -2229,7 +2287,7 @@ mod tests {
                 let (mut log, _, held) = stopped(&own).await;
                 drop(held);
                 flag.store(1, Ordering::Relaxed);
-                log.write(None, &[bytes(2, 40)]).await.unwrap();
+                log.write(None, &[bytes(2, 240)]).await.unwrap();
                 flag.store(2, Ordering::Relaxed);
                 pending::<()>().await;
             });
@@ -2243,10 +2301,10 @@ mod tests {
             sim.crash(&node, Crash::Power);
 
             let stored = stored(&mut sim, &node);
-            let short = stored == Ok(records(&[340, 40]));
+            let short = stored == Ok(records(&[1176, 240]));
             assert!(short || !ended, "run {run}");
             assert!(
-                short || stored == Ok(records(&[340])),
+                short || stored == Ok(records(&[1176])),
                 "run {run}: {stored:?}"
             );
             kept[usize::from(short)] += 1;
@@ -2274,7 +2332,7 @@ mod tests {
                 .run_on(&node, |node, _| async move {
                     let log = file("log-0");
                     let file = node.files().open(&log, Mode::Read).await.unwrap();
-                    let bytes = read(&file, &pool()).await.unwrap();
+                    let bytes = read(&file, &create_pool()).await.unwrap();
                     bytes[SECTOR..6 * SECTOR]
                         .chunks(SECTOR)
                         .all(|sector| sector == [0; SECTOR] || sector == [2; SECTOR])

@@ -1634,38 +1634,45 @@ How to read this record:
   entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
-  holds a record. A write puts its record in blocks of whole sectors, one block of the
-  pool at a time and of 64 KiB at most, and then syncs one time. So a pool that opens
-  holds each write. A write that a file call fails, or that its caller drops, poisons
-  the log (`Error::Poisoned`). A write that the pool stops between two blocks
-  (`Error::Pool`) does not: the log holds what it held, and the bytes of the stopped
-  write stay after its end. The next write puts zeros over those bytes and syncs, and
-  only then writes its record: with one sync, a power cut can keep the record and not
-  the zeros (SIM CRASH), and an open then reads the old bytes as a header (PR 1 of
-  #1091, approved by the architect, 2026-10-07T05:29:41Z:
-  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973). A
-  header never crosses a `SECTOR`: a record whose header would cross one starts at the
-  next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
-  header is whole or absent. At a restart, zeros where a record should start, or a good
-  header with a torn body, are the end of the log. Anything else, or a record after a
-  torn one, is `Error::Corrupt`, and the node does not start. Open writes again, whole,
-  the end file that it finds: the records as it read them, then zeros to the end of the
-  file. So a torn record leaves nothing that a later open reads as a header. Each read
-  and each write of the open is whole sectors, so a header gets one write. An open
-  with a pool whose largest block is less than one sector gives
-  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
-  the directory, and its parent, because `raft` acts on what open gives and a crash can
-  leave any of them with no sync. The write is there because a read sees, from the
-  cache, the writes that a failed sync of this boot lost, and a later sync does not
-  write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
-  the disk does not hold (#1066; the ring has the same rule, #698). Each file before the
-  end file is durable, because a failed write poisons the log, and the next open has the
-  file of that write as its end file or removes it. An open of a log that has a file
-  thus writes and syncs 1 MiB or more, for each region. P1 gives a Raspberry Pi 4 under
-  1 s to start, and no one has measured this cost there (#1140). Lost: zeros only after
-  a torn end (the first shape), which is the defect; and a read with direct I/O, which
-  not each driver can give: macOS does not promise a read that skips the cache (decided
-  by the architect, #1128, 2026-10-07T05:37:30Z:
+  holds a record. A write puts its record in blocks, one block of the pool at a time and
+  of 64 KiB at most, from the end of the record to its start, and then syncs one time.
+  Each block but the one at the end of the record ends at a multiple of the block size
+  in the file, so no two blocks share a sector. The block with the header is the last
+  that it writes, so a write that the pool stops (`Error::Pool`) leaves no header: the
+  log holds what it held, and the bytes of the stopped write stay after its end. Decided
+  by `laptop.architect` (2026-10-07T09:12:02Z):
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034784720. So a pool
+  that opens holds each write. A write that a file call fails, or that its caller drops,
+  poisons the log (`Error::Poisoned`), and a write that the pool stops does not. The
+  next write puts zeros over the bytes of the stopped write and syncs, and only then
+  writes its record: with one sync, a power cut can keep the record and not the zeros
+  (SIM CRASH), and an open then reads the old bytes as a header (PR 1 of #1091, approved
+  by the architect, 2026-10-07T05:29:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1091#issuecomment-6031627973, and the
+  text of this rule, 2026-10-07T08:42:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A header
+  never crosses a `SECTOR`: a record whose header would cross one starts at the next
+  sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
+  whole or absent. At a restart, zeros where a record should start, or a good header
+  with a torn body, are the end of the log. Anything else, or a record after a torn one,
+  is `Error::Corrupt`, and the node does not start. Open writes again, whole, the end
+  file that it finds: the records as it read them, then zeros to the end of the file. So
+  a torn record leaves nothing that a later open reads as a header. Each read and each
+  write of the open is whole sectors, so a header gets one write. An open with a pool
+  whose largest block is less than one sector gives `Error::Pool(TooLarge)` before it
+  reads or makes a file. Then it syncs the end file, the directory, and its parent,
+  because `raft` acts on what open gives and a crash can leave any of them with no sync.
+  The write is there because a read sees, from the cache, the writes that a failed sync
+  of this boot lost, and a later sync does not write them (SIM CRASH): an open that only
+  syncs gives records, or keeps zeros, that the disk does not hold (#1066; the ring has
+  the same rule, #698). Each file before the end file is durable, because a failed write
+  poisons the log, and the next open has the file of that write as its end file or
+  removes it. An open of a log that has a file thus writes and syncs 1 MiB or more, for
+  each region. P1 gives a Raspberry Pi 4 under 1 s to start, and no one has measured
+  this cost there (#1140). Lost: zeros only after a torn end (the first shape), which is
+  the defect; and a read with direct I/O, which not each driver can give: macOS does not
+  promise a read that skips the cache (decided by the architect, #1128,
+  2026-10-07T05:37:30Z:
   https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
   check over the whole record lost: a damaged length then reads as a torn end, and the
   log drops the good records after it. Zeros over the header of a durable record, which
@@ -1696,7 +1703,7 @@ How to read this record:
   log from that leader (a known defect, #1096, that #1107 fixes). A node with no
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
-  (decided by the architect, #242:
+  (decided by the architect, #242, 2026-10-07T04:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
@@ -1705,12 +1712,14 @@ How to read this record:
   and until then no message leaves, nothing applies, and the group gets no tick. Nothing
   bounds the proposals and the messages that the group takes in that time (#1091). A
   write holds one block of the pool at a time (MESH LOG), so no record is too large for
-  a pool that opens, and a write does not wait for a block of its own. A free block of a
-  size with a block in use keeps its budget (#291), so a write can wait while the budget
-  has room for its block, until the other user of the pool drops its block (#1134). A
-  pool whose largest block is less than one sector does not open (MESH LOG), so no write
-  gives `TooLarge` and the group does not stop for it (decided by the architect,
-  2026-10-07T06:32:47Z:
+  a pool that opens, and a write does not wait for a block of its own (decided by the
+  architect, 2026-10-07T08:42:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1284#issuecomment-6034282653). A free
+  block of a size with a block in use keeps its budget (#291), so a write can wait while
+  the budget has room for its block, until the other user of the pool drops its block
+  (#1134). A pool whose largest block is less than one sector does not open (MESH LOG),
+  so no write gives `TooLarge` and the group does not stop for it (decided by the
+  architect, 2026-10-07T06:32:47Z:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
   `Refused` wait decided by the architect, 2026-10-07T04:39:07Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
