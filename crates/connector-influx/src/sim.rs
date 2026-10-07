@@ -136,7 +136,9 @@ impl Store {
             .collect();
         std::iter::from_fn(move || {
             let Reverse((_, at)) = next.pop()?;
-            let points = series.get_mut(at)?;
+            let Some(points) = series.get_mut(at) else {
+                unreachable!("the heap holds only series indexes")
+            };
             let point = points.next();
             next.extend(points.peek().map(|point| Reverse((point.time, at))));
             point

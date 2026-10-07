@@ -87,6 +87,23 @@ fn names_a_point_by_measurement_tags_and_time() {
 }
 
 #[test]
+fn gives_the_points_of_one_time_in_tag_order() {
+    let store = stored("m,a=2 v=2 10\nm,a=1 v=1 10\nm v=0 10\n");
+    let tags: Vec<Tags> = store
+        .points("m", &[])
+        .map(|point| point.tags.clone())
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            Tags::default(),
+            map(&[("a", "1".to_owned())]),
+            map(&[("a", "2".to_owned())]),
+        ]
+    );
+}
+
+#[test]
 fn gives_the_points_in_time_order() {
     let store = stored("m v=1 30\nm v=1 -10\nm v=1 20\n");
     assert_eq!(times(&store, "m", &[]), [-10, 20, 30]);
@@ -602,7 +619,10 @@ proptest! {
         let mut model = Model::new();
         for (at, run) in runs.iter().enumerate() {
             let mut body = String::new();
-            let tags = run.tag.map(|tag| map(&[("t", tag.to_owned())])).unwrap_or_default();
+            let tags = run
+                .tag
+                .map(|tag| map(&[("t", tag.to_owned())]))
+                .unwrap_or_default();
             for k in 0..run.count {
                 #[expect(clippy::arithmetic_side_effects, reason = "below 40_000")]
                 let time = run.start + k * run.step;
@@ -616,7 +636,11 @@ proptest! {
                 model
                     .entry((Stamp::from_nanos(time), tags.clone()))
                     .or_default()
-                    .extend(fields.into_iter().map(|(key, field)| (key.to_owned(), field)));
+                    .extend(
+                        fields
+                            .into_iter()
+                            .map(|(key, field)| (key.to_owned(), field)),
+                    );
             }
             store.write(body.as_bytes()).unwrap();
         }
@@ -683,8 +707,24 @@ fn a_time_inside_a_full_chunk_splits_it() {
     let mut store = stored(&lines((0..CHUNK).map(|k| 2 * k)));
     store.write(lines(std::iter::once(5)).as_bytes()).unwrap();
     assert_eq!(chunks(&store), [CHUNK / 2 + 1, CHUNK / 2]);
-    let times: Vec<i64> = times(&store, "m", &[]);
-    assert!(times.is_sorted() && times.len() == CHUNK + 1, "{times:?}");
+    let mut written: Vec<u32> = (0..CHUNK)
+        .map(|k| 2 * k)
+        .chain([5])
+        .map(|time| u32::try_from(time).unwrap())
+        .collect();
+    written.sort_unstable();
+    let expected: Vec<_> = written
+        .into_iter()
+        .map(|time| {
+            let value = Field::Float(f64::from(time));
+            (
+                Stamp::from_nanos(i64::from(time)),
+                Tags::default(),
+                map(&[("v", value)]),
+            )
+        })
+        .collect();
+    assert_eq!(read(&store, "m"), expected);
 }
 
 #[test]
