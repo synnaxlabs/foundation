@@ -76,6 +76,8 @@ or a line range.
       "cannot be read" is three failed `gh` calls in a row: fix what gh printed (a
       login, a wrong PR number), or wait again once the network is back.
     - Exit 3: git could not get the script. Fix what git printed, and run it again.
+    - Exit 2: `<n>` is not a PR number. Any other exit: the script was stopped. Fix
+      the cause and run it again.
 
 ## Local gate
 
