@@ -10,10 +10,6 @@
     clippy::string_slice
 )]
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "`set_home` of #471 is the first user")
-)]
 mod applied;
 mod bytes;
 pub mod card;

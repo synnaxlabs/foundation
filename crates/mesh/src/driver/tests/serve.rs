@@ -2,7 +2,7 @@
 //! and node 1 serves each with its mesh.
 
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code, Session};
+use transport::{Class, Code};
 
 use super::*;
 

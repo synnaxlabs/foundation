@@ -9,18 +9,19 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
-use block::Pool;
+use block::{Block, Pool};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
-use transport::Transport;
+use transport::{Session, Transport};
 use types::channel;
 use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
+use crate::applied::Applied;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Signer};
 use crate::error::{Error, Stopped};
@@ -31,6 +32,7 @@ use crate::region::{self, Refused, Request};
 use crate::status::Status;
 use send::Senders;
 
+mod home;
 mod send;
 mod stream;
 
@@ -90,6 +92,7 @@ pub struct Config {
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
     pool: Rc<Pool>,
+    clock: Clock,
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the join answer of #336 is the first user")
@@ -183,18 +186,21 @@ impl Mesh {
             waits: None,
             fresh: Vec::new(),
             starter: None,
+            applied: Applied::default(),
+            calls: BTreeMap::new(),
         }));
         let weak = Rc::downgrade(&group);
         config.tasks.spawn(run(
             weak,
             log,
             signer,
-            config.clock,
+            config.clock.clone(),
             config.entropy.clone(),
         ));
         Ok(Self {
             group,
             pool,
+            clock: config.clock,
             time: config.time,
             entropy: config.entropy,
         })
@@ -484,7 +490,7 @@ struct Group {
     // Each proposal since the task last took a `Ready`. The next `Ready` holds the
     // entry of each, unless a new leader replaced the entry.
     proposals: Vec<Rc<Proposal>>,
-    // The count of slots given, which is the slot of the next watch.
+    // The count of slots given, which is the slot of the next watch or try.
     slots: u64,
     // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
@@ -492,6 +498,9 @@ struct Group {
     fresh: Vec<node::Key>,
     // The task of `Senders::run`, while it waits for a new queue.
     starter: Option<Waker>,
+    applied: Applied,
+    // The task of each call of `set_home` that waits for the outcome of a try.
+    calls: BTreeMap<u64, Waker>,
 }
 
 impl Group {
@@ -553,16 +562,20 @@ impl Group {
         Poll::Ready(message)
     }
 
-    // Wakes each task that sends, so that it ends.
-    fn wake_senders(&mut self) {
-        let queues = self.queues.values_mut();
-        let waiting = queues.filter_map(|queue| queue.waker.take());
-        waiting.chain(self.starter.take()).for_each(Waker::wake);
+    // Wakes each task that sends, so that it ends, and drops the session of each.
+    fn end_senders(&mut self) {
+        for queue in self.queues.values_mut() {
+            queue.session = None;
+            queue.waker.take().into_iter().for_each(Waker::wake);
+        }
+        self.starter.take().into_iter().for_each(Waker::wake);
     }
 
     // Applies each change in `committed`, and wakes the watches when a home moves.
     fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
         for Entry { at, data } in committed {
+            self.applied.push(at);
+            self.wake_calls();
             let bytes = match data {
                 Data::Bytes(bytes) => bytes,
                 Data::Empty | Data::Voters(_) => continue,
@@ -587,8 +600,9 @@ impl Group {
 
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
-        self.wake_senders();
+        self.end_senders();
         self.wake_watches();
+        self.wake_calls();
         for proposal in &self.proposals {
             proposal.wake();
         }
@@ -599,6 +613,12 @@ impl Group {
             .into_values()
             .for_each(Waker::wake);
     }
+
+    fn wake_calls(&mut self) {
+        mem::take(&mut self.calls)
+            .into_values()
+            .for_each(Waker::wake);
+    }
 }
 
 impl Drop for Group {
@@ -606,7 +626,7 @@ impl Drop for Group {
     // that each mesh dropped.
     fn drop(&mut self) {
         self.wake();
-        self.wake_senders();
+        self.end_senders();
         self.wake_watches();
     }
 }
@@ -629,13 +649,15 @@ impl Proposal {
     }
 }
 
-// The messages that wait for one member.
+// The messages that wait for one member, and the session to it.
 #[derive(Default)]
 struct Queue {
     messages: VecDeque<raft::Message>,
     // The one task that reads this queue, while it waits for a message or in a send
     // of one.
     waker: Option<Waker>,
+    // The session that the task dialed, until a send on it fails or the group stops.
+    session: Option<Session>,
 }
 
 impl Queue {
@@ -649,6 +671,13 @@ impl Queue {
             waker.wake();
         }
     }
+}
+
+// A block of `pool` that holds `bytes`.
+fn block(pool: &Pool, bytes: &[u8]) -> Result<Block, block::Error> {
+    let mut block = pool.alloc(bytes.len())?;
+    block.copy_from_slice(bytes);
+    Ok(block.freeze())
 }
 
 // Whether `entries`, which is the run of entries of one `Ready`, holds the entry
@@ -773,6 +802,7 @@ mod tests {
     use types::node::SealKey;
     use wire::Protocol;
 
+    use super::home::within;
     use super::*;
     use crate::card;
     use crate::change::Unknown;
@@ -1430,22 +1460,6 @@ mod tests {
 
     fn term(mesh: &Mesh) -> Term {
         mesh.group.borrow().raft.term()
-    }
-
-    /// What `future` gives, or `None` when it waits for longer than `limit`.
-    async fn within<F: Future>(
-        clock: &Clock,
-        limit: Span,
-        mut future: Pin<&mut F>,
-    ) -> Option<F::Output> {
-        let mut end = clock.sleep(limit);
-        poll_fn(|cx| {
-            if let Poll::Ready(output) = future.as_mut().poll(cx) {
-                return Poll::Ready(Some(output));
-            }
-            Pin::new(&mut end).poll(cx).map(|()| None)
-        })
-        .await
     }
 
     /// Gives the output of `future` when it does not wait.

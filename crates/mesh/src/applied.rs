@@ -56,19 +56,19 @@ impl Applied {
         Floor(self.index)
     }
 
-    /// Ends the try of `floor`.
+    /// Ends the try of `floor`. Call it one time for each floor.
     ///
     /// # Panics
     ///
     /// When another `Applied` opened `floor`.
-    pub(crate) fn close(&mut self, Floor(floor): Floor) {
+    pub(crate) fn close(&mut self, Floor(floor): &Floor) {
         let count = self
             .floors
-            .get_mut(&floor)
+            .get_mut(floor)
             .expect("invariant: a floor closes on the `Applied` that opened it");
         *count = count.saturating_sub(1);
         if *count == 0 {
-            self.floors.remove(&floor);
+            self.floors.remove(floor);
         }
         self.trim();
     }
@@ -190,7 +190,7 @@ mod tests {
             applied.terms,
             [(Term(1), 1), (Term(2), 2), (Term(3), 3), (Term(4), 5)]
         );
-        applied.close(floor);
+        applied.close(&floor);
         assert_eq!(applied.terms, [(Term(4), 5)]);
         applied.push(at(6, 5));
         assert_eq!(applied.terms, [(Term(5), 6)]);
@@ -202,9 +202,9 @@ mod tests {
         let high = applied.open();
         applied.push(at(4, 4));
         assert_eq!(applied.terms, [(Term(3), 3), (Term(4), 4)]);
-        applied.close(high);
+        applied.close(&high);
         assert_eq!(applied.terms, [(Term(3), 3), (Term(4), 4)]);
-        applied.close(low);
+        applied.close(&low);
         assert_eq!(applied.terms, [(Term(4), 4)]);
     }
 
@@ -214,7 +214,7 @@ mod tests {
     )]
     fn a_floor_of_a_different_applied_does_not_close() {
         let (_, floor) = create_applied(&[1], 1);
-        Applied::default().close(floor);
+        Applied::default().close(&floor);
     }
 
     #[derive(Clone, Debug)]
@@ -276,7 +276,7 @@ mod tests {
                     Step::Open => open.push(applied.open()),
                     Step::Close(place) => {
                         if let Some(place) = place.checked_rem(open.len()) {
-                            applied.close(open.swap_remove(place));
+                            applied.close(&open.swap_remove(place));
                         }
                     }
                 }
