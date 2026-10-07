@@ -600,12 +600,16 @@ mod tests {
 
     #[test]
     fn decode_refuses_a_large_count_before_it_takes_an_address() {
-        let mut bytes = encoded(&many(32));
-        bytes[75..83].copy_from_slice(&u64::MAX.to_le_bytes());
-        let mut rest = bytes.as_slice();
-        assert_eq!(Card::decode(&mut rest), None);
-        // `rest` shows how many bytes decode took: none past the count.
-        assert_eq!(rest.len(), bytes.len() - 83);
+        // 288 is 32 in its low byte.
+        for count in [288, u64::MAX] {
+            let mut bytes = encoded(&many(32));
+            bytes[75..83].copy_from_slice(&count.to_le_bytes());
+            let mut rest = bytes.as_slice();
+            assert_eq!(Card::decode(&mut rest), None, "count {count}");
+            // The doc leaves `rest` unknown after `None`, but only its length shows
+            // that decode took no address.
+            assert_eq!(rest.len(), bytes.len() - 83, "count {count}");
+        }
     }
 
     #[test]
