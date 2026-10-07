@@ -3602,6 +3602,16 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242).
   Supersedes the `held` part of
   https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190.
+  A counting allocator runs code as `System` runs it, apart from its count: each
+  `GlobalAlloc` method calls the `System` method of the same name, and keeps the
+  trait's own body only when the allocator's contract needs it, with a comment that
+  names that contract. So `Bytes::realloc` calls `System.realloc` and changes `held` by
+  the difference of the two sizes in one atomic step, and `Allocator::realloc` keeps
+  the trait's own body, because the scan of a free reads the old block. A count that
+  no test can tell apart is not a reason to keep the trait's own body: under it, a
+  `realloc` that doubles 64 B to 1 MiB took 15.4 µs, not 1.6 µs (Apple M3 Max).
+  Decided by `laptop.architect` on 2026-10-07T17:59:58Z
+  (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6043758919, #1536).
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
