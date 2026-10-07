@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
     fn encode_panics_on_an_unsigned_grant() {
         raft(Body::PreVoteReply {
             answer: Answer::Granted(None),
@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
     fn encode_panics_on_an_unsigned_proof_entry() {
         Message::Raft(raft::Message {
             from: node(1),

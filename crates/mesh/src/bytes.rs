@@ -114,7 +114,7 @@ pub(crate) fn put_optional_key(key: Option<node::Key>, out: &mut Vec<u8>) {
 /// encodes one.
 pub(crate) fn put_signature(signature: Option<Signature>, out: &mut Vec<u8>) {
     let Signature(bytes) =
-        signature.expect("invariant: a grant is signed before it is encoded");
+        signature.expect("invariant: a claim is signed before it is encoded");
     out.extend(bytes);
 }
 

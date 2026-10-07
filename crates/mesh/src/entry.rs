@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
     fn encode_panics_on_an_unsigned_change() {
         encode(&change(None), &mut Vec::new());
     }

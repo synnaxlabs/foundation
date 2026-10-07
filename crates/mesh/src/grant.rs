@@ -86,13 +86,13 @@ fn verify(
     signature: Option<Signature>,
     members: &BTreeMap<node::Key, PublicKey>,
 ) -> Result<(), Error> {
-    let voter = claim.signer();
-    let public = members.get(&voter).ok_or(Error::NotMember { voter })?;
+    let signer = claim.signer();
+    let public = members.get(&signer).ok_or(Error::NotMember { signer })?;
     let Signature(bytes) =
-        signature.expect("invariant: decode gives each grant a signature");
+        signature.expect("invariant: decode gives each claim a signature");
     let public = UnparsedPublicKey::new(&ED25519, public.to_bytes());
     if public.verify(&statement(claim), &bytes).is_err() {
-        return Err(Error::Forged { voter });
+        return Err(Error::Forged { signer });
     }
     Ok(())
 }
@@ -100,25 +100,27 @@ fn verify(
 /// Why [`check`] refused a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
-    /// The voter is not a member of the region.
+    /// The signer is not a member of the region.
     NotMember {
-        /// The voter.
-        voter: node::Key,
+        /// The node whose signature the claim needs.
+        signer: node::Key,
     },
-    /// The voter's grant has no signature that holds under its public key.
+    /// A claim has no signature that holds under the public key of its signer.
     Forged {
-        /// The voter.
-        voter: node::Key,
+        /// The node whose signature the claim needs.
+        signer: node::Key,
     },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotMember { voter } => {
-                write!(f, "voter {voter} is not a member of the region")
+            Self::NotMember { signer } => {
+                write!(f, "node {signer} is not a member of the region")
             }
-            Self::Forged { voter } => write!(f, "the grant of voter {voter} is forged"),
+            Self::Forged { signer } => {
+                write!(f, "the claim of node {signer} is forged")
+            }
         }
     }
 }
@@ -257,7 +259,7 @@ mod tests {
         };
         let signature = change.signature;
         assert_eq!(verify(&claim, signature, &members(&[1, 2, 3])), Ok(()));
-        let unknown = Err(Error::NotMember { voter: key(1) });
+        let unknown = Err(Error::NotMember { signer: key(1) });
         assert_eq!(verify(&claim, signature, &members(&[2, 3])), unknown);
     }
 
@@ -281,7 +283,7 @@ mod tests {
         ];
         for (leader, at, voters) in moved {
             let claim = Claim::Change { leader, at, voters };
-            let forged = Err(Error::Forged { voter: leader });
+            let forged = Err(Error::Forged { signer: leader });
             assert_eq!(verify(&claim, signature, &members), forged, "{claim:?}");
         }
     }
@@ -378,12 +380,12 @@ mod tests {
 
     #[test]
     fn check_refuses_a_voter_that_is_not_a_member() {
-        let unknown = Error::NotMember { voter: key(3) };
+        let unknown = Error::NotMember { signer: key(3) };
         let refused = Err(unknown);
         assert_eq!(check(&proven(), &members(&[1, 2])), refused);
         assert_eq!(
             unknown.to_string(),
-            format!("voter {} is not a member of the region", key(3))
+            format!("node {} is not a member of the region", key(3))
         );
         let reply = granted(3, Grant::Vote, 1);
         assert_eq!(check(&reply, &members(&[1, 2])), refused);
@@ -393,16 +395,16 @@ mod tests {
     fn check_refuses_a_changed_signature_byte() {
         let mut message = proven();
         voter(&mut message, 2).as_mut().unwrap().0[63] ^= 1;
-        let forged = Error::Forged { voter: key(2) };
+        let forged = Error::Forged { signer: key(2) };
         assert_eq!(check(&message, &members(&[1, 2, 3])), Err(forged));
         assert_eq!(
             forged.to_string(),
-            format!("the grant of voter {} is forged", key(2))
+            format!("the claim of node {} is forged", key(2))
         );
     }
 
     #[test]
-    #[should_panic(expected = "invariant: decode gives each grant a signature")]
+    #[should_panic(expected = "invariant: decode gives each claim a signature")]
     fn check_panics_on_an_unsigned_entry() {
         let mut message = proven();
         *voter(&mut message, 3) = None;
@@ -415,7 +417,7 @@ mod tests {
         members.insert(key(3), public(2));
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
-        let refused = Err(Error::Forged { voter: key(3) });
+        let refused = Err(Error::Forged { signer: key(3) });
         assert_eq!(check(&message, &members), refused);
     }
 
@@ -423,14 +425,14 @@ mod tests {
     fn check_names_the_first_voter_that_fails() {
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
-        let refused = Err(Error::NotMember { voter: key(2) });
+        let refused = Err(Error::NotMember { signer: key(2) });
         assert_eq!(check(&message, &members(&[1, 3])), refused);
     }
 
     #[test]
     fn check_refuses_a_proof_signature_moved_to_another_field() {
         let members = members(&[1, 2, 3, 4]);
-        let forged = Err(Error::Forged { voter: key(1) });
+        let forged = Err(Error::Forged { signer: key(1) });
         let mut later = proven();
         later.term = Term(TERM.0 + 1);
         assert_eq!(check(&later, &members), forged);
@@ -445,7 +447,7 @@ mod tests {
     #[test]
     fn check_refuses_a_grant_signature_moved_to_another_field() {
         let members = members(&[1, 2, 3]);
-        let forged = Err(Error::Forged { voter: key(2) });
+        let forged = Err(Error::Forged { signer: key(2) });
         let mut later = granted(2, Grant::Vote, 1);
         later.term = Term(TERM.0 + 1);
         assert_eq!(check(&later, &members), forged);
@@ -462,7 +464,7 @@ mod tests {
     fn check_refuses_a_grant_that_another_node_signed() {
         let mut moved = granted(2, Grant::Vote, 1);
         moved.from = key(3);
-        let refused = Err(Error::Forged { voter: key(3) });
+        let refused = Err(Error::Forged { signer: key(3) });
         assert_eq!(check(&moved, &members(&[1, 2, 3])), refused);
     }
 

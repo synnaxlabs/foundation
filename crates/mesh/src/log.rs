@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
     fn encode_panics_on_an_unsigned_proof_entry() {
         let mut proof = proof(Grant::Vote, 2, &[2, 3]);
         proof.voters.insert(key(2), None);

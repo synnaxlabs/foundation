@@ -24,7 +24,7 @@ pub(crate) enum Error {
         /// The sender.
         from: node::Key,
     },
-    /// A message carries a grant that does not hold.
+    /// A message carries a grant or a change that does not hold.
     Grant(grant::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),

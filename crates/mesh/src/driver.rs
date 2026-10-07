@@ -939,11 +939,11 @@ mod tests {
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 let proof = heartbeat.proof.as_mut().unwrap();
                 proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
-                let forged = Error::Grant(grant::Error::Forged { voter: key(3) });
+                let forged = Error::Grant(grant::Error::Forged { signer: key(3) });
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(forged.clone()));
                 assert_eq!(
                     forged.to_string(),
-                    format!("the grant of voter {} is forged", key(3))
+                    format!("the claim of node {} is forged", key(3))
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
@@ -966,7 +966,7 @@ mod tests {
                 assert_eq!(mesh.receive(public(3), forged(2)), Err(spoofed));
                 let not_voter = Error::NotVoter { from: key(3) };
                 assert_eq!(mesh.receive(public(3), forged(3)), Err(not_voter));
-                let grant = Error::Grant(grant::Error::Forged { voter: key(1) });
+                let grant = Error::Grant(grant::Error::Forged { signer: key(1) });
                 assert_eq!(mesh.receive(public(2), forged(2)), Err(grant));
             });
         }
