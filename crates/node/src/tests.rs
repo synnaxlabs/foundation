@@ -1918,6 +1918,33 @@ mod hub {
         assert_eq!(node.join(), Ok(()));
     }
 
+    /// Running futures each keep what they hold until the stop drops them all.
+    #[test]
+    fn running_futures_each_hold_until_the_stop() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (_host, node) = node(&mut sim, 2);
+        let dropped: Vec<_> = (0..3).map(|_| Arc::new(Mutex::new(false))).collect();
+        for flag in &dropped {
+            let held = Dropped(Arc::clone(flag));
+            node.spawn(move |_| async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+            });
+        }
+        assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+        let fates = || {
+            dropped
+                .iter()
+                .map(|d| *d.lock().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fates(), [false; 3]);
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(fates(), [true; 3]);
+        assert_eq!(node.join(), Ok(()));
+    }
+
     /// A task that completes drops what it holds, before the node stops.
     #[test]
     fn a_task_that_completes_drops_what_it_holds() {
