@@ -1392,7 +1392,8 @@ mod tests {
         fn a_refused_change_changes_nothing(
             steps in prop::collection::vec(steps(), 0..16),
         ) {
-            let mut state = State::new(name("plant").into(), create_members(&[1, 2])).unwrap();
+            let mut state =
+                State::new(name("plant").into(), create_members(&[1, 2])).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());
