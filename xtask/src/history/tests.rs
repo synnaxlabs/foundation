@@ -75,7 +75,7 @@ impl Drop for Repo {
 fn reaches_itself_by_full_sha_and_by_prefix() {
     let (repo, end) = Repo::with_pr("itself");
     assert_eq!(repo.reaches(&end, &end), Ok(true));
-    assert_eq!(repo.reaches(&end[..8], &end), Ok(true));
+    assert_eq!(repo.reaches(&end[..7], &end), Ok(true));
 }
 
 #[test]
@@ -142,5 +142,17 @@ fn refuses_an_end_that_is_not_a_sha() {
     assert_eq!(
         repo.reaches("HEAD~1x", &end),
         Err("`HEAD~1x` is not a commit SHA of at least 7 digits".to_string())
+    );
+}
+
+#[test]
+fn names_the_git_failure_for_an_unknown_commit() {
+    let (repo, end) = Repo::with_pr("unknown");
+    assert_eq!(
+        repo.reaches("deadbeef", &end),
+        Err(
+            "git rev-parse --verify deadbeef^{commit}: fatal: Needed a single revision"
+                .to_string()
+        )
     );
 }

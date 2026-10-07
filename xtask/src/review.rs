@@ -244,9 +244,14 @@ fn gh(path: &str) -> Result<Vec<Value>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    items(&output.stdout).map_err(|e| format!("gh api {path}: {e}"))
+}
+
+/// The items of each JSON array in `pages`, and each object that is not in an array.
+fn items(pages: &[u8]) -> Result<Vec<Value>, serde_json::Error> {
     let mut items = Vec::new();
-    for page in serde_json::Deserializer::from_slice(&output.stdout).into_iter() {
-        match page.map_err(|e| format!("gh api {path}: {e}"))? {
+    for page in serde_json::Deserializer::from_slice(pages).into_iter() {
+        match page? {
             Value::Array(page) => items.extend(page),
             object => items.push(object),
         }
