@@ -46,15 +46,15 @@ returns (`git worktree remove --force <path>`).
    the confirmed findings, most severe first: file and line, what goes wrong, and the
    fix.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue linked in
-   the answer, also when the code is already on `main`. A deferral in a risk crate
-   (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`, `home`, `replica`,
-   `transport`) needs the explicit OK of `laptop.architect`: link its comment. A fix or
-   an answer that makes such a public surface change, or decides what a ruling means,
-   needs the architect's approval too: link its comment. So does a fix that reverses
-   a finding of the architect. A dispute about what a rule in `CLAUDE.md` or
-   `docs/claude/` means goes to `laptop.director`. A refusal that names a trigger for
-   later work is a deferral: file its issue with the trigger, or write the trigger in
-   the decisions entry that the ruling cites.
+   the answer, also when the code is already on `main` or another crate does the work. A
+   deferral in a risk crate (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`,
+   `wire`, `home`, `replica`, `transport`) needs the explicit OK of `laptop.architect`:
+   link its comment. A fix or an answer that makes such a public surface change, or
+   decides what a ruling means, needs the architect's approval too: link its comment. So
+   does a fix that reverses a finding of the architect. A dispute about what a rule in
+   `CLAUDE.md` or `docs/claude/` means goes to `laptop.director`. A refusal that names a
+   trigger for later work is a deferral: file its issue with the trigger, or write the
+   trigger in the decisions entry that the ruling cites.
 
 ## Rating
 
