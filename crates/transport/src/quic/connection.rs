@@ -29,7 +29,11 @@ pub(crate) struct Key {
 
 /// A fault of the peer's that closes the connection, with the reason.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Fault(pub(super) String);
+#[cfg_attr(
+    not(feature = "fuzzing"),
+    expect(unreachable_pub, reason = "only the fuzzing feature exports it")
+)]
+pub struct Fault(pub(super) String);
 
 /// One noq-proto connection, and what the caller knows of it.
 pub(super) struct Connection {

@@ -1,10 +1,10 @@
 //! What a message from a voter that does not lead does to another node.
 
-use raft::{Body, Data, Entry, Error, Message, Position, Raft, Role, Term, Voters};
+use raft::{Body, Entry, Error, Message, Position, Raft, Role, Term, Voters};
 use types::node;
 
 use crate::change::{heartbeat, joining};
-use crate::network::{Action, ELECTION, Network};
+use crate::network::{Action, ELECTION, Network, change};
 
 // An `Append` from `sender` in `term` that writes and commits one entry, which makes
 // `victim` the only voter. Returns the entry too.
@@ -25,7 +25,7 @@ fn forged_append(
     };
     let entry = Entry {
         at,
-        data: Data::Voters(voters),
+        data: change(Network::key(sender), voters),
     };
     let append = Message {
         from: Network::key(sender),
