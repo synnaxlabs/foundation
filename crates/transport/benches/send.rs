@@ -1,17 +1,19 @@
-//! The cost of a `stream::Sender::send` that is ready on its first poll, on a session
-//! between two sim nodes. Run with `cargo bench -p transport --bench send`.
+//! The cost of a `stream::Sender::send` on a session between two sim nodes. Run with
+//! `cargo bench -p transport --bench send`. A figure is per send over a round, and
+//! some sends in a round cost more than others.
 //!
+//! The lines up to `8 complete 1 KiB` time a send that is ready on its first poll.
 //! Each round fills its blocks, then times one poll of each send: a burst of 64 sends
 //! into streams the peer has drained. A sim sleep between rounds lets the peer read
 //! and acknowledge. A send that waits on its first poll panics, so no number holds a
-//! wait. A figure is per send over a round, and some sends in a burst cost more than
-//! others.
+//! wait.
 //!
-//! The last line has a `Latest` and a `Complete` stream send at once, over a session
-//! whose peer window holds a quarter of a round, so the sends wait for room and for
-//! their turn. It times each poll of each send, not the sim or the peer between polls.
-//! A round in which the two classes never wait at once panics, so the line always
-//! measures classes that compete.
+//! The `waiting` lines send a round on their streams at once, over a session whose
+//! peer window holds a quarter of a round, so the sends wait for the QUIC window and
+//! for their turn. They time each poll of each send, not the sim or the peer between
+//! polls. A round in which a send of each stream does not wait at once panics, so
+//! `latest and complete 1 KiB waiting` always measures classes that compete. Compare
+//! it with `complete 1 KiB waiting`, which has the same timing cost per poll.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
@@ -38,7 +40,7 @@ use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
 use transport::stream::Sender;
-use transport::{Address, Class, Code, Config, Error, Port, Transport};
+use transport::{Address, Class, Code, Config, Error, Port, Session, Transport};
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -55,13 +57,11 @@ const WIDE: Room = Room {
     window_bytes: 1 << 22,
     message_bytes_max: 1 << 16,
 };
-/// The room of the server for the competing scenario: a quarter of a round.
+/// The room of the server for the `WAITING` scenarios: a quarter of a round.
 const TIGHT: Room = Room {
     window_bytes: 16 << 10,
     message_bytes_max: 4 << 10,
 };
-/// The name and message size of the competing scenario.
-const COMPETE: (&str, usize) = ("latest and complete 1 KiB", 1024);
 
 /// Sends per round. A round fits the `WIDE` window, so no send waits there.
 const SENDS: usize = 64;
@@ -82,12 +82,14 @@ struct Room {
 }
 
 /// What one scenario sends.
+#[derive(Clone, Copy)]
 struct Scenario {
     name: &'static str,
     load: Load,
     bytes: usize,
 }
 
+#[derive(Clone, Copy)]
 enum Load {
     /// No send: the same loop polls a ready future, reads the clock, and wakes the
     /// task, for the floor of the harness and of the sim.
@@ -124,6 +126,20 @@ const SCENARIOS: [Scenario; 5] = [
     },
 ];
 
+/// The scenarios whose sends wait, on a session with the room `TIGHT`.
+const WAITING: [Scenario; 2] = [
+    Scenario {
+        name: "complete 1 KiB waiting",
+        load: Load::Streams(&[Class::Complete]),
+        bytes: 1024,
+    },
+    Scenario {
+        name: "latest and complete 1 KiB waiting",
+        load: Load::Streams(&[Class::Latest, Class::Complete]),
+        bytes: 1024,
+    },
+];
+
 /// The result of one scenario.
 struct Measured {
     name: &'static str,
@@ -154,14 +170,7 @@ fn main() {
             let clock = node.clock();
             let mut lines = Vec::with_capacity(SCENARIOS.len());
             for scenario in &SCENARIOS {
-                let classes = match scenario.load {
-                    Load::Control => &[][..],
-                    Load::Streams(classes) => classes,
-                };
-                let mut senders = Vec::with_capacity(classes.len());
-                for &class in classes {
-                    senders.push(session.open_sender(class).await.expect("a stream"));
-                }
+                let mut senders = open(&session, scenario.load).await;
                 lines.push(measure(&clock, &pool, &mut senders, scenario).await);
                 for sender in &mut senders {
                     sender.finish().expect("the stream finishes");
@@ -172,10 +181,13 @@ fn main() {
                 .dial(public(&NARROW), &[Address::Udp(narrow_at)])
                 .await
                 .expect("a session");
-            let latest = session.open_sender(Class::Latest).await;
-            let complete = session.open_sender(Class::Complete).await;
-            let senders = [latest, complete].map(|sender| sender.expect("a stream"));
-            lines.push(compete(&pool, senders).await);
+            for scenario in WAITING {
+                let mut senders = open(&session, scenario.load).await;
+                lines.push(compete(&pool, &mut senders, scenario).await);
+                for sender in &mut senders {
+                    sender.finish().expect("the stream finishes");
+                }
+            }
             session.close(Code(0));
             // A shard that ends drops its tasks, so give the close time to go out.
             clock.sleep(Span::MILLISECOND).await;
@@ -299,78 +311,111 @@ fn poll_control(
     nanos(Instant::now().duration_since(start))
 }
 
-/// Runs the rounds of the competing scenario. Per round, `senders`, a `Latest` and
-/// a `Complete` stream, each send half of [`SENDS`] blocks at once.
+/// Opens a stream for each class of `load`.
+async fn open(session: &Session, load: Load) -> Vec<Sender> {
+    let classes = match load {
+        Load::Control => &[][..],
+        Load::Streams(classes) => classes,
+    };
+    let mut senders = Vec::with_capacity(classes.len());
+    for &class in classes {
+        senders.push(session.open_sender(class).await.expect("a stream"));
+    }
+    senders
+}
+
+/// Runs the rounds of a `WAITING` scenario: per round, each of `senders` sends its
+/// share of [`SENDS`] blocks, all at once.
 ///
 /// # Panics
 ///
-/// When a send fails, or after a round in which no send of one class waited while a
-/// send of the other did.
-async fn compete(pool: &Pool, senders: [Sender; 2]) -> Measured {
-    let (name, bytes) = COMPETE;
-    let [mut latest, mut complete] = senders;
+/// When a send fails, when the classes of `senders` are not those of `scenario` or
+/// are not all different, or after a round in which a send of each sender did not
+/// wait at once.
+async fn compete(pool: &Pool, senders: &mut [Sender], scenario: Scenario) -> Measured {
+    let classes: Vec<Class> = senders.iter().map(Sender::class).collect();
+    assert!(
+        matches!(scenario.load, Load::Streams(load) if load == classes),
+        "{} sends on {classes:?}",
+        scenario.name
+    );
+    for (at, class) in classes.iter().enumerate() {
+        assert!(
+            !classes[..at].contains(class),
+            "{} sends twice on {class:?}",
+            scenario.name
+        );
+    }
+    let share = SENDS / senders.len();
     let mut nanos = Vec::with_capacity(ROUNDS);
     let mut allocations = 0;
     for round in 0..WARMUP + ROUNDS {
-        let tally = RefCell::new(Tally::default());
-        let blocks = || (0..SENDS / 2).map(|_| filled(pool, bytes)).collect();
-        let latest = send_each(&mut latest, blocks(), 0, &tally);
-        let complete = send_each(&mut complete, blocks(), 1, &tally);
-        join(latest, complete).await;
+        let tally = RefCell::new(Tally::new(senders.len()));
+        let mut sends: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
+        for (at, sender) in senders.iter_mut().enumerate() {
+            let blocks = (0..share).map(|_| filled(pool, scenario.bytes)).collect();
+            sends.push(Box::pin(send_each(sender, blocks, at, &tally)));
+        }
+        join(sends).await;
         let tally = tally.into_inner();
         assert!(
             tally.competed,
-            "the classes did not compete in round {round}"
+            "the sends of {classes:?} did not wait at once in round {round}"
         );
         if round >= WARMUP {
             nanos.push(tally.nanos);
             allocations += tally.allocations;
         }
     }
-    for sender in [&mut latest, &mut complete] {
-        sender.finish().expect("the stream finishes");
-    }
     nanos.sort_unstable();
     Measured {
-        name,
+        name: scenario.name,
         nanos,
         allocations,
     }
 }
 
 /// Sends each of `blocks` on `sender` in order, and adds each poll of a send to
-/// `tally` as class `class`.
+/// `tally` as the sends of sender `at`.
 async fn send_each(
     sender: &mut Sender,
     blocks: Vec<Block>,
-    class: usize,
+    at: usize,
     tally: &RefCell<Tally>,
 ) {
     for block in blocks {
         let mut send = pin!(sender.send(block));
-        future::poll_fn(|cx| tally.borrow_mut().poll(class, send.as_mut(), cx))
+        future::poll_fn(|cx| tally.borrow_mut().poll(at, send.as_mut(), cx))
             .await
             .expect("the send goes");
     }
 }
 
-/// The polls of the sends of one competing round.
-#[derive(Default)]
+/// The polls of the sends of one `WAITING` round.
 struct Tally {
     nanos: u64,
     allocations: u64,
-    /// Whether the last poll of the current send of each class waited.
-    waiting: [bool; 2],
-    /// Whether a send of each class waited at once.
+    /// Whether the last poll of the current send of each sender waited.
+    waiting: Vec<bool>,
+    /// Whether a send of each sender waited at once.
     competed: bool,
 }
 
 impl Tally {
-    /// Polls `send` of class `class` once, and adds its time and allocations.
+    fn new(senders: usize) -> Self {
+        Self {
+            nanos: 0,
+            allocations: 0,
+            waiting: vec![false; senders],
+            competed: false,
+        }
+    }
+
+    /// Polls `send` of sender `at` once, and adds its time and allocations.
     #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
     fn poll<F: Future>(
         &mut self,
-        class: usize,
+        at: usize,
         send: Pin<&mut F>,
         cx: &mut Context<'_>,
     ) -> Poll<F::Output> {
@@ -378,37 +423,39 @@ impl Tally {
         let (polled, counted) = ALLOCATOR.count(|| send.poll(cx));
         self.nanos += nanos(Instant::now().duration_since(start));
         self.allocations += counted;
-        self.waiting[class] = polled.is_pending();
-        self.competed |= self.waiting == [true, true];
+        self.waiting[at] = polled.is_pending();
+        self.competed |= self.waiting.iter().all(|&waiting| waiting);
         polled
     }
 }
 
-/// Runs `a` and `b` at once. Each is polled only when it was woken, so no poll of a
+/// Runs `futures` at once. Each is polled only when it was woken, so no poll of a
 /// send is spurious.
-async fn join(a: impl Future<Output = ()>, b: impl Future<Output = ()>) {
-    let mut futures: [Pin<&mut dyn Future<Output = ()>>; 2] = [pin!(a), pin!(b)];
+async fn join(mut futures: Vec<Pin<Box<dyn Future<Output = ()> + '_>>>) {
     let parent = future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
-    let flags = [(); 2].map(|()| {
-        Arc::new(Flag {
-            woken: AtomicBool::new(true),
-            parent: parent.clone(),
+    let flags: Vec<_> = futures
+        .iter()
+        .map(|_| {
+            Arc::new(Flag {
+                woken: AtomicBool::new(true),
+                parent: parent.clone(),
+            })
         })
-    });
-    let wakers = flags.clone().map(Waker::from);
-    let mut done = [false; 2];
+        .collect();
+    let wakers: Vec<_> = flags.iter().cloned().map(Waker::from).collect();
+    let mut done = vec![false; futures.len()];
     future::poll_fn(|cx| {
         assert!(
             cx.waker().will_wake(&parent),
             "the task's waker is the same"
         );
-        for at in 0..2 {
+        for (at, future) in futures.iter_mut().enumerate() {
             if !done[at] && flags[at].woken.swap(false, Ordering::Relaxed) {
                 let mut cx = Context::from_waker(&wakers[at]);
-                done[at] = futures[at].as_mut().poll(&mut cx).is_ready();
+                done[at] = future.as_mut().poll(&mut cx).is_ready();
             }
         }
-        if done == [true; 2] {
+        if done.iter().all(|&done| done) {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -486,14 +533,14 @@ fn print(lines: &[Measured]) {
     println!("ns per send over {ROUNDS} rounds of {SENDS} sends");
     println!("pN: the round at percentile N, over its sends");
     println!(
-        "{:<26} {:>9} {:>9} {:>9} {:>12}",
+        "{:<34} {:>9} {:>9} {:>9} {:>12}",
         "scenario", "p10", "p50", "p90", "allocs/send"
     );
     for line in lines {
         let at = |percent: usize| per(line.nanos[ROUNDS * percent / 100]) / per(SENDS);
         let allocations = per(line.allocations) / per(ROUNDS * SENDS);
         println!(
-            "{:<26} {:>9.1} {:>9.1} {:>9.1} {allocations:>12.2}",
+            "{:<34} {:>9.1} {:>9.1} {:>9.1} {allocations:>12.2}",
             line.name,
             at(10),
             at(50),
