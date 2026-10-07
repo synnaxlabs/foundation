@@ -844,6 +844,9 @@ mod tests {
                 }
                 assert_eq!(sender.finish(), Err(closed.clone()));
                 let sent = sender.send(side.block(b"a")).await;
+                assert_eq!(sent, Err(closed.clone()));
+                side.session.close(Code(6));
+                let sent = sender.send(side.block(b"a")).await;
                 assert_eq!(sent, Err(closed));
             },
             |side| async move {

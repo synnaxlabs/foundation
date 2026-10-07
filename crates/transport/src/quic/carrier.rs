@@ -793,7 +793,7 @@ mod tests {
 
     use super::{BATCHES, Carrier, Socket, register};
     use crate::quic::Endpoint;
-    use crate::testing::{self, IDLE, PORT, address, nodes, shard, spans};
+    use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::tls::public;
     use crate::{Address, Code, Error, Peer};
 
@@ -1334,6 +1334,44 @@ mod tests {
             let dialed = carrier.connect(public(&SERVER), at).await;
             assert_eq!(dialed.err(), Some(network.clone()));
             assert_eq!(carrier.accept().await.err(), Some(network));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_broken_socket_ends_a_waiting_accept() {
+        let (mut sim, client, _) = nodes(0);
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let mut accepting = pin!(carrier.accept());
+            assert!(poll_once(accepting.as_mut()).await.is_none());
+            node.fail_udp(address(&node));
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(accepting.await.err(), Some(network));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_broken_socket_keeps_the_end_of_a_session_that_ended_before() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            let closed = Error::Closed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            node.fail_udp(address(&node));
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert!(carrier.0.borrow().task.is_none());
+            assert_eq!(session.closed().await, closed);
         });
         assert_eq!(sim.run(), Ok(()));
     }
