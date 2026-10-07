@@ -542,7 +542,10 @@ How to read this record:
   the layout to the length of the file (a ring whose size no config gave), and keep the
   file when its length fits (two paths for one case). It does not wait for
   `File::resize` (#1238). Decided by `laptop.architect` (2026-10-07T07:47:16Z):
-  https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001.
+  https://github.com/synnaxlabs/foundation/issues/1254#issuecomment-6033434001. The held
+  handle, the sync before the create, and the `Length` text: decided by
+  `laptop.architect` (2026-10-07T09:08:16Z):
+  https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6034721207.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
