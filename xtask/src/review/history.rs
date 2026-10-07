@@ -60,10 +60,12 @@ impl<'a> History<'a> {
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
     /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
-    /// `git merge-tree` finds a conflict in gives "resolves a conflict in `<file>` in
-    /// `<merge>`". Else the change from the tree that `git merge-tree` makes of the
-    /// parents to the merge gives "changes code at `<file>:<line>` in the resolution
-    /// of `<merge>`", with the line in the merge or in that tree.
+    /// `git merge-tree` finds a conflict in between the parents gives "resolves a
+    /// conflict in `<file>` in `<merge>`". Else the change to the merge from the tree
+    /// that `git merge-tree` makes of the start of the part and the base parent gives
+    /// "changes code at `<file>:<line>` in the resolution of `<merge>`", with the
+    /// line in the merge or in that tree. So text of the part that the base moves
+    /// into a code file counts.
     ///
     /// `None` when no line is code. `from` and `end` are SHAs or prefixes of at least
     /// 7 digits; text that names no single commit gives the phrase "has `<text>`,
@@ -109,7 +111,8 @@ impl<'a> History<'a> {
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
             }
-            if let Some(change) = self.first_change(&merged.tree, merge)? {
+            let reviewed = self.merged(&start, second)?;
+            if let Some(change) = self.first_change(&reviewed.tree, merge)? {
                 return Ok(Some(format!("{change} in the resolution of `{merge}`")));
             }
             start = merge.to_string();

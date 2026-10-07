@@ -70,6 +70,34 @@ impl Repo {
         (repo, end)
     }
 
+    /// Commits a tree of `files`, each a name of any bytes and its text, with
+    /// `parents`, through plumbing, since a work tree on macOS refuses a name that is
+    /// not UTF-8. Returns the commit.
+    #[cfg(unix)]
+    fn commit_tree(&self, files: &[(&[u8], &str)], parents: &[&str]) -> String {
+        use std::os::unix::ffi::OsStrExt;
+        self.git(&["read-tree", "--empty"]);
+        for (name, text) in files {
+            std::fs::write(self.dir.join("blob"), text).unwrap();
+            let blob = self.git(&["hash-object", "-w", "blob"]);
+            let info = [b"100644,", blob.as_bytes(), b",", name].concat();
+            let status = self
+                .command()
+                .args(["update-index", "--add", "--cacheinfo"])
+                .arg(std::ffi::OsStr::from_bytes(&info))
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let tree = self.git(&["write-tree"]);
+        let parents = parents.iter().flat_map(|p| ["-p", p]);
+        let args = [
+            &["commit-tree", &tree, "-m", "c"][..],
+            &parents.collect::<Vec<_>>(),
+        ];
+        self.git(&args.concat())
+    }
+
     fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
         History::new(&self.dir, "main").reaches(end, head)
     }
@@ -530,30 +558,9 @@ fn a_line_number_is_in_the_part_of_the_range_it_is_in() {
 #[cfg(unix)]
 #[test]
 fn reads_a_merge_whose_messages_are_not_utf8() {
-    use std::os::unix::ffi::OsStrExt;
     let repo = Repo::new("merge-bytes");
-    let commit = |files: [(&[u8], &str); 2], parents: &[&str]| {
-        repo.git(&["read-tree", "--empty"]);
-        for (name, text) in files {
-            std::fs::write(repo.dir.join("blob"), text).unwrap();
-            let blob = repo.git(&["hash-object", "-w", "blob"]);
-            let info = [b"100644,", blob.as_bytes(), b",", name].concat();
-            let status = repo
-                .command()
-                .args(["update-index", "--add", "--cacheinfo"])
-                .arg(std::ffi::OsStr::from_bytes(&info))
-                .status()
-                .unwrap();
-            assert!(status.success());
-        }
-        let tree = repo.git(&["write-tree"]);
-        let parents = parents.iter().flat_map(|p| ["-p", p]);
-        let args = [
-            &["commit-tree", &tree, "-m", "c"][..],
-            &parents.collect::<Vec<_>>(),
-        ];
-        repo.git(&args.concat())
-    };
+    let commit =
+        |files: [(&[u8], &str); 2], parents: &[&str]| repo.commit_tree(&files, parents);
     let lines = |first: &str, last: &str| format!("{first}\n2\n3\n4\n5\n{last}\n");
     let base = commit([(b"\xff.md", &lines("1", "6")), (b"y.md", "y\n")], &[]);
     let main = commit([(b"\xff.md", &lines("1", "m")), (b"y.md", "m\n")], &[&base]);
@@ -563,6 +570,52 @@ fn reads_a_merge_whose_messages_are_not_utf8() {
     let merge = commit([(b"\xff.md", &resolved), (b"y.md", "p\n")], &[&end, &main]);
     assert_eq!(repo.code_change(&end, &merge), Ok(None));
     assert_eq!(repo.reaches(&end, &merge), Ok(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_conflict_in_a_code_path_that_is_not_utf8_counts() {
+    let repo = Repo::new("merge-bytes-code");
+    let base = repo.commit_tree(&[(b"\xff.rs", "fn a() {}\n")], &[]);
+    let main = repo.commit_tree(&[(b"a.md", "main\n")], &[&base]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", &main]);
+    let kept: [(&[u8], &str); 2] =
+        [(b"\xff.rs", "fn a() {}\nfn b() {}\n"), (b"a.md", "main\n")];
+    let end = repo.commit_tree(&kept[..1], &[&base]);
+    let merge = repo.commit_tree(&kept, &[&end, &main]);
+    assert_eq!(
+        repo.code_change(&end, &merge),
+        Ok(Some(format!(
+            "resolves a conflict in `\u{fffd}.rs` in `{merge}`"
+        )))
+    );
+}
+
+#[test]
+fn text_of_the_pr_that_the_base_moves_into_a_code_file_counts() {
+    let (repo, _) = Repo::with_pr("merge-rename");
+    let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    repo.advance_main("a.md", text);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let end = repo.head();
+    repo.commit("a.md", &format!("fn unreviewed() {{}}\n{text}"));
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["mv", "a.md", "a.rs"]);
+    repo.git(&["commit", "--quiet", "-m", "mv"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merge = repo.head();
+    assert_eq!(
+        repo.git(&["show", &format!("{merge}:a.rs")]).lines().next(),
+        Some("fn unreviewed() {}")
+    );
+    assert_eq!(
+        repo.code_change(&end, &merge),
+        Ok(Some(format!(
+            "changes code at `a.rs:1` in the resolution of `{merge}`"
+        )))
+    );
 }
 
 #[test]
