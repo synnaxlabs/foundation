@@ -3262,6 +3262,26 @@ How to read this record:
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
   device at run time lost (#569).
+- **FILE RENAME (2026-10-07)** `File::rename(&mut self, to: &Path)` moves an open file
+  to `to`, in the same directory, with no replace. It first syncs the file, so that a
+  reader at the new name sees the bytes written before it. After `Ok`, the handle names
+  `to` in its errors, and a write open of `to` is `Busy` until the handle closes. It
+  renames the file that the handle opened, not whatever path now holds its old name:
+  when the old path is gone or holds another file (a remove and a create since the
+  open), it gives `NotFound { path: old }` and changes nothing. When `to` is there, it
+  gives `Exists { path: to }` and changes nothing; the handle stays usable. A read
+  handle, a path in another directory, an empty path, or the directory itself is a
+  defect and panics. It poisons the file only when it is dropped before it ends, as any
+  other call. `os` checks that the old path still names the file by device and inode,
+  with no follow of a link, then renames with `RENAME_NOREPLACE`; the I/O thread runs
+  the calls of a node in order, so nothing changes the path between the check and the
+  rename. Lost: `Files::rename(from, to)` on paths, which cannot tell the file of the
+  handle from a new file at its path; a link then an unlink, which leaves two names at a
+  crash; a replacing rename or a `replace: bool`, which no caller wants and which hides
+  a defect that `Exists` reports; and a bare-name `rename(&mut self, name: &OsStr)`,
+  which spells a directory rule in the type instead of a check (#1449, decided by
+  `laptop.architect-2`, 2026-10-07:
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
@@ -3282,7 +3302,9 @@ How to read this record:
   order of the writes. As on Linux, these writes stay in the cache, clean: a read sees
   them, and a later write goes over them. A power cut drops them, and at each read or
   write of their sector the cache may drop them, by a coin. A sector with a write that
-  no `sync` covered is dirty, and the cache keeps it.
+  no `sync` covered is dirty, and the cache keeps it. Amended (2026-10-07, #1449): a
+  `Power` crash drops a rename in flight and puts the file back at its durable name; a
+  `Process` crash applies it.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

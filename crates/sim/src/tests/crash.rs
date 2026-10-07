@@ -15,7 +15,7 @@ use env::files::{Error, Mode, Operation};
 use env::net::udp;
 use types::time::Span;
 
-use super::files::{KIB, MIB, block, create, io, pool, read, sectors};
+use super::files::{KIB, MIB, block, create, io, pend, pool, read, sectors};
 use super::{Guard, shard, sim};
 use crate::{Crash, Sim, node};
 
@@ -914,5 +914,84 @@ fn a_crash_stops_a_leaked_timer() {
         let before = node.clock().now();
         sim.run().unwrap();
         assert_eq!(node.clock().now(), before, "{crash:?}");
+    }
+}
+
+/// The names in the data directory, and the sectors of the file at `b` if one is
+/// there, after a power cut at an instant set by `seed` in a create of `a`, a
+/// `sync_dir`, a write of 1s, a sync, a rename to `b`, and a `sync_dir`.
+fn renamed_at_cut(seed: u64) -> (Vec<PathBuf>, Option<Vec<u8>>) {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, move |node| async move {
+        let crash = node::Config::default().monotonic + BEFORE;
+        let early = Span::from_nanos(i64::try_from(seed % 64).unwrap() * 10_000);
+        node.clock().sleep_until(crash - early).await;
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", 1_024).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        file.write_at(0, &[block(&pool, &[1; 1_024])])
+            .await
+            .unwrap();
+        file.sync().await.unwrap();
+        file.rename(Path::new("b")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+    });
+    sim.run_on(&node, |node, _| async move {
+        let files = node.files();
+        let names = files.list(Path::new("")).await.unwrap();
+        let at_b = match files.open(Path::new("b"), Mode::Read).await {
+            Ok(file) => Some(sectors(&read(&file, &pool(), 0, 1_024).await)),
+            Err(_) => None,
+        };
+        (names, at_b)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_power_cut_leaves_a_renamed_file_at_one_name_with_its_synced_bytes() {
+    let mut outcomes = BTreeSet::new();
+    for seed in 0..64 {
+        let (names, at_b) = renamed_at_cut(seed);
+        assert!(names.len() <= 1, "seed {seed}: {names:?}");
+        if names == [PathBuf::from("b")] {
+            assert_eq!(at_b, Some(vec![1, 1]), "seed {seed}");
+        }
+        outcomes.insert(names);
+    }
+    let all = BTreeSet::from([vec![], vec!["a".into()], vec!["b".into()]]);
+    assert_eq!(outcomes, all);
+}
+
+/// The names in the data directory after `crash` with a rename of the synced file
+/// `a` to `b` in flight: the rename is polled 200 us before the crash, so its sync
+/// ends, and again at the crash, which puts the rename call in flight.
+fn rename_in_flight(seed: u64, crash: Crash) -> Vec<PathBuf> {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, crash, |node| async move {
+        let mut file = create_synced(&node).await;
+        let mut rename = pin!(file.rename(Path::new("b")));
+        let at = node::Config::default().monotonic + BEFORE;
+        node.clock()
+            .sleep_until(at - Span::from_nanos(200_000))
+            .await;
+        pend(rename.as_mut()).await;
+        until_crash(&node).await;
+        hang(rename).await;
+    });
+    sim.run_on(&node, |node, _| async move {
+        node.clock().sleep(Span::MILLISECOND).await;
+        node.files().list(Path::new("")).await.unwrap()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_process_crash_applies_a_rename_in_flight_and_a_power_cut_drops_it() {
+    for seed in 0..8 {
+        let applied = rename_in_flight(seed, Crash::Process);
+        assert_eq!(applied, [PathBuf::from("b")], "seed {seed}");
+        let dropped = rename_in_flight(seed, Crash::Power);
+        assert_eq!(dropped, [PathBuf::from("a")], "seed {seed}");
     }
 }

@@ -31,6 +31,8 @@ pub(crate) enum Cause {
     Full,
     /// A write descriptor or its calls hold the file.
     Busy,
+    /// The new name of a rename is taken.
+    Exists,
     Code(i32),
 }
 
@@ -270,6 +272,33 @@ impl Disk {
         self.named(inode, slashed)?.linked = false;
         self.dir_mut(dir).entries.remove(*name);
         self.collect(inode);
+        Ok(())
+    }
+
+    /// Moves the entry of file `inode` from `from` to `to`, both in one directory.
+    /// `NotFound` when `from` no longer names it; `Exists` when `to` is taken.
+    pub(crate) fn rename(
+        &mut self,
+        inode: u64,
+        from: &Path,
+        to: &Path,
+    ) -> Result<(), Cause> {
+        let (from, to) = (segments(from), segments(to));
+        let ((old, parent), Some((new, _))) = (
+            from.split_last().expect("invariant: a rename is of a file"),
+            to.split_last(),
+        ) else {
+            unreachable!("invariant: a rename is to a name")
+        };
+        let dir = self.dir_mut(self.dir(parent)?);
+        if dir.entries.get(*old) != Some(&inode) {
+            return Err(Cause::NotFound);
+        }
+        if dir.entries.contains_key(*new) {
+            return Err(Cause::Exists);
+        }
+        dir.entries.remove(*old);
+        dir.entries.insert((*new).to_owned(), inode);
         Ok(())
     }
 

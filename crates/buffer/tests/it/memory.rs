@@ -123,7 +123,8 @@ impl Driver for Memory {
             self.opens.fetch_add(1, Relaxed);
             let open: Box<dyn Descriptor> = Box::new(Open {
                 bytes,
-                path: path.into(),
+                files: Arc::clone(&self.files),
+                path: Mutex::new(path.into()),
                 syncs_fail: Arc::clone(&self.syncs_fail),
                 syncs: Arc::clone(&self.syncs),
                 opens: Arc::clone(&self.opens),
@@ -160,7 +161,9 @@ impl Driver for Memory {
 
 struct Open {
     bytes: Bytes,
-    path: PathBuf,
+    files: Arc<Mutex<hash::Map<PathBuf, Bytes>>>,
+    /// The path of the file now: a rename changes it.
+    path: Mutex<PathBuf>,
     syncs_fail: Arc<AtomicBool>,
     syncs: Arc<AtomicU64>,
     opens: Arc<AtomicU64>,
@@ -200,7 +203,7 @@ impl Descriptor for Open {
         self.syncs.fetch_add(1, Relaxed);
         let result = if self.syncs_fail.load(Relaxed) {
             Err(Error::Io {
-                path: self.path.clone(),
+                path: lock(&self.path).clone(),
                 operation: Operation::Sync,
                 code: 5,
             })
@@ -214,6 +217,20 @@ impl Descriptor for Open {
             }
             result
         })
+    }
+
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
+        let mut files = lock(&self.files);
+        let result = if files.contains_key(to) {
+            Err(Error::Exists { path: to.into() })
+        } else if let Some(bytes) = files.remove(from) {
+            files.insert(to.into(), bytes);
+            *lock(&self.path) = to.into();
+            Ok(())
+        } else {
+            Err(Error::NotFound { path: from.into() })
+        };
+        Box::pin(async { result })
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
