@@ -1533,7 +1533,7 @@ How to read this record:
   1 s to start, and no one has measured this cost there (#1140). Lost: zeros only after
   a torn end (the first shape), which is the defect; and a read with direct I/O, which
   not each driver can give: macOS does not promise a read that skips the cache (decided
-  by the architect, #1128:
+  by the architect, #1128, 2026-10-07T05:37:30Z:
   https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
   check over the whole record lost: a damaged length then reads as a torn end, and the
   log drops the good records after it. Zeros over the header of a durable record, which
@@ -1577,7 +1577,8 @@ How to read this record:
   while the budget has room for its blocks: with no end when the block in use is its
   own (#1091), and else until the other user of the pool drops its block (#1134). A pool
   whose largest block is less than one sector does not open (MESH LOG), so no write
-  gives `TooLarge` and the group does not stop for it (decided by the architect:
+  gives `TooLarge` and the group does not stop for it (decided by the architect,
+  2026-10-07T06:32:47Z:
   https://github.com/synnaxlabs/foundation/pull/1123#issuecomment-6032389760; the
   `Refused` wait decided by the architect:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
