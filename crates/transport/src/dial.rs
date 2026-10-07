@@ -152,7 +152,10 @@ fn routable(remote: SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::future::poll_fn;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::pin::pin;
+    use std::task::Poll;
 
     use sim::node::Node;
     use types::node::PrivateKey;
@@ -272,20 +275,43 @@ mod tests {
     }
 
     #[test]
-    fn a_dial_on_a_broken_socket_gives_why_it_broke() {
+    fn a_dial_with_no_address_on_a_broken_socket_gives_why_it_broke() {
         let (mut sim, client, _) = nodes(0);
         testing::transport(&client, CLIENT, move |transport, node| async move {
-            let at = address(&node);
-            node.fail_udp(at);
+            node.fail_udp(address(&node));
             // The carrier sees the break when its task next polls the socket.
+            node.clock().sleep(Span::MILLISECOND).await;
+            let dialed = transport.dial(public(&SERVER), &[]).await;
+            let broken = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(dialed.err(), Some(broken));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_socket_that_breaks_between_attempts_ends_the_dial() {
+        let (mut sim, client, _) = nodes(0);
+        let impostor_node = sim.node(sim::node::Config::default());
+        impostor(&impostor_node);
+        let other = address(&impostor_node);
+        let silent = address(&sim.node(sim::node::Config::default()));
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let addresses = [Address::Udp(other), Address::Udp(silent)];
+            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+            let started =
+                poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
+            assert!(started.await);
+            // The first attempt fails, and the socket breaks, while the dial is not
+            // polled. So the next start meets the break.
+            node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+            node.fail_udp(address(&node));
             node.clock().sleep(Span::MILLISECOND).await;
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
-            for addresses in [vec![], vec![Address::Tcp(at), Address::Udp(at)]] {
-                let dialed = transport.dial(public(&SERVER), &addresses).await;
-                assert_eq!(dialed.err(), Some(broken.clone()));
-            }
+            assert_eq!(dialed.await.err(), Some(broken));
         });
         assert_eq!(sim.run(), Ok(()));
     }
