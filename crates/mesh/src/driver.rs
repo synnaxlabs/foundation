@@ -569,8 +569,14 @@ mod tests {
         homes: Homes,
         /// The node of each proposal that the group took, in order.
         led: Vec<u8>,
+        /// The position of each of those proposals.
+        at: Vec<Position>,
         /// The change that each node proposes until the group takes it.
         script: BTreeMap<u8, Change>,
+        /// The voter that forwards a change to each node, with the change.
+        forwards: BTreeMap<u8, (u8, Change)>,
+        /// The answer of each node to the change that it got.
+        answers: BTreeMap<u8, Message>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -683,14 +689,29 @@ mod tests {
                 continue;
             };
             match mesh.propose(change).await {
-                Ok(_) => {
+                Ok(at) => {
                     let mut board = board.lock().unwrap();
                     board.script.remove(&id);
                     board.led.push(id);
+                    board.at.push(at);
                 }
                 Err(Error::Raft(raft::Error::NotLeader { .. })) => {}
                 Err(error) => panic!("node {id} cannot propose: {error}"),
             }
+        }
+    }
+
+    /// Gives node `id` the change that a voter forwards to it, and puts the answer
+    /// on the board.
+    async fn answer(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let forward = board.lock().unwrap().forwards.remove(&id);
+            let Some((from, change)) = forward else {
+                continue;
+            };
+            let answer = mesh.answer(public(from), change).await.unwrap();
+            board.lock().unwrap().answers.insert(id, answer);
         }
     }
 
@@ -753,8 +774,13 @@ mod tests {
 
         /// Takes what the voters did so far.
         fn take(&self) -> (Vec<u8>, Homes) {
-            let board = std::mem::take(&mut *self.board.lock().unwrap());
+            let board = self.board();
             (board.led, board.homes)
+        }
+
+        /// Takes the board, and leaves an empty one.
+        fn board(&self) -> Board {
+            mem::take(&mut *self.board.lock().unwrap())
         }
     }
 
@@ -784,6 +810,11 @@ mod tests {
         let (clock, script) = (node.clock(), Arc::clone(&board));
         tasks.spawn(async move {
             propose(proposing, clock, id, script).await;
+        });
+        let (answering, clock, forwards) =
+            (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            answer(answering, clock, id, forwards).await;
         });
         let mut watch = mesh.watch(INDEX);
         loop {
@@ -823,6 +854,32 @@ mod tests {
             assert_eq!(homes, each(&[None, Some(key(leader))]), "run {seed}");
             assert_eq!(agree(seed), (digest, led, homes), "run {seed}");
         }
+    }
+
+    #[test]
+    fn three_voters_agree_on_the_home_that_a_voter_forwards() {
+        let mut cluster = Cluster::new(3);
+        cluster.script(home);
+        cluster.start();
+        cluster.run(seconds(5));
+        let board = cluster.board();
+        let (&[leader], &[at]) = (board.led.as_slice(), board.at.as_slice()) else {
+            panic!("the group took a proposal from each of {:?}", board.led);
+        };
+        let from = IDS.into_iter().find(|&id| id != leader).unwrap();
+        let forward = |id| (id, (from, home(from)));
+        cluster.board.lock().unwrap().forwards = IDS.map(forward).into();
+        cluster.run(seconds(5));
+        let answer = |id| {
+            let follows = Message::NotLeader {
+                leader: Some(key(leader)),
+            };
+            let leads = Message::Proposed { at: after(at, 1) };
+            (id, if id == leader { leads } else { follows })
+        };
+        let board = cluster.board();
+        assert_eq!(board.answers, IDS.map(answer).into());
+        assert_eq!(board.homes, each(&[Some(key(from))]));
     }
 
     #[test]
