@@ -408,6 +408,14 @@ impl Buffer {
         self.shared.layout
     }
 
+    /// The block pool from [`Config::pool`]. It holds the records, and a caller
+    /// makes the [`Parts`](crate::Parts) of its entries from it, so a shard has one
+    /// pool.
+    #[must_use]
+    pub fn pool(&self) -> &Pool {
+        &self.shared.pool
+    }
+
     /// Where `path` of the index at `slot` stands, with every appended entry.
     #[must_use]
     pub fn tail(&self, slot: Slot, path: Path) -> Tail {
