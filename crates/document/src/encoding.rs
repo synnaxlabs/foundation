@@ -49,15 +49,20 @@ pub struct Checked(Document);
 
 impl Checked {
     /// Checks the depth of `document`. It never recurses past [`DEPTH_MAX`] levels,
-    /// however deep `document` is.
+    /// however deep `document` is, also when it drops a refused `document`.
     ///
     /// # Errors
     ///
     /// Returns [`TooDeep`] at the first level past the limit, in the order that
     /// [`Checked::encode`] writes: the attributes, then the blocks.
     pub fn new(document: Document) -> Result<Self, TooDeep> {
-        check(&document)?;
-        Ok(Self(document))
+        match check(&document) {
+            Ok(()) => Ok(Self(document)),
+            Err(error) => {
+                tear_down(document);
+                Err(error)
+            }
+        }
     }
 
     /// The document.
@@ -78,6 +83,29 @@ impl Checked {
         let mut writer = Writer { out: vec![VERSION] };
         writer.body(&self.0);
         writer.out
+    }
+}
+
+/// Drops `document` one level at a time. A plain drop recurses once per level.
+fn tear_down(document: Document) {
+    let mut documents = vec![document];
+    let mut values = Vec::new();
+    while !documents.is_empty() || !values.is_empty() {
+        if let Some(document) = documents.pop() {
+            let attributes = document.attributes.into_vec();
+            values.extend(attributes.into_iter().map(|a| a.value));
+            documents.extend(document.blocks.into_iter().map(|b| b.body));
+        }
+        if let Some(value) = values.pop() {
+            match value.kind {
+                Kind::List(items) => values.extend(items),
+                Kind::Map(map) => {
+                    values.extend(map.into_vec().into_iter().map(|a| a.value));
+                }
+                Kind::Call(call) => values.extend(call.arguments),
+                _ => {}
+            }
+        }
     }
 }
 
@@ -852,29 +880,6 @@ mod tests {
             assert_eq!(Checked::new(siblings).map(drop), expected, "list items");
         }
 
-        /// Drops `document` one level at a time. A plain drop recurses once per level.
-        fn tear_down(document: Document) {
-            let mut documents = vec![document];
-            let mut values = Vec::new();
-            while !documents.is_empty() || !values.is_empty() {
-                if let Some(document) = documents.pop() {
-                    let attributes = document.attributes.into_vec();
-                    values.extend(attributes.into_iter().map(|a| a.value));
-                    documents.extend(document.blocks.into_iter().map(|b| b.body));
-                }
-                if let Some(value) = values.pop() {
-                    match value.kind {
-                        Kind::List(items) => values.extend(items),
-                        Kind::Map(map) => {
-                            values.extend(map.into_vec().into_iter().map(|a| a.value));
-                        }
-                        Kind::Call(call) => values.extend(call.arguments),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
         #[test]
         fn checks_a_hostile_depth_without_recursing() {
             for level in [Level::Block, Level::List, Level::Map, Level::Call] {
@@ -882,11 +887,7 @@ mod tests {
                 let expected = Err(TooDeep {
                     span: Some(spans[DEPTH_MAX]),
                 });
-                // `Checked::new` would drop the refused document, and a plain drop
-                // recurses once per level.
-                let checked = check(&document);
-                tear_down(document);
-                assert_eq!(checked, expected, "{level:?}");
+                assert_eq!(Checked::new(document), expected, "{level:?}");
             }
         }
 
