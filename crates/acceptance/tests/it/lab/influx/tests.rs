@@ -395,6 +395,14 @@ mod stored {
 
     #[test]
     #[should_panic(
+        expected = "the store holds what the lab did not write: a gap line at 1030 has the fields {\"n\": Integer(1)}"
+    )]
+    fn panics_on_a_gap_line_with_no_count() {
+        check(&gap_line(FIRST + 3, 1).replace("count", "n"));
+    }
+
+    #[test]
+    #[should_panic(
         expected = "the store holds what the lab did not write: a gap line at 1030 counts 4 seqs before seq 103, below the first written seq 100"
     )]
     fn panics_on_a_gap_range_below_the_first_written_seq() {
