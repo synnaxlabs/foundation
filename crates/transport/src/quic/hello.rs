@@ -368,6 +368,16 @@ mod tests {
             Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (5, 0), (3, 0), (2, 0)])),
             fault("a hello with id 3 after id 5")
         );
+        assert_eq!(
+            Hello::decode(&encode(&[(0, 2_000), (2, 0), (1, 1_500)])),
+            fault("a hello with id 1 after id 2")
+        );
+        let mut bytes = encode(&[(0, 2_000), (2, 0)]);
+        bytes.push(0x03);
+        assert_eq!(
+            Hello::decode(&bytes),
+            fault("a hello that ends inside a pair")
+        );
     }
 
     #[test]
