@@ -1,19 +1,19 @@
 //! A remote reader session: one hub stream from the reader's node to the home of an
-//! index. After the header, the reader's node sends [`FromReader::Open`], and the home
-//! sends [`FromHome`] messages.
+//! index. After the header, the reader's node sends an [`Open`] and then
+//! [`Credit`] messages, and the home sends [`Reply`] messages.
 //!
 //! A run follows some messages: the keys of an open, and the ends and then the body
 //! of a head. A run goes as stream messages back to back, with no prefix, each at most
-//! the peer's `message_bytes_max`. Its message gives its length. No message carries an
-//! empty run.
+//! the peer's `message_bytes_max`. A message of a run never splits a key or an end,
+//! and no message is empty.
 //!
 //! Fields are little-endian.
 //!
-//! - [`FromReader`]: kind 1 (open, latest) or 2 (open, complete), then for complete
-//!   `limit_bytes` (`u64`), then the channel count (`u32`). Kind 3 (credit),
-//!   `limit_bytes` (`u64`).
-//! - [`FromHome`]: kind 1 (opened). Kind 2 (head): path (`u8`, live 0, backfill 1),
-//!   seq (`u64`), count (`u32`), and the series count (`u32`).
+//! - [`Open`]: kind 1 (latest) or 2 (complete), then for complete `limit_bytes`
+//!   (`u64`), then the channel count (`u32`).
+//! - [`Credit`]: kind 3, then `limit_bytes` (`u64`).
+//! - [`Reply`]: kind 1 (opened). Kind 2 (head): path (`u8`, live 0, backfill 1), seq
+//!   (`u64`), count (`u32`), and the series count (`u32`).
 //! - [`keys`]: each channel key (`u128`).
 //! - [`ends`]: place and end (each `u32`) for each series.
 
@@ -33,92 +33,66 @@ pub const UNKNOWN: u32 = 16;
 /// Stop code: the node is not the home of the open's index.
 pub const NOT_HOME: u32 = 17;
 
-/// A message from the reader's node to the home.
+/// The first message from the reader's node, which opens the session. The run of its
+/// [`keys`] follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FromReader {
-    /// The first message, which opens the session. Its [`keys`] follow.
-    Open {
-        /// Which frames the session gets.
-        mode: Mode,
-        /// The count of channels the reader reads, all on one index.
-        channels: u32,
-    },
-    /// Each later message: the session's total grant since the open.
-    Credit {
-        /// The grant, in bytes.
-        limit_bytes: u64,
-    },
+pub struct Open {
+    /// Which frames the session gets.
+    pub mode: Mode,
+    /// The count of channels the reader reads, all on one index. At least 1.
+    pub channels: u32,
 }
 
-impl FromReader {
-    /// The bytes of the encoded message.
+impl Open {
+    /// The bytes of the encoded open.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        match self {
-            Self::Open {
-                mode: Mode::Latest, ..
-            } => 5,
-            Self::Open {
-                mode: Mode::Complete { .. },
-                ..
-            } => 13,
-            Self::Credit { .. } => 9,
+        match self.mode {
+            Mode::Latest => 5,
+            Mode::Complete { .. } => 13,
         }
     }
 
-    /// Writes the message into `out`.
+    /// Writes the open into `out`.
     ///
     /// # Panics
     ///
-    /// When `out` is not [`FromReader::encoded_len`] bytes.
+    /// When `out` is not [`Open::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
-        match *self {
-            Self::Open { mode, channels } => {
-                match mode {
-                    Mode::Latest => out.put(&[LATEST]),
-                    Mode::Complete { limit_bytes } => {
-                        out.put(&[COMPLETE]);
-                        out.put(&limit_bytes.to_le_bytes());
-                    }
-                }
-                out.put(&channels.to_le_bytes());
-            }
-            Self::Credit { limit_bytes } => {
-                out.put(&[CREDIT]);
+        match self.mode {
+            Mode::Latest => out.put(&[LATEST]),
+            Mode::Complete { limit_bytes } => {
+                out.put(&[COMPLETE]);
                 out.put(&limit_bytes.to_le_bytes());
             }
         }
+        out.put(&self.channels.to_le_bytes());
     }
 
-    /// Decodes the message in `bytes`.
+    /// Decodes the open in `bytes`.
     ///
     /// # Errors
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
-    /// names no message, and [`Error::Length`] when the length fits no message of
-    /// that kind.
+    /// names no open, [`Error::Length`] when the length fits no open of that kind, and
+    /// [`Error::Channels`] when the open names no channel.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, bytes.len());
-        let message = match kind {
-            LATEST => Self::Open {
-                mode: Mode::Latest,
-                channels: u32::from_le_bytes(fields.take()?),
-            },
-            COMPLETE => Self::Open {
-                mode: Mode::Complete {
-                    limit_bytes: u64::from_le_bytes(fields.take()?),
-                },
-                channels: u32::from_le_bytes(fields.take()?),
-            },
-            CREDIT => Self::Credit {
+        let mode = match kind {
+            LATEST => Mode::Latest,
+            COMPLETE => Mode::Complete {
                 limit_bytes: u64::from_le_bytes(fields.take()?),
             },
             kind => return Err(Error::Kind { kind }),
         };
+        let channels = u32::from_le_bytes(fields.take()?);
         fields.end()?;
-        Ok(message)
+        if channels == 0 {
+            return Err(Error::Channels);
+        }
+        Ok(Self { mode, channels })
     }
 }
 
@@ -134,12 +108,54 @@ pub enum Mode {
     },
 }
 
+/// Each message from the reader's node after the open's keys: the session's total
+/// grant since the open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Credit {
+    /// The grant, in bytes.
+    pub limit_bytes: u64,
+}
+
+impl Credit {
+    /// The bytes of an encoded credit.
+    pub const LEN: usize = 9;
+
+    /// Writes the credit into `out`.
+    ///
+    /// # Panics
+    ///
+    /// When `out` is not [`Credit::LEN`] bytes.
+    pub fn encode(&self, out: &mut [u8]) {
+        let mut out = Writer::new(out, Self::LEN);
+        out.put(&[CREDIT]);
+        out.put(&self.limit_bytes.to_le_bytes());
+    }
+
+    /// Decodes the credit in `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
+    /// names no credit, and [`Error::Length`] when `bytes` is not [`Credit::LEN`]
+    /// bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
+        if kind != CREDIT {
+            return Err(Error::Kind { kind });
+        }
+        let mut fields = Fields::new(rest, bytes.len());
+        let limit_bytes = u64::from_le_bytes(fields.take()?);
+        fields.end()?;
+        Ok(Self { limit_bytes })
+    }
+}
+
 /// A message from the home to the reader's node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FromHome {
+pub enum Reply {
     /// The session is open at the home.
     Opened,
-    /// The head of one frame. Its [`ends`] follow, then its body.
+    /// The head of one frame. The run of its [`ends`] follows, then its body.
     Head(Head),
 }
 
@@ -150,12 +166,13 @@ pub struct Head {
     pub path: Path,
     /// The samples of the frame.
     pub range: Range,
-    /// The count of the frame's series, which is the count of its ends.
+    /// The count of the frame's series, which is the count of its ends. A head with
+    /// more series than the session has places is not valid.
     pub series: u32,
 }
 
-impl FromHome {
-    /// The bytes of the encoded message.
+impl Reply {
+    /// The bytes of the encoded reply.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         match self {
@@ -164,11 +181,11 @@ impl FromHome {
         }
     }
 
-    /// Writes the message into `out`.
+    /// Writes the reply into `out`.
     ///
     /// # Panics
     ///
-    /// When `out` is not [`FromHome::encoded_len`] bytes.
+    /// When `out` is not [`Reply::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
         match self {
@@ -182,13 +199,13 @@ impl FromHome {
         }
     }
 
-    /// Decodes the message in `bytes`.
+    /// Decodes the reply in `bytes`.
     ///
     /// # Errors
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
-    /// names no message, [`Error::Length`] when the length fits no message of that
-    /// kind, and [`Error::Path`] when a head names no path.
+    /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
+    /// and [`Error::Path`] when a head names no path.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, bytes.len());
@@ -215,23 +232,16 @@ impl FromHome {
 }
 
 /// The run of keys after an open, in the open's order. A series of the session has
-/// the place of its channel's first key in the run. The index, when the run does not
-/// hold it, has the next place.
+/// the place of its channel's first key in the run, from 0. The index, when the run
+/// does not hold it, has place [`Open::channels`](super::Open::channels).
 pub mod keys {
     use types::channel;
 
-    use super::{Writer, widen};
+    use super::{Error, Writer, run};
 
     const KEY: usize = 16;
 
-    /// The bytes of the run of an open of `channels`. The caller bounds `channels`
-    /// before it allocates by it.
-    #[must_use]
-    pub fn len(channels: u32) -> usize {
-        widen(channels).saturating_mul(KEY)
-    }
-
-    /// Writes the run of `keys` into `out`.
+    /// Writes `keys` into `out`, one message of the run.
     ///
     /// # Panics
     ///
@@ -243,39 +253,31 @@ pub mod keys {
         }
     }
 
-    /// The keys in `run`.
+    /// The keys in `message`, one message of the run.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// When `run` is not a whole count of keys.
-    #[must_use]
-    pub fn decode(run: &[u8]) -> impl ExactSizeIterator<Item = channel::Key> + '_ {
-        let (keys, rest) = run.as_chunks::<KEY>();
-        assert!(
-            rest.is_empty(),
-            "the run has {} bytes, and a key has {KEY}",
-            run.len()
-        );
-        keys.iter()
-            .map(|&key| channel::Key::from_u128(u128::from_le_bytes(key)))
+    /// [`Error::Empty`] when `message` is empty, and [`Error::Length`] when it is not
+    /// a whole count of keys.
+    pub fn decode(
+        message: &[u8],
+    ) -> Result<impl ExactSizeIterator<Item = channel::Key> + '_, Error> {
+        let keys = run::<KEY>(message)?;
+        Ok(keys
+            .iter()
+            .map(|&key| channel::Key::from_u128(u128::from_le_bytes(key))))
     }
 }
 
 /// The run of ends after a head: the place of each series and the end of its bytes in
-/// the body. The body follows, as long as the last end.
+/// the body. The body follows, as long as the last end. An end whose place the session
+/// does not have, or that repeats a place of its frame, is not valid.
 pub mod ends {
-    use super::{Writer, widen};
+    use super::{Error, Writer, run};
 
     const END: usize = 8;
 
-    /// The bytes of the ends of a head of `series`. The caller bounds `series` before
-    /// it allocates by it.
-    #[must_use]
-    pub fn len(series: u32) -> usize {
-        widen(series).saturating_mul(END)
-    }
-
-    /// Writes `ends`, each a place and an end, into `out`.
+    /// Writes `ends`, each a place and an end, into `out`, one message of the run.
     ///
     /// # Panics
     ///
@@ -289,27 +291,25 @@ pub mod ends {
         }
     }
 
-    /// The ends in `run`, each a place and an end.
+    /// The ends in `message`, one message of the run, each a place and an end.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// When `run` is not a whole count of ends.
-    #[must_use]
+    /// [`Error::Empty`] when `message` is empty, and [`Error::Length`] when it is not
+    /// a whole count of ends.
     pub fn decode(
-        run: &[u8],
-    ) -> impl ExactSizeIterator<Item = (u32, u32)> + DoubleEndedIterator + '_ {
-        let (ends, rest) = run.as_chunks::<END>();
-        assert!(
-            rest.is_empty(),
-            "the run has {} bytes, and an end has {END}",
-            run.len()
-        );
-        ends.iter().map(|&[p0, p1, p2, p3, e0, e1, e2, e3]| {
+        message: &[u8],
+    ) -> Result<
+        impl ExactSizeIterator<Item = (u32, u32)> + DoubleEndedIterator + '_,
+        Error,
+    > {
+        let ends = run::<END>(message)?;
+        Ok(ends.iter().map(|&[p0, p1, p2, p3, e0, e1, e2, e3]| {
             (
                 u32::from_le_bytes([p0, p1, p2, p3]),
                 u32::from_le_bytes([e0, e1, e2, e3]),
             )
-        })
+        }))
     }
 }
 
@@ -328,6 +328,8 @@ pub enum Error {
         /// The bytes of the message.
         len: usize,
     },
+    /// An open names no channel.
+    Channels,
     /// A head names no path.
     Path {
         /// The path byte.
@@ -347,6 +349,7 @@ impl fmt::Display for Error {
                 f,
                 "the hub message has {len} bytes, which no message of its kind has"
             ),
+            Self::Channels => f.write_str("the hub open names no channel"),
             Self::Path { byte } => write!(
                 f,
                 "the frame head names path {byte}, which this node does not know"
@@ -406,8 +409,16 @@ impl<'b> Fields<'b> {
     }
 }
 
-fn widen(count: u32) -> usize {
-    usize::try_from(count).expect("invariant: a usize holds a u32")
+/// The items of `N` bytes in `message`, one message of a run.
+fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
+    let (items, rest) = message.as_chunks::<N>();
+    if message.is_empty() {
+        Err(Error::Empty)
+    } else if !rest.is_empty() {
+        Err(Error::Length { len: message.len() })
+    } else {
+        Ok(items)
+    }
 }
 
 fn path_byte(path: Path) -> u8 {
@@ -438,40 +449,44 @@ mod tests {
         channel::Key::from_u128(bits)
     }
 
-    fn head(path: Path, seq: u64, count: u32, series: u32) -> FromHome {
-        FromHome::Head(Head {
+    fn head(path: Path, seq: u64, count: u32, series: u32) -> Reply {
+        Reply::Head(Head {
             path,
             range: Range { seq, count },
             series,
         })
     }
 
-    fn live() -> FromHome {
+    fn live() -> Reply {
         head(Path::Live, 0, 0, 0)
     }
 
-    fn encode_reader(message: FromReader) -> Vec<u8> {
-        let mut out = vec![0xaa; message.encoded_len()];
-        message.encode(&mut out);
+    fn encode_open(open: Open) -> Vec<u8> {
+        let mut out = vec![0xaa; open.encoded_len()];
+        open.encode(&mut out);
         out
     }
 
-    fn encode_home(message: FromHome) -> Vec<u8> {
-        let mut out = vec![0xaa; message.encoded_len()];
-        message.encode(&mut out);
+    fn encode_credit(credit: Credit) -> Vec<u8> {
+        let mut out = vec![0xaa; Credit::LEN];
+        credit.encode(&mut out);
+        out
+    }
+
+    fn encode_reply(reply: Reply) -> Vec<u8> {
+        let mut out = vec![0xaa; reply.encoded_len()];
+        reply.encode(&mut out);
         out
     }
 
     fn encode_keys(keys: &[channel::Key]) -> Vec<u8> {
-        let count = u32::try_from(keys.len()).expect("a test has few keys");
-        let mut out = vec![0xaa; super::keys::len(count)];
+        let mut out = vec![[0xaa; 16]; keys.len()].concat();
         super::keys::encode(keys, &mut out);
         out
     }
 
     fn encode_ends(ends: &[(u32, u32)]) -> Vec<u8> {
-        let count = u32::try_from(ends.len()).expect("a test has few ends");
-        let mut out = vec![0xaa; super::ends::len(count)];
+        let mut out = vec![[0xaa; 8]; ends.len()].concat();
         super::ends::encode(ends.iter().copied(), &mut out);
         out
     }
@@ -494,58 +509,69 @@ mod tests {
         }
     }
 
-    mod from_reader {
+    /// `decode` gives [`Error::Kind`] for each kind byte outside `known`, at each
+    /// length in `lens`.
+    fn check_kinds<T: fmt::Debug + PartialEq>(
+        decode: fn(&[u8]) -> Result<T, Error>,
+        known: &[u8],
+        lens: &[usize],
+    ) {
+        for kind in (0..=u8::MAX).filter(|kind| !known.contains(kind)) {
+            for &len in lens {
+                let bytes = zeros(kind, len);
+                assert_eq!(decode(&bytes), Err(Error::Kind { kind }), "{len}");
+            }
+        }
+    }
+
+    mod open {
         use super::*;
 
         #[test]
         fn pins_the_wire_values() {
-            let latest = FromReader::Open {
+            let latest = Open {
                 mode: Mode::Latest,
                 channels: 0x0102_0304,
             };
-            assert_eq!(encode_reader(latest), [1, 4, 3, 2, 1]);
-            let complete = FromReader::Open {
+            assert_eq!(encode_open(latest), [1, 4, 3, 2, 1]);
+            let complete = Open {
                 mode: Mode::Complete {
                     limit_bytes: 0x0102_0304_0506_0708,
                 },
                 channels: 2,
             };
             assert_eq!(
-                encode_reader(complete),
+                encode_open(complete),
                 [2, 8, 7, 6, 5, 4, 3, 2, 1, 2, 0, 0, 0]
             );
-            let credit = FromReader::Credit {
-                limit_bytes: 0x0102_0304_0506_0708,
-            };
-            assert_eq!(encode_reader(credit), [3, 8, 7, 6, 5, 4, 3, 2, 1]);
         }
 
         #[test]
         fn refuses_an_empty_message() {
-            assert_eq!(FromReader::decode(&[]), Err(Error::Empty));
+            assert_eq!(Open::decode(&[]), Err(Error::Empty));
         }
 
         #[test]
         fn refuses_unknown_kinds_before_the_length() {
-            for kind in (0..=u8::MAX).filter(|kind| !(1..=3).contains(kind)) {
-                for len in [1, 13] {
-                    let bytes = zeros(kind, len);
-                    assert_eq!(FromReader::decode(&bytes), Err(Error::Kind { kind }));
-                }
-            }
+            check_kinds(Open::decode, &[1, 2], &[1, 5, 13]);
         }
 
         #[test]
         fn refuses_each_wrong_length() {
-            check(FromReader::decode, 1, &[1, 4, 6, 13]);
-            check(FromReader::decode, 2, &[1, 9, 12, 14]);
-            check(FromReader::decode, 3, &[1, 5, 8, 10]);
+            check(Open::decode, 1, &[1, 4, 6, 13]);
+            check(Open::decode, 2, &[1, 5, 9, 12, 14]);
+        }
+
+        #[test]
+        fn refuses_an_open_of_no_channel() {
+            assert_eq!(Open::decode(&[1, 0, 0, 0, 0]), Err(Error::Channels));
+            assert_eq!(Open::decode(&zeros(2, 13)), Err(Error::Channels));
         }
 
         #[test]
         #[should_panic(expected = "out has 4 bytes, and the message has 5")]
         fn panics_when_out_has_the_wrong_length() {
-            let open = FromReader::Open {
+            let open = Open {
                 mode: Mode::Latest,
                 channels: 1,
             };
@@ -553,55 +579,83 @@ mod tests {
         }
     }
 
-    mod from_home {
+    mod credit {
         use super::*;
 
         #[test]
         fn pins_the_wire_values() {
-            assert_eq!(encode_home(FromHome::Opened), [1]);
-            let backfill = head(Path::Backfill, 0x0102_0304_0506_0708, 0x0a0b_0c0d, 3);
-            assert_eq!(
-                encode_home(backfill),
-                [
-                    2, 1, 8, 7, 6, 5, 4, 3, 2, 1, 0x0d, 0x0c, 0x0b, 0x0a, 3, 0, 0, 0
-                ]
-            );
-            assert_eq!(encode_home(live()), zeros(2, 18));
+            let credit = Credit {
+                limit_bytes: 0x0102_0304_0506_0708,
+            };
+            assert_eq!(encode_credit(credit), [3, 8, 7, 6, 5, 4, 3, 2, 1]);
         }
 
         #[test]
         fn refuses_an_empty_message() {
-            assert_eq!(FromHome::decode(&[]), Err(Error::Empty));
+            assert_eq!(Credit::decode(&[]), Err(Error::Empty));
         }
 
         #[test]
         fn refuses_unknown_kinds_before_the_length() {
-            for kind in (0..=u8::MAX).filter(|kind| !(1..=2).contains(kind)) {
-                for len in [1, 18] {
-                    let bytes = zeros(kind, len);
-                    assert_eq!(FromHome::decode(&bytes), Err(Error::Kind { kind }));
-                }
-            }
+            check_kinds(Credit::decode, &[3], &[1, 5, 9]);
         }
 
         #[test]
         fn refuses_each_wrong_length() {
-            check(FromHome::decode, 1, &[2, 18]);
-            check(FromHome::decode, 2, &[1, 2, 17, 19]);
+            check(Credit::decode, 3, &[1, 8, 10]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 10 bytes, and the message has 9")]
+        fn panics_when_out_has_the_wrong_length() {
+            Credit { limit_bytes: 1 }.encode(&mut [0; 10]);
+        }
+    }
+
+    mod reply {
+        use super::*;
+
+        #[test]
+        fn pins_the_wire_values() {
+            assert_eq!(encode_reply(Reply::Opened), [1]);
+            let backfill = head(Path::Backfill, 0x0102_0304_0506_0708, 0x0a0b_0c0d, 3);
+            assert_eq!(
+                encode_reply(backfill),
+                [
+                    2, 1, 8, 7, 6, 5, 4, 3, 2, 1, 0x0d, 0x0c, 0x0b, 0x0a, 3, 0, 0, 0
+                ]
+            );
+            assert_eq!(encode_reply(live()), zeros(2, 18));
+        }
+
+        #[test]
+        fn refuses_an_empty_message() {
+            assert_eq!(Reply::decode(&[]), Err(Error::Empty));
+        }
+
+        #[test]
+        fn refuses_unknown_kinds_before_the_length() {
+            check_kinds(Reply::decode, &[1, 2], &[1, 18]);
+        }
+
+        #[test]
+        fn refuses_each_wrong_length() {
+            check(Reply::decode, 1, &[2, 18]);
+            check(Reply::decode, 2, &[1, 2, 17, 19]);
         }
 
         #[test]
         fn refuses_unknown_paths() {
             for byte in 2..=u8::MAX {
-                let mut bytes = encode_home(live());
+                let mut bytes = encode_reply(live());
                 bytes[1] = byte;
-                assert_eq!(FromHome::decode(&bytes), Err(Error::Path { byte }));
+                assert_eq!(Reply::decode(&bytes), Err(Error::Path { byte }));
             }
         }
 
         #[test]
         fn checks_the_length_before_the_path() {
-            assert_eq!(FromHome::decode(&[2, 9, 9]), Err(Error::Length { len: 3 }));
+            assert_eq!(Reply::decode(&[2, 9, 9]), Err(Error::Length { len: 3 }));
         }
 
         #[test]
@@ -614,25 +668,39 @@ mod tests {
     mod keys {
         use super::*;
 
+        fn decode(message: &[u8]) -> Result<Vec<channel::Key>, Error> {
+            super::super::keys::decode(message).map(Iterator::collect)
+        }
+
         #[test]
         fn pins_the_wire_values() {
             let keys = [key(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10), key(1)];
             let mut bytes = vec![16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
             bytes.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             assert_eq!(encode_keys(&keys), bytes);
-            assert_eq!(super::super::keys::len(2), 32);
         }
 
         #[test]
-        fn has_no_bytes_for_no_channels() {
-            assert_eq!(super::super::keys::len(0), 0);
-            assert_eq!(super::super::keys::decode(&[]).len(), 0);
+        fn refuses_an_empty_message() {
+            assert_eq!(decode(&[]), Err(Error::Empty));
         }
 
         #[test]
-        #[should_panic(expected = "the run has 17 bytes, and a key has 16")]
-        fn panics_on_a_partial_key() {
-            drop(super::super::keys::decode(&[0; 17]));
+        fn decodes_each_message_of_a_split_run() {
+            let sent: Vec<_> = (0..200).map(key).collect();
+            let run = encode_keys(&sent);
+            let got: Vec<_> = run
+                .chunks(1472 / 16 * 16)
+                .flat_map(|message| super::super::keys::decode(message).unwrap())
+                .collect();
+            assert_eq!(got, sent);
+        }
+
+        #[test]
+        fn refuses_a_partial_key() {
+            for len in [1, 15, 17, 31, 33] {
+                assert_eq!(decode(&vec![0; len]), Err(Error::Length { len }));
+            }
         }
 
         #[test]
@@ -645,26 +713,47 @@ mod tests {
     mod ends {
         use super::*;
 
+        fn decode(message: &[u8]) -> Result<Vec<(u32, u32)>, Error> {
+            super::super::ends::decode(message).map(Iterator::collect)
+        }
+
         #[test]
         fn pins_the_wire_values() {
             assert_eq!(
                 encode_ends(&[(3, 8), (0, 21)]),
                 [3, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 0]
             );
-            assert_eq!(super::super::ends::len(2), 16);
         }
 
         #[test]
         fn gives_the_body_length_as_the_last_end() {
-            let run = encode_ends(&[(1, 8), (0, u32::MAX)]);
-            let last = super::super::ends::decode(&run).next_back();
-            assert_eq!(last, Some((0, u32::MAX)));
+            let message = encode_ends(&[(1, 8), (0, u32::MAX)]);
+            let last =
+                super::super::ends::decode(&message).map(|mut ends| ends.next_back());
+            assert_eq!(last, Ok(Some((0, u32::MAX))));
         }
 
         #[test]
-        #[should_panic(expected = "the run has 9 bytes, and an end has 8")]
-        fn panics_on_a_partial_end() {
-            drop(super::super::ends::decode(&[0; 9]));
+        fn refuses_an_empty_message() {
+            assert_eq!(decode(&[]), Err(Error::Empty));
+        }
+
+        #[test]
+        fn decodes_each_message_of_a_split_run() {
+            let sent: Vec<_> = (0..400).map(|place| (place, place + 1)).collect();
+            let run = encode_ends(&sent);
+            let got: Vec<_> = run
+                .chunks(1472 / 8 * 8)
+                .flat_map(|message| super::super::ends::decode(message).unwrap())
+                .collect();
+            assert_eq!(got, sent);
+        }
+
+        #[test]
+        fn refuses_a_partial_end() {
+            for len in [1, 7, 9, 15, 17] {
+                assert_eq!(decode(&vec![0; len]), Err(Error::Length { len }));
+            }
         }
 
         #[test]
@@ -691,6 +780,7 @@ mod tests {
                 Error::Length { len: 4 },
                 "the hub message has 4 bytes, which no message of its kind has",
             ),
+            (Error::Channels, "the hub open names no channel"),
             (
                 Error::Path { byte: 2 },
                 "the frame head names path 2, which this node does not know",
@@ -701,22 +791,18 @@ mod tests {
         }
     }
 
-    fn from_reader() -> impl Strategy<Value = FromReader> {
+    fn open() -> impl Strategy<Value = Open> {
         let mode = prop_oneof![
             Just(Mode::Latest),
             any::<u64>().prop_map(|limit_bytes| Mode::Complete { limit_bytes }),
         ];
-        prop_oneof![
-            (mode, any::<u32>())
-                .prop_map(|(mode, channels)| FromReader::Open { mode, channels }),
-            any::<u64>().prop_map(|limit_bytes| FromReader::Credit { limit_bytes }),
-        ]
+        (mode, 1..=u32::MAX).prop_map(|(mode, channels)| Open { mode, channels })
     }
 
-    fn from_home() -> impl Strategy<Value = FromHome> {
+    fn reply() -> impl Strategy<Value = Reply> {
         let path = prop_oneof![Just(Path::Live), Just(Path::Backfill)];
         prop_oneof![
-            Just(FromHome::Opened),
+            Just(Reply::Opened),
             (path, any::<u64>(), any::<u32>(), any::<u32>())
                 .prop_map(|(path, seq, count, series)| head(path, seq, count, series)),
         ]
@@ -739,37 +825,48 @@ mod tests {
 
     proptest! {
         #[test]
-        fn round_trips_a_message_from_the_reader(message in from_reader()) {
-            prop_assert_eq!(FromReader::decode(&encode_reader(message)), Ok(message));
+        fn round_trips_an_open(open in open()) {
+            prop_assert_eq!(Open::decode(&encode_open(open)), Ok(open));
         }
 
         #[test]
-        fn round_trips_a_message_from_the_home(message in from_home()) {
-            prop_assert_eq!(FromHome::decode(&encode_home(message)), Ok(message));
+        fn round_trips_a_credit(limit_bytes in any::<u64>()) {
+            let credit = Credit { limit_bytes };
+            prop_assert_eq!(Credit::decode(&encode_credit(credit)), Ok(credit));
         }
 
         #[test]
-        fn round_trips_keys(bits in proptest::collection::vec(any::<u128>(), 0..8)) {
+        fn round_trips_a_reply(reply in reply()) {
+            prop_assert_eq!(Reply::decode(&encode_reply(reply)), Ok(reply));
+        }
+
+        #[test]
+        fn round_trips_keys(bits in proptest::collection::vec(any::<u128>(), 1..8)) {
             let keys: Vec<_> = bits.into_iter().map(key).collect();
-            let decoded: Vec<_> = super::keys::decode(&encode_keys(&keys)).collect();
-            prop_assert_eq!(decoded, keys);
+            let decoded = super::keys::decode(&encode_keys(&keys))
+                .map(Iterator::collect::<Vec<_>>);
+            prop_assert_eq!(decoded, Ok(keys));
         }
 
         #[test]
         fn round_trips_ends(
-            ends in proptest::collection::vec(any::<(u32, u32)>(), 0..8),
+            ends in proptest::collection::vec(any::<(u32, u32)>(), 1..8),
         ) {
-            let decoded: Vec<_> = super::ends::decode(&encode_ends(&ends)).collect();
-            prop_assert_eq!(decoded, ends);
+            let decoded = super::ends::decode(&encode_ends(&ends))
+                .map(Iterator::collect::<Vec<_>>);
+            prop_assert_eq!(decoded, Ok(ends));
         }
 
         #[test]
         fn decodes_only_the_messages_it_encodes(bytes in bytes()) {
-            if let Ok(message) = FromReader::decode(&bytes) {
-                prop_assert_eq!(&encode_reader(message), &bytes);
+            if let Ok(open) = Open::decode(&bytes) {
+                prop_assert_eq!(&encode_open(open), &bytes);
             }
-            if let Ok(message) = FromHome::decode(&bytes) {
-                prop_assert_eq!(&encode_home(message), &bytes);
+            if let Ok(credit) = Credit::decode(&bytes) {
+                prop_assert_eq!(&encode_credit(credit), &bytes);
+            }
+            if let Ok(reply) = Reply::decode(&bytes) {
+                prop_assert_eq!(&encode_reply(reply), &bytes);
             }
         }
     }
