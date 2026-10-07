@@ -3427,6 +3427,7 @@ How to read this record:
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
 | r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
+| BENCH SPEND; the ARM RUNNER owner (the coordinator) | Test budget (5.5) |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -4328,14 +4329,15 @@ engine, and performance work past the P1 targets.
 
 **Test budget (2026-10-05).** The person approved 1000 USD for AWS testing, and it
 replaces BENCH SPEND: a nightly chaos lab (about 2 USD a day), a spot simulation swarm
-of four c7i.8xlarge for four hours (ledger cap 22.85 USD at the on-demand price, about
-9 USD at spot), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
-benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
-should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
-and an automatic shutdown first. Only `laptop.monitor` rents and ends machines, by
-"Cloud machines" in `docs/coordination.md`, and no other session holds AWS credentials
-(the person, https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
-2026-10-07T16:48:27Z). This replaces the owner in BENCH SPEND.
+of four c7i.8xlarge for four hours (about 9 USD at spot, with its ledger cap by "Cloud
+machines" step 2 in `docs/coordination.md`), a nightly P1 benchmark on a c7i.metal-24xl
+(about 4 USD), and benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day
+("test budget should be capped at $100 a day"). Every launch goes in the ledger (#15)
+with its cap and an automatic shutdown first. Only `laptop.monitor` rents and ends
+machines, by "Cloud machines" in `docs/coordination.md`, and no other session holds AWS
+credentials (the person,
+https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
+2026-10-07T16:48:27Z). Supersedes: BENCH SPEND, the owner in ARM RUNNER.
 
 ### 5.6 First phase
 

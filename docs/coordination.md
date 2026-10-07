@@ -134,10 +134,10 @@ USD a day for #1139. No other session holds AWS credentials. The person decided 
    the person.
 2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15), with
    the types, the issue, and the session that asked. The cap is the price per hour
-   times count times the lifetime plus 10 minutes. For a spot host the price is its
-   `MaxPrice` plus 0.03 USD an hour for its disk and public address, because AWS never
-   bills a spot host above its `MaxPrice`. For an on-demand host it is the on-demand
-   price (`laptop.monitor`,
+   times count times the lifetime. For an on-demand host the price is the on-demand
+   price. For a spot host the price is its `MaxPrice` plus 0.03 USD an hour for its
+   disk and public address, because AWS never bills a spot host above its `MaxPrice`,
+   and the lifetime gets 10 more minutes (`laptop.monitor`,
    https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042917805,
    2026-10-07T17:12:22Z). The sum of caps stays inside each limit: the total, the day,
    and the #1139 day. At launch, it posts on #15 one line for each instance: the
@@ -154,7 +154,8 @@ USD a day for #1139. No other session holds AWS credentials. The person decided 
    `box2.red-team` keeps the script. Each host ends itself within 120 minutes
    (https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042420655,
    2026-10-07T16:40:04Z). The script ends the host and posts its end line, so step 4
-   needs no message.
+   needs no message. When the script stops with no end line, `laptop.monitor` does
+   step 4 itself.
 6. The spend watch of `laptop.monitor` alerts on each instance that is not on #15.
 
 ## Messages
