@@ -7,7 +7,7 @@
 //! inside an entry or a gap, and after a reopen.
 //!
 //! Input: batches that the production path writes, then edits on the file bytes.
-//! A batch makes a record of one to four blocks, with a table of up to three.
+//! A batch makes a record of one to four blocks, with a table of up to four.
 //! Two edits seal a CRC: a header block and a record. One edit writes a tail and
 //! its chain value in the first header block: a block of the area, on one of the
 //! first 128 laps or the last 128.
@@ -24,9 +24,9 @@
 //! The edits restate the formats in `header.rs` and `record.rs` of `buffer`. Before
 //! it edits, the target walks the build's ring from the tail. Each record must have
 //! a kind and seal as written, the records must end where the room of the build
-//! ends, and a write of the tail where it is must change nothing. So when a format
-//! moves, the target panics. `WRAP` is restated and not checked: the build never
-//! wraps.
+//! ends, and a seal of each record and a write of the tail where it is must change
+//! nothing. So when a format moves, the target panics. `WRAP` is restated and not
+//! checked: the build never wraps.
 
 #![no_main]
 
@@ -872,6 +872,16 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit], built: Room) -> Room
         "the records of the build do not seal as written up to its last"
     );
     let written = image.clone();
+    let way = walk(&written);
+    let sealed =
+        |&&(block, chain): &&(usize, u32)| record::sealed(&written, block, chain);
+    for &(block, _) in way.iter().take_while(sealed) {
+        apply(&mut image, &Edit::SealRecord { block });
+        assert!(
+            image == written,
+            "`SealRecord` restates the record at {block}"
+        );
+    }
     let (block, lap) = place(header::tail(&image));
     apply(&mut image, &Edit::MoveTail { block, lap });
     assert!(image == written, "`MoveTail` restates the header");
