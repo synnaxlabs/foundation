@@ -667,6 +667,9 @@ fn reads_no_system_config_or_attributes_file() {
     let repo = Repo::new("system");
     for name in ["GIT_CONFIG_SYSTEM", "GIT_ATTR_SYSTEM"] {
         let output = command(&repo.dir).args(["var", name]).output().unwrap();
+        // Exit 1 with no output is a known variable with no value; an unknown one
+        // exits 129.
+        assert_eq!(output.status.code(), Some(1), "{name}: {output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{name}");
     }
 }
