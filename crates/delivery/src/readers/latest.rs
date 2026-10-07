@@ -75,7 +75,6 @@ impl Readers {
         }
     }
 
-    /// Starts a latest session. The caller sets `replaced`.
     fn push_latest(&mut self, name: Option<Name>) -> Opened {
         let key = Key(self.next_latest);
         self.next_latest += 1;

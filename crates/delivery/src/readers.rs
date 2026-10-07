@@ -1805,7 +1805,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), 0..1);
             readers.close_named(key, at(0));
             let later = readers
-                .open(named("a", 10), resume(live(9)), 10 * CHARGE)
+                .open(named("a", 10), resume(live(1)), 10 * CHARGE)
                 .key;
             readers.queue(&frames.frame(2), 1..2);
             assert_eq!(released(&mut readers, 2), []);
