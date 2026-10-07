@@ -34,7 +34,9 @@ Never read the whole decisions file: read only the section that an issue names.
   machine, linked, each with its `crate:` labels. A builder blocked on another machine's
   issue: admit that issue first, and `send` its link to the blocked builder only when it
   merges or changes.
-- **Order.** On the path, the riskiest unknowns come first.
+- **Order.** Mark issues ready in the order of the milestone's plan issue, which
+  `laptop.director` keeps. The director also owns each issue's text: send it an issue
+  that is unclear instead of admitting it.
 - **Balance.** Every builder works on any crate, and no builder sits idle while the
   path has work. Keep at least one `ready` issue per idle builder. When builders on
   several accounts are idle, run `~/.factory/bin/factory-budget` and send the next
