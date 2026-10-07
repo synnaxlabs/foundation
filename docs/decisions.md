@@ -1342,7 +1342,7 @@ How to read this record:
   coordinator, 2026-10-06). A log starts at index 1, so that entry is the joint entry of
   the group's first change, and the node checks proofs as a founder with the same log
   does, gaps included (#881, #1005). Lost: an empty committed set proves nothing (the
-  new node then refuses a leader that the outgoing set elects when the old leader fails
+  node then refuses a leader that the outgoing set elects when the old leader fails
   before the joint entry commits); a joining node starts with the group's current
   configuration (the caller must know it, and it removes the operator's recovery of a
   wiped voter); the founding configuration as entry 1, as in etcd (a wider change that
@@ -1454,9 +1454,10 @@ How to read this record:
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
   (`Error::NotVoter`), and each grant holds (`Error::Grant`). So a node refuses a leader
   that became a voter after the newest configuration in its log, and does not get the
-  log from it (#1096). A node with no configuration takes no request. Only a voter that
-  an operator wiped is such a node (#881), because a node that joins opens with the
-  founding voters from its join answer (decided by the architect, #242:
+  log from it (a known defect, #1096, that #1107 fixes). A node with no configuration
+  takes no request. Only a voter that an operator wiped is such a node (#881), because a
+  node that joins opens with the founding voters from its join answer (decided by the
+  architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. A write that finds the pool full (`block::Error::Exhausted`), or that the
