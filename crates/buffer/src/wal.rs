@@ -42,12 +42,14 @@ fn to_u64(len: usize) -> u64 {
 }
 
 /// The size of the largest record of a body of at most `body_max` bytes, in whole
-/// blocks, or `None` when `body_max` is under one block less the record header or
-/// over `u32::MAX`.
+/// blocks, or `None` when `body_max` is under one block less the record header, over
+/// `u32::MAX`, or so large that the record does not fit in a `usize`.
 fn window(body_max: usize) -> Option<u64> {
     let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
-    body.contains(&body_max)
-        .then(|| (to_u64(HEADER_LEN) + to_u64(body_max)).next_multiple_of(BLOCK))
+    let window = HEADER_LEN
+        .checked_add(body_max)?
+        .checked_next_multiple_of(ALIGN)?;
+    body.contains(&body_max).then(|| to_u64(window))
 }
 
 /// The smallest area with a largest record of `window` bytes: the restart record,
@@ -111,6 +113,18 @@ pub struct Small {
     pub min: u64,
 }
 
+impl fmt::Display for Small {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { len, min } = self;
+        write!(
+            f,
+            "a ring file of {len} bytes holds no ring; it needs at least {min} bytes"
+        )
+    }
+}
+
+impl std::error::Error for Small {}
+
 /// The sizes of one ring: the area in bytes and the most bytes one record body
 /// holds. A record is one group commit, so `body_max` bounds a commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,10 +145,11 @@ impl Layout {
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under 4087 bytes (one block less the record header) or over `u32::MAX`,
-    /// when `area` is less than twice the largest record (a 9-byte header and
-    /// `body_max`, in whole 4096-byte blocks), or when the ring file (two header
-    /// blocks and the area) does not fit in a `u64`. A ring of that length that
+    /// under 4087 bytes (one block less the record header), over `u32::MAX`, or so
+    /// large that the largest record does not fit in a `usize`, when `area` is less
+    /// than twice the largest record (a 9-byte header and `body_max`, in whole
+    /// 4096-byte blocks), or when the ring file (two header blocks and the area) does
+    /// not fit in a `u64`. A ring of that length that
     /// holds only its restart record takes any record, wherever the restart record
     /// is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
@@ -163,7 +178,9 @@ impl Layout {
     ///
     /// # Panics
     ///
-    /// When `body_max` is under 4087 bytes or over `u32::MAX`, which no ring takes.
+    /// When `body_max` is a size that [`Layout::new`] refuses at any area: under 4087
+    /// bytes, over `u32::MAX`, or so large that the largest record does not fit in a
+    /// `usize`.
     pub fn fit(len: u64, body_max: usize) -> Result<Self, Small> {
         let window = window(body_max).unwrap_or_else(|| {
             panic!("a body of at most {body_max} bytes makes no ring")
@@ -1174,6 +1191,10 @@ mod tests {
             for len in [min - 1, 8191, 0] {
                 assert_eq!(Layout::fit(len, 4087), Err(Small { len, min }));
             }
+            assert_eq!(
+                Small { len: 8191, min }.to_string(),
+                "a ring file of 8191 bytes holds no ring; it needs at least 16384 bytes"
+            );
         }
 
         #[test]
@@ -1210,11 +1231,13 @@ mod tests {
                     Layout::new(under, body_max),
                     Err(Unfit { area: under, body_max })
                 );
-                prop_assert_eq!(Layout::fit(min, body_max).map(Layout::file_len), Ok(min));
+                let fit = Layout::fit(min, body_max);
+                prop_assert_eq!(fit.map(Layout::file_len), Ok(min));
                 match Layout::fit(len, body_max) {
                     Ok(layout) => {
                         prop_assert!(min <= len);
-                        prop_assert_eq!(Layout::new(layout.area(), body_max), Ok(layout));
+                        let new = Layout::new(layout.area(), body_max);
+                        prop_assert_eq!(new, Ok(layout));
                         prop_assert!(layout.file_len() <= len);
                         prop_assert!(layout.file_len() + 4096 > len);
                     }
