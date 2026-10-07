@@ -56,6 +56,8 @@ mod message;
 )]
 mod region;
 pub mod status;
+#[cfg(feature = "sim")]
+pub mod testing;
 pub mod ticket;
 
 pub use member::Member;

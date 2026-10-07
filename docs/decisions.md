@@ -1814,7 +1814,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). A message
   has one byte form, and a decode takes nothing else. The log (MESH LOG) and the
   messages share the byte form of an entry. Decided by `consensus`, approved by the
-  coordinator (#471).
+  coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
+  gives the fuzz target `mesh_change` the decode and encode of a change record; no
+  change type is public (decided by the architect, 2026-10-07T11:17:12Z:
+  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
   the order of RAFT SURFACE: sign, write and sync, queue the messages, apply. A ticker
