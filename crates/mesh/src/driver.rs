@@ -245,10 +245,10 @@ impl Mesh {
     /// # Errors
     ///
     /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
-    /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
-    ///   configuration. The group does not see the change.
     /// - [`Error::Pool`] while an earlier write of the log waits for a block. The group
     ///   does not see the change.
+    /// - [`Error::PeerNotVoter`] when `peer` is the key of no voter of this node's
+    ///   configuration. The group does not see the change.
     pub(crate) async fn answer(
         &self,
         peer: PublicKey,
@@ -256,7 +256,7 @@ impl Mesh {
     ) -> Result<Message, Error> {
         {
             let group = self.group.borrow();
-            group.running()?;
+            group.taking()?;
             let Voters { incoming, outgoing } = group.raft.voters();
             let holds = |voter: &node::Key| {
                 group.state.member(*voter).map(Member::public_key) == Some(peer)
@@ -1944,6 +1944,49 @@ mod tests {
             node.clock().sleep(TICK).await;
             assert!(quiet(&mesh, 2).await);
             assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+        });
+    }
+
+    // The group drops each of them in a wait, so it pays for no check of one.
+    #[test]
+    fn a_group_that_waits_for_a_block_checks_the_wait_first() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let config = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let held = fill(&pool);
+            let heartbeat = || proven(2, 1, Body::Heartbeat { commit: 0 });
+            let mut forged = heartbeat();
+            let proof = forged.proof.as_mut().unwrap();
+            proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+            let stranger = message(4, 1, Body::Heartbeat { commit: 0 });
+            let messages = [
+                (public(3), heartbeat(), Error::Spoofed { from: key(2) }),
+                (public(4), stranger, Error::NotVoter { from: key(4) }),
+                (
+                    public(2),
+                    forged,
+                    Error::Grant(grant::Error::Forged { voter: key(3) }),
+                ),
+            ];
+            assert_eq!(mesh.receive(public(2), heartbeat()), Ok(()));
+            node.clock().sleep(TICK).await;
+            for (peer, message, _) in messages.clone() {
+                assert_eq!(mesh.receive(peer, message), Err(exhausted(327)));
+            }
+            let answer = mesh.answer(public(4), home(4)).await;
+            assert_eq!(answer, Err(exhausted(327)));
+            drop(held);
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            for (peer, message, refused) in messages {
+                assert_eq!(mesh.receive(peer, message), Err(refused));
+            }
+            let answer = mesh.answer(public(4), home(4)).await;
+            assert_eq!(answer, Err(Error::PeerNotVoter { peer: public(4) }));
         });
     }
 
