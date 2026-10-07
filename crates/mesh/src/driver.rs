@@ -78,6 +78,8 @@ pub(crate) struct Config {
 #[derive(Clone)]
 pub(crate) struct Mesh {
     group: Rc<RefCell<Group>>,
+    time: clock::Reader,
+    entropy: Entropy,
 }
 
 impl Mesh {
@@ -133,14 +135,20 @@ impl Mesh {
             watches: BTreeMap::new(),
             proposals: Vec::new(),
             slots: 0,
-            time: config.time,
-            entropy: config.entropy.clone(),
         }));
         let weak = Rc::downgrade(&group);
-        config
-            .tasks
-            .spawn(run(weak, log, signer, config.clock, config.entropy));
-        Ok(Self { group })
+        config.tasks.spawn(run(
+            weak,
+            log,
+            signer,
+            config.clock,
+            config.entropy.clone(),
+        ));
+        Ok(Self {
+            group,
+            time: config.time,
+            entropy: config.entropy,
+        })
     }
 
     /// A watch of the home of `index`.
@@ -295,15 +303,14 @@ impl Mesh {
     ///   is before the Unix epoch, where a UUIDv7 key has no time.
     /// - [`Error::Status`] when `request` names more than 64 status channels.
     pub(crate) fn stamp(&self, request: Request) -> Result<Change, Error> {
-        let group = self.group.borrow();
-        let mesh = group.time.now().mesh.ok_or(Error::Unsynced)?;
+        let mesh = self.time.now().mesh.ok_or(Error::Unsynced)?;
         let at = mesh.latest;
-        if at < Stamp::from_nanos(0) {
+        if at < Stamp::EPOCH {
             return Err(Error::Unsynced);
         }
         let key = |name| {
             let mut random = [0; 16];
-            group.entropy.fill(&mut random);
+            self.entropy.fill(&mut random);
             (name, channel::Key::v7(at, u128::from_le_bytes(random)))
         };
         let keys = request.status.into_iter().map(key).collect();
@@ -408,8 +415,6 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch.
     slots: u64,
-    time: clock::Reader,
-    entropy: Entropy,
 }
 
 impl Group {
@@ -2228,7 +2233,7 @@ mod tests {
 
     /// The join of node `id` as `plant.node<id>`, which ticket 7 admits.
     fn join(id: u8) -> Change {
-        join_with(&common::member(id).card, 7, Stamp::from_nanos(0))
+        join_with(&common::member(id).card, 7, Stamp::EPOCH)
     }
 
     /// The request of node `id` as `plant.node<id>`, which ticket `ticket` admits, with
@@ -2411,7 +2416,7 @@ mod tests {
         let other = common::signed(2, "plant.other");
         let changes = [
             encoded(&ticket()),
-            encoded(&join_with(&other, 7, Stamp::from_nanos(0))),
+            encoded(&join_with(&other, 7, Stamp::EPOCH)),
             encoded(&home(1)),
         ];
         let mut cluster = Cluster::new(5);
@@ -2520,7 +2525,7 @@ mod tests {
             let Change::Join(join) = stamped else {
                 panic!("{stamped:?} is not a join")
             };
-            assert_eq!(join.at, Stamp::from_nanos(0));
+            assert_eq!(join.at, Stamp::EPOCH);
         });
     }
 
