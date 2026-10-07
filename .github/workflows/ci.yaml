@@ -13,22 +13,27 @@ concurrency:
 
 jobs:
   # A skipped required job counts as passed. So a job skips only when this filter ran
-  # and found no change. A push or a failed filter runs every job.
+  # and found no change. A direct push or a failed filter runs every job. A merge queue
+  # push skips every job, because the queue already ran them on the same commit.
   changes:
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.actor == 'github-merge-queue[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      deps: ${{ steps.filter.outputs.deps }}
-      models: ${{ steps.filter.outputs.models }}
+      rust: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.rust }}
+      deps: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.deps }}
+      models: >-
+        ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.models }}
     steps:
       # In the merge queue, the filter diffs the group's base and head in a clone.
       - if: github.event_name == 'merge_group'
         uses: actions/checkout@v4
-      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+      - if: github.event_name != 'push'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: filter
         with:
           base: ${{ github.event.merge_group.base_sha }}
@@ -172,9 +177,8 @@ jobs:
         env:
           # A mutant can allocate in a loop until the host runs out of memory, which
           # kills the runner. Each test process gets 4 GiB, so the mutant aborts and
-          # is caught. The cap counts reserved memory, not touched pages: each sim
-          # node in a transport test reserves about 110 MiB for its block pool, so 8
-          # threads of tests with 4 nodes stay under it.
+          # is caught. The cap counts reserved memory, not touched pages: a sim test
+          # reserves 236 MiB for its block pool, so 8 threads stay under it.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=4294967296 --
           RUST_TEST_THREADS: 8
         run: |
