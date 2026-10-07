@@ -1,0 +1,6 @@
+{
+  "name": "factory",
+  "version": "0.1.0",
+  "description": "Messages between the factory's Claude Code sessions over IoT Core",
+  "author": { "name": "Synnax Labs" }
+}
