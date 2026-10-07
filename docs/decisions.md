@@ -2455,12 +2455,14 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
-  as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
-  datagrams that arrive at it are lost, and a send still works. Approved by the
-  coordinator on #907. Built by `simulation` in #926. Amended (2026-10-07, #1255): a
-  receive first gives the datagrams queued before the fault, then `EIO`, so a test
-  can put a last datagram and the error in one poll (laptop.architect-2:
-  https://github.com/synnaxlabs/foundation/issues/1255). Amended (2026-10-06, #943):
+  as when the OS breaks it, until the socket drops: each receive first gives the
+  datagrams queued before the fault, then `EIO`; the datagrams that arrive at it after
+  the fault are lost, and a send still works. A broken socket still holds its receive
+  queue, so the queue stays readable. A pulled serial adapter takes its buffer with it,
+  so `Node::fail_serial` loses its unread bytes. Approved by the coordinator on #907;
+  the queue before `EIO` approved by laptop.architect-2 on 2026-10-07
+  (https://github.com/synnaxlabs/foundation/issues/1255). Built by `simulation` in
+  #926. Amended (2026-10-06, #943):
   `link::Config::rate` limits a link to that many bytes per second, counted as IP
   packets with their IP and UDP or TCP headers. Each direction of a link sends one
   packet at a time: a packet starts when it is sent or when the packet before it has
