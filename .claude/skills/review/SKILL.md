@@ -2,8 +2,8 @@
 name: review
 description:
   Adversarial review of a Foundation pull request by fresh reviewer agents, by tier,
-  with a second round on the fix commits. Use on each draft PR before it merges (a
-  builder's, a record, or a rule PR), when asked to review a PR, or after fix commits.
+  with a second round on the fix commits. Use on each PR before it merges (a builder's,
+  a red-team, a record, or a rule PR), when asked to review a PR, or after fix commits.
   Argument: the PR number.
 ---
 
@@ -57,11 +57,11 @@ command outside that worktree. Remove each worktree when its agent returns
    what goes wrong, and the fix. It ends with three lines. First `Deferred:` and `none`,
    or the issue of each deferred finding, each with the link to the architect's OK in a
    risk crate. Then `Public surface:` and `none`, or each public item and crate
-   dependency that the PR changes (the `architecture` report names them, and in a later
-   round the `reviewer` report names those of its range), each with the link to the
-   architect's approval once it exists. A later round keeps each item of the round
-   before it. Then `Hot path:` as the `architecture` report gives it, or in a later
-   round the `reviewer` report.
+   dependency that the PR changes (the `architecture` report names them, and in a round
+   with no `architecture` agent the `reviewer` report names those of its range), each
+   with the link to the architect's approval once it exists. A later round keeps each
+   item of the round before it. Then `Hot path:` as the `architecture` report gives it,
+   or, in a round with no `architecture` agent, the `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A deferral to an existing issue is a comment on that
@@ -163,5 +163,5 @@ the `Public surface:` line of the last round comment links the architect's appro
 each item, each finding of an architect review has its fix commit or a linked answer,
 and each later step that a round, an architect review, an architect's ruling, or an
 issue that the PR closes names is stated on an open issue that does it (a new issue, or
-a comment on an existing one) or as a trigger in the decisions entry. Only then does the
-author run `gh pr ready`.
+a comment on an existing one) or as a trigger in the decisions entry. Only then is the
+PR marked ready: by its author, or by `laptop.monitor` for a red-team or rule PR.

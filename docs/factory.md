@@ -105,8 +105,9 @@ that pass in CI.
 
 - A ruleset on `main` requires the CI checks, the merge queue, and code-owner review,
   with zero other approvals.
-- After its local gate and review, the author runs `gh pr merge <n> --auto`. A red-team
-  PR is the one exception: after the director approves it, `laptop.monitor` queues it.
+- After its local gate and review, the author runs `gh pr merge <n> --auto`. Two PRs are
+  exceptions, and `laptop.monitor` marks each ready and queues it: a red-team PR after
+  the director approves it, and the director's rule PR after the person approves it.
   The queue tests each PR on top of `main` and merges it.
 - Code owners (`.github/CODEOWNERS`): the person owns `oracles/` (except the fuzz
   inputs in `oracles/fuzz/`), `.github/`, `CLAUDE.md`, and `.claude/`. Everything else
