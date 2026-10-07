@@ -12,7 +12,7 @@ use super::*;
 /// The largest message that node 2 takes, when a test sets no other.
 const LIMIT: usize = 1 << 16;
 
-/// The peer of node 1 at the address of node 2, with its transport.
+/// A peer of node 1, with its transport.
 struct Peer {
     node: sim::node::Node,
     transport: Transport,
@@ -32,7 +32,7 @@ impl Peer {
     ///
     /// # Panics
     ///
-    /// When `session` fails in that time.
+    /// When `session` or the transport fails in that time.
     async fn more(&self, session: &Session) -> [bool; 2] {
         let mut stream = pin!(session.accept());
         let mut other = pin!(self.transport.accept());
@@ -294,10 +294,11 @@ fn a_session_that_fails_leaves_the_session_to_each_other_member() {
         let receiver = stream(&session).await;
         peer.node.clock().sleep(seconds(10)).await;
         receiver.stop(Code(7));
+        let _receiver = stream(&session).await;
         peer.more(&session).await
     });
     sim.run_for(seconds(30)).unwrap();
-    assert_eq!(more.lock().unwrap().take(), Some([true, false]));
+    assert_eq!(more.lock().unwrap().take(), Some([false; 2]));
 }
 
 #[test]
@@ -454,7 +455,7 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
 
 /// Whether node 2, which takes a message of at most `limit` bytes, got the entry of
 /// 2000 bytes that node 1 proposed as the leader, and what `Peer::more` gave after 16
-/// messages, and again after node 2 stopped the stream.
+/// messages, and again after node 2 stopped the stream and got a new one.
 fn large(limit: usize) -> (bool, [[bool; 2]; 2]) {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
         let config = create_config(&node, &tasks, create_pool());
@@ -486,15 +487,15 @@ fn large(limit: usize) -> (bool, [[bool; 2]; 2]) {
         }
         let quiet = peer.more(&session).await;
         receiver.stop(Code(7));
+        let _receiver = stream(&session).await;
         (got, [quiet, peer.more(&session).await])
     })
 }
 
 #[test]
 fn a_message_that_is_too_large_for_the_peer_drops_and_its_stream_stays() {
-    let more = [[false; 2], [true, false]];
-    assert_eq!(large(LIMIT), (true, more));
-    assert_eq!(large(1472), (false, more));
+    assert_eq!(large(LIMIT), (true, [[false; 2]; 2]));
+    assert_eq!(large(1472), (false, [[false; 2]; 2]));
 }
 
 /// Asserts that node 2 gets a message, and that its stream and its session then end
