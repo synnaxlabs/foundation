@@ -17,6 +17,7 @@ use env::tasks::Tasks;
 use http::uri::{PathAndQuery, Scheme};
 use http::{HeaderValue, Request, Response, Uri, header};
 use http_body::Body as _;
+use hyper::body::Incoming;
 use hyper::client::conn::http1::{self, SendRequest};
 use types::time::Span;
 
@@ -32,9 +33,15 @@ const OPTIONS: tcp::Options = tcp::Options {
 };
 
 /// Sends HTTP/1.1 requests over `env`. It keeps one idle connection for each origin
-/// and reuses it. It drops an idle connection after 90 s or when the server closes
-/// it, and it drops the connection of a request that failed. A dropped client closes
-/// its idle connections. It stays on the thread that made it.
+/// and reuses it. It does not reuse a connection idle longer than 90 s, and the next
+/// send closes it. It drops a connection that the server closed, and the connection
+/// of a request that failed. A dropped client closes its idle connections. It stays
+/// on the thread that made it.
+///
+/// When a request on a reused connection fails before its response, the client sends
+/// it once more on a new connection: always when the connection did not write it, and
+/// for an idempotent method when it did. A request with another method then fails,
+/// because the server may have acted on it.
 ///
 /// ```
 /// use bytes::Bytes;
@@ -66,7 +73,8 @@ pub struct Config {
     pub clock: Clock,
     /// Runs each connection's I/O.
     pub tasks: Tasks,
-    /// The longest a request may take, from the connect to the last body byte. A
+    /// The longest a request may take, from the call to `send` to the last body
+    /// byte. A
     /// timeout below zero acts as zero. One that passes the end of the clock never
     /// fires.
     pub timeout: Span,
@@ -126,14 +134,35 @@ impl Client {
     ) -> Result<Response<Bytes>, Error> {
         let (mut parts, body) = request.into_parts();
         let remote = remote(&parts.uri)?;
-        let mut sender = match self.pool.take(remote, self.clock.now()) {
-            Some(sender) => sender,
-            None => self.connect(remote).await?,
-        };
         origin_form(&mut parts);
-        let response = sender
-            .send_request(Request::from_parts(parts, Whole(Some(body))))
-            .await?;
+        let request = Request::from_parts(parts, Whole(Some(body)));
+        let request = match self.pool.take(remote, self.clock.now()) {
+            Some(mut sender) => {
+                // The server may have closed the idle stream before this request
+                // reached it. RFC 9112 lets a client send an idempotent request again.
+                let spare = request.method().is_idempotent().then(|| copy(&request));
+                match sender.try_send_request(request).await {
+                    Ok(response) => return self.read(remote, sender, response).await,
+                    Err(mut error) => match error.take_message().or(spare) {
+                        Some(request) => request,
+                        None => return Err(error.into_error().into()),
+                    },
+                }
+            }
+            None => request,
+        };
+        let mut sender = self.connect(remote).await?;
+        let response = sender.send_request(request).await?;
+        self.read(remote, sender, response).await
+    }
+
+    /// Reads the whole body of `response`, then keeps `sender` for `remote`.
+    async fn read(
+        &self,
+        remote: SocketAddr,
+        sender: SendRequest<Whole>,
+        response: Response<Incoming>,
+    ) -> Result<Response<Bytes>, Error> {
         let (parts, mut incoming) = response.into_parts();
         let mut bytes = Vec::new();
         while let Some(frame) =
@@ -183,6 +212,16 @@ fn remote(uri: &Uri) -> Result<SocketAddr, Error> {
         .unwrap_or(host);
     let ip: IpAddr = host.parse().map_err(|_not_ip| fail())?;
     Ok(SocketAddr::new(ip, authority.port_u16().unwrap_or(80)))
+}
+
+/// A copy of `request`, to send again.
+fn copy(request: &Request<Whole>) -> Request<Whole> {
+    let mut copy = Request::new(Whole(request.body().0.clone()));
+    *copy.method_mut() = request.method().clone();
+    *copy.uri_mut() = request.uri().clone();
+    *copy.version_mut() = request.version();
+    copy.headers_mut().clone_from(request.headers());
+    copy
 }
 
 /// Moves the authority into `Host`, unless the request has one, and leaves the path

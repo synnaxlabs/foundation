@@ -1614,11 +1614,14 @@ How to read this record:
   HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
   HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
   Decided by the coordinator with `advisor` on 2026-10-06 (#341). The client keeps one
-  idle connection for each origin and drops one that is idle longer than 90 s (the
-  `hyper-util` default), read on the `env` clock: it sends no keep-alive, and a
-  firewall or NAT may drop the state of an idle stream. Decided by the coordinator
-  with `advisor` on 2026-10-06
-  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924).
+  idle connection for each origin. It does not reuse one that is idle longer than 90 s
+  (the `hyper-util` default), read on the `env` clock, and the next send closes it: the
+  client sends no keep-alive, and a firewall or NAT may drop the state of an idle
+  stream. Decided by the coordinator with `advisor` on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). From
+  the review of #1111: a request that fails on a reused connection before its response
+  goes once more on a new connection, when the connection did not write it or its
+  method is idempotent (RFC 9112).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a

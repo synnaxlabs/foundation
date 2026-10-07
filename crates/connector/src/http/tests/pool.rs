@@ -1,6 +1,10 @@
 use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
+use http::Request;
+
+use env::clock::Clock;
 use env::net::{Tcp, tcp};
 use types::time::{Monotonic, Span};
 
@@ -16,8 +20,9 @@ const OVER: Span = Span::from_nanos(IDLE_MAX.nanos() + 1);
 enum Reply {
     /// Writes the bytes and waits for the next request.
     Bytes(String),
-    /// Writes the bytes and closes the stream.
-    Close(String),
+    /// Writes the bytes, waits for the span, and closes the stream, as a server
+    /// with a keep-alive timeout does.
+    Close(String, Span),
     /// Writes nothing and waits for the next request.
     Nothing,
 }
@@ -65,7 +70,7 @@ impl Network {
                         let (log, answer, clock) =
                             (Arc::clone(&slot), Arc::clone(&answer), clock.clone());
                         tasks.spawn(async move {
-                            answer_each(stream, index, &log, &*answer).await;
+                            answer_each(stream, index, &log, &*answer, &clock).await;
                             log.lock().expect("no panic under the lock").streams
                                 [index]
                                 .1 = Some(clock.now());
@@ -83,6 +88,7 @@ async fn answer_each(
     index: usize,
     log: &Mutex<Log>,
     answer: &(dyn Fn(usize) -> Reply + Send + Sync),
+    clock: &Clock,
 ) {
     loop {
         match request(&mut stream).await {
@@ -96,8 +102,9 @@ async fn answer_each(
         };
         match answer(count) {
             Reply::Bytes(bytes) => write(&mut stream, bytes.as_bytes()).await,
-            Reply::Close(bytes) => {
+            Reply::Close(bytes, idle) => {
                 write(&mut stream, bytes.as_bytes()).await;
+                clock.sleep(idle).await;
                 poll_fn(|cx| stream.poll_close(cx))
                     .await
                     .expect("the close works");
@@ -121,7 +128,7 @@ fn sends(network: &Network, port: u16, n: usize) -> Vec<Step> {
     (0..n).map(|_| Step::Send(get(&url))).collect()
 }
 
-fn all_ok(outcomes: &[Result<http::Response<bytes::Bytes>, Error>]) {
+fn all_ok(outcomes: &[Result<http::Response<Bytes>, Error>]) {
     for outcome in outcomes {
         let response = outcome.as_ref().expect("the server answers");
         assert_eq!(response.body().as_ref(), b"ok");
@@ -164,7 +171,7 @@ fn opens_a_new_stream_after_90_s_idle() {
 #[test]
 fn opens_a_new_stream_when_the_server_closed_the_old_one() {
     let mut network = Network::new(23);
-    let log = network.serve_each(PORT, |_| Reply::Close(OK.into()));
+    let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), Span::ZERO));
     let mut steps = sends(&network, PORT, 2);
     steps.insert(1, Step::Wait(Span::SECOND));
     all_ok(&network.run(steps));
@@ -267,6 +274,71 @@ fn keeps_the_stream_open_until_the_client_drops() {
     let (start, end) = log.lock().expect("no panic").streams[0];
     let end = end.expect("the drop ended it");
     assert!(after(start, Span::MINUTE) <= end, "{start:?} {end:?}");
+}
+
+/// The steps of two sends, where the second goes out after the server closed the
+/// idle stream, but before its FIN reaches the client.
+fn race(network: &mut Network, second: Request<Bytes>) -> Vec<Step> {
+    race_at(
+        network,
+        second,
+        RACE_IDLE.nanos() - 100 * Span::MICROSECOND.nanos(),
+    )
+}
+
+/// The steps of two sends, `wait` nanoseconds apart.
+fn race_at(network: &mut Network, second: Request<Bytes>, wait: i64) -> Vec<Step> {
+    let mut steps = sends(network, PORT, 1);
+    steps.push(Step::Wait(Span::from_nanos(wait)));
+    steps.push(Step::Send(second));
+    steps
+}
+
+const RACE_IDLE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
+
+#[test]
+fn sends_a_get_again_when_the_server_closed_the_idle_stream_first() {
+    let mut network = Network::new(31);
+    let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
+    let url = format!("http://{}/", network.remote());
+    let steps = race(&mut network, get(&url));
+    all_ok(&network.run(steps));
+    assert_eq!(log.lock().expect("no panic").requests, [0, 1]);
+}
+
+fn post(network: &Network) -> Request<Bytes> {
+    Request::post(format!("http://{}/write", network.remote()))
+        .body(Bytes::from_static(b"m v=1 5"))
+        .expect("a valid request")
+}
+
+#[test]
+fn sends_a_post_again_when_the_close_came_before_the_write() {
+    // In this run, the FIN reaches the client as the second send starts, so `hyper`
+    // cancels the request and does not write it.
+    let mut network = Network::new(50);
+    let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
+    let second = post(&network);
+    let steps = race_at(&mut network, second, RACE_IDLE.nanos());
+    all_ok(&network.run(steps));
+    assert_eq!(log.lock().expect("no panic").requests, [0, 1]);
+}
+
+#[test]
+fn fails_a_post_when_the_server_closed_the_idle_stream_first() {
+    let mut network = Network::new(31);
+    let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
+    let second = post(&network);
+    let steps = race(&mut network, second);
+    let outcomes = network.run(steps);
+    all_ok(&outcomes[..1]);
+    let error = outcomes[1].as_ref().expect_err("the stream closed");
+    assert!(matches!(error, Error::Protocol(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "the exchange failed: connection closed before message completed"
+    );
+    assert_eq!(log.lock().expect("no panic").requests, [0]);
 }
 
 /// The digest of a run with two idle streams that one send drops at once.
