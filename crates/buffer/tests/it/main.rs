@@ -174,6 +174,23 @@ impl Shard {
             buffer.committed().await.expect("commits");
         }
     }
+
+    /// Makes a ring with a data record of two blocks at `BLOCK` and a data record at
+    /// `3 * BLOCK`, and gives its layout.
+    async fn create_long_record(&self) -> Layout {
+        let ring = layout(AREA, 3 * to_usize(BLOCK) - 9);
+        let mut slots = Slots::new();
+        let buffer = self.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let long = Parts::from(self.block(4244));
+        for (first, stamp, parts) in [(0, 30, long), (3, 60, Parts::default())] {
+            buffer
+                .append([entry(1, a, Path::Live, first, 3, Some(stamp), parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        ring
+    }
 }
 
 fn to_usize(value: u64) -> usize {
@@ -2195,7 +2212,8 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
     });
 }
 
-/// A header block is before the first record, and its version byte reads as a kind.
+/// The first record follows the chain value of the header, which the helper does not
+/// read.
 #[test]
 #[should_panic(expected = "the first record of the area follows no record")]
 fn seal_refuses_the_first_record_of_the_area() {
@@ -2205,23 +2223,30 @@ fn seal_refuses_the_first_record_of_the_area() {
     });
 }
 
+#[test]
+#[should_panic(expected = "no record starts at 8192")]
+fn seal_refuses_a_block_inside_a_record() {
+    run(115, Memory::default(), |shard| async move {
+        shard.create_long_record().await;
+        shard.seal(2 * BLOCK);
+    });
+}
+
+#[test]
+#[should_panic(expected = "no chain value of kind 0 before 16384")]
+fn seal_refuses_a_record_after_a_block_that_is_no_record() {
+    run(116, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.seal(4 * BLOCK);
+    });
+}
+
 /// The record before the invalid one has two blocks, and a byte of its body in the
 /// second block reads as the kind of a data record.
 #[test]
 fn a_record_of_an_unknown_kind_after_a_long_record_is_invalid() {
     run(114, Memory::default(), |shard| async move {
-        let ring = layout(AREA, 3 * to_usize(BLOCK) - 9);
-        let mut slots = Slots::new();
-        let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
-        let long = Parts::from(shard.block(4244));
-        for (first, stamp, parts) in [(0, 30, long), (3, 60, Parts::default())] {
-            buffer
-                .append([entry(1, a, Path::Live, first, 3, Some(stamp), parts)])
-                .expect("queues");
-            buffer.committed().await.expect("commits");
-        }
-        drop(buffer);
+        let ring = shard.create_long_record().await;
         let kind = to_usize(AREA_START + 3 * BLOCK) + 8;
         assert_eq!(shard.memory.bytes(RING)[kind - to_usize(BLOCK)], DATA);
         shard.memory.put(RING, kind, &[4]);
