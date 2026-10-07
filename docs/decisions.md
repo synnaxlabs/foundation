@@ -1896,8 +1896,8 @@ How to read this record:
   key cannot come from the public key, which can rotate, so the signed card is its one
   place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). The
-  field is `ephemeral`, never `expiry`, because `ticket::Options::expiry` is a `Stamp`
-  with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
+  field is `ephemeral`, never `expiry`, because the join ticket's expiry is a mesh time
+  (`Stamp`) with another meaning (decided by `laptop.architect`, 2026-10-07T10:14:01Z:
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035800302). Decided
   by the architect, #242
   (https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
@@ -3123,7 +3123,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral expiry, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; removal of an ephemeral node after its time offline | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
