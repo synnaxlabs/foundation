@@ -26,7 +26,7 @@ Launch in parallel every reviewer the PR needs:
 | --- | --- |
 | Every PR | `reviewer` |
 | A code PR: it changes a `.rs` file, a `Cargo.toml`, or `Cargo.lock` | add `architecture` and `breaker` |
-| A hot path: it changes code that runs once per sample, series, frame, or data message, or a public item that its caller on record calls at that rate, or code in a crate's `src/` that no product path runs but that a benchmark runs in its timed loop (such as a `GlobalAlloc` that a benchmark holds), whatever its body says. A change to a bench file alone is not one. A control message whose rate does not grow with the data (raft, membership) is not one. The `Hot path:` line of the `architecture` report decides | add `performance`. It must report measured numbers for `main` and the PR, with the machine, and, for code that no product path runs, for each benchmark that holds it. For a stub, it states what the surface makes each message and each part cost, read from the code under it, with no numbers. Run it again if it does not |
+| A hot path: it changes code that runs once per sample, series, frame, or data message, or a public item that its caller on record calls at that rate, or code in a crate's `src/` that exists only for tests and benchmarks and that a benchmark runs in its timed loop (such as a counting `GlobalAlloc`), whatever its body says. A change to a bench file alone is not one. A control message whose rate does not grow with the data (raft, membership) is not one. The `Hot path:` line of the `architecture` report decides | add `performance`. It must report measured numbers for `main` and the PR, with the machine, and, for code that exists only for tests and benchmarks, for each benchmark that runs it in its timed loop. For a stub, it states what the surface makes each message and each part cost, read from the code under it, with no numbers. Run it again if it does not |
 | A flagged oracle weakening | add one `reviewer` per weakening, told to argue for fixing the code instead |
 
 When the PR changes a public surface or a crate's dependencies, also send its link to
@@ -136,13 +136,13 @@ In 4 of the 5 worst escaped defects, the defect came in through a fix or a defer
 nothing checked again. So when round 1 led to fix commits:
 
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
-   with the round 1 comment and each architect review attached. Only a range that
-   changes no `.rs` line but comments skips `breaker`, and its round comment says so.
-   The `reviewer` also gets each answer that changed no code, and checks it
-   (`.claude/agents/reviewer.md`). The round comment puts each deferral that its report
-   names on its `Deferred:` line. Its report gives the `Public surface:` and `Hot path:`
-   lines for the range. The round comment adds each item of the first to its own
-   `Public surface:` line, and copies the second. When the `Hot path:` line names a
+   with the round 1 comment and each architect review attached. Only a range in which
+   the check counts no code change (Round comment) skips `breaker`, and its round
+   comment says so. The `reviewer` also gets each answer that changed no code, and
+   checks it (`.claude/agents/reviewer.md`). The round comment puts each deferral that
+   its report names on its `Deferred:` line. Its report gives the `Public surface:` and
+   `Hot path:` lines for the range. The round comment adds each item of the first to its
+   own `Public surface:` line, and copies the second. When the `Hot path:` line names a
    function, run `performance` again on the range, and update the Performance section
    with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
@@ -156,23 +156,20 @@ nothing checked again. So when round 1 led to fix commits:
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge, whose
 `git show --remerge-diff <merge>` is empty, needs no round. A merge with a resolution
-gets a round on that diff. When the merge has a conflict in a `.rs`, `Cargo.toml`, or
-`Cargo.lock` file (`git merge-tree`), the round runs `reviewer` and `breaker`, also when
-the resolution changes only comments. When it has no such conflict and the diff changes
-no `.rs` line, the round runs `reviewer` alone, and its comment says so. Otherwise it
-runs as step 1 says.
+gets a round on that diff, which runs as step 1 says.
 
 ## Done
 
 Review is done when the last round comment ends at the PR head, or at a head before
 clean merges of `main`, and finds nothing (each `Text fixes:` item applied as "Second
 round" step 2 says), each round comment names each reviewer its round requires (round 1:
-the table; a later round: `reviewer`, `breaker` unless its range changes only comments,
-and `performance` with new numbers when its `Hot path:` line names a function), the
-`Deferred:` line of each round comment links the OK of each deferral in a risk crate,
-the `Public surface:` line of the last round comment links the architect's approval of
-each item, each finding of an architect review has its fix commit or a linked answer,
-and each later step that a round, an architect review, an architect's ruling, or an
-issue that the PR closes names is stated on an open issue that does it (a new issue, or
-a comment on an existing one) or as a trigger in the decisions entry. Only then is the
-PR marked ready: by its author, or by `laptop.monitor` for a red-team or rule PR.
+the table; a later round: `reviewer`, `breaker` unless the check counts no code change
+in its range, and `performance` with new numbers when its `Hot path:` line names a
+function), the `Deferred:` line of each round comment links the OK of each deferral in a
+risk crate, the `Public surface:` line of the last round comment links the architect's
+approval of each item, each finding of an architect review has its fix commit or a
+linked answer, and each later step that a round, an architect review, an architect's
+ruling, or an issue that the PR closes names is stated on an open issue that does it (a
+new issue, or a comment on an existing one) or as a trigger in the decisions entry. Only
+then is the PR marked ready: by its author, or by `laptop.monitor` for a red-team or
+rule PR.

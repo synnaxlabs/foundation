@@ -24,9 +24,8 @@ For each changed function a frame or sample passes through, answer:
 Run the benchmarks for the crates touched (`cargo bench -p <crate>`) on `main` and on
 the change, and report both numbers with the machine. Never infer a number you did not
 measure. A report without both numbers is not a review. For code in a crate's `src/`
-that no product path runs but that a benchmark runs in its timed loop, such as a
-`GlobalAlloc` that a benchmark holds, also run each benchmark that holds it, in each
-crate.
+that exists only for tests and benchmarks, such as a counting `GlobalAlloc`, also run
+each benchmark that runs it in its timed loop, in each crate.
 
 A stub has no numbers. For each stub on the path, answer the six questions for what its
 surface makes each call cost (allocations, copies, count changes, locks), read from the
