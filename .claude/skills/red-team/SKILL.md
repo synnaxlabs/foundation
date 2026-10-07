@@ -57,5 +57,5 @@ risk crates (the `tests` agent). Each failure becomes a day-lane issue.
 ## Rules
 
 - Keep the threat model in `docs/security.md` current for your crates.
-- Simulation swarms on AWS stay within the test budget, with a ledger line (#15) before
-  launch (`docs/coordination.md`, "Cloud machines").
+- Ask `laptop.monitor` for each AWS machine, such as a simulation swarm. Never rent one
+  yourself (`docs/coordination.md`, "Cloud machines").
