@@ -152,6 +152,13 @@ pub(crate) struct Run {
     pub(crate) offset: u64,
 }
 
+impl Run {
+    /// Whether the record of the run is before `offset`.
+    fn before(&self, offset: u64) -> bool {
+        self.offset < offset
+    }
+}
+
 /// What a read of a path from a mark finds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Found {
@@ -217,7 +224,7 @@ impl Log {
                 return Ok(());
             }
         }
-        while self.runs.front().is_some_and(|run| run.offset < hidden) {
+        while self.runs.front().is_some_and(|run| run.before(hidden)) {
             self.runs.pop_front();
         }
         self.runs.push_back(Run { start, offset });
@@ -277,8 +284,8 @@ impl Logs {
             .saturating_sub(1);
         // The runs are in offset order too: only a hidden choice needs a search.
         let chosen = match log.runs.get(chosen) {
-            Some(run) if run.offset < self.hidden => {
-                log.runs.partition_point(|run| run.offset < self.hidden)
+            Some(run) if run.before(self.hidden) => {
+                log.runs.partition_point(|run| run.before(self.hidden))
             }
             _ => chosen,
         };
