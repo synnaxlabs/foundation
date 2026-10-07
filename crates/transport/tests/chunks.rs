@@ -3,9 +3,10 @@
 //! frames cannot grow the list. A packet holds at most 1472 bytes, and noq-proto
 //! keeps each packet's bytes in place until their spare bytes pass the larger of
 //! 32 KiB and 1.5 times the bytes it holds, which these messages do not reach. So
-//! the only heap block that holds all of a longer pattern is that buffer. The count
-//! covers each thread, so this binary has no test harness. The sim runs on one
-//! thread, so the count is exact.
+//! the only heap block that holds all of a longer pattern is that buffer. A read of
+//! 65 chunks also makes one allocation more than a read of 64: the buffer, and no
+//! larger list. The counts cover each thread, so this binary has no test harness.
+//! The sim runs on one thread, so the counts are exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -49,9 +50,9 @@ const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its send: past the server's read.
 const LIVE: Span = Span::from_nanos(2_000_000_000);
 
-/// The server's one poll of its read, and the heap blocks that hold the pattern that
-/// the poll frees.
-type Out = (Poll<Result<Option<Vec<u8>>, Error>>, u64);
+/// The server's one poll of its read, the heap blocks that hold the pattern that the
+/// poll frees, and the allocations the poll makes.
+type Out = (Poll<Result<Option<Vec<u8>>, Error>>, u64, u64);
 
 fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
@@ -61,8 +62,10 @@ fn main() {
         (240_000, SECOND, 1),
         (1 << 18, LAST, 0),
     ];
+    let mut allocations = Vec::new();
     for (len, at, copies) in cases {
-        let (read, freed) = run(&pattern, len, at);
+        let (read, freed, allocated) = run(&pattern, len, at);
+        allocations.push(allocated);
         let Poll::Ready(Ok(Some(read))) = read else {
             panic!("{len} bytes: the read gave {read:?}");
         };
@@ -74,6 +77,14 @@ fn main() {
             "{len} bytes: the heap buffers that the read frees with the whole pattern"
         );
     }
+    let [full, past, ..] = allocations[..] else {
+        unreachable!("four cases")
+    };
+    assert_eq!(
+        past.checked_sub(full),
+        Some(1),
+        "the copy of a full list allocates only its buffer"
+    );
 }
 
 /// The [`Out`] of the server's read of a message of `len` bytes with `pattern` at
@@ -83,7 +94,7 @@ fn run(pattern: &[u8], len: usize, at: usize) -> Out {
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
-    let out = Arc::new(Mutex::new((Poll::Pending, 0)));
+    let out = Arc::new(Mutex::new((Poll::Pending, 0, 0)));
     serve(&server, pattern.to_vec(), Arc::clone(&out));
     let message = pattern.to_vec();
     sim.run_on(&client, move |node, tasks| async move {
@@ -106,7 +117,7 @@ fn run(pattern: &[u8], len: usize, at: usize) -> Out {
     })
     .expect("the run ends");
     let out = out.lock().expect("not poisoned");
-    (out.0.clone(), out.1)
+    (out.0.clone(), out.1, out.2)
 }
 
 /// Starts the server on `node`. Once the whole message is in, it reads it in one
@@ -123,14 +134,16 @@ fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         own.clock().sleep(READ).await;
-        let (read, freed) = {
+        let ((read, freed), allocated) = {
             let mut recv = pin!(receiver.recv());
             let mut cx = Context::from_waker(Waker::noop());
-            ALLOCATOR.freed_holding(&pattern, || recv.as_mut().poll(&mut cx))
+            ALLOCATOR.count(|| {
+                ALLOCATOR.freed_holding(&pattern, || recv.as_mut().poll(&mut cx))
+            })
         };
         let message =
             read.map(|read| read.map(|block| block.map(|block| block.to_vec())));
-        *out.lock().expect("not poisoned") = (message, freed);
+        *out.lock().expect("not poisoned") = (message, freed, allocated);
         drop(receiver);
     });
     drop(started.expect("a shard"));
