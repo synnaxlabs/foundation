@@ -3323,16 +3323,17 @@ How to read this record:
   `xtask globals` check allows only this case. The static also holds the state of
   `Allocator::freed_holding` (#349): a phase with a count of the frees that scan, the
   caller's needle while a call runs, and a found count, because Rust has no other way
-  to see a freed block. It also holds the bytes it holds, `Allocator::held`, one more
-  atomic count, so a test can bound the memory of a structure; the person's exception
-  covers it as it is. Decided by `laptop.architect` on 2026-10-07T14:33:00Z
-  (https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190).
-  `freed_holding` is the one exception to "Safe code is sound
+  to see a freed block. `freed_holding` is the one exception to "Safe code is sound
   for every input": the person said "#481 I approve A" on 2026-10-05. A freed block
   can hold bytes the program never wrote, such as padding or the spare capacity of a
   `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
   and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
-  3605); when Rust has one, `freed_holding` uses it and the exception goes.
+  3605); when Rust has one, `freed_holding` uses it and the exception goes. The static
+  also holds the count of `Allocator::held`: the bytes in the blocks that it gave out
+  and did not free, so a test can bound the memory of a structure. It is one more
+  atomic count, so the person's exception covers it as it is. Decided by
+  `laptop.architect` on 2026-10-07T14:33:00Z
+  (https://github.com/synnaxlabs/foundation/issues/1437#issuecomment-6040199190).
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
@@ -4157,7 +4158,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
-| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and the bytes it holds so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
