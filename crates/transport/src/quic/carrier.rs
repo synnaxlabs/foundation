@@ -22,8 +22,9 @@ use types::node::PublicKey;
 use types::time::Monotonic;
 
 use super::stream::{Incoming, Receiver, Sender};
+use super::wait::{self, RETRY};
 use super::{Endpoint, Event, connection};
-use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer, port};
+use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer, Status, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
 /// shard's other tasks.
@@ -58,6 +59,7 @@ impl Carrier {
             accepting: Vec::new(),
             failed: None,
             connects: 0,
+            waits: wait::Queue::default(),
         }));
         let task = Task::new(Rc::clone(&state), &clock, sender, receiver);
         tasks.spawn(task.run());
@@ -95,6 +97,12 @@ impl Carrier {
     /// before was given.
     pub(crate) async fn accept(&self) -> Result<Session, Error> {
         poll_fn(|cx| self.poll_accept(cx)).await
+    }
+
+    /// What the carrier counted.
+    pub(crate) fn status(&self) -> Status {
+        let state = self.0.borrow();
+        state.waits.status(state.clock.now())
     }
 
     /// Checks that the socket still works.
@@ -189,6 +197,8 @@ struct State {
     failed: Option<env::net::Error>,
     /// How many dials connected.
     connects: u64,
+    /// The reads that wait for a block.
+    waits: wait::Queue,
 }
 
 impl State {
@@ -263,6 +273,7 @@ impl State {
 
     /// Gives `error` to the session of `key`, unless it dropped.
     fn end(&mut self, key: connection::Key, error: Error) {
+        self.waits.end(self.clock.now(), key);
         if let Some(slot) = self.sessions.get_mut(&key) {
             slot.end = Some(error);
             slot.wake();
@@ -411,7 +422,7 @@ impl Session {
         sender: &mut Sender,
         message: &mut Option<Block>,
     ) -> Poll<Result<(), Error>> {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             sender.check_unfinished();
             let written = match message.take() {
                 Some(message) => endpoint.write(clock.now(), sender, message),
@@ -442,7 +453,7 @@ impl Session {
     /// After a [`Session::finish`] that gave `Ok`, or as [`Endpoint::finish`] does
     /// while the session is live.
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             sender.check_unfinished();
             if let Some(error) = &slot.end {
                 return Err(error.clone());
@@ -453,14 +464,15 @@ impl Session {
 
     /// Resets `sender`'s stream with `code`, as [`Endpoint::reset`] does.
     pub(crate) fn reset(&self, sender: Sender, code: Code) {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             slot.writing.remove(&sender.key().id);
             endpoint.reset(clock.now(), sender, code);
         });
     }
 
     /// Ready with the next whole message of `receiver`'s stream, `None` after the
-    /// last, or with the error.
+    /// last, or with the error. It takes the message's block through the carrier's
+    /// [`wait::Queue`], and waits there while it has no block.
     ///
     /// # Errors
     ///
@@ -470,33 +482,47 @@ impl Session {
         cx: &mut Context<'_>,
         receiver: &mut Receiver,
     ) -> Poll<Result<Option<Block>, Error>> {
-        self.with(
-            |endpoint, clock, slot| match endpoint.read(clock.now(), receiver) {
+        self.with(|endpoint, clock, slot, waits| {
+            let (now, stream, class) = (clock.now(), receiver.key(), receiver.class());
+            let mut asked = false;
+            let take = |pool: &_, len| {
+                asked = true;
+                waits.take(now, pool, stream, class, len, cx.waker())
+            };
+            let read = match endpoint.read(now, receiver, take) {
                 Ok(Poll::Pending) => {
-                    if let Some(error) = &slot.end {
-                        return Poll::Ready(Err(error.clone()));
-                    }
-                    register_one(&mut slot.reading, receiver.key().id, cx.waker());
-                    Poll::Pending
+                    let Some(error) = &slot.end else {
+                        if !asked {
+                            waits.park(now, stream);
+                        }
+                        register_one(&mut slot.reading, stream.id, cx.waker());
+                        return Poll::Pending;
+                    };
+                    Err(error.clone())
                 }
-                Ok(Poll::Ready(message)) => Poll::Ready(Ok(message)),
-                Err(error) => Poll::Ready(Err(error)),
-            },
-        )
+                Ok(Poll::Ready(message)) => Ok(message),
+                Err(error) => Err(error),
+            };
+            waits.leave(now, stream);
+            Poll::Ready(read)
+        })
     }
 
-    /// Ends a read of `receiver` that waits, as [`Endpoint::end_wait`] does.
+    /// Ends a read of `receiver` that waits, as [`Endpoint::end_wait`] does, and its
+    /// wait for a block.
     pub(crate) fn end_wait(&self, receiver: &mut Receiver) {
-        self.with(|endpoint, _, slot| {
+        self.with(|endpoint, clock, slot, waits| {
             slot.reading.remove(&receiver.key().id);
+            waits.leave(clock.now(), receiver.key());
             endpoint.end_wait(receiver);
         });
     }
 
     /// Stops `receiver`'s stream with `code`, as [`Endpoint::stop`] does.
     pub(crate) fn stop(&self, receiver: Receiver, code: Code) {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, waits| {
             slot.reading.remove(&receiver.key().id);
+            waits.leave(clock.now(), receiver.key());
             endpoint.stop(clock.now(), receiver, code);
         });
     }
@@ -509,7 +535,7 @@ impl Session {
         wakers: fn(&mut Slot) -> &mut Vec<Waker>,
         take: impl FnOnce(&mut Endpoint, &Clock, connection::Key) -> Option<T>,
     ) -> Poll<Result<T, Error>> {
-        self.with(|endpoint, clock, slot| {
+        self.with(|endpoint, clock, slot, _| {
             if let Some(error) = &slot.end {
                 return Poll::Ready(Err(error.clone()));
             }
@@ -525,7 +551,7 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn raw(&self, bytes: &[u8]) {
         let key = self.key;
-        self.with(|endpoint, _, _| {
+        self.with(|endpoint, _, _, _| {
             let connection = super::pair::connection(endpoint, key);
             let id = connection.streams().open(noq_proto::Dir::Uni);
             let mut send = connection.send_stream(id.expect("a stream"));
@@ -533,21 +559,25 @@ impl Session {
         });
     }
 
-    /// Runs `call` on the endpoint, the clock, and the session's slot, then wakes the
-    /// task to send what the call queued.
-    fn with<T>(&self, call: impl FnOnce(&mut Endpoint, &Clock, &mut Slot) -> T) -> T {
+    /// Runs `call` on the endpoint, the clock, the session's slot, and the reads
+    /// that wait for a block, then wakes the task to send what the call queued.
+    fn with<T>(
+        &self,
+        call: impl FnOnce(&mut Endpoint, &Clock, &mut Slot, &mut wait::Queue) -> T,
+    ) -> T {
         let mut state = self.state.borrow_mut();
         let State {
             endpoint,
             clock,
             task,
             sessions,
+            waits,
             ..
         } = &mut *state;
         let slot = sessions
             .get_mut(&self.key)
             .expect("invariant: a session keeps its slot until it drops");
-        let called = call(endpoint, clock, slot);
+        let called = call(endpoint, clock, slot, waits);
         if let Some(task) = task {
             task.wake_by_ref();
         }
@@ -598,6 +628,14 @@ struct Task {
     socket: Socket,
     /// Completes at the endpoint's deadline as of the last poll that changed it.
     sleep: Sleep,
+    retry: Retry,
+}
+
+/// The timer that wakes the first read that waits for a block once each [`RETRY`].
+struct Retry {
+    sleep: Sleep,
+    /// Whether `sleep` is armed for the reads that wait now.
+    armed: bool,
 }
 
 impl Task {
@@ -611,6 +649,10 @@ impl Task {
             state,
             socket: Socket::new(sender, receiver),
             sleep: clock.sleep_until(Monotonic(0)),
+            retry: Retry {
+                sleep: clock.sleep_until(Monotonic(0)),
+                armed: false,
+            },
         }
     }
 
@@ -659,10 +701,41 @@ impl Task {
             self.sleep.reset(deadline);
             more |= Pin::new(&mut self.sleep).poll(cx).is_ready();
         }
+        more |= self.retry.poll(cx, &state.waits, now, fresh);
         if more {
             cx.waker().wake_by_ref();
         }
         Poll::Pending
+    }
+}
+
+impl Retry {
+    /// Wakes the first read of `waits` when the timer is due, and arms it while
+    /// reads wait. Returns whether it is due again at once.
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+        waits: &wait::Queue,
+        now: Monotonic,
+        fresh: bool,
+    ) -> bool {
+        if !waits.waiting() {
+            self.armed = false;
+            return false;
+        }
+        if self.armed && self.sleep.deadline() <= now {
+            waits.wake_first();
+            self.armed = false;
+        }
+        if self.armed && !fresh {
+            return false;
+        }
+        if !self.armed {
+            self.sleep.reset(now + RETRY);
+            self.armed = true;
+        }
+        // Each poll of the sleep arms the timer again.
+        Pin::new(&mut self.sleep).poll(cx).is_ready()
     }
 }
 
@@ -793,17 +866,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
+    use block::{Config, Heap, Pool};
     use env::net::udp::{self, Transmit};
+    use noq_proto::{ConnectionHandle, Dir, Side, StreamId};
     use sim::Sim;
     use sim::node::Node;
     use types::node::PrivateKey;
-    use types::time::Span;
+    use types::time::{Monotonic, Span};
 
-    use super::{BATCHES, Carrier, Socket, register};
-    use crate::quic::Endpoint;
+    use super::{BATCHES, Carrier, Retry, Socket, register};
+    use crate::quic::{Endpoint, connection, stream, wait};
     use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::tls::public;
-    use crate::{Code, Error, Peer};
+    use crate::{Class, Code, Error, Peer};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -1112,6 +1187,65 @@ mod tests {
         wakers.into_iter().for_each(Waker::wake);
         let counts = [&one, &other].map(|count| count.0.load(Ordering::Relaxed));
         assert_eq!(counts, [1, 1]);
+    }
+
+    #[test]
+    fn the_retry_wakes_the_first_read_each_10_ms_with_the_last_task_waker() {
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let counts: [_; 3] =
+            std::array::from_fn(|_| Arc::new(Count(AtomicUsize::new(0))));
+        let [read, old, new] = counts
+            .each_ref()
+            .map(|count| Waker::from(Arc::clone(count)));
+        let woken = move || {
+            counts
+                .each_ref()
+                .map(|count| count.0.load(Ordering::Relaxed))
+        };
+        let (mut sim, client, _) = nodes(0);
+        shard(&client, CLIENT, |config, _| async move {
+            let clock = config.clock;
+            let start = clock.now();
+            let mut retry = Retry {
+                sleep: clock.sleep_until(Monotonic(0)),
+                armed: false,
+            };
+            let mut waits = wait::Queue::default();
+            let key = stream::Key {
+                connection: connection::Key {
+                    handle: ConnectionHandle(0),
+                    serial: 0,
+                },
+                id: StreamId::new(Side::Client, Dir::Uni, 0),
+            };
+            let config = Config { budget: 300 };
+            let memory = Heap::new(config.reservation());
+            let pool = Pool::new(config, memory);
+            // A 100-byte block takes 192 bytes of the budget.
+            let held = pool.alloc(100).expect("room");
+            let taken = waits.take(start, &pool, key, Class::Complete, 100, &read);
+            assert!(taken.is_none());
+            for task in [&old, &new] {
+                let mut cx = Context::from_waker(task);
+                assert!(!retry.poll(&mut cx, &waits, start, true));
+            }
+            clock.sleep(spans(Span::MILLISECOND, 9)).await;
+            assert_eq!(woken(), [0, 0, 0]);
+            clock.sleep(spans(Span::MILLISECOND, 2)).await;
+            assert_eq!(woken(), [0, 0, 1]);
+            let mut cx = Context::from_waker(&new);
+            assert!(!retry.poll(&mut cx, &waits, clock.now(), false));
+            assert_eq!(woken(), [1, 0, 1]);
+            clock.sleep(spans(Span::MILLISECOND, 10)).await;
+            assert_eq!(woken(), [1, 0, 2]);
+            drop(held);
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
