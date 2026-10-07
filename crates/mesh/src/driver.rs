@@ -681,6 +681,8 @@ mod tests {
         members: BTreeMap<u8, BTreeSet<u8>>,
         /// The records of those members on each node, at the same time.
         records: BTreeMap<u8, BTreeMap<u8, Member>>,
+        /// The region state of each node, at the same time.
+        states: BTreeMap<u8, region::State>,
         /// The join request that each node stamps.
         requests: BTreeMap<u8, Request>,
         /// The join that each node stamped.
@@ -996,7 +998,9 @@ mod tests {
             let records: BTreeMap<_, _> = (1..10)
                 .filter_map(|of| Some((of, mesh.member(key(of))?)))
                 .collect();
+            let state = mesh.group.borrow().state.clone();
             let mut board = board.lock().unwrap();
+            board.states.insert(id, state);
             board.homes.entry(id).or_default().push(home);
             board.members.insert(id, records.keys().copied().collect());
             board.records.insert(id, records);
@@ -2305,7 +2309,7 @@ mod tests {
     fn a_join_that_a_follower_stamps_admits_the_node_on_every_member() {
         let hour = NOW + Span::HOUR;
         let mut cluster = Cluster::new(2);
-        cluster.script_each(&[encoded(&ticket_of(8, "plant", false, hour))]);
+        cluster.script_each(&[encoded(&ticket_of(8, "plant", true, hour))]);
         cluster.start();
         cluster.run(seconds(5));
         let (leader, follower) = roles(&cluster);
@@ -2342,6 +2346,7 @@ mod tests {
         }
         cluster.script(home);
         cluster.run(seconds(2));
+        let repeat = join.clone();
         let Change::Join(join) = join else {
             panic!("{join:?} is not a join")
         };
@@ -2352,8 +2357,20 @@ mod tests {
             admission: join.admission,
             ..common::member(4)
         };
-        for (id, records) in cluster.board().records {
+        let board = cluster.board();
+        for (id, records) in board.records {
             assert_eq!(records.get(&4), Some(&admitted), "node {id}");
+        }
+        for (id, mut state) in board.states {
+            let uses = state.ticket(public(8)).map(|record| record.uses);
+            assert_eq!(uses, Some(1), "node {id}");
+            let again = state.apply(repeat.clone()).unwrap_err();
+            let duplicate = Refused::from(Unfit::Duplicate { key: key(4) });
+            assert_eq!(again, duplicate, "node {id}");
+            assert_eq!(
+                again.to_string(),
+                format!("node {} is already a member", key(4))
+            );
         }
     }
 
@@ -2462,7 +2479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_no_mesh_time_after_the_epoch_stamps_no_join() {
+    fn a_node_with_no_mesh_time_at_or_after_the_epoch_stamps_no_join() {
         for synced_before in [false, true] {
             solo(move |node, tasks| async move {
                 let time = if synced_before {
@@ -2480,8 +2497,7 @@ mod tests {
                 assert_eq!(stamped, Err(Error::Unsynced), "{synced_before}");
             });
         }
-        let text =
-            "this node has no mesh time after the Unix epoch, so it stamps no join";
+        let text = "this node has no mesh time at or after the Unix epoch, so it stamps no join";
         assert_eq!(Error::Unsynced.to_string(), text);
     }
 
