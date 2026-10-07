@@ -1,6 +1,8 @@
 //! `config::check` never panics on the documents of HCL files, gives the same entries
 //! for the files in either order or problems in both, and orders its problems as its
-//! doc says. Each `\x1e` in the input starts the next file, up to three.
+//! doc says. Files that pass alone, with keys that differ in more than case, pass
+//! together and give the union of their entries. Each `\x1e` in the input starts the
+//! next file, up to three.
 
 #![no_main]
 
