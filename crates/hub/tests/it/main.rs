@@ -17,7 +17,7 @@ use env::clock::Clock;
 use env::files::Operation;
 use env::tasks::Tasks;
 use hub::home::{Outcome, Refusal};
-use hub::reader::{self, Mode, Received};
+use hub::reader::{self, Mode, Reader, Received};
 use hub::writer::{self, Writer};
 use hub::{Channel, Hub};
 use types::authority::Authority;
@@ -283,6 +283,22 @@ fn poll_once<F: Future>(future: F) -> Poll<F::Output> {
     pin!(future).poll(&mut Context::from_waker(Waker::noop()))
 }
 
+/// The charge of each frame that waits for `reader`, in order. A `Pending` after a
+/// frame may be the yield of `next`, so only two in a row end it.
+fn drain(reader: &mut Reader) -> Vec<u64> {
+    let (mut charges, mut pending) = (Vec::new(), 0);
+    while pending < 2 {
+        match poll_once(reader.next()) {
+            Poll::Ready(received) => {
+                charges.push(received.expect("a frame").frame.charge());
+                pending = 0;
+            }
+            Poll::Pending => pending += 1,
+        }
+    }
+    charges
+}
+
 #[test]
 fn gives_a_complete_reader_each_frame_in_seq_order_with_the_samples_written() {
     run(1, |test| async move {
@@ -480,11 +496,9 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
             }
         }
         assert!(bytes > 3 * WINDOW, "{bytes} bytes are past three windows");
-        let mut last = 0;
-        while let Poll::Ready(received) = poll_once(lagger.next()) {
-            last = received.expect("a frame").frame.charge();
-            spent += last;
-        }
+        let charges = drain(&mut lagger);
+        let last = charges.last().copied().unwrap_or(0);
+        spent += charges.iter().sum::<u64>();
         let limit = first + WINDOW;
         assert!(
             spent - last < limit && limit <= spent,
@@ -575,32 +589,28 @@ fn gives_a_reader_the_key_set_of_each_frame() {
     });
 }
 
+/// The simulator has no task budget, so only the reader's own yield lets the other
+/// task run. The simulator picks a ready task at random, so the frames span several
+/// yields.
 #[test]
-fn yields_to_other_tasks_of_a_runtime_while_frames_wait() {
+fn yields_to_other_tasks_of_the_shard_while_frames_wait() {
     run(11, |test| async move {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
-        let frames = 200;
+        let frames = 1000;
         for n in 0..frames {
             write(&mut writer, &[now + n], &[n]);
         }
         reader.next().await.expect("a frame");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("a runtime");
         let taken = Rc::new(Cell::new(1));
         let other = Rc::new(Cell::new(None));
-        let local = tokio::task::LocalSet::new();
-        local.block_on(&runtime, async {
-            let (seen, other) = (Rc::clone(&taken), Rc::clone(&other));
-            tokio::task::spawn_local(async move { other.set(Some(seen.get())) });
-            for n in 1..frames {
-                reader.next().await.expect("a frame");
-                taken.set(n + 1);
-            }
-        });
-        assert_eq!(taken.get(), frames);
+        let (seen, ran) = (Rc::clone(&taken), Rc::clone(&other));
+        test.tasks.spawn(async move { ran.set(Some(seen.get())) });
+        for n in 1..frames {
+            reader.next().await.expect("a frame");
+            taken.set(n + 1);
+        }
         let other = other.get().expect("the other task ran");
         assert!(other < frames, "the other task ran after {other} frames");
     });
@@ -642,10 +652,7 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
             write_wide(&mut writer, now, n);
             test.clock.sleep(SETTLE).await;
         }
-        let mut spent = 0;
-        while let Poll::Ready(received) = poll_once(lagger.next()) {
-            spent += received.expect("a frame").frame.charge();
-        }
+        let spent: u64 = drain(&mut lagger).iter().sum();
         assert!(WINDOW <= spent, "{spent} bytes reach the window");
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         write_wide(&mut writer, now, frames);

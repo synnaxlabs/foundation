@@ -16,13 +16,16 @@ use crate::State;
 /// The credit a complete reader has past the frames it took: a fixed window until
 /// the hub sizes it from the link.
 const WINDOW: u64 = 1 << 20;
+/// Frames that [`Reader::next`] gives in a row before it yields once.
+const STREAK: u32 = 128;
 
 /// Which frames a reader gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Each live frame, after the commit that holds it. A reader that falls a window
-    /// behind gets no later frame: it left frames untaken, or one commit held more
-    /// than a window of frames.
+    /// Each live frame, after the commit that holds it. A session that misses a frame
+    /// gets no later frame, with no error, until it closes: it misses one when it
+    /// leaves a window of frames untaken, or when one commit holds more than a window
+    /// of frames. The hub has no catch-up from the buffer yet.
     Complete,
     /// The newest live frame, before its commit.
     Latest,
@@ -71,6 +74,8 @@ pub struct Reader {
     credit: Option<Credit>,
     /// The key set of the last frame.
     set: Option<Arc<KeySet>>,
+    /// Frames given in a row since `next` last returned `Pending`.
+    streak: u32,
 }
 
 /// What a complete reader took, to grant its credit.
@@ -118,11 +123,13 @@ impl Reader {
             key,
             credit,
             set: None,
+            streak: 0,
         })
     }
 
-    /// The next frame. Spends one unit of the task's budget per frame, so a task that
-    /// loops on it lets the shard's other tasks run.
+    /// The next frame. After 128 frames in a row, it wakes its task and waits once, so
+    /// a task that loops on it lets the shard's other tasks run. A complete session
+    /// that missed a frame waits with no end ([`Mode::Complete`]).
     ///
     /// # Errors
     ///
@@ -136,7 +143,13 @@ impl Reader {
         let frame = poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
+            if self.streak == STREAK {
+                self.streak = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             if let Some(frame) = state.home.take(self.key) {
+                self.streak += 1;
                 if let Some(credit) = &mut self.credit {
                     // The limit rises only for frames the caller took before.
                     state.home.grant(credit.key, credit.taken_bytes + WINDOW);
@@ -147,11 +160,11 @@ impl Reader {
             if let Some(error) = &state.failed {
                 return Poll::Ready(Err(error.clone()));
             }
+            self.streak = 0;
             state.wakers.insert(self.key, cx.waker().clone());
             Poll::Pending
         })
         .await?;
-        tokio::task::coop::consume_budget().await;
         let key = frame.key_set();
         let set = match self.set.take() {
             Some(set) if set.key() == key => self.set.insert(set),

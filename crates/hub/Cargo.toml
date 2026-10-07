@@ -9,7 +9,6 @@ publish.workspace = true
 block = { path = "../block" }
 env = { path = "../env" }
 home = { path = "../home" }
-tokio = { workspace = true, features = ["rt"] }
 types = { path = "../types" }
 
 [dev-dependencies]
