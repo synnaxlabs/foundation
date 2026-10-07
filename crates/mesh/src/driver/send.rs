@@ -7,7 +7,7 @@ use std::pin::pin;
 use std::rc::{Rc, Weak};
 use std::task::Poll;
 
-use block::{Block, Pool};
+use block::Pool;
 use env::tasks::Tasks;
 use transport::stream::Sender;
 use transport::{Class, Session, Transport};
@@ -15,6 +15,7 @@ use types::node;
 use wire::Protocol;
 
 use super::Group;
+use crate::bytes::block;
 use crate::message::Message;
 
 /// What sends the messages of one group: one task for each member, so a member that
@@ -28,13 +29,6 @@ pub(super) struct Senders {
     pub(super) tasks: Tasks,
 }
 
-// The way to one member: a session to it, and one stream of that session.
-#[derive(Default)]
-struct Link {
-    session: Option<Session>,
-    stream: Option<Sender>,
-}
-
 // Why a message did not go.
 enum Failure {
     // The pool had no block for the message, or for the header of its stream.
@@ -42,6 +36,12 @@ enum Failure {
     // The group has no record of the member, so no address to dial.
     Unknown,
     Transport(transport::Error),
+}
+
+impl From<block::Error> for Failure {
+    fn from(_: block::Error) -> Self {
+        Self::Pool
+    }
 }
 
 impl From<transport::Error> for Failure {
@@ -72,12 +72,12 @@ impl Senders {
         }
     }
 
-    // Sends each message for `to`. A message that fails drops, with the part of the
-    // link that failed: `raft` sends again.
+    // Sends each message for `to`. A message that fails drops, with the part that
+    // failed, the stream or the session of the group: `raft` sends again.
     async fn send(self, to: node::Key) {
-        let mut link = Link::default();
+        let mut stream = None;
         while let Some(message) = self.next(to).await {
-            let pass = self.pass(to, &mut link, message);
+            let pass = self.pass(to, &mut stream, message);
             let Some(sent) = self.alive(to, pass).await else {
                 return;
             };
@@ -86,7 +86,7 @@ impl Senders {
                 Failure::Pool | Failure::Unknown => {}
                 Failure::Transport(error) => match error {
                     transport::Error::TooLarge { .. } => {}
-                    transport::Error::Stopped { .. } => link.stream = None,
+                    transport::Error::Stopped { .. } => stream = None,
                     // The session failed, or no dial gave one. Other protocols can
                     // use the session, so only the handle drops.
                     transport::Error::Unreachable { .. }
@@ -94,7 +94,10 @@ impl Senders {
                     | transport::Error::PeerClosed { .. }
                     | transport::Error::TimedOut
                     | transport::Error::Broken { .. }
-                    | transport::Error::Network { .. } => link = Link::default(),
+                    | transport::Error::Network { .. } => {
+                        stream = None;
+                        self.group().borrow_mut().sessions.remove(&to);
+                    }
                     // A stream gives `Reset` only after a dropped send, and this
                     // task ends when it drops one. Only a bind gives `Config`. Only
                     // an attempt of a dial gives `Unroutable` or `Authentication`,
@@ -142,51 +145,55 @@ impl Senders {
         running.then_some(group)
     }
 
-    // Sends `message` on the stream of `link`. With no stream it opens one, and with
-    // no session it dials first. The header of the protocol goes first on a stream,
-    // which `link` holds only after. Each block is taken just before its send: a
-    // dial can wait until it times out.
+    // The group, in a step of the send of a message: `alive` found it at the last
+    // poll, and no other task ran since.
+    fn group(&self) -> Rc<RefCell<Group>> {
+        let group = self.group.upgrade();
+        group.expect("invariant: the group lives in each step of a send")
+    }
+
+    // Sends `message` on `stream`. With no stream it opens one, and with no session
+    // to `to` in the group it dials first. The header of the protocol goes first on
+    // a stream, which `stream` holds only after. Each block is taken just before its
+    // send: a dial can wait until it times out.
     async fn pass(
         &self,
         to: node::Key,
-        link: &mut Link,
+        stream: &mut Option<Sender>,
         message: raft::Message,
     ) -> Result<(), Failure> {
-        let sender = if let Some(sender) = &mut link.stream {
+        let sender = if let Some(sender) = stream {
             sender
         } else {
-            let session = match &link.session {
+            let held = self.group().borrow().sessions.get(&to).cloned();
+            let session = match held {
                 Some(session) => session,
-                None => link.session.insert(self.dial(to).await?),
+                None => self.dial(to).await?,
             };
             let mut sender = session.open_sender(Class::Command).await?;
-            let header = self.block(&wire::header::encode(Protocol::Mesh))?;
+            let header = block(&self.pool, &wire::header::encode(Protocol::Mesh))?;
             sender.send(header).await?;
-            link.stream.insert(sender)
+            stream.insert(sender)
         };
-        let block = self.block(&Message::Raft(message).encode())?;
+        let block = block(&self.pool, &Message::Raft(message).encode())?;
         Ok(sender.send(block).await?)
     }
 
-    // A block of the pool that holds `bytes`.
-    fn block(&self, bytes: &[u8]) -> Result<Block, Failure> {
-        let Ok(mut block) = self.pool.alloc(bytes.len()) else {
-            return Err(Failure::Pool);
-        };
-        block.copy_from_slice(bytes);
-        Ok(block.freeze())
-    }
-
-    // Dials `to` at the addresses of its card, as the group holds it now.
+    // Dials `to` at the addresses of its card, as the group holds it now, and gives
+    // the session to the group.
     async fn dial(&self, to: node::Key) -> Result<Session, Failure> {
         let (public_key, addresses) = {
-            let group = self.group.upgrade();
-            let group = group.expect("invariant: `alive` holds the group for a dial");
+            let group = self.group();
             let group = group.borrow();
             let member = group.state.member(to).ok_or(Failure::Unknown)?;
             let addresses = member.card.card().addresses.as_slice().to_vec();
             (member.public_key(), addresses)
         };
-        Ok(self.transport.dial(public_key, &addresses).await?)
+        let session = self.transport.dial(public_key, &addresses).await?;
+        self.group()
+            .borrow_mut()
+            .sessions
+            .insert(to, session.clone());
+        Ok(session)
     }
 }

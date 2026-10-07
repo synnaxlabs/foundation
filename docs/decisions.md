@@ -176,6 +176,30 @@ How to read this record:
   scalar names and the `Lengths` fix, and 2026-10-07T15:17:16Z,
   https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040868780, for a
   scalar element with space around it as `Syntax`.
+  Amended: `sample::Type::Matrix { element, rows: u16, columns: u16 }` holds
+  `T[rows][columns]` (A13), row-major, with the bytes of an array of `rows * columns`
+  elements. Its fields are public: no `u16` pair overflows `width`, so no format needs a
+  check. Its text is `f32[2][3]`; a length over 65535 is `Error::Matrix`, and more than
+  two lengths is `Error::Lengths`. The spec's data type code of a matrix is `MATRIX` 6,
+  then the element code, `rows: u16`, and `columns: u16`. A matrix of a number can have
+  a unit, by the element's rule, as an array. Decided by `laptop.architect`
+  (2026-10-07T17:30:55Z):
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011, and for
+  the spec by `laptop.architect-2` (2026-10-07T17:27:36Z):
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043187013.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625 and
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042559685 (a
+  `Matrix` with private fields and `u32` sides), and the `Lengths` text of
+  https://github.com/synnaxlabs/foundation/pull/1439#issuecomment-6040630702.
+  Amended: the field shape is `Type::Matrix { element, sides: Sides }`, with
+  `Sides { rows: u16, columns: u16 }` and its `repr(C, align(4))`, so the sides sit at
+  byte 4 of `Type`, as `Array.len`, `List.max`, and the stored `n` do. Without it,
+  `home::stored::read` was 16% to 44% slower for each series than `main` (box2).
+  Decided by `laptop.architect` (2026-10-07T19:03:23Z):
+  https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6044826781.
+  Supersedes the field shape of
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -743,15 +767,22 @@ How to read this record:
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
   little-endian. `end` is as in FRAME LAYOUT. Kinds: scalar 0, array 1, list 2, string
-  3, bytes 4. `n` is the array length or the list maximum, else 0. `element` is the
-  scalar (bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10,
-  stamp 11, span 12, uuid 13), else 0. The type is the writer's type, so a reader
-  decodes with it after an `apply` changes the channel's type (A15). The header is one
-  pool block and the series bytes are a view of the frame's block, so a write copies
-  no series byte. A slot or key set number is never stored. The layout is part of the
-  disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
-  once where remote records enter (X43), and the read after it panics on a bad body.
-  Decided by the `write-path` builder; approved by the coordinator (#191).
+  3, bytes 4, matrix 5. `n` is the array length, the list maximum, or `rows | columns
+  << 16` of a matrix, else 0. `element` is the scalar (bool 0, i8 1, i16 2, i32 3, i64
+  4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10, stamp 11, span 12, uuid 13), else 0. The
+  type is the writer's type, so a reader decodes with it after an `apply` changes the
+  channel's type (A15). The header is one pool block and the series bytes are a view of
+  the frame's block, so a write copies no series byte. A slot or key set number is never
+  stored. The layout is part of the disk format version (C9d), as in FRAME LAYOUT. Copy
+  mode checks each stored body once where remote records enter (X43), and the read after
+  it panics on a bad body. Decided by the `write-path` builder; approved by the
+  coordinator (#191).
+  Amended: kind 5, with both `u16` sides in `n`, so the descriptor stays 26 bytes and
+  a body with no matrix is as before. Decided by `laptop.architect`
+  (2026-10-07T17:30:55Z):
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
+  Supersedes the `columns` table of
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625.
 - **STORED BENCH (#1547, 2026-10-07)** The cargo feature `bench` of `home`, off by
   default, adds `#[doc(hidden)] pub mod bench`: `entry` calls `stored::entry`, and
   `read` calls `stored::read` and gives each series' channel, type, and bytes. Only the
@@ -1444,6 +1475,13 @@ How to read this record:
   reader's node, each with an exact error for each broken rule, so `hub` checks no wire
   rule. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
+  Amended (2026-10-07T14:56:48Z, #1455): `Reader::decode` checks a message in three
+  steps and gives the error of the first that fails: the bytes (its decode error), the
+  order of the session (`Unopened` or `Reopen`, whatever the content), then the content
+  against the session (`Places`, `Run`, `Body`). A head before `Opened` is not a head
+  of this session yet, so its series count has no session to break. Lost: `Places`
+  first. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/1455#issuecomment-6040654132).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
@@ -1489,6 +1527,11 @@ How to read this record:
   key or a `Client` (an SDK, proved by its signed hello above). Callers admit peers,
   dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
   NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+  `Transport::public_key` gives the key that the transport proves to each peer, so
+  `node` can check it against the key it loads. Decided by laptop.architect and
+  laptop.architect-2 (#1587, 2026-10-07 19:55 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
@@ -1542,11 +1585,25 @@ How to read this record:
   (#611). A send that does not wait (`try_send`) starts a message only by the same rule
   and when, after a flush, the stream holds no part of an earlier one; else it gives the
   message back with no byte of it sent, and the stream does not wait for room (#597). A
-  receiver takes a block by the same rule, highest class first, within `window_bytes`
-  plus `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that
-  wait for a block never use up the credit that a started message needs, and a peer that
-  breaks the send rule holds at most the receive budget and stops only its
-  own connection. Each node's first one-way stream is its hello, with no class byte:
+  receiver takes room for a message by the same rule, highest class first, within
+  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable` (#611). It
+  holds the bytes of a message outside the pool, and takes a block only when the message
+  is whole. Decided by architect-2 (#1456:
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673). No
+  chunk of the carrier outlives the read that took it: a read that ends before its
+  message has a block copies the bytes it holds into one buffer of the message's
+  length, outside the pool. Decided by `laptop.architect-2` (#1456, 2026-10-07 17:05
+  UTC: https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6042785777).
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6042336187 and the
+  copy cost of
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673. A
+  test asserts that each read leaves no view of a chunk, and that each reader holds
+  at most one buffer, whose capacity is the length of its message (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6043389350). So
+  bytes that wait for a block never use up the credit that a started message needs,
+  and a peer that breaks the send rule holds at most the receive budget and stops only
+  its own connection. Each node's first one-way stream is its hello, with no class byte:
   (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
   0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
   an id it does not know, so an advisory field needs no new ALPN; a field that the peer
@@ -1632,16 +1689,16 @@ How to read this record:
   `transport::Error` has no `Pool` variant, and the read path's "no room now"
   stays private (architect, #68:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032721674). Its doc
-  says that it waits. The message stays queued, and the carrier's per-stream flow
-  control holds the peer, as a read already waits for `Readable` (STREAM WIRE); TLS over
-  TCP must do the same (TRANSPORT SHAPE LOCKED). One timer for each `Transport` retries
-  all of its waiting reads, for both causes; each retry's `alloc` takes back the blocks
-  returned since the last try. The retry interval is a `transport` constant that
+  says that it waits. The whole message keeps its room in the receive budget, and the
+  budget holds the peer (STREAM WIRE). Decided by architect-2 (#1456:
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673). TLS
+  over TCP must do the same (TRANSPORT SHAPE LOCKED). One timer for each `Transport`
+  retries all of its waiting reads, for both causes; each retry's `alloc` takes back the
+  blocks returned since the last try. The retry interval is a `transport` constant that
   simulation tunes (5.3). The waiting reads of one `Transport` take blocks highest class
   first, then oldest first, so `CatchUp` reads cannot starve `Command` reads; other
-  users of the shard pool (M4) are not in this order. A waiting read that then waits
-  for room in its connection's receive budget keeps its place but holds no turn, so a
-  connection that holds its budget stops no read of another connection (STREAM WIRE).
+  users of the shard pool (M4) are not in this order. A read waits for a block only
+  with a whole message that holds its room, so it never waits for room in its place.
   `transport` counts the time that reads wait and each refused commit, and `node`
   publishes them on status channels (BQ11b). `Transport::status` gives
   `Status { waited, refusals }`, pulled, not pushed: `waited` is the time that at least
@@ -2284,9 +2341,10 @@ How to read this record:
   only after the format flag (C9d) allows it; a node of an older build stops at it and
   never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
-  call gives `Error::Stopped` with the first cause, and a watch gives it also after each
-  `Mesh` drops. `member` has no error (#562): it gives the record that the node holds,
-  also after a stop (approved by the architect, 2026-10-07T08:07:48Z:
+  call gives `Error::Stopped` with the first cause. A watch gives the `Stopped` itself,
+  also after each `Mesh` drops (MESH SURFACE). `member` has no error (#562): it gives
+  the record that the node holds, also after a stop (approved by the architect,
+  2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). A stopped
   group does not start again: the node opens the mesh again, and the open makes durable
   what it gives (MESH LOG). The task ends soon after the last `Mesh` drops, a write in
@@ -2331,10 +2389,65 @@ How to read this record:
   end when the group stops or when each `Mesh` drops, also a task that waits in a dial
   or in a send. The task of a voter that a change removed, to which `raft` sends no more
   messages, ends only then (#1401) (approved by the architect, 2026-10-07T13:40:50Z:
-  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881).
+  https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881). The group
+  holds the handle of the session to each member, and not the task, so that `set_home`
+  (PR 4c-2 of #471) can open its stream on it: the task is the only one that dials (the
+  plan of PR 4d,
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037266854, approved
+  by the architect, 2026-10-07T11:52:00Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A stop
+  of the group drops each handle. When `Transport::dial` gives the one open session to a
+  peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
+  handle goes back to the task.
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+- **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
+  `Watch::next`, and `Mesh::member` (#562). `next` gives `Stopped`, which holds the
+  cause types `log::Error` and `change::Unknown`, each public in its own module, so a
+  caller can match the exact cause. `next` gives `Stopped` and not `Error`, because a
+  stop is the only error that it has: the type says what the call gives. For a read of a
+  home, `hub` gets the variant `Error::Mesh(mesh::Stopped)` in #340, which supersedes
+  the `Error::Mesh(mesh::Error)` of its plan
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6002776268). The
+  cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
+  A `Stopped` that holds a text for each cause lost, because a caller cannot match a
+  text. The surface holds types of other crates, among them `raft::Position`,
+  `block::Error`, `env::files::Error`, and `types::node::PublicKey`, which the card of a
+  `Member` holds. A caller whose line of the crate map does not hold the crate of such a
+  type reads it only through `Display` and `Debug`. A caller that must match one gets
+  the crate in its line through an `interface` issue first. `mesh` does not re-export
+  such a type: a re-export makes each change to `raft` a change to the surface of
+  `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index
+  only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and gives
+  it each stream of a peer with `Mesh::serve`. The three are public since the senders
+  (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them, because
+  `open` and `serve` give them. `claim::Error` is the `grant::Error` of the rulings:
+  #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
+  to the types of other crates. `Config` and `serve` add types that the caller builds:
+  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  `env::tasks::Tasks`, `clock::Reader`, `block::Pool`, `transport::Transport`,
+  `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
+  So a crate that opens a region has `env`, `clock`, `block`, and `transport` in its
+  line of the crate map. `open` does not check that the transport proves the key of
+  `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
+  `Debug` text of a `Config` does not show the private key. The calls that change the
+  region and the change records stay private. The surface is approved by the architect,
+  2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
+  surface as built, with the types that the caller builds and the sentence on the key of
+  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
+  is approved by the architect, 2026-10-07T15:17:13Z:
+  https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
+  of the PRs is decided by the architect, 2026-10-07T17:18:52Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6043038615. The
+  architect then ruled the type that `next` gives, the later PR for `Error`,
+  `claim::Error`, and `region::Unfit`, and the rule for the types of other crates,
+  2026-10-07T17:38:37Z:
+  https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
+  ruling supersedes the list of the export PR in the ruling on the order, for those
+  three types.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -2406,7 +2519,7 @@ How to read this record:
   region by name prefix. Regions nest like names. Supersedes: K5 voters policy. The
   prefix is a `types::name::Prefix`, which can be empty: the root prefix
   (`Prefix::ROOT`, text `""`) contains each name, so the root region holds each node.
-  `mesh` holds it in `driver::Config.region` and `region::State`, and checks each name
+  `mesh` holds it in `mesh::Config.region` and `region::State`, and checks each name
   against the region with `Prefix::contains`; `ticket::Options.prefix` stays a `Name`.
   Decided by `laptop.architect` (2026-10-07T12:47:19Z):
   https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each

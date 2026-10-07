@@ -81,11 +81,13 @@ impl Scalar {
 ///
 /// Enums and flags use an integer layout, and quality uses `U32`; their meaning is in
 /// `spec`.
+// Declared in the order of the STORED BODY kind codes, so each tag is its kind code
+// and `home::stored` maps one to the other with no branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     /// One fixed-width value per sample.
     Scalar(Scalar),
-    /// A fixed array per sample, row-major for more than one dimension.
+    /// A fixed array per sample.
     Array {
         /// The element type.
         element: Scalar,
@@ -103,6 +105,26 @@ pub enum Type {
     String,
     /// Unlabeled bytes per sample.
     Bytes,
+    /// A fixed array of arrays per sample, row-major. A sample has the bytes of an
+    /// array of `rows * columns` elements; the shape is only in the type.
+    Matrix {
+        /// The element type.
+        element: Scalar,
+        /// The rows and columns.
+        sides: Sides,
+    },
+}
+
+/// The sides of a matrix: `rows` arrays of `columns` elements.
+// Aligned to 4, so the sides sit at byte 4 of `Type`, as `Array.len`, `List.max`, and
+// the stored `n` do. `C` keeps `rows` in the low half, as in `n`.
+#[repr(C, align(4))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sides {
+    /// Arrays per sample.
+    pub rows: u16,
+    /// Elements per array.
+    pub columns: u16,
 }
 
 impl Type {
@@ -112,6 +134,10 @@ impl Type {
         match self {
             Self::Scalar(s) => Some(s.width()),
             Self::Array { element, len } => Some(element.width() * len as usize),
+            Self::Matrix {
+                element,
+                sides: Sides { rows, columns },
+            } => Some(element.width() * rows as usize * columns as usize),
             Self::List { .. } | Self::String | Self::Bytes => None,
         }
     }
@@ -119,11 +145,15 @@ impl Type {
 
 impl fmt::Display for Type {
     /// Writes the text that a user writes and [`Type::from_str`] reads: `f64`,
-    /// `f32[3]`, `list<u8, 16>`, `string`, or `bytes`.
+    /// `f32[3]`, `f32[2][3]`, `list<u8, 16>`, `string`, or `bytes`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Scalar(scalar) => f.write_str(scalar.name()),
             Self::Array { element, len } => write!(f, "{}[{len}]", element.name()),
+            Self::Matrix {
+                element,
+                sides: Sides { rows, columns },
+            } => write!(f, "{}[{rows}][{columns}]", element.name()),
             Self::List { element, max } => {
                 write!(f, "list<{}, {max}>", element.name())
             }
@@ -138,9 +168,9 @@ impl FromStr for Type {
 
     /// Reads the text that `Display` writes, and only that text: a scalar (`bool`,
     /// `i8` to `i64`, `u8` to `u64`, `f32`, `f64`, `timestamp`, `duration`, or `uuid`),
-    /// an array `<scalar>[<len>]`, a list `list<<scalar>, <max>>`, `string`, or
-    /// `bytes`. Case is exact, a count has no leading zero, and the one space is after
-    /// the comma of a list.
+    /// an array `<scalar>[<len>]`, a matrix `<scalar>[<rows>][<columns>]`, a list
+    /// `list<<scalar>, <max>>`, `string`, or `bytes`. Case is exact, a count has no
+    /// leading zero, and the one space is after the comma of a list.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
             "string" => return Ok(Self::String),
@@ -160,20 +190,32 @@ impl FromStr for Type {
         if let Some(array) = text.strip_suffix(']') {
             let (name, len) = array.split_once('[').ok_or(Error::Syntax)?;
             let element = element(name)?;
-            if len.contains("][") {
+            let mut lengths = len.split("][");
+            let (Some(len), columns, None) =
+                (lengths.next(), lengths.next(), lengths.next())
+            else {
                 return Err(Error::Lengths);
-            }
-            return Ok(Self::Array {
-                element,
-                len: count(len)?,
-            });
+            };
+            return match columns {
+                None => Ok(Self::Array {
+                    element,
+                    len: count(len)?,
+                }),
+                Some(columns) => Ok(Self::Matrix {
+                    element,
+                    sides: Sides {
+                        rows: side(len)?,
+                        columns: side(columns)?,
+                    },
+                }),
+            };
         }
         Scalar::named(text).map(Self::Scalar).ok_or(Error::Syntax)
     }
 }
 
-/// The scalar that `text` names as the element of an array or a list. A scalar with
-/// space around it is a fault of syntax, not of the element.
+/// The scalar that `text` names as the element of an array, a matrix, or a list. A
+/// scalar with space around it is a fault of syntax, not of the element.
 fn element(text: &str) -> Result<Scalar, Error> {
     match Scalar::named(text) {
         Some(scalar) => Ok(scalar),
@@ -184,11 +226,22 @@ fn element(text: &str) -> Result<Scalar, Error> {
 
 /// The count that `text` writes in ASCII digits with no leading zero.
 fn count(text: &str) -> Result<u32, Error> {
-    let digits = text.bytes().all(|byte| byte.is_ascii_digit());
+    digits(text)?.parse().map_err(|_over_u32| Error::Count)
+}
+
+/// The length of a matrix side that `text` writes as a [`count`]. A count over 65535,
+/// of any size, is [`Error::Matrix`].
+fn side(text: &str) -> Result<u16, Error> {
+    digits(text)?.parse().map_err(|_over_u16| Error::Matrix)
+}
+
+/// `text` when it is one or more ASCII digits with no leading zero.
+fn digits(text: &str) -> Result<&str, Error> {
+    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     if !digits || (text.len() > 1 && text.starts_with('0')) {
         return Err(Error::Count);
     }
-    text.parse().map_err(|_not_a_u32| Error::Count)
+    Ok(text)
 }
 
 /// Why a text is not a sample type. `Display` gives the message: a lower-case clause
@@ -199,14 +252,17 @@ pub enum Error {
     /// `list<u8,16>`, and a scalar element with space around it, as in `f32 [3]`, give
     /// this error.
     Syntax,
-    /// The element of an array or a list is not a scalar, as in `string[3]` or
-    /// `list<f32[2], 4>`.
+    /// The element of an array, a matrix, or a list is not a scalar, as in `string[3]`
+    /// or `list<f32[2], 4>`.
     Element,
-    /// A length or a maximum is not ASCII digits with no leading zero that fit in a
-    /// `u32`, as in `f32[]`, `f32[03]`, or `f32[-1]`.
+    /// A length or a maximum is not ASCII digits with no leading zero, or an array
+    /// length or a list maximum is over 4294967295, as in `f32[]`, `f32[03]`, or
+    /// `f32[-1]`.
     Count,
-    /// An array has more than one length, as in `f32[2][3]`.
+    /// An array has more than two lengths, as in `u8[1][1][1]`.
     Lengths,
+    /// A matrix has a length over 65535, as in `f32[70000][3]`.
+    Matrix,
 }
 
 impl Error {
@@ -223,8 +279,9 @@ impl Error {
             }
             Self::Count => "Write the count in plain digits, such as 16",
             Self::Lengths => {
-                "Use one array length: a type of two lengths does not read yet"
+                "Use one or two array lengths, such as f32[3] or f32[2][3]"
             }
+            Self::Matrix => "Use at most 65535 rows and 65535 columns, or an array",
         }
     }
 }
@@ -249,7 +306,8 @@ impl fmt::Display for Error {
                 return Ok(());
             }
             Self::Count => "expected a count of 0 to 4294967295, with no leading zero",
-            Self::Lengths => "expected one array length",
+            Self::Lengths => "expected one or two array lengths",
+            Self::Matrix => "expected each matrix length from 0 to 65535",
         })
     }
 }
@@ -268,6 +326,12 @@ mod tests {
             scalar.clone().prop_map(Type::Scalar),
             (scalar.clone(), any::<u32>())
                 .prop_map(|(element, len)| Type::Array { element, len }),
+            (scalar.clone(), any::<u16>(), any::<u16>()).prop_map(
+                |(element, rows, columns)| Type::Matrix {
+                    element,
+                    sides: Sides { rows, columns },
+                }
+            ),
             (scalar, any::<u32>())
                 .prop_map(|(element, max)| Type::List { element, max }),
             Just(Type::String),
@@ -293,6 +357,11 @@ mod tests {
                 },
                 "uuid[0]",
             ),
+            (matrix(Scalar::F32, 2, 3), "f32[2][3]"),
+            (matrix(Scalar::U8, 0, 5), "u8[0][5]"),
+            (matrix(Scalar::F32, 1, 3), "f32[1][3]"),
+            (matrix(Scalar::U8, 65535, 65535), "u8[65535][65535]"),
+            (matrix(Scalar::U8, 0, 0), "u8[0][0]"),
             (
                 Type::List {
                     element: Scalar::U8,
@@ -365,18 +434,52 @@ mod tests {
             ("f32[4294967296]", Error::Count),
             ("list<u8, 016>", Error::Count),
             ("list<u8,  16>", Error::Count),
+            ("f32[2][]", Error::Count),
+            ("f32[2][03]", Error::Count),
+            ("f32[2]][3]", Error::Count),
+            ("f32[2] [3]", Error::Count),
+            ("f32[2][4294967296]", Error::Matrix),
+            ("f32[2][3", Error::Syntax),
+            ("f32[2][3][", Error::Syntax),
+            ("string[2][3]", Error::Element),
+            ("u8[1][1][1]", Error::Lengths),
+            ("u8[1][1][]", Error::Lengths),
+            ("f32[70000][3]", Error::Matrix),
+            ("u8[65535][65536]", Error::Matrix),
+            ("u8[65536][0]", Error::Matrix),
+            ("u8[4294967295][2]", Error::Matrix),
+            ("u8[2][4294967296]", Error::Matrix),
+            ("u8[99999999999999999999][1]", Error::Matrix),
         ];
         for (text, error) in cases {
             assert_eq!(text.parse::<Type>(), Err(error), "{text:?}");
         }
     }
 
-    /// #1341 reads these as arrays of arrays.
-    #[test]
-    fn refuses_two_lengths() {
-        for text in ["f32[2][3]", "u8[1][1][1]"] {
-            assert_eq!(text.parse::<Type>(), Err(Error::Lengths), "{text}");
+    fn matrix(element: Scalar, rows: u16, columns: u16) -> Type {
+        Type::Matrix {
+            element,
+            sides: Sides { rows, columns },
         }
+    }
+
+    #[test]
+    fn reads_two_lengths() {
+        let read = "f32[2][3]".parse::<Type>();
+        assert_eq!(read, Ok(matrix(Scalar::F32, 2, 3)));
+        assert_eq!(read.unwrap().width(), Some(24));
+    }
+
+    #[test]
+    fn gives_the_width_of_the_largest_matrix() {
+        let max = matrix(Scalar::Uuid, u16::MAX, u16::MAX);
+        assert_eq!(max.width(), Some(16 * 65_535 * 65_535));
+        assert_eq!(matrix(Scalar::U8, 0, u16::MAX).width(), Some(0));
+    }
+
+    #[test]
+    fn stays_eight_bytes() {
+        assert_eq!(size_of::<Type>(), 8);
     }
 
     #[test]
@@ -402,8 +505,13 @@ mod tests {
             ),
             (
                 Error::Lengths,
-                "expected one array length",
-                "Use one array length: a type of two lengths does not read yet",
+                "expected one or two array lengths",
+                "Use one or two array lengths, such as f32[3] or f32[2][3]",
+            ),
+            (
+                Error::Matrix,
+                "expected each matrix length from 0 to 65535",
+                "Use at most 65535 rows and 65535 columns, or an array",
             ),
         ];
         for (error, message, fix) in cases {
@@ -421,7 +529,8 @@ mod tests {
 
         #[test]
         fn shows_a_text_that_reads_as_that_text(
-            text in "(list<)?[a-z]{0,2}[0-9]{0,2}(\\[|, )?[0-9]{0,3}(\\]|>)?"
+            text in "(list<)?[a-z]{0,2}[0-9]{0,2}(\\[|, )?[0-9]{0,3}(\\]|>)?\
+                     (\\[[0-9]{0,3}\\]?)?"
         ) {
             if let Ok(sample) = text.parse::<Type>() {
                 prop_assert_eq!(sample.to_string(), text);
