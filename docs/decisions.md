@@ -1766,7 +1766,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z, and
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
-  2026-10-07T17:08:02Z).
+  2026-10-07T17:08:02Z). `Entry::claims`, `Proof::claims(term)` and `Link::claims`
+  give the claims of one entry, proof, or link in the same order, so `mesh` edits a
+  message before `step` reads it (decided by `laptop.architect`, 2026-10-07T18:57:55Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6044730486, and
+  2026-10-07T20:05:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6045861142).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -2181,26 +2186,25 @@ How to read this record:
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242, 2026-10-07T04:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A claim
-  in the proof whose signer has no key at the node is removed before `step`. An append
-  is cut before the first entry with a claim whose signer has no key at the node, and
-  the entries after the cut are not checked or stepped. A claim of a known signer with
-  a bad signature refuses the whole message (`Error::Claim` with `claim::Error::Forged`)
-  (decided by `laptop.director`, 2026-10-07T17:07:54Z:
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6042828979). In
-  the chain, a vote of a link whose signer has no key at the node is removed, and the
-  chain is cut before the first link whose leader has no key. `mesh` makes each change
-  before `Raft::claims`, and steps the message that it checked (decided by
-  `laptop.director`, 2026-10-07T17:18:49Z:
+  in the proof whose signer has no key at the node, or whose signature does not hold
+  under a key from a join that is not applied, is removed before `step`. An append is
+  cut before the first entry with such a claim, and the entries after the cut are not
+  checked or stepped. A claim of an applied member with a bad signature refuses the
+  whole message (`Error::Claim` with `claim::Error::Forged`) (decided by
+  `laptop.director`, 2026-10-07T20:02:05Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6045806233. This
+  supersedes rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6042828979, which
+  superseded rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423). In
+  the chain, such a vote of a link is removed, and the chain is cut before the first
+  link whose change is such a claim. `mesh` makes each change before `Raft::claims`,
+  and steps the message that it checked (decided by `laptop.director`,
+  2026-10-07T17:18:49Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6043037608). A
-  For an append, a join above `prev` gives no key to the claims of the message: the
-  append can replace it, and the run brings the real join, so the next append checks
-  the claim (`box2.builder-7`, 2026-10-07:
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6045701609). A
   hard proof that lost such a claim can be no quorum at a node with a newer
   configuration, which then learns the term from the leader. A follower answers a cut
-  run with the last entry it kept, and the leader sends the rest from there. This
-  supersedes rule 3 of
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423.
+  run with the last entry it kept, and the leader sends the rest from there.
   `propose_voters` refuses a set with a node that is not a member in the applied
   state of this node (`Error::NotMember`, the first such key), so each log
   that holds the `Voters` entry holds the join of each of its voters before it, and the
@@ -3964,7 +3968,8 @@ How to read this record:
 | Retired entry | Replaced by |
 | --- | --- |
 | A1 sketch: channel `home` field, epoch and seq pair, standby in the mesh file | S5, S12, A8 |
-| Rule 3 of #1382 (6038235423): a claim of a signer with no key refuses the message | MESH DRIVER: the claim is removed, or the append or chain is cut (6042828979, 6043037608) |
+| Rule 3 of #1382 (6038235423): `mesh` removes a claim whose signer has no key at the node, and a bad signature of a known signer refuses the message | "Rule 3 becomes" (6042828979): the append is cut before the first entry with a claim of a signer with no key, and the chain too (6043037608) |
+| Rule 3 of 6042828979: a claim of a known signer with a bad signature refuses the whole message | MESH DRIVER (6045806233): a claim that does not hold under a key from a join that is not applied is removed, or cuts the append or the chain; only a bad signature of an applied member refuses |
 | A1 "control is a lease" (for every holder) | S11 (optional writer setting) |
 | A2 and A15 "mesh file" and placeholder commands | K1, K3 |
 | A5 tie rule (ties ordered by seq) | S6 strict increase |

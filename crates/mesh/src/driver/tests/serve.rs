@@ -201,24 +201,30 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
     proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
     let stranger = message(4, 1, Body::Heartbeat { commit: 0 });
     let misrouted = message(2, 3, Body::HeartbeatReply);
+    let unproven = chain::heartbeat(chain::links(2, &[2, 3, 4]));
+    let mut forged_link = chain::heartbeat(chain::links(2, &chain::ALL));
+    let votes = &mut forged_link.chain[2].change.votes.voters;
+    votes.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+    let forged_claim = || Error::Claim(claim::Error::Forged { signer: key(3) });
+    let all: &[u8] = &chain::ALL;
+    let founders: &[u8] = &chain::FOUNDERS;
     let cases = [
-        (3, heartbeat(), Error::Spoofed { from: key(2) }),
-        (4, stranger, Error::NotVoter { from: key(4) }),
+        (all, 3, heartbeat(), Error::Spoofed { from: key(2) }),
+        (all, 4, stranger, Error::NotVoter { from: key(4) }),
+        (all, 2, forged, forged_claim()),
         (
-            2,
-            forged,
-            Error::Claim(claim::Error::Forged { signer: key(3) }),
-        ),
-        (
+            all,
             2,
             misrouted,
             Error::Raft(raft::Error::Misrouted { to: key(3) }),
         ),
+        (founders, 3, unproven, chain::unproven()),
+        (founders, 3, forged_link, forged_claim()),
     ];
-    for (from, refused, error) in cases {
+    for (members, from, refused, error) in cases {
         let (served, finished) = run(
             move |node, tasks, incoming| async move {
-                let config = config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS);
+                let config = config(&node, &tasks, 1, members, &IDS);
                 let mesh = Mesh::start(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
                 // The group did not see the heartbeat after the refused message:

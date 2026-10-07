@@ -54,20 +54,42 @@ impl Signer {
     }
 }
 
-/// Removes from `message` each claim whose signer `public_key` gives no key, then
-/// checks each signature that `raft` reads from what is left. A voter of the proof
-/// with no key is removed. In the chain, a vote of a link whose signer has no key is
-/// removed, and the chain is cut before the first link whose leader has no key. An
-/// append is cut before the first entry with a claim whose signer has no key, and
-/// the entries after the cut are not checked. `step` then takes the shorter chain
-/// and the shorter run.
+/// The public key of a signer at a node, for [`check`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Known {
+    /// The key of an applied member. The apply checked its card.
+    Applied(PublicKey),
+    /// The key of a join in the log that the node has not applied. The apply can
+    /// refuse the join, so a claim that fails under it is one of a signer with no
+    /// key.
+    Unapplied(PublicKey),
+}
+
+impl Known {
+    /// The key, applied or not.
+    pub(crate) fn public_key(self) -> PublicKey {
+        match self {
+            Self::Applied(key) | Self::Unapplied(key) => key,
+        }
+    }
+}
+
+/// Removes from `message` each claim of a signer with no key, then checks each
+/// signature that `raft` reads from what is left. A signer has no key for a claim
+/// when `public_key` gives none, or gives [`Known::Unapplied`] and the claim does
+/// not hold under it. A voter of the proof with no key is removed. In the chain, a
+/// vote of a link whose signer has no key is removed, and the chain is cut before
+/// the first link whose leader has no key. An append is cut before the first entry
+/// with a claim whose signer has no key, and the entries after the cut are not
+/// checked. `step` then takes the shorter chain and the shorter run.
 ///
 /// # Errors
 ///
-/// - [`Error::Forged`]: the first claim, in the order of [`Raft::claims`], whose
-///   signature does not hold under the key of its signer.
-/// - [`Error::NotMember`]: the sender of a reply that grants has no key. A caller
-///   that checks the sender first does not meet it.
+/// - [`Error::Forged`]: the first claim, in the order of [`Raft::claims`], of an
+///   applied member whose signature does not hold under its key.
+/// - [`Error::NotMember`]: the sender of a reply that grants has no key for its
+///   grant. A caller that checks the sender first meets it only for a grant that
+///   does not hold under a [`Known::Unapplied`] key.
 ///
 /// # Panics
 ///
@@ -75,25 +97,53 @@ impl Signer {
 pub(crate) fn check(
     raft: &Raft,
     message: &mut Message,
-    public_key: impl Fn(node::Key) -> Option<PublicKey>,
+    public_key: impl Fn(node::Key) -> Option<Known>,
 ) -> Result<(), Error> {
-    let known = |key| public_key(key).is_some();
+    let known = |(claim, signature): (Claim<'_>, Option<Signature>)| {
+        let key = public_key(claim.signer());
+        match key {
+            None => false,
+            Some(Known::Applied(_)) => true,
+            Some(Known::Unapplied(public)) => holds(public, &claim, signature),
+        }
+    };
+    let term = message.term;
     if let Some(proof) = &mut message.proof {
-        proof.voters.retain(|&voter, _| known(voter));
+        let absent = proof.claims(term).filter(|claim| !known(*claim));
+        let absent: Vec<_> = absent.map(|(claim, _)| claim.signer()).collect();
+        for voter in absent {
+            proof.voters.remove(&voter);
+        }
     }
-    for link in &mut message.chain {
-        link.change.votes.voters.retain(|&voter, _| known(voter));
+    let mut cut = message.chain.len();
+    for (index, link) in message.chain.iter_mut().enumerate() {
+        // The signer of a vote; `None` for the change of the leader.
+        let absent = link.claims().filter(|claim| !known(*claim));
+        let absent: Vec<_> = absent
+            .map(|(claim, _)| match claim {
+                Claim::Grant { voter, .. } => Some(voter),
+                Claim::Change { .. } => None,
+            })
+            .collect();
+        let mut leader = false;
+        for voter in absent {
+            match voter {
+                Some(voter) => {
+                    link.change.votes.voters.remove(&voter);
+                }
+                None => leader = true,
+            }
+        }
+        if leader {
+            cut = index;
+            break;
+        }
     }
-    let chain = &mut message.chain;
-    let kept = chain
-        .iter()
-        .take_while(|link| known(link.change.votes.candidate))
-        .count();
-    chain.truncate(kept);
+    message.chain.truncate(cut);
     if let Body::Append { entries, .. } = &mut message.body {
         let kept = entries
             .iter()
-            .take_while(|entry| entry.claims().all(|(claim, _)| known(claim.signer())))
+            .take_while(|entry| entry.claims().all(known))
             .count();
         entries.truncate(kept);
     }
@@ -103,26 +153,32 @@ pub(crate) fn check(
     Ok(())
 }
 
-// Checks `signature` against the public key of the signer of `claim`.
+// Checks `signature` against the key of the signer of `claim`.
 fn verify(
     claim: &Claim<'_>,
     signature: Option<Signature>,
-    public_key: impl Fn(node::Key) -> Option<PublicKey>,
+    public_key: impl Fn(node::Key) -> Option<Known>,
 ) -> Result<(), Error> {
     let signer = claim.signer();
-    let public = public_key(signer).ok_or(Error::NotMember { signer })?;
+    match public_key(signer) {
+        Some(Known::Applied(public)) if holds(public, claim, signature) => Ok(()),
+        Some(Known::Applied(_)) => Err(Error::Forged { signer }),
+        Some(Known::Unapplied(public)) if holds(public, claim, signature) => Ok(()),
+        Some(Known::Unapplied(_)) | None => Err(Error::NotMember { signer }),
+    }
+}
+
+// Whether `signature` holds for `claim` under `public`.
+fn holds(public: PublicKey, claim: &Claim<'_>, signature: Option<Signature>) -> bool {
     let Signature(bytes) =
         signature.expect("invariant: decode gives each claim a signature");
-    if !ed25519::holds(public, &statement(claim), &bytes) {
-        return Err(Error::Forged { signer });
-    }
-    Ok(())
+    ed25519::holds(public, &statement(claim), &bytes)
 }
 
 /// Why [`check`] refused a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
-    /// The signer is not a member of the region.
+    /// The signer has no key at this node for its grant.
     NotMember {
         /// The node whose signature the claim needs.
         signer: node::Key,
@@ -193,10 +249,21 @@ mod tests {
         self, TERM, granted, key, message, public, reply_body, signature, signer,
     };
 
-    fn members(ids: &[u8]) -> impl Fn(node::Key) -> Option<PublicKey> {
-        let members: BTreeMap<_, _> =
-            ids.iter().map(|&id| (key(id), public(id))).collect();
-        move |voter| members.get(&voter).copied()
+    fn members(ids: &[u8]) -> impl Fn(node::Key) -> Option<Known> {
+        keys(ids, &[])
+    }
+
+    // The keys of the applied `members`, and of each `(node, signer)` of `joins`: a
+    // join of `node` that is not applied, with the key of `signer`.
+    fn keys(members: &[u8], joins: &[(u8, u8)]) -> impl Fn(node::Key) -> Option<Known> {
+        let applied = members
+            .iter()
+            .map(|&id| (key(id), Known::Applied(public(id))));
+        let joined = joins
+            .iter()
+            .map(|&(id, signer)| (key(id), Known::Unapplied(public(signer))));
+        let known: BTreeMap<_, _> = applied.chain(joined).collect();
+        move |voter| known.get(&voter).copied()
     }
 
     // Node `key` of the voters 1, 2 and 3, in term 0 with an empty log.
@@ -219,7 +286,7 @@ mod tests {
     // Checks `message` as its receiver, a node of the voters 1, 2 and 3 in term 0.
     fn checked(
         message: &mut Message,
-        public_key: impl Fn(node::Key) -> Option<PublicKey>,
+        public_key: impl Fn(node::Key) -> Option<Known>,
     ) -> Result<(), Error> {
         check(&node(message.to), message, public_key)
     }
@@ -320,8 +387,6 @@ mod tests {
         assert_eq!(follower.term(), Term(0));
     }
 
-    // The chain of `chained` with its link to 1 and 2, then a link by leader 4 at
-    // the next index to 1 alone, voted by 1 and 2.
     // As `chained`, with a second link: in the term after `TERM`, leader 4 moved
     // the voters from 1 and 2 to 1 alone, elected by 1 and 2. The message is of the
     // term after that.
@@ -364,6 +429,30 @@ mod tests {
         link_of(&mut expected).votes.voters.remove(&key(3));
         assert_eq!(message, expected);
         assert_eq!(node(key(2)).step(message), Ok(()));
+    }
+
+    #[test]
+    fn check_removes_a_vote_of_a_link_that_fails_under_a_written_join() {
+        let mut message = chained();
+        assert_eq!(checked(&mut message, keys(&[1, 2], &[(3, 5)])), Ok(()));
+        let mut expected = chained();
+        link_of(&mut expected).votes.voters.remove(&key(3));
+        assert_eq!(message, expected);
+        assert_eq!(node(key(2)).step(message), Ok(()));
+        let mut held = chained();
+        assert_eq!(checked(&mut held, keys(&[1, 2], &[(3, 3)])), Ok(()));
+        assert_eq!(held, chained());
+    }
+
+    #[test]
+    fn check_cuts_a_chain_before_a_link_whose_leader_fails_under_a_written_join() {
+        let mut message = two_links();
+        message.chain[1].change.signature = Some(Signature([0; 64]));
+        assert_eq!(checked(&mut message, keys(&[1, 2, 3], &[(4, 4)])), Ok(()));
+        assert_eq!(message.chain, two_links().chain[..1]);
+        let mut held = two_links();
+        assert_eq!(checked(&mut held, keys(&[1, 2, 3], &[(4, 4)])), Ok(()));
+        assert_eq!(held, two_links());
     }
 
     #[test]
@@ -630,6 +719,27 @@ mod tests {
     }
 
     #[test]
+    fn check_removes_a_voter_whose_vote_fails_under_a_written_join() {
+        let mut message = proven();
+        assert_eq!(checked(&mut message, keys(&[1, 2], &[(3, 5)])), Ok(()));
+        let mut expected = proven();
+        expected.proof.as_mut().unwrap().voters.remove(&key(3));
+        assert_eq!(message, expected);
+        let mut held = proven();
+        assert_eq!(checked(&mut held, keys(&[1, 2], &[(3, 3)])), Ok(()));
+        assert_eq!(held, proven());
+    }
+
+    #[test]
+    fn check_refuses_a_grant_that_fails_under_the_written_join_of_its_sender() {
+        let unknown = Error::NotMember { signer: key(3) };
+        let mut reply = granted(3, Grant::Vote, 1);
+        assert_eq!(checked(&mut reply, keys(&[1, 2], &[(3, 5)])), Err(unknown));
+        let mut held = granted(3, Grant::Vote, 1);
+        assert_eq!(checked(&mut held, keys(&[1, 2], &[(3, 3)])), Ok(()));
+    }
+
+    #[test]
     fn check_refuses_a_grant_whose_sender_has_no_key() {
         let unknown = Error::NotMember { signer: key(3) };
         let mut reply = granted(3, Grant::Vote, 1);
@@ -711,7 +821,7 @@ mod tests {
         let two = members(&[1, 2]);
         let members = |voter| {
             if voter == key(3) {
-                Some(public(2))
+                Some(Known::Applied(public(2)))
             } else {
                 two(voter)
             }
@@ -781,6 +891,16 @@ mod tests {
             unreachable!()
         };
         assert_eq!((prev, commit), (Position::default(), 4));
+    }
+
+    #[test]
+    fn check_cuts_an_append_before_a_change_that_fails_under_a_written_join() {
+        let mut message = run();
+        assert_eq!(checked(&mut message, keys(&[1, 2, 3], &[(4, 5)])), Ok(()));
+        assert_eq!(run_entries(&message), &run_entries(&run())[..2]);
+        let mut held = run();
+        assert_eq!(checked(&mut held, keys(&[1, 2, 3], &[(4, 4)])), Ok(()));
+        assert_eq!(held, run());
     }
 
     #[test]
