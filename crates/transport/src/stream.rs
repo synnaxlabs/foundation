@@ -1258,7 +1258,8 @@ mod tests {
                     messages.push(message.to_vec());
                 }
                 assert_eq!(messages.pop(), Some(b"c".to_vec()));
-                assert!(messages.iter().all(|message| message == &[7; 60_000]));
+                let body = vec![7; 60_000];
+                assert!(messages.iter().all(|message| *message == body));
                 side.session.close(Code(4));
             },
         );
