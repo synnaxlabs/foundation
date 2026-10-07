@@ -215,7 +215,7 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
 }
 
 #[test]
-fn refuses_a_name_influxdb_skips_at_the_start() {
+fn refuses_a_tab_or_nul_in_any_part() {
     refuses(&[
         (
             Measurement::new("\t#m", &[], &["f"]),
@@ -226,20 +226,28 @@ fn refuses_a_name_influxdb_skips_at_the_start() {
             "the name \"\\t#m\" holds '\\t', which line protocol cannot carry",
         ),
         (
-            Measurement::new("\0#m", &[], &["f"]),
+            Measurement::new("m\0x", &[], &["f"]),
             Error::Character {
-                name: "\0#m".into(),
+                name: "m\0x".into(),
                 character: '\0',
             },
-            "the name \"\\0#m\" holds '\\0', which line protocol cannot carry",
+            "the name \"m\\0x\" holds '\\0', which line protocol cannot carry",
         ),
         (
-            Measurement::new("\tm", &[], &["f"]),
+            Measurement::new("m", &[("\tk", "v")], &["f"]),
             Error::Character {
-                name: "\tm".into(),
+                name: "\tk".into(),
                 character: '\t',
             },
-            "the name \"\\tm\" holds '\\t', which line protocol cannot carry",
+            "the name \"\\tk\" holds '\\t', which line protocol cannot carry",
+        ),
+        (
+            Measurement::new("m", &[("k", "a\tb")], &["f"]),
+            Error::Character {
+                name: "a\tb".into(),
+                character: '\t',
+            },
+            "the name \"a\\tb\" holds '\\t', which line protocol cannot carry",
         ),
         (
             Measurement::new("m", &[], &["f", "\tf"]),
@@ -250,12 +258,12 @@ fn refuses_a_name_influxdb_skips_at_the_start() {
             "the name \"\\tf\" holds '\\t', which line protocol cannot carry",
         ),
         (
-            Measurement::new("m", &[], &["\0f"]),
+            Measurement::new("m", &[], &["f\0g"]),
             Error::Character {
-                name: "\0f".into(),
+                name: "f\0g".into(),
                 character: '\0',
             },
-            "the name \"\\0f\" holds '\\0', which line protocol cannot carry",
+            "the name \"f\\0g\" holds '\\0', which line protocol cannot carry",
         ),
     ]);
 }
@@ -325,26 +333,9 @@ fn allows_what_is_reserved_only_elsewhere() {
     assert_eq!(text(&out), "time,k=_v,t=# #f=0i 0\n");
 }
 
-/// A name that InfluxDB keeps, with a tab or NUL, then maybe `#`, in front of some.
 fn name() -> impl Strategy<Value = String> {
-    let lead = prop_oneof![
-        8 => Just(""),
-        1 => proptest::sample::select(vec!["\t", "\0", "\t#", "\0#"]),
-    ];
-    let name =
-        "[^_#\\\\\n\r][^\\\\\n\r]{0,8}".prop_filter("not time", |name| name != "time");
-    (lead, name).prop_map(|(lead, name)| format!("{lead}{name}"))
-}
-
-/// The error for the first name that starts with a tab or NUL.
-fn skipped<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<Error> {
-    names.into_iter().find_map(|name| {
-        let character = name.chars().next().filter(|c| matches!(c, '\t' | '\0'))?;
-        Some(Error::Character {
-            name: name.into(),
-            character,
-        })
-    })
+    "[^_#\\\\\n\r\t\0][^\\\\\n\r\t\0]{0,8}"
+        .prop_filter("not time", |name| name != "time")
 }
 
 fn field_value() -> impl Strategy<Value = Value> {
@@ -383,16 +374,30 @@ proptest! {
         prop_assume!(!fields.is_empty());
         let borrowed: Vec<(&str, &str)> =
             tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let line = Measurement::new(&measurement, &borrowed, &keys_of_fields);
-        let names = std::iter::once(measurement.as_str()).chain(keys_of_fields.iter().copied());
-        if let Some(error) = skipped(names) {
-            prop_assert_eq!(line, Err(error));
-            return Ok(());
-        }
-        let line = line.unwrap();
+        let line = Measurement::new(&measurement, &borrowed, &keys_of_fields).unwrap();
         let values: Vec<Option<Value>> = fields.iter().map(|&(_, v)| Some(v)).collect();
         let mut out = Vec::new();
         line.line(&mut out, &values, Stamp::from_nanos(time));
         prop_assert_eq!(parse(text(&out)), (measurement, tags, fields, time));
+    }
+
+    #[test]
+    fn refuses_a_tab_or_nul_anywhere(
+        name in name(),
+        at in any::<proptest::sample::Index>(),
+        character in proptest::sample::select(vec!['\t', '\0']),
+        part in 0..4_usize,
+    ) {
+        let mut chars: Vec<char> = name.chars().collect();
+        chars.insert(at.index(chars.len() + 1), character);
+        let name: String = chars.into_iter().collect();
+        let n = name.as_str();
+        let got = match part {
+            0 => Measurement::new(n, &[("k", "v")], &["f"]),
+            1 => Measurement::new("m", &[(n, "v")], &["f"]),
+            2 => Measurement::new("m", &[("k", n)], &["f"]),
+            _ => Measurement::new("m", &[("k", "v")], &["f", n]),
+        };
+        prop_assert_eq!(got, Err(Error::Character { name, character }));
     }
 }
