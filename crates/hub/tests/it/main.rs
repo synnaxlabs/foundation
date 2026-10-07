@@ -17,7 +17,7 @@ use env::clock::Clock;
 use env::files::Operation;
 use env::tasks::Tasks;
 use hub::home::{Outcome, Refusal};
-use hub::reader::{self, Mode, Reader, Received};
+use hub::reader::{self, Ended, Mode, Reader, Received};
 use hub::writer::{self, Writer};
 use hub::{Channel, Hub};
 use types::authority::Authority;
@@ -255,12 +255,16 @@ fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
     let entry = entry(received.set, key);
     let group = received.set.entries()[entry].group;
     let count = received
-        .frame
+        .view
         .range(group)
         .expect("the group is present")
         .count;
     let count = usize::try_from(count).expect("a count");
-    let bytes = received.frame.series(entry).expect("the series is present");
+    let (_, bytes) = received
+        .view
+        .iter()
+        .find(|&(present, _)| present == entry)
+        .expect("the view holds the series");
     let data_type = received.set.entries()[entry].data_type;
     let mut out = vec![0; count * 8];
     codec::decode(data_type, count, bytes, &mut out).expect("decodes");
@@ -290,7 +294,7 @@ fn drain(reader: &mut Reader) -> Vec<u64> {
     while pending < 2 {
         match poll_once(reader.next()) {
             Poll::Ready(received) => {
-                charges.push(received.expect("a frame").frame.charge());
+                charges.push(received.expect("a frame").view.charge());
                 pending = 0;
             }
             Poll::Pending => pending += 1,
@@ -315,7 +319,7 @@ fn gives_a_complete_reader_each_frame_in_seq_order_with_the_samples_written() {
                 seq: n.cast_unsigned(),
                 count: 1,
             };
-            assert_eq!(received.frame.range(0), Some(range));
+            assert_eq!(received.view.range(0), Some(range));
             assert_eq!(samples(&received, 1), [now + n]);
             assert_eq!(samples(&received, 2), [n * 10]);
         }
@@ -378,7 +382,10 @@ fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after()
         };
         assert_eq!(samples(&received.expect("a frame"), 2), [7]);
         let received = complete.next().await.expect("a frame");
-        assert_eq!(samples(&received, 2), [7]);
+        assert_eq!(samples(&received, 1), [now]);
+        let time = entry(received.set, 1);
+        let entries: Vec<_> = received.view.iter().map(|(entry, _)| entry).collect();
+        assert_eq!(entries, [time], "the view holds only the reader's channels");
     });
 }
 
@@ -431,7 +438,7 @@ fn frees_the_frames_of_a_reader_when_it_drops() {
         let now = test.now();
         for n in 0..4 {
             write(&mut writer, &[now + n], &[n]);
-            drop(taker.next().await.expect("a frame"));
+            taker.next().await.expect("a frame");
         }
         let held = test.free();
         drop(lagger);
@@ -463,11 +470,11 @@ fn gives_each_reader_the_error_of_a_failed_sync_on_each_later_call() {
         let now = test.now();
         write(&mut writer, &[now], &[1]);
         assert_eq!(samples(&latest.next().await.expect("a frame"), 2), [1]);
-        let failed = env::files::Error::Io {
+        let failed = Ended::Buffer(env::files::Error::Io {
             path: PathBuf::from(RING),
             operation: Operation::Sync,
             code: 5,
-        };
+        });
         for _ in 0..2 {
             assert_eq!(complete.next().await.err(), Some(failed.clone()));
             assert_eq!(latest.next().await.err(), Some(failed.clone()));
@@ -485,10 +492,10 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
         let (mut bytes, mut spent, mut first) = (0, 0, 0);
         for n in 0..400 {
             write_wide(&mut writer, now, n);
-            bytes += taker.next().await.expect("a frame").frame.charge();
+            bytes += taker.next().await.expect("a frame").view.charge();
             // The take of the second frame grants credit for the first.
             if n < 2 {
-                let charge = lagger.next().await.expect("a frame").frame.charge();
+                let charge = lagger.next().await.expect("a frame").view.charge();
                 if n == 0 {
                     first = charge;
                 }
@@ -636,7 +643,7 @@ fn waits_for_no_commit_in_a_loop_after_the_only_complete_reader_closes() {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         write(&mut writer, &[now + 4], &[4]);
         let received = reader.next().await.expect("a frame");
-        assert_eq!(received.frame.range(0), Some(Range { seq: 4, count: 1 }));
+        assert_eq!(received.view.range(0), Some(Range { seq: 4, count: 1 }));
     });
 }
 
@@ -661,7 +668,7 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
             seq: frames.cast_unsigned() * 1000,
             count: 1000,
         };
-        assert_eq!(received.frame.range(0), Some(range));
+        assert_eq!(received.view.range(0), Some(range));
     });
 }
 
@@ -706,11 +713,11 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff() {
                 Some(test.writer("a", &["value"]).await)
             };
             test.clock.sleep(SETTLE).await;
-            let failed = env::files::Error::Io {
+            let failed = Ended::Buffer(env::files::Error::Io {
                 path: PathBuf::from(RING),
                 operation: Operation::Sync,
                 code: 5,
-            };
+            });
             let next = poll_once(complete.next()).map(Result::err);
             assert_eq!(next, Poll::Ready(Some(failed)), "closed: {closed}");
             drop(writer);
@@ -753,11 +760,11 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
         let written = writer.write(LIVE, draft).map(<[_]>::to_vec);
         assert_eq!(written, Err(hub::home::Error::Large));
         test.clock.sleep(SETTLE).await;
-        let failed = env::files::Error::Io {
+        let failed = Ended::Buffer(env::files::Error::Io {
             path: PathBuf::from(RING),
             operation: Operation::Sync,
             code: 5,
-        };
+        });
         let next = poll_once(complete.next()).map(Result::err);
         assert_eq!(next, Poll::Ready(Some(failed)));
     });

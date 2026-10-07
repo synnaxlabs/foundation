@@ -617,9 +617,14 @@ How to read this record:
   frames, or a commit of more than a window) gets no later frame and no error until it
   closes; the docs of `Mode::Complete` and `next` state it. This is a patch until
   catch-up from the buffer exists. After a warmup, a write and a read make no heap
-  allocation, which a counting allocator test binary checks (COUNTING ALLOCATOR).
-  `Hub::define` and `Config::pool` stand. Decided by the architect, #1133
-  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575).
+  allocation, which a counting allocator test binary checks (COUNTING ALLOCATOR). `next`
+  gives a `types::frame::View` of the reader's channels and their index (M2), never the
+  frame. The view borrows the reader, which releases the frame at the next call, so the
+  grant at the next take follows CREDIT RULES; a caller that keeps data copies it. A
+  session that ends gives `reader::Ended`. `Hub::define` stands. Decided by the
+  architect, #1133
+  (https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575 and
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps

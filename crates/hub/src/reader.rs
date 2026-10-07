@@ -7,8 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 
-use types::frame::Frame;
+use types::channel;
 use types::frame::key_set::KeySet;
+use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
 use crate::State;
@@ -31,14 +32,32 @@ pub enum Mode {
     Latest,
 }
 
-/// One frame that a reader got.
+/// One frame that a reader got, through the reader's mask (M2): only the reader's
+/// channels and their index.
 #[derive(Debug)]
 pub struct Received<'a> {
-    /// The frame. Its series are encoded.
-    pub frame: Frame,
-    /// The key set that the frame's entries index.
+    /// The frame through the mask. Its series are encoded.
+    pub view: View<'a>,
+    /// The key set that the view's entries index.
     pub set: &'a Arc<KeySet>,
 }
+
+/// Why a reader session gives no more frames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// The shard's buffer failed.
+    Buffer(env::files::Error),
+}
+
+impl fmt::Display for Ended {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Buffer(error) => write!(f, "the buffer of the shard failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Ended {}
 
 /// Why a reader session did not open.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,8 +91,12 @@ pub struct Reader {
     key: ::home::reader::Key,
     /// The credit of a complete reader.
     credit: Option<Credit>,
-    /// The key set of the last frame.
-    set: Option<Arc<KeySet>>,
+    /// The slots of the reader's channels.
+    slots: Box<[channel::Slot]>,
+    /// The frame that the last [`Received`] lends.
+    frame: Option<Frame>,
+    /// The key set of the last frame, and the mask of the reader's channels in it.
+    mask: Option<(Arc<KeySet>, Mask)>,
     /// Frames given in a row since `next` last returned `Pending`.
     streak: u32,
 }
@@ -96,6 +119,7 @@ impl Reader {
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;
         let mut index = None;
+        let mut slots = Vec::with_capacity(channels.len());
         for name in channels {
             let channel = borrowed
                 .channels
@@ -104,6 +128,7 @@ impl Reader {
             if *index.get_or_insert(channel.index) != channel.index {
                 return Err(Error::ManyIndexes);
             }
+            slots.push(borrowed.interner.slots().assign(channel.key));
         }
         let index = index.ok_or(Error::Empty)?;
         let slot = borrowed.interner.slots().assign(index);
@@ -122,24 +147,29 @@ impl Reader {
             state: Rc::clone(state),
             key,
             credit,
-            set: None,
+            slots: slots.into(),
+            frame: None,
+            mask: None,
             streak: 0,
         })
     }
 
-    /// The next frame. After 128 frames in a row, it wakes its task and waits once, so
-    /// a task that loops on it lets the shard's other tasks run. A complete session
-    /// that missed a frame waits with no end ([`Mode::Complete`]).
+    /// The next frame, as a view of the reader's channels. The view borrows the
+    /// reader, so the frame stays in use until the next call or the drop. After 128
+    /// frames in a row, it wakes its task and waits once, so a task that loops on it
+    /// lets the shard's other tasks run. A complete session that missed a frame waits
+    /// with no end ([`Mode::Complete`]).
     ///
     /// # Errors
     ///
-    /// The error that ended the shard's buffer, once no frame waits, on this and every
-    /// later call.
+    /// [`Ended`] once no frame waits and the session can give no more, on this and
+    /// every later call.
     #[expect(
         clippy::missing_panics_doc,
         reason = "the interner holds the key set of each frame a writer made"
     )]
-    pub async fn next(&mut self) -> Result<Received<'_>, env::files::Error> {
+    pub async fn next(&mut self) -> Result<Received<'_>, Ended> {
+        self.frame = None;
         let frame = poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
@@ -158,7 +188,7 @@ impl Reader {
                 return Poll::Ready(Ok(frame));
             }
             if let Some(error) = &state.failed {
-                return Poll::Ready(Err(error.clone()));
+                return Poll::Ready(Err(Ended::Buffer(error.clone())));
             }
             self.streak = 0;
             state.wakers.insert(self.key, cx.waker().clone());
@@ -166,17 +196,22 @@ impl Reader {
         })
         .await?;
         let key = frame.key_set();
-        let set = match self.set.take() {
-            Some(set) if set.key() == key => self.set.insert(set),
+        let (set, mask) = match self.mask.take() {
+            Some(mask) if mask.0.key() == key => self.mask.insert(mask),
             _ => {
                 let snapshot = self.state.borrow().interner.snapshot();
                 let set = snapshot
                     .get(key)
                     .expect("invariant: a frame's key set is known");
-                self.set.insert(Arc::clone(set))
+                let mask = Mask::new(set, self.slots.iter().copied());
+                self.mask.insert((Arc::clone(set), mask))
             }
         };
-        Ok(Received { frame, set })
+        let frame = self.frame.insert(frame);
+        Ok(Received {
+            view: View::new(frame, mask),
+            set,
+        })
     }
 }
 
