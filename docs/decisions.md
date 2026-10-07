@@ -2667,9 +2667,11 @@ How to read this record:
   person (2026-10-07T17:04:29Z
   https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353).
   Supersedes: https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042446508
-  (item 1, by the person's ruling and 6042839816; item 9, by 6043097777 item 5),
-  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816 (its 400
-  and 415 sentences, by 6043097777 items 4 and 5).
+  (items 1 and 4, by the person's ruling and 6042839816; item 9, by 6043097777 item
+  5), https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042839816 (its
+  400 and 415 sentences, by 6043097777 items 4 and 5),
+  https://github.com/synnaxlabs/foundation/pull/1473#issuecomment-6042291321 (the doc
+  of finding 1, by 6042446508 item 1 and 6042839816).
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library
