@@ -618,17 +618,15 @@ fn a_proposal_with_no_answer_goes_again_only_after_node_1_has_no_leader() {
     assert_eq!(ends, [Err(reset), Ok(())]);
 }
 
-// Node 2 stays the leader and sends one heartbeat of the next term, then none: only
-// the term of node 1 changes before its election timeout.
+// Node 2 stays the leader and sends one heartbeat of the next term, then none. Node 1
+// got the last heartbeat of term 5 at most 600 ms before, and an election timeout is
+// 10 ticks or more: in the first 300 ms, only the new term ends the try.
 #[test]
 fn a_try_ends_when_the_same_leader_leads_a_later_term() {
     let call = |node: sim::node::Node, mesh: Mesh| async move {
-        let clock = node.clock();
-        let group = mesh.clone();
-        let set = within(&clock, seconds(10), set(mesh)).await;
-        (set, group.group.borrow().raft.term())
+        within(&node.clock(), seconds(10), set(mesh)).await
     };
-    let ((set, term), (end, gap)) = run(call, |mut leader| async move {
+    let (set, (end, gap)) = run(call, |mut leader| async move {
         let clock = leader.clock();
         let (_, mut old) = leader.proposal().await;
         leader.silent.set(true);
@@ -642,11 +640,11 @@ fn a_try_ends_when_the_same_leader_leads_a_later_term() {
         let end = old.end().await;
         (end, clock.now() - start)
     });
-    assert_eq!((set, term), (None, Term(6)));
+    assert_eq!(set, None);
     assert_eq!(end, Err(transport::Error::Reset { code: Code(0) }));
     let ms = gap.nanos() / Span::MILLISECOND.nanos();
     assert!(
-        ms < 500,
+        ms < 300,
         "the try ended {ms} ms after the heartbeat of term 6"
     );
 }
