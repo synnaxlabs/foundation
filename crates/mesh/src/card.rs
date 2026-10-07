@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-use aws_lc_rs::signature::KeyPair;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
 
@@ -92,10 +91,10 @@ impl Signed {
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
         let pair = ed25519::pair(private_key);
         assert!(
-            pair.public_key().as_ref() == card.public_key.to_bytes(),
+            ed25519::public(&pair) == card.public_key,
             "the card's public key is not the public half of the private key"
         );
-        let signature = ed25519::sign(&pair, &statement(key, &card));
+        let signature = ed25519::sign(&pair, &statement(TAG, key, &card));
         Self {
             key,
             card,
@@ -113,7 +112,7 @@ impl Signed {
         card: Card,
         signature: [u8; 64],
     ) -> Result<Self, Forged> {
-        if !ed25519::holds(card.public_key, &statement(key, &card), &signature) {
+        if !ed25519::holds(card.public_key, &statement(TAG, key, &card), &signature) {
             return Err(Forged { node: key });
         }
         Ok(Self {
@@ -157,10 +156,10 @@ impl fmt::Display for Forged {
 
 impl std::error::Error for Forged {}
 
-// The bytes a node signs for its card. They name the node, so nodes that share a key
-// cannot share a card.
-fn statement(key: node::Key, card: &Card) -> Vec<u8> {
-    let mut bytes = TAG.to_vec();
+/// The bytes signed under `tag` for `card` of node `key`. They name the node, so a
+/// signature holds for one node only.
+pub(crate) fn statement(tag: &[u8], key: node::Key, card: &Card) -> Vec<u8> {
+    let mut bytes = tag.to_vec();
     put_key(key, &mut bytes);
     card.encode(&mut bytes);
     bytes
@@ -424,7 +423,7 @@ mod tests {
         expected.extend(1u128.to_be_bytes());
         expected.extend([2, 1]);
         expected.extend([8, 7, 6, 5, 4, 3, 2, 1]);
-        assert_eq!(statement(key(1), &card), expected);
+        assert_eq!(statement(TAG, key(1), &card), expected);
     }
 
     #[test]

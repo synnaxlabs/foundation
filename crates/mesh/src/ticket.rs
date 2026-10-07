@@ -6,7 +6,6 @@ use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
 
-use crate::bytes::put_key;
 use crate::card;
 use crate::ed25519;
 
@@ -239,13 +238,9 @@ impl fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-// The bytes a ticket signs to admit a card. They name the node, so an admission holds
-// for one node only.
+// The bytes a ticket signs to admit `card`.
 fn statement(card: &card::Signed) -> Vec<u8> {
-    let mut bytes = TAG.to_vec();
-    put_key(card.key(), &mut bytes);
-    card.card().encode(&mut bytes);
-    bytes
+    card::statement(TAG, card.key(), card.card())
 }
 
 #[cfg(test)]
@@ -359,7 +354,6 @@ mod tests {
                 public_key: public(7)
             })
         );
-        assert_eq!(record.uses, 1);
     }
 
     #[test]
@@ -371,6 +365,7 @@ mod tests {
                 record.admit(&card, &ticket(7).admission(&card), BEFORE_EXPIRY);
             assert_eq!(admitted, Ok(()));
         }
+        // The count is region state, which every node must agree on.
         assert_eq!(record.uses, 2);
     }
 
@@ -415,6 +410,37 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_names_the_first_check_that_fails_and_counts_no_use() {
+        let mut record = record(7, false);
+        let outside = signed(3, "plant.edger");
+        assert_eq!(
+            record.admit(&outside, &ticket(8).admission(&outside), EXPIRY),
+            Err(Refused::Forged {
+                node: key(3),
+                public_key: public(7)
+            })
+        );
+        assert_eq!(
+            record.admit(&outside, &ticket(7).admission(&outside), EXPIRY),
+            Err(Refused::Scope {
+                name: "plant.edger".parse().unwrap(),
+                prefix: "plant.edge".parse().unwrap()
+            })
+        );
+        let inside = signed(4, "plant.edge.a");
+        let admission = ticket(7).admission(&inside);
+        assert_eq!(record.admit(&inside, &admission, BEFORE_EXPIRY), Ok(()));
+        assert_eq!(
+            record.admit(&inside, &admission, EXPIRY),
+            Err(Refused::Expired {
+                public_key: public(7),
+                expiry: EXPIRY,
+                at: EXPIRY
+            })
+        );
+    }
+
+    #[test]
     fn a_ticket_admits_no_node_from_its_expiry() {
         let mut record = record(7, false);
         let card = signed(3, "plant.edge.a");
@@ -426,7 +452,6 @@ mod tests {
                 at: EXPIRY
             })
         );
-        assert_eq!(record.uses, 0);
         assert_eq!(
             record.admit(&card, &ticket(7).admission(&card), BEFORE_EXPIRY),
             Ok(())
