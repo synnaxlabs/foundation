@@ -33,6 +33,9 @@ struct Comment {
 struct Round {
     number: u32,
     reviewers: BTreeSet<String>,
+    /// The round has the line `Breaker: skipped`: its range changes no `.rs` line but
+    /// comments.
+    breakerless: bool,
     end: String,
     findings: String,
 }
@@ -82,13 +85,13 @@ fn problems(
                     round.number, round.findings
                 ));
             }
-            let missing: Vec<&str> = required(&record.files)
+            let missing: Vec<&str> = required(&round, &record.files)
                 .into_iter()
                 .filter(|name| !round.reviewers.contains(*name))
                 .collect();
             if !missing.is_empty() {
                 problems.push(format!(
-                    "review round {} names no {}, which the diff requires.",
+                    "review round {} names no {}, which this round requires.",
                     round.number,
                     missing.join(", ")
                 ));
@@ -111,15 +114,19 @@ fn problems(
     Ok(problems)
 }
 
-/// The reviewers the review skill's table requires for a diff of `files`.
-fn required(files: &[String]) -> Vec<&'static str> {
+/// The reviewers that `round` must name for a PR that changes `files`: on round 1,
+/// each reviewer of the review skill's table; on a later round, `reviewer`, and
+/// `breaker` for a code PR unless the round skipped it.
+fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
     let code = files.iter().map(Path::new).any(|f| {
         f.extension().is_some_and(|e| e == "rs")
             || f.file_name()
                 .is_some_and(|n| n == "Cargo.toml" || n == "Cargo.lock")
     });
-    if code {
+    if code && round.number <= 1 {
         vec!["reviewer", "architecture", "breaker"]
+    } else if code && !round.breakerless {
+        vec!["reviewer", "breaker"]
     } else {
         vec!["reviewer"]
     }
@@ -162,7 +169,9 @@ fn parse<'a>(
         .parse()
         .map_err(|e| format!("`## Review round {number}` has no round number: {e}"))?;
     let (mut reviewers, mut range, mut findings) = (None, None, None);
+    let mut breakerless = false;
     for line in lines {
+        breakerless |= line.starts_with("Breaker: skipped");
         if let Some(value) = line.strip_prefix("Reviewers: ") {
             reviewers.get_or_insert(value);
         } else if let Some(value) = line.strip_prefix("Range: ") {
@@ -188,6 +197,7 @@ fn parse<'a>(
             .split(',')
             .map(|r| r.trim().trim_matches('`').to_string())
             .collect(),
+        breakerless,
         end: end.to_string(),
         findings: findings.ok_or_else(|| missing("Findings"))?.to_string(),
     })

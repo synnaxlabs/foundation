@@ -20,7 +20,8 @@ The fixes close each round 1 finding. Tests pin the depth limit at both ends.
 
 ## Review round 3
 
-Reviewers: reviewer, architecture, breaker
+Reviewers: reviewer
+Breaker: skipped, the range changes no `.rs` line but comments
 Range: `38cba24f..c77c67d7`
 Findings: none
 
@@ -108,27 +109,56 @@ fn fails_a_round_with_findings() {
     );
 }
 
+/// `ROUND` as a later round of a code PR that does not skip `breaker`.
+fn later(reviewers: &str) -> String {
+    ROUND
+        .replace("Reviewers: reviewer", &format!("Reviewers: {reviewers}"))
+        .replace(
+            "Breaker: skipped, the range changes no `.rs` line but comments\n",
+            "",
+        )
+}
+
 #[test]
 fn fails_a_code_pr_whose_round_names_no_breaker() {
-    let round =
-        ROUND.replace("reviewer, architecture, breaker", "reviewer, architecture");
     assert_eq!(
-        check(&record(vec![bot(&round)])),
-        vec!["review round 3 names no breaker, which the diff requires.".to_string()]
+        check(&record(vec![bot(&later("reviewer, architecture"))])),
+        vec!["review round 3 names no breaker, which this round requires.".to_string()]
+    );
+    assert_eq!(
+        check(&record(vec![bot(&later("reviewer, breaker"))])),
+        Vec::<String>::new()
     );
 }
 
 #[test]
+fn round_1_of_a_code_pr_needs_each_reviewer_of_the_table() {
+    let first = ROUND.replace("round 3", "round 1");
+    assert_eq!(
+        check(&record(vec![bot(&first)])),
+        vec![
+            "review round 1 names no architecture, breaker, which this round requires."
+                .to_string()
+        ]
+    );
+    let first = first.replace(
+        "Reviewers: reviewer",
+        "Reviewers: reviewer, architecture, breaker",
+    );
+    assert_eq!(check(&record(vec![bot(&first)])), Vec::<String>::new());
+}
+
+#[test]
 fn needs_only_the_reviewer_for_a_diff_with_no_code() {
-    let round = ROUND.replace("reviewer, architecture, breaker", "`reviewer`");
-    let mut docs = record(vec![bot(&round)]);
+    let first = later("`reviewer`").replace("round 3", "round 1");
+    let mut docs = record(vec![bot(&first)]);
     docs.files = vec!["docs/decisions.md".to_string(), "README.md".to_string()];
     assert_eq!(check(&docs), Vec::<String>::new());
     docs.files.push("xtask/Cargo.toml".to_string());
     assert_eq!(
         check(&docs),
         vec![
-            "review round 3 names no architecture, breaker, which the diff requires."
+            "review round 1 names no architecture, breaker, which this round requires."
                 .to_string()
         ]
     );
