@@ -956,7 +956,7 @@ mod model {
             let (tally, waker) = create_waker();
             let first = pin!(consumer.pop()).poll(&mut Context::from_waker(&waker));
             let mut producer = pushes.join().unwrap();
-            assert_ne!(first, Poll::Ready(None));
+            assert!(matches!(first, Poll::Pending | Poll::Ready(Some(1))));
             let before = tally.count();
             producer.push(2).unwrap();
             assert_eq!(tally.count(), before);
