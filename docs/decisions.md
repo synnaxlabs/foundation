@@ -1470,7 +1470,15 @@ How to read this record:
   `window_bytes` plus `message_bytes_max`; else the read waits for `Readable` (#611). It
   holds the bytes of a message outside the pool, and takes a block only when the message
   is whole. Decided by architect-2 (#1456:
-  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673). So
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673). No
+  chunk of the carrier outlives the read that took it: a read that ends before its
+  message has a block copies the bytes it holds into one buffer of the message's
+  length, outside the pool. Decided by `laptop.architect-2` (#1456, 2026-10-07 17:05
+  UTC: https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6042785777).
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6042336187 and the
+  copy cost of
+  https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6041057673. So
   bytes that wait for a block never use up the credit that a started message needs,
   and a peer that breaks the send rule holds at most the receive budget and stops only
   its own connection. Each node's first one-way stream is its hello, with no class byte:
