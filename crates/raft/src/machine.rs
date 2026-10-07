@@ -396,7 +396,7 @@ impl Raft {
     /// - [`Error::Misrouted`] when the message is for another node.
     /// - [`Error::Loopback`] when the message names this node as its sender.
     /// - [`Error::SecondLeader`] when a heartbeat or an append of this node's term
-    ///   comes from a node other than the leader it knows.
+    ///   comes from a node other than the leader of the term that it knows.
     /// - [`Error::Unproven`] when the message claims a higher term, or a leader of
     ///   this node's term that it did not prove, with no proof that a quorum of this
     ///   node's voters granted it, and no chain of configuration entries that leads
