@@ -4,10 +4,12 @@ mod body;
 mod pool;
 mod stream;
 
+use std::cell::Cell;
 use std::fmt;
 use std::future::poll_fn;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::Poll;
 
 use bytes::Bytes;
@@ -40,8 +42,8 @@ const OPTIONS: tcp::Options = tcp::Options {
 ///
 /// When a request on a reused connection fails before its response, the client sends
 /// it once more on a new connection: always when the connection did not write it, and
-/// for an idempotent method when it did. A request with another method then fails,
-/// because the server may have acted on it.
+/// for an idempotent method when no byte of a response came. Else it fails, because
+/// the server may have acted on it.
 ///
 /// ```
 /// use bytes::Bytes;
@@ -74,9 +76,8 @@ pub struct Config {
     /// Runs each connection's I/O.
     pub tasks: Tasks,
     /// The longest a request may take, from the call to `send` to the last body
-    /// byte. A
-    /// timeout below zero acts as zero. One that passes the end of the clock never
-    /// fires.
+    /// byte. A timeout below zero acts as zero. One that passes the end of the clock
+    /// never fires.
     pub timeout: Span,
     /// The largest response body the client reads.
     pub body_max: usize,
@@ -137,30 +138,36 @@ impl Client {
         origin_form(&mut parts);
         let request = Request::from_parts(parts, Whole(Some(body)));
         let request = match self.pool.take(remote, self.clock.now()) {
-            Some(mut sender) => {
-                // The server may have closed the idle stream before this request
-                // reached it. RFC 9112 lets a client send an idempotent request again.
+            Some(mut connection) => {
+                let received = connection.received.get();
                 let spare = request.method().is_idempotent().then(|| copy(&request));
-                match sender.try_send_request(request).await {
-                    Ok(response) => return self.read(remote, sender, response).await,
-                    Err(mut error) => match error.take_message().or(spare) {
-                        Some(request) => request,
-                        None => return Err(error.into_error().into()),
-                    },
+                match connection.sender.try_send_request(request).await {
+                    Ok(response) => {
+                        return self.read(remote, connection, response).await;
+                    }
+                    Err(mut error) => {
+                        // With no byte of a response, the server may have closed the
+                        // idle stream before the request reached it.
+                        let unanswered = connection.received.get() == received;
+                        match error.take_message().or(spare.filter(|_| unanswered)) {
+                            Some(request) => request,
+                            None => return Err(error.into_error().into()),
+                        }
+                    }
                 }
             }
             None => request,
         };
-        let mut sender = self.connect(remote).await?;
-        let response = sender.send_request(request).await?;
-        self.read(remote, sender, response).await
+        let mut connection = self.connect(remote).await?;
+        let response = connection.sender.send_request(request).await?;
+        self.read(remote, connection, response).await
     }
 
-    /// Reads the whole body of `response`, then keeps `sender` for `remote`.
+    /// Reads the whole body of `response`, then keeps `connection` for `remote`.
     async fn read(
         &self,
         remote: SocketAddr,
-        sender: SendRequest<Whole>,
+        connection: Connection,
         response: Response<Incoming>,
     ) -> Result<Response<Bytes>, Error> {
         let (parts, mut incoming) = response.into_parts();
@@ -175,24 +182,37 @@ impl Client {
                 bytes.extend_from_slice(&data);
             }
         }
-        self.pool.put(remote, sender, self.clock.now());
+        self.pool.put(remote, connection, self.clock.now());
         Ok(Response::from_parts(parts, Bytes::from(bytes)))
     }
 
-    async fn connect(&self, remote: SocketAddr) -> Result<SendRequest<Whole>, Error> {
+    async fn connect(&self, remote: SocketAddr) -> Result<Connection, Error> {
         let config = tcp::Config {
             remote,
             options: OPTIONS,
         };
         let tcp = self.net.connect(&config).await.map_err(Error::Connect)?;
-        let (sender, connection) = http1::handshake(Stream(tcp)).await?;
+        let received = Rc::default();
+        let stream = Stream {
+            tcp,
+            received: Rc::clone(&received),
+        };
+        let (sender, connection) = http1::handshake(stream).await?;
         // `hyper` gives a connection error to the request in flight, which reports it.
         // An idle connection that fails is closed, and the pool does not reuse it.
         self.tasks.spawn(async move {
             let _reported: Result<(), hyper::Error> = connection.await;
         });
-        Ok(sender)
+        Ok(Connection { sender, received })
     }
+}
+
+/// A connection to a server.
+#[derive(Debug)]
+struct Connection {
+    sender: SendRequest<Whole>,
+    /// The count of bytes that its stream read, which wraps.
+    received: Rc<Cell<u64>>,
 }
 
 /// The address `uri` names.

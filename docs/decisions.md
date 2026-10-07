@@ -1620,8 +1620,8 @@ How to read this record:
   stream. Decided by the coordinator with `advisor` on 2026-10-06
   (https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6022322924). From
   the review of #1111: a request that fails on a reused connection before its response
-  goes once more on a new connection, when the connection did not write it or its
-  method is idempotent (RFC 9112).
+  goes once more on a new connection, when the connection did not write it, or when
+  its method is idempotent and no byte of a response came (RFC 9112, as in Go).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a

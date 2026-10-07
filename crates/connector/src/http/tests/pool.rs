@@ -32,6 +32,8 @@ enum Reply {
 struct Log {
     /// The stream of each request, in the order they came, by accept order.
     requests: Vec<usize>,
+    /// The bytes of each request, in the order they came.
+    bytes: Vec<Vec<u8>>,
     /// When each stream came and ended, by accept order.
     streams: Vec<(Monotonic, Option<Monotonic>)>,
 }
@@ -91,12 +93,13 @@ async fn answer_each(
     clock: &Clock,
 ) {
     loop {
-        match request(&mut stream).await {
-            Ok(bytes) if !bytes.is_empty() => {}
+        let bytes = match request(&mut stream).await {
+            Ok(bytes) if !bytes.is_empty() => bytes,
             _ended => return,
-        }
+        };
         let count = {
             let mut log = log.lock().expect("no panic under the lock");
+            log.bytes.push(bytes);
             log.requests.push(index);
             log.requests.len() - 1
         };
@@ -306,6 +309,28 @@ fn sends_a_get_again_when_the_server_closed_the_idle_stream_first() {
     assert_eq!(log.lock().expect("no panic").requests, [0, 1]);
 }
 
+#[test]
+fn sends_the_same_request_again() {
+    let mut network = Network::new(31);
+    let log = network.serve_each(PORT, |_| Reply::Close(OK.into(), RACE_IDLE));
+    let put = Request::put(format!("http://{}/write", network.remote()))
+        .header("x-key", "7")
+        .body(Bytes::from_static(b"m v=1 5"))
+        .expect("a valid request");
+    let steps = race(&mut network, put);
+    all_ok(&network.run(steps));
+    let log = log.lock().expect("no panic");
+    assert_eq!(log.requests, [0, 1]);
+    let sent = super::text(&log.bytes[1]);
+    assert!(sent.starts_with("PUT /write HTTP/1.1\r\n"), "{sent}");
+    assert!(
+        sent.contains(&format!("host: {}\r\n", network.remote())),
+        "{sent}"
+    );
+    assert!(sent.contains("x-key: 7\r\n"), "{sent}");
+    assert!(sent.ends_with("\r\n\r\nm v=1 5"), "{sent}");
+}
+
 fn post(network: &Network) -> Request<Bytes> {
     Request::post(format!("http://{}/write", network.remote()))
         .body(Bytes::from_static(b"m v=1 5"))
@@ -358,4 +383,44 @@ fn digest(seed: u64) -> u64 {
 #[test]
 fn two_runs_of_one_seed_give_the_same_trace() {
     assert_eq!(digest(30), digest(30));
+}
+
+#[test]
+fn fails_a_get_after_a_broken_response() {
+    let mut network = Network::new(60);
+    let log = network.serve_each(PORT, |n| match n {
+        1 => Reply::Bytes("HTTP/1.1 abc\r\n\r\n".into()),
+        _ => ok(n),
+    });
+    let outcomes = network.run(sends(&network, PORT, 2));
+    all_ok(&outcomes[..1]);
+    let error = outcomes[1].as_ref().expect_err("a bad status");
+    assert_eq!(
+        error.to_string(),
+        "the exchange failed: invalid HTTP status-code parsed"
+    );
+    assert_eq!(
+        log.lock().expect("no panic under the lock").requests,
+        [0, 0]
+    );
+}
+
+#[test]
+fn fails_a_get_after_part_of_a_response() {
+    let mut network = Network::new(61);
+    let log = network.serve_each(PORT, |n| match n {
+        1 => Reply::Close("HTTP/1.1 200 OK\r\n".into(), Span::ZERO),
+        _ => ok(n),
+    });
+    let outcomes = network.run(sends(&network, PORT, 2));
+    all_ok(&outcomes[..1]);
+    let error = outcomes[1].as_ref().expect_err("a partial response");
+    assert_eq!(
+        error.to_string(),
+        "the exchange failed: connection closed before message completed"
+    );
+    assert_eq!(
+        log.lock().expect("no panic under the lock").requests,
+        [0, 0]
+    );
 }

@@ -4,10 +4,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use hyper::client::conn::http1::SendRequest;
 use types::time::{Monotonic, Span};
 
-use super::body::Whole;
+use super::Connection;
 
 /// The longest a connection stays idle. The client sends no keep-alive, so a
 /// firewall or NAT may have dropped the state of an older stream.
@@ -20,7 +19,7 @@ pub(super) struct Pool(RefCell<BTreeMap<SocketAddr, Idle>>);
 
 #[derive(Debug)]
 struct Idle {
-    sender: SendRequest<Whole>,
+    connection: Connection,
     /// When its last exchange ended.
     since: Monotonic,
 }
@@ -32,7 +31,7 @@ impl Pool {
         &self,
         origin: SocketAddr,
         now: Monotonic,
-    ) -> Option<SendRequest<Whole>> {
+    ) -> Option<Connection> {
         let mut idle = self.0.borrow_mut();
         idle.retain(|_, idle| {
             idle.since
@@ -40,20 +39,24 @@ impl Pool {
                 .is_none_or(|end| now <= end)
         });
         idle.remove(&origin)
-            .map(|idle| idle.sender)
-            .filter(SendRequest::is_ready)
+            .map(|idle| idle.connection)
+            .filter(|connection| connection.sender.is_ready())
     }
 
-    /// Keeps `sender` as the idle connection for `origin`, from `now`. It drops the
+    /// Keeps `connection` as the idle one for `origin`, from `now`. It drops the
     /// connection it replaces.
     pub(super) fn put(
         &self,
         origin: SocketAddr,
-        sender: SendRequest<Whole>,
+        connection: Connection,
         now: Monotonic,
     ) {
-        self.0
-            .borrow_mut()
-            .insert(origin, Idle { sender, since: now });
+        self.0.borrow_mut().insert(
+            origin,
+            Idle {
+                connection,
+                since: now,
+            },
+        );
     }
 }
