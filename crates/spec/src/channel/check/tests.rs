@@ -189,7 +189,7 @@ fn edge(from: u128, len: u128) -> BoxedStrategy<Option<u128>> {
 
 /// A set of channels with correct edges: indexes, then quality channels, then other
 /// data channels, then control channels, each on an index other than the one it
-/// controls. Each edge is drawn from the channels of the kind it needs.
+/// controls.
 fn correct() -> impl Strategy<Value = Vec<Channel>> {
     (1_u128..4, 0_u128..3, 1_u128..5)
         .prop_flat_map(|(indexes, qualities, others)| {

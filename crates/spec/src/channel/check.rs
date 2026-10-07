@@ -1,4 +1,4 @@
-//! The checks across channels: each edge points at a channel it may point at.
+//! The checks across channels.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -140,7 +140,7 @@ impl Edge {
         }
     }
 
-    /// The kind of channel the edge needs, and the fix that points it there.
+    /// What the edge needs, and the fix that points it there.
     const fn need(self) -> (&'static str, &'static str) {
         match self {
             Self::Index => ("an index channel", "Point it at an index channel"),
