@@ -1036,6 +1036,10 @@ impl Streams {
             let Some(half) = self.halves.get_mut(&id) else {
                 continue;
             };
+            // An earlier wake in this drive may have written all of it.
+            if !half.holds() {
+                continue;
+            }
             let caller = half.rest == Rest::Caller;
             if !caller && self.sending.write(inner, half).is_pending() {
                 continue;
@@ -4353,6 +4357,34 @@ mod tests {
             }
             let lens: Vec<_> = got.iter().map(Vec::len).collect();
             assert_eq!(lens, [40_000], "the server got these messages of `latest`");
+        });
+    }
+
+    #[test]
+    fn a_message_after_a_pumped_message_that_two_wakes_named_holds_its_bytes() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut bulk = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut bulk);
+            let mut pumped = open_sender(&mut pair, Class::Command);
+            let waiting = open_sender(&mut pair, Class::Command);
+            let now = pair.now();
+            let given =
+                try_write(&mut pair.client, now, &mut pumped, shard.block(b"p"));
+            assert_eq!(given, Ok(None));
+            assert!(half(&mut pair.client, &pumped).holds());
+            let message = Some(shard.block(b"w"));
+            let written = pair.client.endpoint.write(now, &waiting, &mut { message });
+            assert_eq!(written, Ok(Poll::Pending));
+            // One drive: noq-proto names `bulk` and `pumped`, and each wakes `pumped`.
+            free(&mut pair);
+            assert!(!half(&mut pair.client, &pumped).holds());
+            let message = Some(shard.block(&[7; 1000]));
+            let now = pair.now();
+            let written = pair.client.endpoint.write(now, &pumped, &mut { message });
+            assert_eq!(written, Ok(Poll::Pending));
+            let state = half(&mut pair.client, &pumped).claim.state;
+            assert!(matches!(state, State::Held(1000)), "{state:?}");
         });
     }
 
