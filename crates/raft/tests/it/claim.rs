@@ -321,7 +321,27 @@ fn a_message_from_this_node_claims_nothing() {
     assert_eq!(raft.ready(), Ready::default());
 }
 
-// `step` refuses a second leader of its term before it reads a claim.
+// A follower ignores a vote reply of its term, after the header. Its grant is still
+// a claim: only a refusal or a drop by the header gives none.
+#[test]
+fn a_reply_that_step_ignores_still_claims_its_grant() {
+    let body = Body::VoteReply {
+        answer: Answer::Granted(Some(signature(1))),
+    };
+    let message = message(7, body, None);
+    let mut raft = receiver(7);
+    let grant = Claim::Grant {
+        voter: key(1),
+        grant: Grant::Vote,
+        term: Term(7),
+        candidate: key(2),
+    };
+    assert_eq!(claims(&raft, &message), vec![(grant, Some(signature(1)))]);
+    assert_eq!(raft.step(message), Ok(()));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
+// `step` refuses a second leader of its term by its header.
 #[test]
 fn a_second_leader_of_the_term_claims_nothing() {
     let mut raft = receiver(7);
