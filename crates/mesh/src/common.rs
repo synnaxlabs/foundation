@@ -180,9 +180,15 @@ pub(crate) fn grant_in(
 ///
 /// When `leader` is not 1, 2 or 3: a proof holds its candidate as a voter.
 pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
+    proven_in(TERM, leader, to, body)
+}
+
+/// As [`proven`], in `term`.
+pub(crate) fn proven_in(term: Term, leader: u8, to: u8, body: Body) -> Message {
     let mut ready = Ready {
         messages: vec![Message {
-            proof: Some(votes(TERM, leader)),
+            term,
+            proof: Some(votes(term, leader)),
             ..message(leader, to, body)
         }],
         ..Ready::default()

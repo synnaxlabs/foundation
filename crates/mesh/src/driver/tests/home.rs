@@ -618,6 +618,39 @@ fn a_proposal_with_no_answer_goes_again_only_after_node_1_has_no_leader() {
     assert_eq!(ends, [Err(reset), Ok(())]);
 }
 
+// Node 2 stays the leader and sends one heartbeat of the next term, then none: only
+// the term of node 1 changes before its election timeout.
+#[test]
+fn a_try_ends_when_the_same_leader_leads_a_later_term() {
+    let call = |node: sim::node::Node, mesh: Mesh| async move {
+        let clock = node.clock();
+        let group = mesh.clone();
+        let set = within(&clock, seconds(10), set(mesh)).await;
+        (set, group.group.borrow().raft.term())
+    };
+    let ((set, term), (end, gap)) = run(call, |mut leader| async move {
+        let clock = leader.clock();
+        let (_, mut old) = leader.proposal().await;
+        leader.silent.set(true);
+        leader.rest(BEAT).await;
+        let beat = common::proven_in(Term(6), 2, 1, Body::Heartbeat { commit: 0 });
+        let mut sender = Leader::open(&leader.peer, &leader.dialed).await;
+        let start = clock.now();
+        let beat = leader.peer.block(&Message::Raft(beat).encode());
+        sender.send(beat).await.unwrap();
+        sender.finish().unwrap();
+        let end = old.end().await;
+        (end, clock.now() - start)
+    });
+    assert_eq!((set, term), (None, Term(6)));
+    assert_eq!(end, Err(transport::Error::Reset { code: Code(0) }));
+    let ms = gap.nanos() / Span::MILLISECOND.nanos();
+    assert!(
+        ms < 500,
+        "the try ended {ms} ms after the heartbeat of term 6"
+    );
+}
+
 /// The next value of `watch`, which comes while `call` waits.
 async fn next_before<F: Future>(
     watch: &mut Watch,

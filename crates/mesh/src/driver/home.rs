@@ -124,7 +124,8 @@ impl Try<'_> {
         };
         let mut forward = pin!(forward(&session, &mesh.pool, change));
         // The leader answers or ends the stream while it leads, so only a change of
-        // the lead ends the wait with no answer.
+        // the lead ends the wait with no answer. The answer is polled first, so a
+        // change of the lead in the same poll drops no answer.
         poll_fn(|cx| {
             if let Poll::Ready(at) = forward.as_mut().poll(cx) {
                 return Poll::Ready(Ok(at));

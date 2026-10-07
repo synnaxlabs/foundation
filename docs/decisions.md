@@ -2430,8 +2430,10 @@ How to read this record:
   2026-10-07T22:40:51Z:
   https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6048332653).
   Supersedes the limit of one election timeout in the plan that this approval took:
-  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407. With a
-  position,
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407. It also
+  supersedes point 3 of
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552, a stop
+  that ends a forward at most 11 ticks late. With a position,
   the call waits with no time limit until this node applied the entry of that term at
   that index, or until the log has a different entry there, and then it proposes again:
   a new leader commits an entry of its term, which decides each older position. A time
@@ -2457,9 +2459,9 @@ How to read this record:
   the home only while `State::apply` never refuses a home change. A change kind that
   lets `apply` refuse a home change (such as a removal of a member) must also make
   `set_home` tell a refused entry from one that set the home. The surface as built, the
-  doc of `set_home`, and the four points that the plan did not state (a joint
-  configuration, `Error::Pool`, the time to a stop in a forward, and `NoVote` before
-  `NotMember`) are approved by the architect, 2026-10-07T20:29:07Z:
+  doc of `set_home`, and three points that the plan did not state (a joint
+  configuration, `Error::Pool`, and `NoVote` before `NotMember`) are approved by the
+  architect, 2026-10-07T20:29:07Z:
   https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The
   ruling of 2026-10-07T20:58:20Z above adds the sentence on a late proposal to that
   doc. Its sentences on what `NoVote` and `NotMember` read supersede the last sentence
