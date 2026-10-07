@@ -36,6 +36,9 @@ const MIXED: [Type; 9] = [
     Type::Bytes,
 ];
 
+/// The pool of each bench.
+const POOL: block::Config = block::Config { budget: 1 << 24 };
+
 /// Bytes of one sample of a type that has no width.
 const VARIABLE: usize = 16;
 
@@ -82,12 +85,6 @@ impl Case {
     }
 }
 
-fn pool() -> block::Pool {
-    let config = block::Config { budget: 1 << 24 };
-    let memory = block::Heap::new(config.reservation());
-    block::Pool::new(config, memory)
-}
-
 fn store(pool: &block::Pool, frame: &Frame, set: &KeySet) -> buffer::Entry {
     let (last, stored_at) = (Stamp::from_nanos(7), Stamp::from_nanos(9));
     home::bench::entry(pool, frame, set, last, stored_at).expect("room")
@@ -107,7 +104,7 @@ fn cases() -> Vec<Case> {
 
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn entry(bencher: Bencher<'_, '_>, case: &Case) {
-    let pool = pool();
+    let pool = block::Pool::heap(POOL);
     let frame = case.frame(&pool);
     bencher
         .counter(ItemsCount::new(case.series))
@@ -116,7 +113,7 @@ fn entry(bencher: Bencher<'_, '_>, case: &Case) {
 
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn read(bencher: Bencher<'_, '_>, case: &Case) {
-    let pool = pool();
+    let pool = block::Pool::heap(POOL);
     let frame = case.frame(&pool);
     let parts = store(&pool, &frame, &case.set).parts;
     let body: Vec<u8> = parts.into_iter().flat_map(|part| part.to_vec()).collect();
