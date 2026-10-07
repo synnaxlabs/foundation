@@ -802,6 +802,53 @@ How to read this record:
   and each `hub` caller must keep it); a refusal in `config check` (a second place that
   must track the home). Decided by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
+  row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
+  `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
+  nothing outside a Tokio runtime. A complete session that misses a frame (one that
+  comes when the frames it has not given back, held or untaken, reach a window) gets no
+  later frame, as there is no catch-up from the buffer yet. The director chose that
+  `delivery` reports the miss and wakes the session, and that `next` then ends with an
+  error (2026-10-07T06:01:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
+  `delivery::Readers::release` also names a session that missed a frame and has none
+  waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
+  forwards it until #274 removes it. `next` gives a waiting frame, then `Ended::Behind`,
+  then `Ended::Buffer`. Lost: an error from `take`, which every caller, latest readers
+  too, then handles; a `behind` list beside the woken keys, a second list to drain for
+  an event that happens once per session. A `delivery` model property test and a 32-seed
+  `sim` test stand in for loom and shuttle: the wake never crosses a thread. Decided by
+  `laptop.architect` (2026-10-07T06:36:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). A waiting
+  hub reader has given back every frame, as it grants at each `next` call, so no hub
+  test reaches the wake of a session that missed a frame with none waiting. The
+  `delivery` tests and the home `sim` test
+  `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
+  `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
+  miss while a frame waits gives no wake. The hub `sim` test is
+  `ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window`: one
+  commit of more than a window wakes a waiting reader, which gets each frame before the
+  miss, then `Ended::Behind`, with no hang. Decided by `laptop.architect`
+  (2026-10-07T07:24:41Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119). #1170
+  sizes the window to one commit. After a warmup, a write and `next` make no heap
+  allocation, while frames wait, while a reader waits, and in the write that wakes a
+  latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
+  does not count the commit task. `next` gives a `types::frame::View` of the reader's
+  channels and their index (M2), never the frame. The view borrows the reader, which
+  releases the frame at the next call, not at its first poll, and grants credit for it
+  there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
+  keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
+  A writer on a channel of a type the home does not write gets `writer::Error::Type`
+  with the channel's name (HOME TYPE REFUSAL). Decided by `laptop.architect`
+  (2026-10-07T05:53:24Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
+  2026-10-07T05:57:18Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
+  2026-10-07T07:12:40Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929). The
+  surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
