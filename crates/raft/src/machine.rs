@@ -427,9 +427,7 @@ impl Raft {
             return Err(Error::Loopback);
         }
         if !self.reads(from, term, &body) {
-            if term < self.term {
-                self.answer_stale(from, &body);
-            }
+            self.answer_stale(from, &body);
             return Ok(());
         }
         let body = self.check(from, term, body, proof.as_ref(), &chain)?;
@@ -978,10 +976,11 @@ impl Raft {
         true
     }
 
-    // Answers a message for a lower term so that its sender learns this term, with
-    // the proof of this term, or drops it. The answer carries this node's chain,
-    // which can fall short of the sender's configuration when this node took the
-    // term through a chain it does not hold: the leader's chain then moves it.
+    // Answers a message that `step` does not read: a request for a lower term gets
+    // this term with its proof, so that its sender learns it, and a reply is
+    // dropped. The answer carries this node's chain, which can fall short of the
+    // sender's configuration when this node took the term through a chain it does
+    // not hold: the leader's chain then moves it.
     fn answer_stale(&mut self, from: node::Key, body: &Body) {
         let reply = match body {
             // The reply carries the higher term, so a stale leader steps down and
@@ -3077,6 +3076,25 @@ mod tests {
             let mut raft = behind(&all);
             raft.step(heartbeat(3, by_joint)).unwrap();
             assert_eq!((raft.term(), raft.leader()), (Term(3), Some(key(2))));
+        }
+
+        // Node 1 committed the leave of term 1. A second change of term 1 was voted
+        // under the configuration before the term, not under the leave.
+        #[test]
+        fn a_link_of_the_committed_term_trusts_the_configuration_below_it() {
+            let heartbeat = |chain| Message {
+                proof: Some(proof(Grant::Vote, 2, &[2, 5])),
+                chain,
+                ..message(2, 2, Body::Heartbeat { commit: 0 })
+            };
+            let next = plain(&[2, 5, 6]);
+            // 1 and 2 are a quorum of the leave, not of the founding configuration.
+            let by_leave = vec![link(position(1, 2), 1, &[1, 2], next.clone())];
+            refuses(&mut left(), heartbeat(by_leave), "voted under the leave");
+            let by_all = vec![link(position(1, 2), 1, &[1, 2, 3], next)];
+            let mut raft = left();
+            raft.step(heartbeat(by_all)).unwrap();
+            assert_eq!((raft.term(), raft.leader()), (Term(2), Some(key(2))));
         }
 
         #[test]
