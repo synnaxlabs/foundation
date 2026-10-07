@@ -695,6 +695,38 @@ fn serve_gives_no_code_of_the_mesh_when_the_group_stops() {
     assert!(homes.is_subset(&[Some(key(1)), kept].into()), "{homes:?}");
 }
 
+// `serve` does not tell a stop before the proposal from a stop in its write.
+#[test]
+fn serve_gives_no_code_of_the_mesh_when_the_group_stopped_before_the_proposal() {
+    let at = Position {
+        term: Term(5),
+        index: 1,
+    };
+    let (served, seen) = run(
+        move |node, tasks, incoming| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let data = Data::Bytes(vec![9]);
+            let append = Body::Append {
+                prev: Position::default(),
+                entries: vec![Entry { at, data }],
+                commit: 1,
+            };
+            assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+            let cause = Unknown::Kind { kind: 9 };
+            let stopped = Error::Stopped(Stopped::Change { at, cause });
+            assert_eq!(watch.next().await, Err(stopped));
+            mesh.serve(public(2), incoming).await
+        },
+        |peer| async move { stopped(peer, &[propose(3)]).await },
+    );
+    let text = "the group stopped: the committed entry at index 1 of term 5 is not a \
+                change: change kind 9 is unknown";
+    assert_eq!(served.unwrap_err().to_string(), text);
+    assert_eq!(seen, codes(Code(0)));
+}
+
 #[test]
 fn serve_stops_a_two_way_stream_that_does_not_start_with_a_proposal() {
     let cases = [vec![0xff], Vec::new(), raft(heartbeat())];
