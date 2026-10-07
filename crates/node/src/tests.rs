@@ -854,6 +854,32 @@ mod buffer {
         }
     }
 
+    /// A crash at any point of the first opens, then a restart with another disk
+    /// budget: a ring with a checkpoint keeps its size and a ring with none takes its
+    /// new part, so the restart opens.
+    #[test]
+    fn a_crash_during_the_opens_then_another_disk_budget_opens() {
+        let mut failed = Vec::new();
+        for crash in [sim::Crash::Process, sim::Crash::Power] {
+            for step in 0..60 {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                let node = Node::start(config(&host, 1 << 20, Box::new(heap)));
+                let after = Span::from_nanos(step * 25_000);
+                assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                sim.crash(&host, crash);
+                drop(node);
+                let lens = run_on_disk(&mut sim, &host, 2 * RING)
+                    .map(|()| [0, 1].map(|core| ring_len(&mut sim, &host, core)));
+                let fits = |len: &u64| [RING, DISK.bytes() / 2].contains(len);
+                if !lens.as_ref().is_ok_and(|lens| lens.iter().all(fits)) {
+                    failed.push(format!("{crash:?} at {after:?}: {lens:?}"));
+                }
+            }
+        }
+        assert_eq!(failed, Vec::<String>::new());
+    }
+
     #[test]
     fn a_restart_opens_the_rings_it_left() {
         let mut sim = sim::Sim::new(sim::Config::default());
