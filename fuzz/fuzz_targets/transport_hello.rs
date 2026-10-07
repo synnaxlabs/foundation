@@ -1,5 +1,5 @@
-//! `transport::fuzzing::Hello::decode` never panics. A hello it reads agrees with a
-//! second reader, keeps the limit order, and decodes from its own encoding.
+//! `transport::fuzzing::Hello::decode` never panics, gives the hello that a second
+//! reader gives, and a hello it reads decodes from its own encoding.
 
 #![no_main]
 
@@ -16,17 +16,19 @@ fn varint(bytes: &[u8]) -> Option<(u64, &[u8])> {
     Some((value, rest))
 }
 
-fuzz_target!(|bytes: &[u8]| {
-    let Ok(hello) = Hello::decode(bytes) else {
-        return;
-    };
-    assert!(bytes.len() <= 256, "a hello over 256 bytes");
+/// The hello in `bytes` by the STREAM WIRE rules, written apart from `decode`.
+fn read(bytes: &[u8]) -> Option<Hello> {
+    if bytes.len() > 256 {
+        return None;
+    }
     let (mut rest, mut last, mut window, mut message) = (bytes, None, None, None);
     while !rest.is_empty() {
-        let (id, after) = varint(rest).expect("a whole id");
-        let (value, after) = varint(after).expect("a whole value");
+        let (id, after) = varint(rest)?;
+        let (value, after) = varint(after)?;
         rest = after;
-        assert!(last < Some(id), "id {id} after id {last:?}");
+        if last >= Some(id) {
+            return None;
+        }
         last = Some(id);
         let value = usize::try_from(value).unwrap_or(usize::MAX);
         match id {
@@ -35,12 +37,16 @@ fuzz_target!(|bytes: &[u8]| {
             _ => {}
         }
     }
-    assert_eq!(window, Some(hello.window_bytes), "another window_bytes");
-    assert_eq!(message, Some(hello.message_bytes_max), "another message_bytes_max");
-    assert!(hello.message_bytes_max >= 1472, "a message_bytes_max below 1472");
-    assert!(
-        hello.window_bytes >= hello.message_bytes_max,
-        "a window_bytes below the message_bytes_max"
-    );
-    assert_eq!(Hello::decode(&hello.encode()), Ok(hello), "the hello changed");
+    let hello = Hello { window_bytes: window?, message_bytes_max: message? };
+    let limits = hello.window_bytes >= hello.message_bytes_max
+        && hello.message_bytes_max >= 1472;
+    limits.then_some(hello)
+}
+
+fuzz_target!(|bytes: &[u8]| {
+    let hello = Hello::decode(bytes).ok();
+    assert_eq!(hello, read(bytes), "the readers disagree");
+    if let Some(hello) = hello {
+        assert_eq!(Hello::decode(&hello.encode()), Ok(hello), "the hello changed");
+    }
 });
