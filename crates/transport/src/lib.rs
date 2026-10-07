@@ -88,7 +88,7 @@ const PAYLOAD_IPV4: u16 = 1472;
 ///
 /// Dropping it closes each session that no caller accepted with `Code(0)`, and the
 /// sessions it gave stay open. It refuses each dial from a peer until each session
-/// ended, and then frees its socket, so a later dial gets no answer.
+/// ended, and then frees its [`port::Part`], so a later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
 }
