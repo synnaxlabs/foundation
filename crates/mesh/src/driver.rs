@@ -2208,6 +2208,35 @@ mod tests {
         }
 
         #[test]
+        fn a_step_that_replaces_from_below_a_written_join_removes_its_key() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[home(1), join(4)])).await;
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_from_below_an_unwritten_join_removes_its_key() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = append(common::TERM, changes(&[home(1), join(4)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, joined)), Ok(()));
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
         fn a_join_that_this_leader_proposes_gives_a_key_before_the_write() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
