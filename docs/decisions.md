@@ -243,28 +243,29 @@ How to read this record:
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
 - **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps the holds
-  on the indexes it selects: past `keep` after its store time, no hold keeps a sample,
-  so `buffer` may trim it (STORE TRIM). Retention deletes nothing: a ring frees only at
-  its tail, so a time on one index cannot free its samples. It keeps no history window.
-  An index that no policy selects has no time cap. `keep` is zero or more. At `0s` no
-  hold keeps a sample after its store time, so a reader that is behind gets a gap for
-  each sample that `buffer` trims before the reader gets it. Most specific wins as a
-  whole policy (X25), equal specificity is a plan error (S12), and a data channel takes
-  its index's policy (X26). Lost: a finite default `keep` (5.3), a value for "no cap",
-  a size cap per index, and a read that reports each sample past `keep` as a gap while
-  its bytes are on disk. That read does not depend on disk pressure, but at `0s` a
-  reader a few milliseconds behind loses each sample it reads from disk, and each read
-  needs `keep` and a clock. Stale commands are the job of `max_age` (A20), not of
-  retention. In `config`, `select` and `keep` are both required. `keep` reads with
-  `document::read::span` (`document.bad-span`), where a negative span reads, and
-  `config` refuses it with `config.negative-span` at the `keep` value. The code names
-  the defect, so a later span bound (a reader `hold`, S10) uses it too. Ruling and
-  answers:
+  on the indexes it selects by store time (READER RULES), so `buffer` may trim a sample
+  past the cap (STORE TRIM). Retention deletes nothing: a ring frees only at its tail,
+  so a time on one index cannot free its samples. It keeps no history window. An index
+  that no policy selects has no time cap. `keep` is zero or more. At `0s` a reader that
+  is behind gets a gap for each sample that `buffer` trims before the reader gets it.
+  Most specific wins as a whole policy (X25), equal specificity is a plan error (S12),
+  and a data channel takes its index's policy (X26). Lost: a finite default `keep`
+  (5.3), a value for "no cap", a size cap per index, and a read that reports each sample
+  past `keep` as a gap while its bytes are on disk. That read does not depend on disk
+  pressure, but at `0s` a reader a few milliseconds behind loses each sample it reads
+  from disk, and each read needs `keep` and a clock. Stale commands are the job of
+  `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
+  `keep` reads with `document::read::span` (`document.bad-span`), where a negative span
+  reads, and `config` refuses it with `config.negative-span` at the `keep` value. The
+  code names the defect, so a later span bound (a reader `hold`, S10) uses it too.
+  Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160. The cap
   and the lost read: decided by `laptop.architect`, 2026-10-07T12:30:53Z,
   https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637.
+  Supersedes https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156
+  in its clause that `buffer` trims a sample past `keep`, also when a reader holds it.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
   lease, channels, confirmation: stored or replicated }`. It has no path: the label on
   each write (B7) is the only source, and a write with no label is live. The person
@@ -284,19 +285,26 @@ How to read this record:
   named reader holds from its position until `hold` after the close, in mesh time; an
   unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
   a negative hold (#94). The floor per path is the lowest held position, or none.
-  Retention caps the holds: `buffer` raises the floor past each sample stored more than
-  `keep` ago (RETENTION). A trim follows STORE TRIM: under disk pressure, at the tail
-  of the ring, whatever the floors (decided by `laptop.architect`,
-  2026-10-07T12:59:37Z:
-  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739). A
-  resume takes, per path, the position the reader's `hub` presents, then the position at
-  this home, then the home's fallback. A position below the floor or past the head is
-  accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
-  read at `Mark::at(position)`, so the entries with no samples at the position come
-  again. Between reads, the caller keeps the mark the last read gave, in memory
+  Retention caps the holds: the floor of a path is at least its first sample stored at
+  or after the cutoff, the mesh time of `home` minus `keep`, or past its last sample
+  when none is (RETENTION). After a failover the store times of a path need not rise
+  with its seq, so a sample stored before the cutoff can stay held a little longer, and
+  no sample stored at or after the cutoff loses its hold (decided by `laptop.architect`,
+  2026-10-07T13:39:39Z:
+  https://github.com/synnaxlabs/foundation/issues/1080#issuecomment-6039184732). A trim
+  follows STORE TRIM: under disk pressure, at the tail of the ring, whatever the floors
+  (decided by `laptop.architect`, 2026-10-07T12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/89 in its clause that
+  `buffer` trims below the floor, past retention (by store time), and under disk
+  pressure. A resume takes, per path, the position the reader's `hub` presents, then the
+  position at this home, then the home's fallback. A position below the floor or past
+  the head is accepted as is; the `buffer` read reports any gap (B2). A resume starts a
+  `buffer` read at `Mark::at(position)`, so the entries with no samples at the position
+  come again. Between reads, the caller keeps the mark the last read gave, in memory
   (#510). Named readers write a position record at once when they open, close, or are
-  taken over, and on the home's interval when the position changed. A session open at
-  a crash restores as closed at the restore. The home drops a grant, ack, or close for a
+  taken over, and on the home's interval when the position changed. A session open at a
+  crash restores as closed at the restore. The home drops a grant, ack, or close for a
   key it gave that is no longer open: a late message after a close or a takeover. A take
   of such a key gives nothing. A key is the home's own value, in memory only, and keys
   start again at a restore. No hub message carries a key: the home maps each one to a
@@ -706,17 +714,22 @@ How to read this record:
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
-  `len` 0, and `first` at the live tail. It records a handoff after the gate input
-  that gave it and before the next input or frame. Its bytes are empty when no writer
-  holds control, else `[authority: u8]` then the holder's subject as UTF-8; the entry
-  length gives the subject's length. A restart or a failover starts the gate from the
-  last record (X18): `Gate::recover` with its holder, or `Gate::new` when it names
-  none. Trimming must keep the last record of each index (#406). Until it does, a
-  trim (STORE TRIM) can free that record, and a holder whose record a trim freed gets
-  no grace after a restart. The layout is part of the disk format version (C9d). Copy
-  mode checks each record once where remote records enter (X43), and the read after it
-  panics on a bad record.
-  Decided by the `write-path` builder; approved by the coordinator (#191).
+  `len` 0, and `first` at the live tail. It records a handoff after the gate input that
+  gave it and before the next input or frame. Its bytes are empty when no writer holds
+  control, else `[authority: u8]` then the holder's subject as UTF-8; the entry length
+  gives the subject's length. A restart or a failover starts the gate from the last
+  record (X18): `Gate::recover` with its holder, or `Gate::new` when it names none.
+  Trimming must keep the last record of each index (#406). Until it does, a trim
+  (STORE TRIM) can free that record, and a holder whose record a trim freed gets no
+  grace after a restart. Retention deletes nothing (decided by `laptop.architect`,
+  2026-10-07T12:30:53Z and 12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637 and
+  https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/402 in its clause that
+  retention can remove that record. The layout is part of the disk format version (C9d).
+  Copy mode checks each record once where remote records enter (X43), and the read after
+  it panics on a bad record. Decided by the `write-path` builder; approved by the
+  coordinator (#191).
 - **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
   record takes the next free value here. The buffer does not read the tag.
@@ -3369,6 +3382,7 @@ How to read this record:
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
 | r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
+| Retention trims a held sample: RETENTION (#895), READER RULES (2026-10-04), HANDOFF RECORD (#191) | RETENTION, STORE TRIM |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -3441,7 +3455,7 @@ Storage classes used in the table:
 | Region | Files: `region "<prefix>" { voters }`. The parent's spec holds the delegation record `{ prefix, epoch, initial voters }`; the region's own Raft config holds current voters (X3) | Parent voters create, remove, or force takeover; the region changes its own voters | `mesh`, `plan`, every node | `spec` (definition), `mesh` (groups) |
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
 | Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
-| Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `home` (gives the cap to `buffer.set_floor`), `buffer` (caps holds by store time; a trim follows STORE TRIM) | `spec` |
+| Retention policy | Spec; selects indexes: `{ select, keep }` (architect, #895: https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156) | Files | `home` (gives the cutoff to `buffer.set_floor`), `buffer` (caps holds by store time; a trim follows STORE TRIM) | `spec` |
 | Placement policy | Spec; selects connectors and indexes: `{ select, home, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
 | Compression policy | Spec; selects indexes; `mode` auto, raw, or max. The actual codec is a 1-byte tag per vector in the encoded bytes | Files | `codec` at the encoder (the home, or the writer's `hub`) | `spec`, `codec` |
