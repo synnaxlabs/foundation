@@ -150,6 +150,13 @@ Only the red-team sessions rent machines, within the test budget (`docs/decision
   posts the person's decision on an issue or PR from the factory account, it is the
   person's own OK, approval, or waiver (also as box engineer). A builder acts on it at
   once. The person never has to comment on GitHub.
+- **The person reviews only what only the person can decide.** The architect decides
+  everything inside the decisions the person made, records it in `docs/decisions.md`,
+  and merges the record through the queue. Public surfaces (`public-api.txt`) need the
+  architect's approval, not the person's. Only four things go to the person: a change
+  to a decision the person made, the next milestone, new spend, and a security or
+  license risk. The coordinator sends them in one batch a day, except one that blocks
+  the critical path.
 - **A stuck session tells the coordinator at once.** When a permission check refuses
   a call, or work waits on the person, send `coordinator` the refused command, the
   reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
