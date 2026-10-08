@@ -79,12 +79,15 @@ How to read this record:
   benchmarks, not interviewed.
 - **DEVX (2026-10-08)** Design each public API for the person, agent, or program that
   uses it. A public API is any surface that a user reaches: the CLI, MCP, the config
-  language, the client, and each file that a user reads or writes. Each plan for one
-  compares its options by the steps from a new install to the first use, and by the
-  error and fix that each wrong step gives (C7). A step that Foundation can do itself
-  is not a step for the user (FIRST ADMIN). The person, on 2026-10-08: "when we're
-  designing public APIs like this, we really need to think about devx"
-  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981).
+  language, the client protocol and each SDK, and each file that a user reads or
+  writes. Each plan for one compares its options by the steps of each common task, the
+  first use after a new install among them, and by the error and fix that each wrong
+  step gives (C7). A step that Foundation can do itself is not a step for the user
+  (FIRST ADMIN). The person, on 2026-10-08: "when we're designing public APIs like
+  this, we really need to think about devx"
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981,
+  2026-10-08T02:43:43Z). The plan rule is decided by `laptop.architect-2` and
+  `laptop.architect` from those words.
 
 ### 1.2 Data model
 
@@ -3795,7 +3798,7 @@ How to read this record:
   a key in the spec. Lost: the first apply from any local process (any local user
   could then take the node), and an admin public key given before the first start (a
   step before the first use). The #1744 plan names the subject, its access policy,
-  and the key file. Decided by the person on 2026-10-08 ("Yes, I approve."):
+  and the key file. Decided by the person ("Yes, I approve."), 2026-10-08T02:43:43Z:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
   question:
   https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051078801.
