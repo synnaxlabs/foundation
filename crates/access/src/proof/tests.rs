@@ -257,7 +257,8 @@ mod admit {
     }
 
     #[test]
-    fn refuses_a_reserved_subject_that_foundation_did_not_make() {
+    #[should_panic(expected = "invariant: a tree with no problem from region::check")]
+    fn panics_at_a_subject_key_with_no_label() {
         let key = public(&pair(TEST_1));
         let policy = spec::access::Policy::new(
             types::name::Selector::new(["ops.@x"]).unwrap(),
@@ -275,14 +276,7 @@ mod admit {
         .into();
         let ops: types::name::Prefix = "ops".parse().unwrap();
         let root = (types::name::Prefix::ROOT, &BTreeMap::new());
-        let rules = Rules::new([root, (ops, &tree)]);
-        let subject = name("ops.@x");
-        let hello = Hello {
-            subject: subject.clone(),
-            ..create_hello()
-        };
-        let result = admit(&rules, NOW, hello).map(|_admitted| ());
-        assert_eq!(result, Err(Error::Unknown { subject }));
+        Rules::new([root, (ops, &tree)]);
     }
 
     #[test]
@@ -502,16 +496,12 @@ mod admit {
     }
 
     #[test]
-    fn refuses_a_subject_whose_definition_is_not_at_its_subject_key() {
+    #[should_panic(expected = "invariant: a tree with no problem from region::check")]
+    fn panics_at_a_subject_definition_off_its_subject_key() {
         let key = public(&pair(TEST_1));
         let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
         let tree: BTreeMap<Name, Definition> = [(name("ops.ana"), subject)].into();
-        let rules = Rules::new([(types::name::Prefix::ROOT, &tree)]);
-
-        let error = admit(&rules, NOW, create_hello()).unwrap_err();
-
-        let subject = name("ops.ana");
-        assert_eq!(error, Error::Unknown { subject });
+        Rules::new([(types::name::Prefix::ROOT, &tree)]);
     }
 
     #[test]
