@@ -222,7 +222,7 @@ struct State {
     /// The connections peers dialed, in the order they connected, for
     /// [`Carrier::poll_accept`]. `None` once the carrier dropped.
     accepted: Option<VecDeque<connection::Key>>,
-    /// The wakers of the [`Carrier::accept`] calls that wait.
+    /// The wakers of the [`Carrier::poll_accept`] calls that wait.
     accepting: Vec<Waker>,
     /// What broke the socket.
     failed: Option<env::net::Error>,

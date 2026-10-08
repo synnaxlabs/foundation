@@ -518,7 +518,8 @@ mod tests {
             for _ in 1..20 {
                 drop(transport.accept().await.expect("a session"));
             }
-            // Only the count shows a prune that keeps the ended entries.
+            // Only the count shows a prune that keeps the ended entries here. The
+            // memory test bounds the heap.
             assert_eq!(transport.table.borrow().nodes.len(), 7);
             let Peer::Node(peer) = held.peer() else {
                 panic!("a node dialed the held session");
@@ -594,6 +595,74 @@ mod tests {
             assert_eq!(accepted.peer(), Peer::Node(SERVER.public()));
             dialed.close(Code(6));
             assert_eq!(accepted.closed().await, Error::Closed { code: Code(6) });
+            linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // Two server transports dial the client in turn. The client's dial to the first
+    // fails, and `accept` then gives both sessions in the order they came.
+    #[test]
+    fn accept_gives_the_sessions_that_a_failed_dial_took_in_order() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let dead = dead(&server);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let transports = testing::transports(&config, &node, 2);
+            let mut sessions = Vec::new();
+            for transport in &transports {
+                let dialed = transport.dial(CLIENT.public(), &back).await;
+                sessions.push(dialed.expect("a session"));
+            }
+            for session in sessions {
+                let closed = Error::PeerClosed { code: Code(6) };
+                assert_eq!(session.closed().await, closed);
+            }
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let first = PrivateKey([10; 32]).public();
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 200))
+                .await;
+            let dialed = transport.dial(first, &dead).await;
+            drop(dialed.expect("the first session"));
+            for key in [10, 11] {
+                let accepted = transport.accept().await.expect("a session");
+                assert_eq!(accepted.peer(), Peer::Node(PrivateKey([key; 32]).public()));
+                accepted.close(Code(6));
+            }
+            linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The server closes the client's session, and once it drained, dials the client. The
+    // new connection takes the handle of the old one, and a dial gives the new session.
+    #[test]
+    fn a_dial_gives_the_new_session_on_the_handle_of_an_ended_one() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            transport.accept().await.expect("a session").close(Code(1));
+            node.clock().sleep(testing::spans(testing::IDLE, 5)).await;
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let closed = Error::PeerClosed { code: Code(2) };
+            assert_eq!(dialed.expect("a session").closed().await, closed);
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let old = transport
+                .dial(SERVER.public(), &at)
+                .await
+                .expect("a session");
+            assert_eq!(old.closed().await, Error::PeerClosed { code: Code(1) });
+            let own = transport.accept().await.expect("the dialed session");
+            node.clock().sleep(testing::spans(testing::IDLE, 10)).await;
+            let theirs = transport.accept().await.expect("the server's session");
+            let dialed = transport.dial(SERVER.public(), &[]).await;
+            dialed.expect("the server's session").close(Code(2));
+            assert_eq!(theirs.closed().await, Error::Closed { code: Code(2) });
+            drop(own);
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
