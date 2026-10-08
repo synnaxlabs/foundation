@@ -846,7 +846,7 @@ mod tests {
         /// a wrong key, and a new server endpoint with the same node key.
         fn stranger(shard: &testing::Shard) -> (Vec<u8>, Endpoint) {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial((PrivateKey([9; 32])).public());
+            pair.dial(PrivateKey([9; 32]).public());
             pair.run(Duration::from_secs(5));
             let (_, _, initial) = pair.server.sent.first().expect("a reply");
             let (_, Some(issued)) = ids(initial) else {

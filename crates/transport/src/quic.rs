@@ -890,7 +890,7 @@ mod tests {
         #[test]
         fn to_another_key_fails_authentication_and_tells_the_server_nothing() {
             testing::run(1, |shard| {
-                let expected = (PrivateKey([9; 32])).public();
+                let expected = PrivateKey([9; 32]).public();
                 let mut pair = dial(shard, expected);
                 pair.run(Duration::from_secs(1));
                 let error = Error::Authentication { expected };
