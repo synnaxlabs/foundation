@@ -793,6 +793,36 @@ mod tests {
         }
 
         #[test]
+        fn when_source_fails_after_chunks_in_one_read_it_keeps_no_chunk() {
+            let pool = pool(1 << 16);
+            let mut reader = Reader::new(1_000);
+            let batch = Bytes::from(encode(&[vec![9; 100]]));
+            let mut at = 0;
+            let source = |_| {
+                if at == 2 + 10 {
+                    return Err(Error::Reset {
+                        code: crate::Code(16),
+                    });
+                }
+                let chunk = batch.slice(at..=at);
+                at += 1;
+                Ok(Poll::Ready(Some(chunk)))
+            };
+            let read = drive(&mut reader, |_| true, |len| pool.alloc(len).ok(), source)
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
+            assert_eq!(
+                read,
+                Err(Error::Reset {
+                    code: crate::Code(16)
+                })
+            );
+            assert!(batch.is_unique(), "a chunk outlives the read");
+            let mut next = Source::new(encode(&[vec![5; 20]]), 64);
+            let next = super::read(&mut reader, &pool, &mut next);
+            assert_eq!(next, Ok(Poll::Ready(Some(vec![5; 20]))));
+        }
+
+        #[test]
         fn when_admit_refuses_it_takes_no_body_bytes_then_goes_on() {
             let pool = pool(1 << 16);
             let mut source = Source::new(encode(&[vec![4; 100]]), 64);
