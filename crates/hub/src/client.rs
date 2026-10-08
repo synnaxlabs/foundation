@@ -54,13 +54,9 @@ pub struct Config {
     pub tasks: env::tasks::Tasks,
     /// The pool that the client sends from. It can be the pool of the program's
     /// transport. Each message that the client sends takes a block from it, which the
-    /// stream holds until the node has it. A body goes in chunks of the smaller of
-    /// [`transport::stream::Sender::bytes_max`] and [`block::Pool::largest`]. The
-    /// stream holds the chunks that fit in the node's
-    /// [`transport::Config::window_bytes`], and the next chunk takes its block before
-    /// it waits for the window. So a request needs `(window_bytes / chunk + 1) *
-    /// block::footprint(chunk)` bytes, and gives [`Error::Pool`] when the pool has no
-    /// room.
+    /// stream holds until the node acknowledges it. A message of a request that finds
+    /// no block tries again after one second, so a small pool makes a request slower,
+    /// not fail.
     pub pool: Rc<block::Pool>,
 }
 
@@ -161,8 +157,7 @@ impl Client {
     /// when the node stopped the request or closed the session with a refusal,
     /// [`Error::Transport`] when the stream or the session failed;
     /// [`Error::Message`] for a response that `wire` refuses or that ends early;
-    /// [`Error::Unanswered`] when the node finished the stream with no response;
-    /// [`Error::Pool`] when the pool has no block for a message.
+    /// [`Error::Unanswered`] when the node finished the stream with no response.
     pub async fn request(&self, body: &[u8]) -> Result<Vec<u8>, Error> {
         let shared = &self.0.0;
         let length = u64::try_from(body.len())
@@ -180,18 +175,17 @@ impl Client {
         }
         let (mut sender, receiver) = shared.session.open(Class::Complete).await?;
         let receiver = open.receiver.insert(receiver);
-        shared
-            .send(&mut sender, &wire::header::encode(Protocol::Hub))
-            .await?;
+        let header = shared.copy(&wire::header::encode(Protocol::Hub)).await;
+        sender.send(header).await?;
         let signature = shared
             .pair
             .sign(&access::proof::request(shared.connection, body));
-        let mut message = shared.pool.alloc(Request::LEN)?;
+        let mut message = shared.alloc(Request::LEN).await;
         Request { length, signature }.encode(&mut message);
         sender.send(message.freeze()).await?;
         let most = sender.bytes_max().min(shared.pool.largest());
         for chunk in body.chunks(most) {
-            shared.send(&mut sender, chunk).await?;
+            sender.send(shared.copy(chunk).await).await?;
         }
         sender.finish()?;
         let first = receiver.recv().await;
@@ -214,6 +208,24 @@ impl Client {
 }
 
 impl Shared {
+    /// A block of `len` bytes. While the pool has none, tries again after [`RETRY`]:
+    /// the streams give their blocks back as the node acknowledges them.
+    async fn alloc(&self, len: usize) -> block::Unique {
+        loop {
+            if let Ok(block) = self.pool.alloc(len) {
+                return block;
+            }
+            self.clock.sleep(RETRY).await;
+        }
+    }
+
+    /// [`Shared::alloc`], filled with `bytes`.
+    async fn copy(&self, bytes: &[u8]) -> block::Block {
+        let mut block = self.alloc(bytes.len()).await;
+        block.copy_from_slice(bytes);
+        block.freeze()
+    }
+
     async fn send(&self, sender: &mut Sender, bytes: &[u8]) -> Result<(), Error> {
         sender.send(self.pool.copy(bytes)?).await?;
         Ok(())

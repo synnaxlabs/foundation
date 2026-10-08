@@ -24,7 +24,7 @@ use wire::hub::client::{
 
 use super::link::{
     AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
-    serve_session,
+    serve_session, serve_session_on,
 };
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
 use super::{NODE, POOL};
@@ -793,10 +793,10 @@ fn sends_a_body_over_the_largest_block_of_its_pool() {
     );
 }
 
-/// A pool with less room than the node's flow window gives `Error::Pool` for a large
-/// body, and the next request of the client still gets its reply.
+/// A pool with less room than the node's flow window sends a large body, with each
+/// chunk after a block that the node acknowledged, and gets the whole reply.
 #[test]
-fn gives_a_pool_error_for_a_body_over_the_room_of_its_pool() {
+fn sends_a_body_over_the_room_of_its_pool() {
     serve_session(
         143,
         true,
@@ -811,14 +811,9 @@ fn gives_a_pool_error_for_a_body_over_the_room_of_its_pool() {
             let client = connect_with(&node, tasks, at, AGENT, Rc::new(pool))
                 .await
                 .expect("connects");
-            assert_eq!(
-                client.request(&body(256 << 10)).await,
-                Err(Error::Pool(block::Error::Exhausted {
-                    requested: 65_536,
-                    available: 64_896,
-                }))
-            );
-            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+            let sent = body(256 << 10);
+            let reply = client.request(&sent).await.expect("replies");
+            assert!(reply.iter().eq(sent.iter().rev()));
         },
     );
 }
@@ -949,31 +944,35 @@ fn gives_a_reset_and_a_close_as_one_refusal() {
     assert_eq!(Error::from(reset.clone()), Error::Transport(reset));
 }
 
-/// A pool with room for the blocks of the node's window and the block of one more
-/// chunk, each at its footprint, sends a body at the cap; one byte less gives
-/// `Error::Pool`.
+/// A pool with room for one block of a chunk sends a body at the cap on each link: a
+/// chunk that finds no block waits until the node acknowledges the chunks before it.
 #[test]
-fn sends_a_body_at_the_cap_from_the_smallest_pool_with_room() {
-    // The node's window and largest message.
-    let (window, chunk) = (1 << 20, 1 << 16);
-    let smallest = (window / chunk + 1) * block::footprint(chunk);
-    for (budget, expected) in [
-        (smallest, Ok(())),
-        (
-            smallest - 1,
-            Err(Error::Pool(block::Error::Exhausted {
-                requested: 65_536,
-                available: 65_023,
-            })),
-        ),
-    ] {
-        serve_session(
+fn sends_a_body_at_the_cap_from_a_pool_of_one_chunk_on_each_link() {
+    let micros = |n: i64| Span::from_nanos(n * 1_000);
+    let lossless = sim::link::Config::default();
+    let links = [
+        lossless,
+        sim::link::Config {
+            jitter: micros(200),
+            ..lossless
+        },
+        sim::link::Config {
+            loss: 0.05,
+            ..lossless
+        },
+    ];
+    for wire in links {
+        let label = format!("{wire:?}");
+        serve_session_on(
             143,
+            wire,
             true,
             POOL,
             Some(rules()),
             move |node, tasks, at| async move {
-                let config = block::Config { budget };
+                let config = block::Config {
+                    budget: block::footprint(1 << 16),
+                };
                 let pool = block::Pool::new(
                     config.clone(),
                     block::Heap::new(config.reservation()),
@@ -983,7 +982,7 @@ fn sends_a_body_at_the_cap_from_the_smallest_pool_with_room() {
                     .expect("connects");
                 let cap = usize::try_from(BODY_BYTES_MAX).expect("fits");
                 let got = client.request(&body(cap)).await.map(drop);
-                assert_eq!(got, expected, "a pool of {budget} bytes");
+                assert_eq!(got, Ok(()), "{label}");
             },
         );
     }

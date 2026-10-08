@@ -13,12 +13,11 @@
   (HUB LINK). A request dropped before its response began keeps the turn until the
   response begins or the stream ends, because the node holds it open until then.
   `Config` holds its own `pool`, which a program may share with the transport. The
-  stream holds each block of a body until the node has it. A body goes in chunks of the
-  smaller of `transport::stream::Sender::bytes_max` and `block::Pool::largest`. The
-  stream holds the chunks that fit in the node's `transport::Config::window_bytes`,
-  and the next chunk takes its block before it waits for the window. So a request
-  needs `(window_bytes / chunk + 1) * block::footprint(chunk)` bytes, and gives
-  `Error::Pool` when the pool has no room.
+  stream holds each block of a request until the node acknowledges it, so a link that
+  reorders or loses packets holds more blocks than the node's window, with no bound in
+  closed form. A message of a request that finds no block tries again after a second,
+  as a renewal does, so a small pool makes a request slower, not fail, and `request`
+  gives no `Error::Pool`. Lost: a stated room of the pool, which ack loss can exceed.
   `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
   client closes the session with `Code(0)`. A node's stop and close with a code are one
   error: `Error::Refused(wire::hub::client::Refusal)`, a closed set in `wire` with
@@ -43,13 +42,16 @@
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069514013), and the
   order "in the order they began" and the dropped request at 21:38:44Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
-  approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
+  approved the retry and the `MALFORMED` close at 22:04:03Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It
   gave the reason against `tokio::sync::Semaphore` at 22:15:33Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). It
-  approved the pool sentence, which adds the block of the next chunk and counts each
-  block at its footprint, at 5b5901b4, at 22:43:35Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522). The
-  bound in closed form, with the chunk of `Sender::bytes_max`, is owed its approval.
-  Supersedes the sentence "Any pool works" of
-  https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). The
+  wait of a request for a block is owed its approval. Supersedes the sentence "Any
+  pool works" of
+  https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056, and the
+  room of the pool approved at 22:04:03Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128), at
+  22:34:24Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070406709), and at
+  22:43:35Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522).

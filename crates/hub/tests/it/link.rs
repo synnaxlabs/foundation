@@ -115,6 +115,29 @@ where
     G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
+    serve_session_on(
+        seed,
+        sim::link::Config::default(),
+        synced,
+        pool,
+        rules,
+        program,
+    )
+}
+
+/// As [`serve_session`], on `wire`.
+pub(super) fn serve_session_on<G, P>(
+    seed: u64,
+    wire: sim::link::Config,
+    synced: bool,
+    pool: usize,
+    rules: Option<access::Rules>,
+    program: G,
+) -> Home
+where
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let served = Arc::new(Mutex::new(Vec::new()));
     let closed = Arc::new(Mutex::new(None));
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
@@ -131,7 +154,7 @@ where
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
         drop((link, test));
     };
-    run_program(seed, home, program);
+    run_program_on(seed, wire, home, program);
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
     let closed = closed.lock().expect("not poisoned").take();
     Home {
@@ -214,9 +237,24 @@ where
     G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
+    run_program_on(seed, sim::link::Config::default(), home, program);
+}
+
+pub(super) fn run_program_on<F, H, G, P>(
+    seed: u64,
+    wire: sim::link::Config,
+    home: F,
+    program: G,
+) where
+    F: FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
+    H: Future<Output = ()> + 'static,
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
-        ..sim::Config::default()
+        link: wire,
+        steps_max: 100_000_000,
     });
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
     let at = Address::Udp(SocketAddr::new(nodes[0].addresses()[0], PORT));
