@@ -52,12 +52,19 @@ Searches skip `patches/` (`.ignore`): to search a copy, give its path or use
 `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables equal (#1867).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
-PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff <its
-diff>` gives when run in the copy's directory, with the cargo-mutants version that
-`.github/workflows/ci.yaml` pins, and with the test outside the copy that kills it. The
-`breaker` of the PR runs each mutant on the list. Decided by laptop.architect-2,
-2026-10-08T11:24:06Z:
-https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517. A copy is a
+PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
+<diff>` gives when run in the copy's directory, where `<diff>` is `git diff
+--relative=patches/<crate> <merge base>`, with the cargo-mutants version that
+`.github/workflows/ci.yaml` pins, and with the test outside the copy that kills it. An
+empty list for a diff that changes a code line of a `.rs` file in the copy (trimmed,
+not empty and not starting with `//`, as REVIEW CHECK counts it) is a finding. The
+`breaker` of the PR runs each mutant on the list. The root `Cargo.toml` excludes
+`.claude`, so cargo in a copy inside an agent worktree finds no workspace above it.
+Decided by laptop.architect-2, 2026-10-08T11:36:09Z:
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. Supersedes
+(b) of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058668724 and
+the text of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517.
+A copy is a
 path package, so `cargo deny` does not check it against advisories (#1867).
 
 | Crate | Release | Change | Why |

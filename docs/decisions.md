@@ -5500,11 +5500,12 @@ How to read this record:
   2026-10-05 ("Ok I guess we need to do #2"), #620. `fuzz/` is a workspace of its own,
   so `fuzz/Cargo.toml` holds the same `[patch.crates-io]` table (#1864). The PR that
   changes a copy of a Rust crate lists its mutants as `docs/dependencies.md`, "Local
-  patches", states. That rule does not cover a C copy. Trigger: the PR that first
-  changes a file in a C copy states how a test outside the copy checks each changed
-  line, for the approval of the architect of `connector-opcua` (#435). Both decided by
-  `laptop.architect-2`, 2026-10-08T11:24:06Z
-  (https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
+  patches", states (`laptop.architect-2`, 2026-10-08T11:36:09Z,
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337). That
+  rule does not cover a C copy. Trigger: the PR that first changes a file in a C copy
+  states how a test outside the copy checks each changed line, for the approval of the
+  architect of `connector-opcua` (#435; `laptop.architect-2`, 2026-10-08T11:24:06Z,
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
 
 ### 1.16 Retired entries
 
