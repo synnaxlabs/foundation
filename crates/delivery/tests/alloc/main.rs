@@ -1,8 +1,8 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
 //! make none once each session got a frame, also for sessions charged by their places.
-//! Once frames waited for credit, a release in which frames wait for credit makes none,
-//! nor one in which sessions miss them. An ack makes none, and no call on a closed key
+//! A release in which sessions start to wait for credit makes none, nor one in which
+//! they miss. An ack makes none, and no call on a closed key
 //! of either mode makes one. This binary has no test harness: the count covers each
 //! thread, and a harness allocates on its own thread at any time.
 
@@ -193,23 +193,27 @@ fn places(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     );
 }
 
+/// Sessions that never waited for credit start to wait in a release, and miss in the
+/// next: neither allocates, so the frames that wait take no heap per session.
 fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     let mut readers = Readers::new(0);
     let warm = [open(&mut readers, 0, u64::MAX)];
     let mut seq = 0;
-    for _ in 0..2 {
-        flow(&mut readers, &warm, frame, set, &mut seq);
+    flow(&mut readers, &warm, frame, set, &mut seq);
+    // The queue holds four frames at once: two that wait, and two queued after them.
+    for _ in 0..4 {
+        readers.queue(&frame(), set, seq..seq + 1);
+        seq += 1;
     }
-    // A session of credit 1 gets the first frame, and the second waits for credit.
+    assert!(
+        readers.release(seq).is_empty(),
+        "the warm session has frames to take"
+    );
+    // A session of credit 0 waits from the first frame, one of credit 1 from the
+    // second.
     let keys: Vec<_> = (0..SESSIONS)
         .map(|i| open(&mut readers, seq, u64::from(i % 2 == 1)))
         .collect();
-    flow(&mut readers, &warm, frame, set, &mut seq);
-    // Each session gets both frames and has spent its credit.
-    let limit_bytes = 2 * frame().charge();
-    for &key in &keys {
-        readers.grant(key, limit_bytes);
-    }
     let all: Vec<_> = warm.iter().chain(&keys).copied().collect();
     let ((owed, missed), allocations) = ALLOCATOR.count(|| {
         let owed = flow(&mut readers, &all, frame, set, &mut seq);
@@ -221,13 +225,15 @@ fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     );
     assert_eq!(
         owed,
-        2 * SESSIONS + 3,
-        "each session takes two frames, and the release wakes only the warm session"
+        6 + 1 + SESSIONS / 2,
+        "the warm session takes six frames, and the release wakes it and each \
+         session of credit 1"
     );
     assert_eq!(
         missed,
-        SESSIONS + 3,
-        "the warm session takes two frames, and the release wakes each session"
+        2 + 1 + SESSIONS / 2,
+        "the warm session takes two frames, and the release wakes it and each \
+         session of credit 0"
     );
     let drained_behind = |readers: &mut Readers, key: complete::Key| loop {
         match readers.take(key.into()) {
