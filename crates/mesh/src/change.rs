@@ -465,6 +465,7 @@ mod tests {
             for holder in holders {
                 bytes.extend(holder.to_le_bytes());
             }
+            bytes.extend([0, 0]);
             let length = bytes.len();
             let error = Change::decode(&bytes).unwrap_err();
             assert_eq!(error, Malformed::Body { kind: 4, length });
@@ -479,7 +480,7 @@ mod tests {
             for chunk in chunks {
                 bytes.extend([chunk; 32]);
             }
-            bytes.extend([0, 0]);
+            bytes.extend([0; 4]);
             let length = bytes.len();
             let error = Change::decode(&bytes).unwrap_err();
             assert_eq!(error, Malformed::Body { kind: 4, length });
@@ -492,7 +493,8 @@ mod tests {
         let mut bytes = encoded(&change);
         assert_eq!(Change::decode(&bytes), Ok(change));
         bytes[73..75].copy_from_slice(&1025_u16.to_le_bytes());
-        bytes.extend([0xff; 32]);
+        let end = 75 + CHUNKS_MAX * 32;
+        bytes.splice(end..end, [0xff; 32]);
         let length = bytes.len();
         assert_eq!(
             Change::decode(&bytes),
@@ -513,9 +515,10 @@ mod tests {
         let change = held(HOLDERS_MAX);
         let mut bytes = encoded(&change);
         assert_eq!(Change::decode(&bytes), Ok(change));
-        let at = bytes.len() - HOLDERS_MAX * 16 - 2;
+        let at = bytes.len() - HOLDERS_MAX * 16 - 4;
         bytes[at..at + 2].copy_from_slice(&65_u16.to_le_bytes());
-        bytes.extend(u128::MAX.to_le_bytes());
+        let end = bytes.len() - 2;
+        bytes.splice(end..end, u128::MAX.to_le_bytes());
         let length = bytes.len();
         assert_eq!(
             Change::decode(&bytes),

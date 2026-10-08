@@ -174,6 +174,23 @@ mod tests {
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
     }
 
+    // With the counts that its byte form lacks, each fails for what its name says.
+    #[test]
+    fn each_refused_spec_change_input_fails_for_what_its_name_says() {
+        let inputs =
+            inputs!("mesh_change": "spec_chunks_1025", "spec_holders_out_of_order");
+        for (name, lacked) in
+            [("spec_chunks_1025", 4), ("spec_holders_out_of_order", 2)]
+        {
+            let whole = [inputs[name], &vec![0; lacked]].concat();
+            let body = Malformed::Body {
+                kind: 4,
+                length: whole.len(),
+            };
+            assert_eq!(Change::decode(&whole), Err(body), "{name}");
+        }
+    }
+
     #[test]
     fn each_spec_change_input_with_a_repeated_or_falling_key_does_not_decode() {
         let inputs = inputs!(
@@ -206,12 +223,13 @@ mod tests {
         twice.extend(key(3).as_u128().to_le_bytes());
         assert_eq!(inputs["spec_holders_equal"], twice);
         for (name, bytes) in inputs {
+            let homed = homed(bytes);
             let body = Malformed::Body {
                 kind: 4,
-                length: bytes.len(),
+                length: homed.len(),
             };
-            assert_eq!(Change::decode(bytes), Err(body), "{name}");
-            assert_eq!(round_trip_change(bytes), None, "{name}");
+            assert_eq!(Change::decode(&homed), Err(body), "{name}");
+            assert_eq!(round_trip_change(&homed), None, "{name}");
         }
     }
 
@@ -235,11 +253,12 @@ mod tests {
         bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
         bytes.extend(key(65).as_u128().to_le_bytes());
         assert_eq!(inputs["spec_holders_65"], bytes);
+        let homed = homed(&bytes);
         let body = Malformed::Body {
             kind: 4,
-            length: bytes.len(),
+            length: homed.len(),
         };
-        assert_eq!(Change::decode(&bytes), Err(body));
+        assert_eq!(Change::decode(&homed), Err(body));
     }
 
     // The byte form of a spec change with no home, before the homes: with no count of
