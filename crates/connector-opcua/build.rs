@@ -21,20 +21,27 @@ fn main() {
     if let Err(e) = compiler::check(&build.get_compiler()) {
         panic!("{e}");
     }
+    // The shim is our code, so its warnings are errors. It reads the headers of the
+    // copy as system headers, which keeps their warnings out.
+    let mut shim = cc::Build::new();
+    shim.warnings_into_errors(true);
     for flag in read("flags.txt").lines() {
         // Each include path is relative to the copy.
-        match flag.strip_prefix("-I") {
-            Some(dir) => build.include(copy.join(dir)),
-            None => build.flag(flag),
-        };
+        if let Some(dir) = flag.strip_prefix("-I") {
+            let dir = copy.join(dir);
+            build.include(&dir);
+            shim.flag("-isystem").flag(dir);
+        } else {
+            build.flag(flag);
+            shim.flag(flag);
+        }
     }
     for source in read("sources.txt").lines() {
         build.file(copy.join(source));
     }
-    build
-        .file("src/shim.c")
-        .warnings(false)
-        .compile("open62541");
+    build.warnings(false).compile("open62541");
+    // The copy calls into the shim, so the shim links after it.
+    shim.file("src/shim.c").compile("shim");
 }
 
 #[cfg(not(feature = "open62541"))]
