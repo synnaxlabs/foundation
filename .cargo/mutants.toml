@@ -58,8 +58,6 @@ exclude_re = [
   # An out connector has no device channel. `Ok(Channels::default())` is what the body
   # returns.
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
-  # A fast path: with `false`, `check` walks the ends, which gives the same result.
-  'crates/codec/src/text\.rs:.*replace ascii -> bool with false',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
 ]

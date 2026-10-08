@@ -2117,6 +2117,21 @@ mod tests {
         }
 
         #[test]
+        fn checks_a_sample_from_the_first_vector_that_is_not_ascii() {
+            let long = format!("{}\u{e9}", "a".repeat(24));
+            let samples = ["a".repeat(1_000), long];
+            let (count, values) = variable(1, &samples);
+            let encoded = encode_type(Type::String, count, &values);
+            assert_eq!(validate(Type::String, count, &encoded), Ok(values.len()));
+            let mut elements = vec![b'a'; 1_024];
+            elements.extend(b"\xc3\xa9\xff");
+            let ends = [1_000, 1_026, 1_027];
+            refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 2 });
+            let ends = [1_000, 1_025, 1_027];
+            refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 1 });
+        }
+
+        #[test]
         fn refuses_utf8_before_trailing_bytes() {
             let values = raw(&[1, 2], 1, b"a\xff");
             let mut encoded = [

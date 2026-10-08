@@ -10,63 +10,61 @@ pub(crate) fn raw(ends: &[u8], elements: &[u8]) -> Result<(), Error> {
     if elements.is_ascii() {
         return Ok(());
     }
-    check(Pieces::Raw(Some(ends)), Pieces::Raw(Some(elements)))
+    check(Pieces::Raw(Some(ends)), 0, elements, Pieces::Raw(None))
 }
 
 /// Checks that each sample of an encoded `String` series of `count` samples is UTF-8,
 /// given its encoded `ends` and the encoded `vectors` of its `elements`, which are
-/// valid.
+/// valid. It decodes each vector once, and the ends only when a vector is not ASCII.
+#[expect(clippy::unwrap_in_result, reason = "the caller checked the vectors")]
 pub(crate) fn encoded(
     count: usize,
     ends: &[u8],
     elements: usize,
     vectors: &[u8],
 ) -> Result<(), Error> {
-    if ascii(elements, vectors) {
-        return Ok(());
-    }
-    check(
-        Pieces::Encoded(Decoder::new(Scalar::U32, count, ends)),
-        Pieces::Encoded(Decoder::new(Scalar::U8, elements, vectors)),
-    )
-}
-
-/// Whether each of the `elements` of the encoded `vectors`, which are valid, is ASCII.
-/// Each sample of ASCII text is UTF-8.
-fn ascii(elements: usize, vectors: &[u8]) -> bool {
     let mut vectors = Decoder::new(Scalar::U8, elements, vectors);
     let mut out = [0; VECTOR_LEN];
+    let mut from = 0;
     while let Some(vector) = vectors.next(&mut out) {
-        if !vector
-            .expect("invariant: the vectors were checked")
-            .is_ascii()
-        {
-            return false;
+        let vector = vector.expect("invariant: the vectors were checked");
+        if !vector.is_ascii() {
+            let ends = Pieces::Encoded(Decoder::new(Scalar::U32, count, ends));
+            return check(ends, from, vector, Pieces::Encoded(vectors));
         }
+        from = from.strict_add(vector.len());
     }
-    true
+    Ok(())
 }
 
-/// Checks each sample that the `ends` cut from the `elements`.
+/// Checks each sample that the `ends` cut from the elements, given that each element
+/// before `from` is ASCII, `piece` holds the elements from `from` on, and `rest` gives
+/// the elements after `piece`.
 #[expect(
     clippy::unwrap_in_result,
     reason = "each expect is an invariant that the caller checked"
 )]
-fn check(mut ends: Pieces<'_>, mut elements: Pieces<'_>) -> Result<(), Error> {
+fn check(
+    mut ends: Pieces<'_>,
+    from: usize,
+    piece: &[u8],
+    mut rest: Pieces<'_>,
+) -> Result<(), Error> {
     let mut ends_out = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
-    let mut elements_out = [0; VECTOR_LEN];
+    let mut rest_out = [0; VECTOR_LEN];
     let mut text = Text::default();
-    let mut piece: &[u8] = &[];
-    let mut start = 0;
+    let mut piece = piece;
+    let mut start = from;
     while let Some(decoded) = ends.next(&mut ends_out) {
         for end in decoded.as_chunks::<4>().0 {
             let end = usize::try_from(u32::from_le_bytes(*end))
                 .expect("invariant: a usize holds a u32");
-            let mut left = end.strict_sub(start);
+            // An ASCII prefix does not change whether the rest of a sample is UTF-8.
+            let mut left = end.saturating_sub(start);
             while left > 0 {
                 if piece.is_empty() {
-                    piece = elements
-                        .next(&mut elements_out)
+                    piece = rest
+                        .next(&mut rest_out)
                         .expect("invariant: the elements hold each end");
                 }
                 let (head, tail) = piece.split_at(left.min(piece.len()));
@@ -75,7 +73,7 @@ fn check(mut ends: Pieces<'_>, mut elements: Pieces<'_>) -> Result<(), Error> {
                 piece = tail;
             }
             text.end()?;
-            start = end;
+            start = start.max(end);
         }
     }
     Ok(())
