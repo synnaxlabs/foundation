@@ -4003,10 +4003,11 @@ mod tests {
         ]
     }
 
-    /// Writes `count` samples of each series of `series`, an index then its data, on a
-    /// run of `seed`, and checks that a reader and the stored body give them back.
-    fn check_write_and_read(seed: u64, count: u32, series: Vec<(Type, Vec<u8>)>) {
-        run(seed, move |test| async move {
+    /// Writes `count` samples of each series of `series`, an index then its data, in
+    /// the simulation `replay`, and checks that a reader and the stored body give them
+    /// back.
+    fn check_write_and_read(replay: u64, count: u32, series: Vec<(Type, Vec<u8>)>) {
+        run(replay, move |test| async move {
             let data: Vec<(channel::Key, Type)> = (3..)
                 .zip(&series[1..])
                 .map(|(slot, &(data_type, _))| (key(Slot::new(slot)), data_type))
