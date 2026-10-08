@@ -1033,9 +1033,10 @@ How to read this record:
   `home::reader` re-exports the `delivery` values that the surface names: `Next`,
   `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
   2026-10-08T11:12:45Z:
-  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367). `Config`
-  takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
-  for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
+  Supersedes the clause "apart from two" of #963. `Config` takes no pool: the shard
+  uses `Buffer::pool()`. It takes one `clock: clock::Reader` for monotonic and mesh
+  time. The shard is the only writer of the buffer in `Config`:
   the caller gives it with no entry that waits for a commit. The condition is stated,
   not checked: `node` appends nothing before `Shard::new`, and `Config` takes the
   buffer by value, so no later append can come from outside (architect,
@@ -4966,12 +4967,16 @@ How to read this record:
 - **R16-10 (#340)** One exception to one path per item (r16 2): `hub` re-exports each
   item of another layer-2 crate that its public surface names, at the same path under
   a module named for that crate (`hub::home::Error` for `home::Error`). Layer 3 names
-  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub` and
-  `home` (for the `delivery` values that its surface names) re-export, and only items
-  their own signatures use. Layer 2 and `node` name the item at its home. Copies of
-  the types lost: each change in `home` needs a change in `hub`. Decided by the
-  architect (#340). The `home` exception: `laptop.architect`, 2026-10-08T11:12:45Z:
-  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367.
+  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
+  re-exports, and only items its own signatures use. Layer 2 and `node` name the item
+  at its home. Copies of the types lost: each change in `home` needs a change in
+  `hub`. Decided by the architect (#340). A second exception: `home::reader`
+  re-exports each `delivery` value that the surface of `home` names, and `hub` names
+  each through `home::reader`, not at its home (`laptop.architect`,
+  2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
+  Supersedes the clauses "Only `hub` re-exports" and "Layer 2 and `node` name the item
+  at its home" of #340 for those values.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
