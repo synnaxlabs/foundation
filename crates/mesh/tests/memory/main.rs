@@ -40,9 +40,9 @@ const FEW: usize = 8;
 const MANY: usize = 520;
 /// The bytes for each apply by which the slopes of two runs can differ with no
 /// refusal kept. The periodic writes of the node fall at other applies in each run,
-/// so the gap swings with the window: up to 3.9 bytes over 64 reads, and within 0.34
-/// over each window of 300 to 1025 reads. With a `u32` kept for each refusal, they
-/// differ by about 5.
+/// so the gap swings with the window: up to 3.9 bytes over 64 reads, within 0.88 over
+/// each window of 300 to 1025 reads, and 0.05 over the 513 reads here. With a `u32`
+/// kept for each refusal, they differ by about 5.
 const SLACK: i128 = 2;
 
 fn main() {
