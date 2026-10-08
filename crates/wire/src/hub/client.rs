@@ -223,6 +223,10 @@ impl Request {
     }
 
     /// The body that follows this request.
+    ///
+    /// # Panics
+    ///
+    /// When `length` is over [`BODY_BYTES_MAX`].
     #[must_use]
     pub fn body(&self) -> Body {
         Body::new(self.length)
@@ -268,6 +272,10 @@ impl Response {
     }
 
     /// The body that follows this response.
+    ///
+    /// # Panics
+    ///
+    /// When `length` is over [`BODY_BYTES_MAX`].
     #[must_use]
     pub fn body(&self) -> Body {
         Body::new(self.length)
@@ -282,6 +290,7 @@ pub struct Body {
 
 impl Body {
     fn new(length: u64) -> Self {
+        assert_body(length);
         let remain = usize::try_from(length)
             .expect("invariant: a usize holds a body of at most 16 MiB");
         Self { remain }

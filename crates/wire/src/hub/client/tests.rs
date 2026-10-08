@@ -407,6 +407,20 @@ fn panics_on_a_response_over_the_cap() {
 }
 
 #[test]
+#[should_panic(expected = "a body of 16777217 bytes is over the cap of 16777216")]
+fn panics_on_the_body_of_a_request_over_the_cap() {
+    let _body = request(BODY_BYTES_MAX + 1).body();
+}
+
+#[test]
+#[should_panic(
+    expected = "a body of 18446744073709551615 bytes is over the cap of 16777216"
+)]
+fn panics_on_the_body_of_a_response_over_the_cap() {
+    let _body = Response { length: u64::MAX }.body();
+}
+
+#[test]
 #[should_panic(expected = "out has 160 bytes, and the message has 161")]
 fn panics_when_out_has_the_wrong_length() {
     signed("ops.ana").encode(&mut [0; 160]);
