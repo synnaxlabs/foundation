@@ -1958,6 +1958,31 @@ mod tests {
         });
     }
 
+    // The pool stays full, so only the end of the group's task frees the log for a
+    // new open, which takes its own pool.
+    #[test]
+    fn a_stop_while_a_write_waits_for_a_block_frees_the_log_at_the_next_tick() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let small = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::start(small).await.unwrap();
+            lead(&mesh, &node.clock(), home(1)).await;
+            let _held = fill(&pool);
+            let mut proposal = pin!(mesh.propose(home(2)));
+            assert!(now(proposal.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
+            let removed = Stopped::Removed { by: key(2) };
+            mesh.group.borrow_mut().stop(removed.clone());
+            assert_eq!(proposal.await, Err(Error::Stopped(removed)));
+            node.clock().sleep(TICK).await;
+            let again = Mesh::start(config(&node, &tasks, 1, &[1], &[1])).await;
+            assert_eq!(again.map(drop), Ok(()));
+        });
+    }
+
     // One `Ready` replaces the entry of the proposal and commits an entry that is
     // not a change.
     #[test]
