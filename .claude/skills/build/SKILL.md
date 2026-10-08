@@ -30,8 +30,8 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    and send the links to `laptop.coordinator`, which adds `ready`.
 5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
 
-Read only this before you plan: the issue and its comments, the section of
-`docs/decisions.md` for your crate (`grep -n '^#'`, then that range),
+Read only this before you plan: the issue and its comments, the records of
+`docs/decisions/` for your crate (the folder of its topic, and `grep -rl` for its name),
 `docs/claude/rust.md`, and `docs/claude/testing.md`. `/eb-review` adds the design docs
 it names; add `docs/claude/performance.md` for a hot path. Send wide searches to an
 `Explore` subagent with `model: "haiku"`. Read diffs and logs through `--stat`, `tail`,
@@ -135,7 +135,7 @@ take the next issue meanwhile.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
   to the crate's architect (`docs/factory.md`).
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling
-  to the crate's section of `docs/decisions.md` in your PR, with who decided and the
+  to the crate's records in `docs/decisions/` in your PR, with who decided and the
   comment link.
 - Send the architect only a change to the public surface or to the meaning of a ruling.
   A fix of wording or links in a ruling needs no new approval.
