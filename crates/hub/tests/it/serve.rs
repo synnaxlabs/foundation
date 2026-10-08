@@ -31,20 +31,20 @@ use super::{
 };
 
 /// The UDP port of each transport.
-const PORT: u16 = 7000;
-const HOME: PrivateKey = PrivateKey([1; 32]);
+pub(super) const PORT: u16 = 7000;
+pub(super) const HOME: PrivateKey = PrivateKey([1; 32]);
 const PEER: PrivateKey = PrivateKey([2; 32]);
 /// How long the peer waits for a reply that must not come.
 const QUIET: Span = Span::from_nanos(100_000_000);
 
-fn public_key(key: &PrivateKey) -> PublicKey {
+pub(super) fn public_key(key: &PrivateKey) -> PublicKey {
     let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("a key pair");
     PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
         .expect("a public key")
 }
 
 /// A transport of `node` at `PORT` that proves `key`.
-fn transport(
+pub(super) fn transport(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,
@@ -115,7 +115,7 @@ impl Peer {
 }
 
 /// A pool for a transport, so a test that fills the hub's pool does not fill it.
-fn own_pool() -> Rc<Pool> {
+pub(super) fn own_pool() -> Rc<Pool> {
     let config = block::Config { budget: 1 << 20 };
     Rc::new(Pool::new(
         config.clone(),
