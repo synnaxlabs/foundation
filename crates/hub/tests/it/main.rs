@@ -32,6 +32,7 @@ use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
 mod client;
+mod program;
 mod serve;
 
 /// The node key of the hub under test.

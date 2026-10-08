@@ -28,25 +28,25 @@ use wire::hub::client::{
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
 use super::{AREA, BODY_MAX, NODE, POOL, Test};
 
-const SUBJECT: &str = "ops.agent";
+pub(super) const SUBJECT: &str = "ops.agent";
 /// The key that the spec lists for [`SUBJECT`].
-const AGENT: PrivateKey = PrivateKey([3; 32]);
+pub(super) const AGENT: PrivateKey = PrivateKey([3; 32]);
 /// A key that the spec does not list.
-const OTHER: PrivateKey = PrivateKey([4; 32]);
+pub(super) const OTHER: PrivateKey = PrivateKey([4; 32]);
 const CONNECTION: connection::Key = connection::Key([7; 16]);
 /// How long each hello lives, unless a test says otherwise.
 const LIFE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
 /// How long the home holds a request before it replies.
 const HOLD: Span = Span::from_nanos(50_000_000);
 /// How long the program waits for what must not come.
-const QUIET: Span = Span::from_nanos(200_000_000);
+pub(super) const QUIET: Span = Span::from_nanos(200_000_000);
 
-fn name(name: &str) -> Name {
+pub(super) fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
 }
 
 /// The rules of a root tree that lists `AGENT` for [`SUBJECT`].
-fn rules() -> access::Rules {
+pub(super) fn rules() -> access::Rules {
     let key = Kind::Subject.key(SUBJECT).expect("a subject key");
     let subject = Subject::new(vec![public_key(&AGENT)]).expect("a subject");
     let tree: BTreeMap<Name, Definition> = [(key, Definition::Subject(subject))].into();
@@ -55,7 +55,7 @@ fn rules() -> access::Rules {
 
 /// What the home's link gave for one stream.
 #[derive(Debug, PartialEq, Eq)]
-enum Got {
+pub(super) enum Got {
     Ended,
     /// A request, with the subject of its hello and its body.
     Request(Name, Vec<u8>),
@@ -64,9 +64,9 @@ enum Got {
 /// What the home saw: what `serve` gave for each stream, in the order they ended, and
 /// how the session ended.
 #[derive(Debug)]
-struct Home {
-    served: Vec<Result<Got, serve::Error>>,
-    closed: transport::Error,
+pub(super) struct Home {
+    pub(super) served: Vec<Result<Got, serve::Error>>,
+    pub(super) closed: transport::Error,
 }
 
 /// Runs one client session: the home's node makes a [`Test`] hub, with mesh time when
@@ -97,6 +97,23 @@ fn session_with<P>(
 where
     P: Future<Output = ()> + 'static,
 {
+    serve_session(seed, synced, pool, rules, move |node, tasks, at| {
+        as_agent(node, tasks, at, program)
+    })
+}
+
+/// As [`session_with`], where `program` runs on the program's node with the home's
+/// address, and dials it itself.
+pub(super) fn serve_session<P>(
+    seed: u64,
+    synced: bool,
+    pool: usize,
+    rules: Option<access::Rules>,
+    program: impl FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+) -> Home
+where
+    P: Future<Output = ()> + 'static,
+{
     let served = Arc::new(Mutex::new(Vec::new()));
     let closed = Arc::new(Mutex::new(None));
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
@@ -119,7 +136,7 @@ where
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
         drop((link, test));
     };
-    run(seed, home, program);
+    run_program(seed, home, program);
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
     let closed = closed.lock().expect("not poisoned").take();
     Home {
@@ -129,7 +146,7 @@ where
 }
 
 /// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
-async fn home(
+pub(super) async fn home(
     node: &sim::node::Node,
     tasks: &env::tasks::Tasks,
     pool: usize,
@@ -153,6 +170,37 @@ fn run<H, P>(
     H: Future<Output = ()> + 'static,
     P: Future<Output = ()> + 'static,
 {
+    run_program(seed, home, move |node, tasks, at| {
+        as_agent(node, tasks, at, program)
+    });
+}
+
+/// Dials the home at `at` as an [`Agent`], runs `program`, and closes the session.
+async fn as_agent<P>(
+    node: sim::node::Node,
+    tasks: env::tasks::Tasks,
+    at: Address,
+    program: impl FnOnce(Agent) -> P,
+) where
+    P: Future<Output = ()>,
+{
+    let agent = Agent::dial(&node, tasks, at).await;
+    let session = agent.session.clone();
+    program(agent).await;
+    session.close(Code(0));
+    node.clock().sleep(Span::MILLISECOND).await;
+}
+
+/// Runs `home` on one simulated node, and `program` on another, with the home's
+/// address.
+pub(super) fn run_program<H, P>(
+    seed: u64,
+    home: impl FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
+    program: impl FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -172,13 +220,7 @@ fn run<H, P>(
             .expect("starts"),
     );
     let node = nodes[1].clone();
-    let main = move |tasks: env::tasks::Tasks| async move {
-        let agent = Agent::dial(&node, tasks, at).await;
-        let session = agent.session.clone();
-        program(agent).await;
-        session.close(Code(0));
-        node.clock().sleep(Span::MILLISECOND).await;
-    };
+    let main = move |tasks: env::tasks::Tasks| program(node, tasks, at);
     drop(
         nodes[1]
             .shards()
@@ -189,7 +231,7 @@ fn run<H, P>(
 }
 
 /// Reads the header of `incoming`, and checks that it names the hub.
-async fn header(incoming: &mut Incoming) {
+pub(super) async fn header(incoming: &mut Incoming) {
     let header = incoming.receiver.recv().await.expect("a header");
     let header = header.expect("the header comes before the finish");
     assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
