@@ -105,9 +105,8 @@ impl Table {
     /// comes.
     pub(crate) fn poll_dialed(&mut self, cx: &Context<'_>) -> Option<Session> {
         let session = self.dialed.pop_front();
-        if session.is_none() && !self.accepting.iter().any(|w| w.will_wake(cx.waker()))
-        {
-            self.accepting.push(cx.waker().clone());
+        if session.is_none() {
+            quic::register(&mut self.accepting, cx.waker());
         }
         session
     }
@@ -130,9 +129,7 @@ impl Attempt {
         if let Some(result) = &state.result {
             return Poll::Ready(result.clone());
         }
-        if !state.waiting.iter().any(|w| w.will_wake(cx.waker())) {
-            state.waiting.push(cx.waker().clone());
-        }
+        quic::register(&mut state.waiting, cx.waker());
         Poll::Pending
     }
 
@@ -147,13 +144,14 @@ impl Attempt {
 mod tests {
     use std::net::SocketAddr;
     use std::pin::pin;
+    use std::rc::Rc;
 
     use sim::node::Node;
     use types::ed25519::{PrivateKey, PublicKey};
     use types::time::Span;
 
     use crate::testing::{self, CLIENT, SERVER};
-    use crate::{Address, Client, Code, Error, Peer};
+    use crate::{Address, Client, Code, Error, Peer, Transport};
 
     /// An address on `node` where nothing answers.
     fn dead(node: &Node) -> [Address; 1] {
@@ -198,6 +196,33 @@ mod tests {
             for session in [second.expect("a session"), accepted] {
                 assert_eq!(session.closed().await, Error::Closed { code: Code(3) });
             }
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn an_accept_that_waits_gets_a_session_that_a_dial_makes_later() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        testing::transport(&server, SERVER, |transport, _| async move {
+            let session = transport.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(7) };
+            assert_eq!(session.closed().await, closed);
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let tasks = config.tasks.clone();
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Rc::new(Transport::new(config, part).expect("a transport"));
+            let accepting = Rc::clone(&transport);
+            tasks.spawn(async move {
+                let accepted = accepting.accept().await.expect("the dialed session");
+                accepted.close(Code(7));
+            });
+            node.clock().sleep(Span::MILLISECOND).await;
+            let dialed = transport.dial(SERVER.public(), &at).await;
+            let closed = Error::Closed { code: Code(7) };
+            assert_eq!(dialed.expect("a session").closed().await, closed);
+            linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
     }

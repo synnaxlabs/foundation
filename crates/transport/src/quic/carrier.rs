@@ -908,7 +908,7 @@ impl Held {
 }
 
 /// Adds `waker` to `wakers` unless one there wakes the same task.
-fn register(wakers: &mut Vec<Waker>, waker: &Waker) {
+pub(crate) fn register(wakers: &mut Vec<Waker>, waker: &Waker) {
     if !wakers.iter().any(|w| w.will_wake(waker)) {
         wakers.push(waker.clone());
     }
