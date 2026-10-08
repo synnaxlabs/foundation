@@ -41,6 +41,7 @@ const HEADER: usize = 16;
 fn main() {
     c_allocates_through_the_global_allocator();
     the_drop_frees_the_client_its_loop_and_its_timers();
+    the_fuzz_round_trip_frees_each_value();
 }
 
 fn c_allocates_through_the_global_allocator() {
@@ -88,4 +89,13 @@ fn the_drop_frees_the_client_its_loop_and_its_timers() {
     );
     drop(client);
     assert_eq!(ALLOCATOR.held(), before, "the drop freed each block");
+}
+
+fn the_fuzz_round_trip_frees_each_value() {
+    // A Variant of 7 ExtensionObjects, then the padding that #435 needs.
+    let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
+    data.resize(data.len() + 7 * 4, 0);
+    let before = ALLOCATOR.held();
+    connector_opcua::fuzz::decode(&data);
+    assert_eq!(ALLOCATOR.held(), before, "the round trip freed each block");
 }

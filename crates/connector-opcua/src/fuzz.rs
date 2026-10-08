@@ -156,6 +156,10 @@ mod tests {
             [0, BYTE_STRING, TYPES - 1].map(|at| types[at].name()),
             ["Boolean", "ByteString", "PubSubConfiguration2DataType"]
         );
+        assert_eq!(
+            [0, BYTE_STRING, VARIANT].map(|at| types[at].size()),
+            [1, 16, 48]
+        );
     }
 
     #[test]
