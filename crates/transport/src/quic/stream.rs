@@ -3864,7 +3864,7 @@ mod tests {
             let key = key(&pair.client);
             let connection =
                 crate::quic::find(&mut pair.client.endpoint.connections, key);
-            // Private: the capacity of the buffer shows in no public count.
+            // Private: a public count shows each growth, not the capacity it bounds.
             let buffer = &connection.expect("a connection").streams.sending.buffer;
             assert!(buffer.capacity() < 2 * 1_600, "{}", buffer.capacity());
         });
@@ -3894,7 +3894,7 @@ mod tests {
                 let key = key(&pair.client);
                 let connection =
                     crate::quic::find(&mut pair.client.endpoint.connections, key);
-                // Private: the capacity of the buffer shows in no public count.
+                // Private: a public count shows each growth, not the capacity it bounds.
                 let buffer = &connection.expect("a connection").streams.sending.buffer;
                 let capacity = buffer.capacity();
                 assert!(capacity < 2 * (100 + COPIED_MAX), "{capacity}");
