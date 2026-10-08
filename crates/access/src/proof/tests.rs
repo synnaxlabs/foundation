@@ -409,7 +409,7 @@ mod admit {
     }
 
     #[test]
-    fn keeps_each_subject_of_each_region_tree_by_its_name() {
+    fn keeps_each_subject_of_each_region_tree_by_its_tree_key() {
         let key = public(&pair(TEST_1));
         let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
         let region: BTreeMap<Name, Definition> =
