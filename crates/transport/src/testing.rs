@@ -185,6 +185,14 @@ pub(crate) fn start<F: Future<Output = ()> + 'static>(
 ///
 /// When [`Transport::new`] refuses `config`, with its error.
 pub(crate) fn setup(config: &Config) -> quic::Setup {
+    let config = Config {
+        private_key: config.private_key.clone(),
+        clock: config.clock.clone(),
+        entropy: config.entropy.clone(),
+        tasks: config.tasks.clone(),
+        pool: Rc::clone(&config.pool),
+        ..*config
+    };
     config.setup().unwrap_or_else(|error| panic!("{error}"))
 }
 

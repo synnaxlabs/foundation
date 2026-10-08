@@ -99,7 +99,6 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// or timed out. Then it frees its [`port::Part`], so a later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
-    clock: env::clock::Clock,
     public_key: PublicKey,
 }
 
@@ -122,11 +121,10 @@ impl Transport {
     /// }
     /// ```
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
-        let setup = config.setup()?;
+        let public_key = config.private_key.public();
         Ok(Self {
-            carrier: quic::Carrier::new(setup, part),
-            clock: config.clock,
-            public_key: config.private_key.public(),
+            carrier: quic::Carrier::new(config.setup()?, part),
+            public_key,
         })
     }
 
@@ -172,7 +170,7 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier, &self.clock, peer, addresses).await;
+        let dialed = dial::dial(&self.carrier, peer, addresses).await;
         dialed.map(Session::new)
     }
 
@@ -292,7 +290,7 @@ impl Config {
     /// The node's setup, or the first rule of [`Transport::new`] that this config
     /// breaks. A field's own range comes before its relation to another field, so the
     /// error names the field to change.
-    pub(crate) fn setup(&self) -> Result<quic::Setup, Error> {
+    pub(crate) fn setup(self) -> Result<quic::Setup, Error> {
         let limit = self.message_bytes_max.get().min(self.pool.largest());
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
@@ -304,15 +302,15 @@ impl Config {
             ("window_bytes", "must be at least the message limit")
         } else {
             return Ok(quic::Setup {
-                role: quic::Role::Node(self.private_key.clone()),
+                role: quic::Role::Node(self.private_key),
                 message_bytes_max: limit,
                 window_bytes: self.window_bytes,
                 streams_max: self.streams_max,
                 idle: self.idle,
-                clock: self.clock.clone(),
-                entropy: self.entropy.clone(),
-                tasks: self.tasks.clone(),
-                pool: Rc::clone(&self.pool),
+                clock: self.clock,
+                entropy: self.entropy,
+                tasks: self.tasks,
+                pool: self.pool,
             });
         };
         Err(Error::Config { field, rule })

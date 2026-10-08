@@ -23,7 +23,6 @@ const IDLE: Span = Span::from_nanos(30 * Span::SECOND.nanos());
 /// clone drops. Once each connection drained, it frees its [`port::Part`].
 pub struct Client {
     carrier: quic::Carrier,
-    clock: env::clock::Clock,
 }
 
 impl Client {
@@ -46,10 +45,8 @@ impl Client {
     /// }
     /// ```
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
-        let clock = config.clock.clone();
         Ok(Self {
             carrier: quic::Carrier::new(config.setup()?, part),
-            clock,
         })
     }
 
@@ -78,7 +75,7 @@ impl Client {
         node: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier, &self.clock, node, addresses).await;
+        let dialed = dial::dial(&self.carrier, node, addresses).await;
         dialed.map(Session::new)
     }
 }

@@ -101,6 +101,11 @@ impl Carrier {
         state.waits.status(state.clock.now())
     }
 
+    /// The clock of the carrier's endpoint.
+    pub(crate) fn clock(&self) -> Clock {
+        self.0.borrow().clock.clone()
+    }
+
     /// Checks that the socket still works.
     ///
     /// # Errors
