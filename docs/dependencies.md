@@ -37,7 +37,8 @@ approval; pin the version you build against there.
 | `http` | `connector` (`http`); `connector-influx` (feature `sim`) | The request and response types of `hyper`, which the client's surface uses (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466), and of the simulated HTTP servers | MIT or Apache-2.0 | 1.5.0 | 2026-10-06 |
 | `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.1.0 | 2026-10-06 |
 | `rustc-hash` | `types` (`types::hash::Map` and `Set`) | The fixed, fast hasher of every hash map (R16-7, #1321): SipHash cost 8.5 ns of 131 ns per 64 B `transport` write (#1308, #1399). Already in the build through `noq-proto`. The person: "Yeah I approve" (https://github.com/synnaxlabs/foundation/issues/1321#issuecomment-6039851114) | MIT or Apache-2.0 | 2.1.3 | 2026-10-07 |
-| `open62541` (C library, the upstream source files in `patches/open62541/`, not a crate) | `connector-opcua` (from #435 PR 4) | The OPC UA client, with a passive event loop that Rust drives under `sim` (#435). `cargo deny` checks only crates, so `deny.toml` has no entry for it | MPL-2.0; CC0-1.0 in `plugins/`; in `deps/`, MIT (`itoa`, `libc_time`, `mp_printf`, `musl_inet_pton`, `parse_num`), BSL-1.0 (`dtoa`), BSD (`base64`, `open62541_queue.h`), and Apache-2.0 (`pcg_basic`) | 1.5.9 | 2026-10-08 (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544) |
+| `cc` | `connector-opcua` (build dependency, feature `open62541`; dev-dependency, the tests of `build/compiler.rs`) | Compiles the open62541 copy and `shim.c` in `build.rs`, with no CMake (#435). Already in the build through `aws-lc-sys`. The person: "Yes" (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544). Dev-dependency approved by `laptop.architect-2` (https://github.com/synnaxlabs/foundation/pull/1915#issuecomment-6064248826, 2026-10-08 16:20 UTC) | MIT or Apache-2.0 | 1.6.0 | 2026-10-08 |
+| `open62541` (C library, the upstream source files in `patches/open62541/`, not a crate) | `connector-opcua` (feature `open62541`) | The OPC UA client, with a passive event loop that Rust drives under `sim` (#435). `cargo deny` checks only crates, so `deny.toml` has no entry for it | MPL-2.0; CC0-1.0 in `plugins/`; in `deps/`, MIT (`itoa`, `libc_time`, `mp_printf`, `musl_inet_pton`, `parse_num`), BSL-1.0 (`dtoa`), BSD (`base64`, `open62541_queue.h`), and Apache-2.0 (`pcg_basic`) | 1.5.9 | 2026-10-08 (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544) |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
@@ -83,8 +84,9 @@ The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
 the empty-list sentence of
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy of
-a Rust crate is a path package, so `cargo deny` does not check it against advisories
-(#1867).
+a Rust crate is a path package, which `cargo deny` does not check against advisories,
+so the `Advisories of each patched release` step of the `deny` job in
+`.github/workflows/ci.yaml` checks its release (#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |

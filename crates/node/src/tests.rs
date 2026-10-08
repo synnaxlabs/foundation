@@ -605,9 +605,9 @@ mod buffer {
         let clock = host.clock();
         node.spawn(move |hub| async move {
             let names = ["c", "b", "a"];
-            for (key, name) in [3, 2, 1].into_iter().zip(names) {
-                super::hub::define(&hub, key, name, super::hub::STAMP, key);
-            }
+            let channels = [3, 2, 1].map(super::hub::index);
+            let channels: Vec<_> = names.into_iter().zip(channels).collect();
+            super::hub::define(&hub, &channels);
             let writer = super::hub::writer(&hub, &clock, &names).await;
             let entries = writer.set().entries();
             let slot = |key| entries.iter().find(|e| e.key == Key::from_u128(key));
@@ -1786,9 +1786,11 @@ mod lock {
 }
 
 mod hub {
+    use ::hub::Hub;
     use ::hub::reader::{Mode, Received};
     use ::hub::writer::{self, Writer};
-    use ::hub::{Channel, Hub};
+    use spec::channel::{Channel, Data, Kind};
+    use spec::data_type::DataType;
     use types::authority::Authority;
     use types::channel::Key;
     use types::frame::key_set::KeySet;
@@ -1798,7 +1800,6 @@ mod hub {
 
     use super::*;
 
-    pub(super) const STAMP: Type = Type::Scalar(Scalar::Stamp);
     const I64: Type = Type::Scalar(Scalar::I64);
     /// The wall time when a host is added, which is before the node's mesh time.
     const WALL: i64 = 1_767_225_600_000_000_000;
@@ -1807,20 +1808,31 @@ mod hub {
         name.parse().expect("a valid name")
     }
 
-    /// Defines channel `key`, named `name`, of `data_type` on index `index`.
-    pub(super) fn define(
-        hub: &Hub,
-        key: u128,
-        name: &str,
-        data_type: Type,
-        index: u128,
-    ) {
-        hub.define(Channel {
+    /// The index `key`.
+    pub(super) fn index(key: u128) -> Channel {
+        Channel {
             key: Key::from_u128(key),
-            name: self::name(name),
-            data_type,
-            index: Key::from_u128(index),
-        });
+            kind: Kind::Index {
+                error: None,
+                control: None,
+            },
+        }
+    }
+
+    /// The data channel `key` of `data_type` on the index `index`.
+    fn data(key: u128, data_type: Type, index: u128) -> Channel {
+        let index = Key::from_u128(index);
+        let data = Data::new(index, None, DataType::Sample(data_type), None);
+        Channel {
+            key: Key::from_u128(key),
+            kind: Kind::Data(data.expect("no unit")),
+        }
+    }
+
+    /// Defines each of `channels`, by its name, in one call.
+    pub(super) fn define(hub: &Hub, channels: &[(&str, Channel)]) {
+        let channels: Vec<_> = channels.iter().map(|(n, c)| (name(n), c)).collect();
+        hub.define(channels.iter().map(|(name, channel)| (name, *channel)));
     }
 
     /// A writer on `channels`, opened again each millisecond of `clock` until the node
@@ -1906,8 +1918,7 @@ mod hub {
         let clock = host.clock();
         let probe = probe(&node);
         node.spawn(move |hub| async move {
-            define(&hub, 1, "time", STAMP, 1);
-            define(&hub, 2, "value", I64, 1);
+            define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
             let reader = hub.reader(&[name("value")], Mode::Complete).await;
             let mut reader = reader.expect("the reader opens");
             let mut writer = writer(&hub, &clock, &["value"]).await;
@@ -2055,7 +2066,7 @@ mod hub {
         let task = Dropped(Arc::clone(&dropped));
         node.spawn(move |hub| async move {
             let _task = task;
-            define(&hub, 1, "time", STAMP, 1);
+            define(&hub, &[("time", index(1))]);
             let reader = hub.reader(&[name("time")], Mode::Complete).await;
             let mut reader = reader.expect("the reader opens");
             drop(reader.next().await);
@@ -2093,8 +2104,7 @@ mod hub {
                     interner,
                     tasks: spawn,
                 });
-                define(&hub, 1, "time", STAMP, 1);
-                define(&hub, 2, "value", I64, 1);
+                define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;
                 drop(guard);
                 drop((writer, hub));
@@ -2616,17 +2626,21 @@ mod port {
 
         use ::mesh::card::addresses::Addresses;
         use ::mesh::card::{self, Card};
+        use ::mesh::region::Founding;
         use ::mesh::status::Status;
         use std::future::poll_fn;
         use std::pin::pin;
         use std::task::Poll;
 
         use ::mesh::Member;
+        use spec::definition::{Definition, Kind};
+        use spec::subject::Subject;
+        use spec::tree::Chunks;
         use types::channel;
         use types::node::SealKey;
 
         use super::*;
-        use crate::{Endpoint, Region, route};
+        use crate::{Endpoint, route};
 
         /// The key and private key of a second node.
         const OTHER: (types::node::Key, PrivateKey) =
@@ -2665,11 +2679,12 @@ mod port {
         }
 
         /// The region `plant`, where each of `members` is a voter.
-        fn region(members: &[Member]) -> Region {
-            Region {
+        fn region(members: &[Member]) -> Founding {
+            Founding {
                 prefix: "plant".parse().unwrap(),
                 members: members.to_vec(),
                 voters: members.iter().map(|member| member.card.key()).collect(),
+                definitions: BTreeMap::new(),
             }
         }
 
@@ -2677,7 +2692,7 @@ mod port {
         fn start(
             host: &sim::node::Node,
             (key, private_key): (types::node::Key, PrivateKey),
-            region: Region,
+            region: Founding,
         ) -> Node {
             Node::start(Config {
                 key,
@@ -2999,6 +3014,58 @@ mod port {
                 assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
             }
             assert!(held && logged);
+        }
+
+        /// A node started with a region with founding definitions puts the chunks of
+        /// their tree in its chunk store.
+        #[test]
+        fn the_chunk_store_holds_the_tree_of_the_founding_definitions() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let mut region = region(&[member(OWN, &KEY, &host)]);
+            let subject = Subject::new([KEY.public()].into()).unwrap();
+            let label = Kind::Subject.key("plant.operator").unwrap();
+            region.definitions = [(label, Definition::Subject(subject))].into();
+            let mut chunks = Chunks::default();
+            let tree = spec::region::tree(&mut chunks, &region.definitions);
+            let listed = tree.chunks.clone();
+            let node = start(&host, (OWN, KEY), region);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let shard = env::shards::Config {
+                name: "store".into(),
+                core: None,
+            };
+            let own = host.clone();
+            let held = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&held);
+            let started = host.shards().start(shard, move |_| async move {
+                let pool = block::Config { budget: 1 << 20 };
+                let memory = block::Heap::new(pool.reservation());
+                let pool = Rc::new(block::Pool::new(pool, memory));
+                let store = blob::Store::open(blob::Config {
+                    files: own.files(),
+                    dir: crate::directory::blob(),
+                    pool,
+                })
+                .await
+                .expect("the store opens");
+                for digest in tree.chunks {
+                    let block = store.get(digest).await.expect("a read");
+                    let bytes = block.map(|block| block.to_vec());
+                    out.lock().unwrap().push((digest, bytes));
+                }
+            });
+            drop(started.expect("the store starts"));
+            assert_eq!(sim.run(), Ok(()));
+            assert!(listed.contains(&tree.root));
+            let expected: Vec<_> = listed
+                .into_iter()
+                .map(|digest| (digest, chunks.get(digest).map(<[u8]>::to_vec)))
+                .collect();
+            assert_eq!(*held.lock().unwrap(), expected);
         }
 
         /// A node that starts again with its region, at once after a stop or a power

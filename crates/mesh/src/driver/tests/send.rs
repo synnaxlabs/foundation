@@ -129,9 +129,8 @@ pub(super) async fn create_config(
     pool: Rc<Pool>,
 ) -> Config {
     Config {
-        members: IDS.map(create_voter).into(),
         pool,
-        ..config_at(node, tasks, 1, PORT, &IDS, &IDS).await
+        ..dialed_at(node, tasks, 1, PORT, &IDS, &IDS).await
     }
 }
 
@@ -391,10 +390,8 @@ async fn create_stranger(
     tasks: &Tasks,
 ) -> (Config, raft::Message) {
     let members = vec![create_voter(1), common::member(2), common::member(3)];
-    let config = Config {
-        members,
-        ..config_at(node, tasks, 1, PORT, &IDS, &IDS).await
-    };
+    let mut config = config_at(node, tasks, 1, PORT, &IDS, &IDS).await;
+    config.founding.members = members;
     let voters = Voters {
         incoming: [1, 2, 4].map(key).into(),
         outgoing: IDS.map(key).into(),

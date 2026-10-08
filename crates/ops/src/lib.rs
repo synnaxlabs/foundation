@@ -7,12 +7,23 @@ use std::io::{self, BufRead, Write};
 use serde_json::{Value, json};
 
 mod error;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table entries of #1744 call it")
+)]
+mod front_end;
 mod mcp;
 mod operation;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table entries of #1744 call it")
+)]
+mod plan;
 #[cfg(test)]
 mod tests;
 
 use error::Error;
+pub use front_end::FrontEnd;
 use operation::Parsed;
 
 /// Runs one command line, such as `["foundation", "version", "--json"]`, and returns

@@ -1,0 +1,44 @@
+{
+  "added": 3,
+  "base": {
+    "root": "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
+    "version": 0
+  },
+  "changed": 0,
+  "changes": [
+    {
+      "action": "add",
+      "kind": "channel",
+      "name": "site.time",
+      "place": {
+        "column": 9,
+        "file": "site.hcl",
+        "line": 1
+      }
+    },
+    {
+      "action": "add",
+      "kind": "channel",
+      "name": "site.temp",
+      "place": {
+        "column": 9,
+        "file": "site.hcl",
+        "line": 2
+      }
+    },
+    {
+      "action": "add",
+      "kind": "placement",
+      "name": "p",
+      "place": {
+        "column": 11,
+        "file": "site.hcl",
+        "line": 6
+      }
+    }
+  ],
+  "homes": {
+    "site.time": "edge"
+  },
+  "removed": 0
+}
