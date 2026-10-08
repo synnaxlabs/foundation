@@ -2031,9 +2031,10 @@ How to read this record:
   2026-10-08T04:03:21Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
   `types::ed25519::PrivateKey` holds the Ed25519 private key of a node and of a
-  subject. The same ruling moves it when a program first holds the private key of a
-  subject (#1748; item of `laptop.director`:
-  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
+  subject (ruling above). It moved in its own mechanical PR before the PR that gives
+  `hub::client` the private key of a subject. Ordered by `laptop.director` at
+  2026-10-08T05:41:28Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
   `types::ed25519::PrivateKey::public` is the one place that derives the public key
   from the private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
   `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
