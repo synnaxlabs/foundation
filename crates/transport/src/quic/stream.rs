@@ -3230,10 +3230,14 @@ mod tests {
             let waited = pair.client.endpoint.budget_waits();
             let second = open_sender(&mut pair, Class::Complete);
             let third = open_sender(&mut pair, Class::Complete);
+            let fourth = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
-            // The second takes room at once, and the third waits for it.
-            let messages =
-                [(&second, vec![0xb; 100]), (&third, vec![0xc; MESSAGE_MAX])];
+            // The second takes room at once, and the third and fourth wait for it.
+            let messages = [
+                (&second, vec![0xb; 100]),
+                (&third, vec![0xc; MESSAGE_MAX]),
+                (&fourth, vec![0xd]),
+            ];
             for (sender, message) in messages {
                 let message = shard.block(&message);
                 let written = pair::write(
@@ -3244,15 +3248,15 @@ mod tests {
                 );
                 assert_eq!(written, Ok(Poll::Pending));
             }
-            assert_eq!(pair.client.endpoint.budget_waits(), waited + 1);
-            let mut senders = [first, second, third];
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
+            let mut senders = [first, second, third, fourth];
             exchange(&mut pair, &mut senders, 10 * RUN);
-            assert_eq!(pair.client.endpoint.budget_waits(), waited + 1);
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
             let (now, key) = (pair.now(), key(&pair.client));
             pair.client.endpoint.close(now, key, Code(1));
             pair.run(10 * RUN);
             assert!(pair.client.endpoint.drained());
-            assert_eq!(pair.client.endpoint.budget_waits(), waited + 1);
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
         });
     }
 

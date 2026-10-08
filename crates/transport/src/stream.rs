@@ -2433,6 +2433,42 @@ mod tests {
     }
 
     #[test]
+    fn the_status_counts_the_sends_that_wait_for_send_budget_room() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| Config {
+                window_bytes: 2 * LARGE,
+                ..config
+            },
+            |side| async move {
+                assert_eq!(side.transport.status().budget_waits, 0);
+                let mut senders = Vec::new();
+                for _ in 0..5 {
+                    let opened = side.session.open_sender(Class::Complete).await;
+                    senders.push(opened.expect("a stream"));
+                }
+                let mut sends: Vec<Pin<Box<dyn Future<Output = _>>>> = Vec::new();
+                for sender in &mut senders {
+                    sends.push(Box::pin(sender.send(side.block(&vec![0; LARGE]))));
+                }
+                for send in &mut sends {
+                    poll_once(Pin::new(send)).await;
+                }
+                // QUIC takes the first message whole, and the window only part of the
+                // second. The second and third hold the budget, so the others wait.
+                assert_eq!(side.transport.status().budget_waits, 2);
+                drop(sends);
+                side.session.close(Code(4));
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_recv_into_takes_no_block_from_a_full_pool() {
         let (mut sim, ..) = testing::sessions(
             0,
