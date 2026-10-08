@@ -936,6 +936,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032912929). The
   surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
+  Amended (2026-10-08T00:13:26Z, #1625): `reader::Session` is the home's side of a
+  reader, which `Reader` drives, and which `Hub::serve` (#1636) will drive. The split
+  costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet host), which
+  adds 0.3% to the write of one frame. Accepted by laptop.architect:
+  https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
   it on drop, and the task ends at its first poll after that. Lost:
@@ -1432,10 +1437,13 @@ How to read this record:
   it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
   the ends, so the reader holds no more ends than it has places. The ends and the body
   are in place order: the home writes the series of each place it has, from 0, each from
-  the frame's block as a slice, with ends it computes in that order. At the open it
-  makes the list of each place and its home entry, sorted by place, and writes each ends
-  message from it with `wire::hub::ends::encode`, which sizes the message by its buffer,
-  so no scratch buffer holds the ends (the architect, #1146,
+  the frame's block as a slice, with ends it computes in that order. It cuts each series
+  from `Frame::body` by `View::bounds` (the architect, 2026-10-07T22:35:41Z,
+  https://github.com/synnaxlabs/foundation/issues/1639#issuecomment-6048265226; lost:
+  `View::ends`, which gives no start, and `Frame::bounds`, a search for each place). At
+  the open it makes the list of each place and its home entry, sorted by place, and
+  writes each ends message from it with `wire::hub::ends::encode`, which sizes the
+  message by its buffer, so no scratch buffer holds the ends (the architect, #1146,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
   takes exactly the ends the buffer holds and no more, so one iterator passed with
   `by_ref()` splits a run into messages; the caller owns the count of the run (the
@@ -1447,7 +1455,25 @@ How to read this record:
   then the body as it arrives, with no copy of a series after the receive. An end below
   the start of its series is not valid; `types` refuses it, as `frame::check` does. The
   padding may hold any bytes (FRAME LAYOUT). Each direction has its own messages: the
-  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`, `Head`, or
+  `Behind`. The home sends `Behind` after the last frame before a miss of the session,
+  then finishes its stream. The reader's `next` gives each frame before it, then
+  `Ended::Behind`. `hub` builds both in #340 PR 4. A message after `Behind` is not
+  valid (lost: a stop code, which can cut off the frames sent before it; the architect,
+  2026-10-07T21:07:50Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6046877541).
+  `Behind` and `Credit` in a latest session are not valid (lost: accept them in either
+  mode, which lets a remote latest reader give `Ended::Behind`; the architect,
+  2026-10-07T21:34:58Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047310321). The
+  check of the mode costs the decode of a `Credit` +0.28 ns. The `Ended` state and the
+  mode flag of `Reader`, for `Behind`, cost a body message up to +0.37 ns and a frame up
+  to +1 ns. Both are accepted with no code change; a `Credit` decode past +1 ns over
+  `main` comes back to the architect (lost: `#[inline]` on `wire::hub::Home::decode`,
+  which is not measured and grows each caller; the architect, 2026-10-07T22:18:40Z,
+  https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6048002213, and
+  2026-10-08T00:16:49Z,
+  https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6049484466). Stop
   codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
   the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
   decode, comes from the wrong side, or breaks a rule above), which every protocol may
@@ -2294,8 +2320,15 @@ How to read this record:
   home of a forwarded change: `Error::NotMember` checks only the argument of a local
   caller, and the check of a home at apply on each node is #1273. A forwarded change
   applies at least one time: a member that got no answer forwards it again, and the
-  leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
-  state of a call that took effect last. `Change::Join` is safe to repeat while no
+  leader then appends a second entry. A try of `set_home` that gives up resets its
+  stream. A proposal that the network delivers late, before the reset, can still apply
+  after a later call returned and set the older home, until #1273 refuses it (ruled by
+  the architect, 2026-10-07T20:58:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  Supersedes the sentence that a repeat of `Change::Home` gives the state of a call
+  that took effect last:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025.
+  `Change::Join` is safe to repeat while no
   change removes a member: a repeat finds its node a member and is refused
   (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
   must keep a repeat of an older `Join` from admitting the node again, and needs a
@@ -2409,7 +2442,66 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A stop
   of the group drops each handle. When `Transport::dial` gives the one open session to a
   peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
-  handle goes back to the task.
+  handle goes back to the task. `set_home` makes a member the home of an index, and
+  returns when this node applied an entry that sets it. A try starts with two checks on
+  this node: the node is a voter (`Error::NoVote`), and the home is a member
+  (`Error::NotMember`). Only the two and a stop of the group end the call with an error.
+  A voter of one half of a joint configuration is a voter here, as in the leader's check
+  of a peer (`Error::PeerNotVoter`). The try proposes on this node. When another node
+  leads, the try sends the proposal on a new two-way stream of the session to the leader
+  that the group holds, and reads one answer. The call does not dial: two dialers for
+  one peer need a rule for which session stays, and a follower sends to its leader in
+  each tick, so with no session the leader cannot be reached. A try gets no position
+  when no leader is known, when the group has no session to the leader, when the leader
+  refuses the proposal, when the stream fails, when the pool has no block for the
+  proposal or this node's group gives `Error::Pool`, and when this node's `raft` names
+  another leader or term before the answer. The call then waits one tick and starts the
+  next try. A try that waits for the answer has no time limit: the leader answers each
+  forwarded proposal or ends its stream, and a session that fails one way ends at the
+  timeout of `transport`. `Group` wakes each call at each change of the leader or the
+  term, and at a stop, so a stop ends the wait at once. A limit of one election timeout
+  on the answer lost: on a link with a round trip above it, `raft` keeps its leader,
+  and each try gave up after the leader took its proposal, so the call appended one
+  entry for each try and never returned (decided by `laptop.architect`,
+  2026-10-07T22:40:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6048332653).
+  Supersedes the limit of one election timeout in the plan that this approval took:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407. It also
+  supersedes point 3 of
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552, a stop
+  that ends a forward at most 11 ticks late. With a position,
+  the call waits with no time limit until this node applied the entry of that term at
+  that index, or until the log has a different entry there, and then it proposes again:
+  a new leader commits an entry of its term, which decides each older position. A time
+  limit lost: a slow group gets the change again at each timeout. A `request` number
+  with a map of open requests lost: the stream is the request (MESH WIRE). `Applied`
+  keeps the term of each applied entry only above the lowest floor of an open try, and
+  the term of the last entry, so it holds one pair while no call waits (MEMORY BOUNDS).
+  A dropped call leaves no waker and no floor, and its stream stops. A node that is not
+  a voter gets `NoVote` and does not wait, because the leader gives it only code 16,
+  which a full pool also gives (approved by the architect with two changes, `NoVote` and
+  the bound of `Applied`, 2026-10-07T11:54:56Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407). The
+  `NoVote` check reads the configuration of this node's log, which changes when the node
+  appends a change of voters, before the commit. A promoted node gets `NoVote` until it
+  appends that change, and a new leader that replaces the entry changes the result back.
+  `NotMember` reads what this node applied (ruled by the architect,
+  2026-10-07T20:58:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  Supersedes the sentence that a promoted node gets `NoVote` until it applies that
+  change: https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407.
+  `Ok`
+  means that the entry at the position of the try applied. That is an entry that sets
+  the home only while `State::apply` never refuses a home change. A change kind that
+  lets `apply` refuse a home change (such as a removal of a member) must also make
+  `set_home` tell a refused entry from one that set the home. The surface as built, the
+  doc of `set_home`, and three points that the plan did not state (a joint
+  configuration, `Error::Pool`, and `NoVote` before `NotMember`) are approved by the
+  architect, 2026-10-07T20:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The
+  ruling of 2026-10-07T20:58:20Z above adds the sentence on a late proposal to that
+  doc. Its sentences on what `NoVote` and `NotMember` read supersede the last sentence
+  of the doc text in that comment ("The first two read what this node applied").
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
@@ -2459,13 +2551,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
   Supersedes the sentence that `open` does not check the key of the transport:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
-  `Debug` text of a `Config` does not show the private key. The calls that change the
-  region and the change records stay private. The surface is approved by the architect,
-  2026-10-07T16:24:54Z:
+  `Debug` text of a `Config` does not show the private key. `Mesh::set_home` is the
+  first public call that changes the region (#471), and `Error::NoVote` is public with
+  it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
+  The line "Private still" of the plan names `set_home` (4c-2) as the first call that
+  changes the region
+  (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
+  the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  surface as built, with the types that the caller builds and the sentence that `open`
-  does not check the key of the transport (superseded above), is approved by the
-  architect, 2026-10-07T19:55:12Z:
+  other calls that change the region and the change records stay private. The surface
+  is approved in the same comment. The surface as built, with the types that the caller
+  builds and the sentence that `open` does not check the key of the transport
+  (superseded above), is approved by the architect, 2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order

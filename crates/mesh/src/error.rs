@@ -35,6 +35,9 @@ pub enum Error {
     Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// This node is not a voter of its configuration, and only a voter proposes a
+    /// change. Call it on a voter.
+    NoVote,
     /// The region cannot hold a member record of the config.
     Member(Unfit),
     /// This node's private key is not the key of its member.
@@ -76,6 +79,9 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::NoVote => f.write_str(
+                "this node is not a voter, and only a voter proposes a change",
+            ),
             Self::Member(refused) => refused.fmt(f),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
