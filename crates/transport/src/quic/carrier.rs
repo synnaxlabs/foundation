@@ -159,6 +159,15 @@ impl Dialer {
         }
     }
 
+    /// The next session that a peer dialed and that no accept took, without a wait.
+    pub(crate) fn accepted(&self) -> Option<Session> {
+        let key = self.0.borrow_mut().accepted.as_mut()?.pop_front()?;
+        Some(Session {
+            state: Rc::clone(&self.0),
+            key,
+        })
+    }
+
     /// Starts a dial to `remote` that `peer` must answer, and gives its session,
     /// which [`Session::poll_connected`] waits on. Dropping the session closes the
     /// dial.

@@ -4,8 +4,9 @@
   that a dial made. No public item is new.
   1. The table. Each `Transport` maps a node key to its open session and to the dial
      that runs for it. A session that is closing or closed is not open, so the next
-     `dial` dials again. A refusal is a close. The table holds no handle, so a session
-     still closes when its last handle drops.
+     `dial` dials again. A refusal is a close. The table holds no handle to an open
+     session, only to a session that waits for `accept`, so a session still closes
+     when its last handle drops.
   2. One attempt. The dial runs as a task on `tasks`, not in the caller's future, so the
      first caller can drop and the others still get the result. Its session goes to the
      table and to `accept` even when no caller waits. A dial that fails gives the
@@ -19,9 +20,11 @@
      higher peer's session (not in the table, not given to `accept`) while its own dial
      runs, or until the peer acknowledges a ping sent after the higher session arrived.
      Its own completes or answers: it closes the held one. Its own fails or ends: the
-     held one wins. The loser closes with `Code(0)`. A restarted peer answers a ping on
-     an old session with a stateless reset (`cid::Issuer`), so the old session ends
-     within one round trip. The second PR of #1363 builds this rule.
+     held one wins, and goes to the waiters and to `accept`. The loser closes with
+     `Code(0)`. A restarted peer answers a ping on an old session with a stateless
+     reset (`cid::Issuer`), so the old session ends within one round trip. The second
+     PR of #1363 builds this rule. Until then, a newer session does not replace the
+     open one in the table.
   5. Clients. A client session never enters the table, and `dial` never gives one. Two
      sessions from one client both stay open.
   6. Shards. The table is per `Transport`, so per shard. Until #77, a node runs one

@@ -1,5 +1,5 @@
 //! The table of a [`Transport`](crate::Transport): the open session to each node, the
-//! dial that runs for it, and the dialed sessions that wait for `accept`.
+//! dial that runs for it, and the sessions that wait for `accept`.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -24,8 +24,9 @@ pub(crate) struct Table {
     /// one, and at least [`FLOOR`]. So peers that come with new keys cannot grow the
     /// table past twice its live entries.
     limit: usize,
-    /// The sessions that dials made, in the order they connected, for `accept`.
-    dialed: VecDeque<Session>,
+    /// The sessions for `accept`, in the order the table got them: each that a dial
+    /// made, and each that a peer opened and the table took from the carrier.
+    ready: VecDeque<Session>,
     /// The wakers of the `accept` calls that wait.
     accepting: Vec<Waker>,
 }
@@ -68,7 +69,11 @@ pub(crate) async fn dial(
             let addresses = addresses.to_vec();
             tasks.spawn(async move {
                 let dial = dial::dial(&dialer, node, &addresses).await;
-                table.borrow_mut().dialed(node, dial.map(Session::new));
+                let mut table = table.borrow_mut();
+                if dial.is_err() {
+                    table.take(&dialer);
+                }
+                table.dialed(node, dial.map(Session::new));
             });
             attempt
         }
@@ -88,11 +93,11 @@ pub(crate) async fn accept(
 ) -> Result<Session, Error> {
     poll_fn(|cx| {
         let mut table = table.borrow_mut();
-        if let Some(session) = table.poll_dialed(cx) {
+        if let Some(session) = table.poll_ready(cx) {
             return Poll::Ready(Ok(session));
         }
         let session = ready!(carrier.poll_accept(cx)).map(Session::new)?;
-        table.accepted(&session);
+        table.hold(&session);
         Poll::Ready(Ok(session))
     })
     .await
@@ -114,18 +119,17 @@ impl Table {
         Found::Start(attempt)
     }
 
-    /// Ends the attempt to `node` with what its dial gave. A session becomes the open
-    /// one and waits for `accept`. After an error, the attempt gives the open session
-    /// that the peer opened meanwhile, if one is open.
+    /// Ends the attempt to `node` with what its dial gave. A session waits for
+    /// `accept`. After an error, the attempt gives the open session that the peer
+    /// opened meanwhile, if one is open.
     fn dialed(&mut self, node: PublicKey, dialed: Result<Session, Error>) {
         let entry = self.nodes.get_mut(&node);
         let entry = entry.expect("invariant: a dial keeps its entry");
         let attempt = entry.dial.take().expect("invariant: one dial ends it");
         let result = match dialed {
             Ok(session) => {
-                entry.session = session.downgrade();
-                self.dialed.push_back(session.clone());
-                self.accepting.drain(..).for_each(Waker::wake);
+                self.hold(&session);
+                self.push(session.clone());
                 Ok(session)
             }
             Err(error) => entry.session.open().ok_or(error),
@@ -136,12 +140,31 @@ impl Table {
         attempt.end(result);
     }
 
-    /// Makes `session`, which a peer opened, the open one to its node. A client's
-    /// session has no node.
-    fn accepted(&mut self, session: &Session) {
-        if let Peer::Node(node) = session.peer() {
-            self.entry(node).session = session.downgrade();
+    /// Takes each session that a peer opened and that no `accept` took from the
+    /// carrier of `dialer`, so that a dial that failed finds it.
+    fn take(&mut self, dialer: &quic::Dialer) {
+        while let Some(session) = dialer.accepted() {
+            let session = Session::new(session);
+            self.hold(&session);
+            self.push(session);
         }
+    }
+
+    /// Makes `session` the open one to its node, unless the node has an open one. A
+    /// client's session has no node.
+    fn hold(&mut self, session: &Session) {
+        if let Peer::Node(node) = session.peer() {
+            let entry = self.entry(node);
+            if entry.session.open().is_none() {
+                entry.session = session.downgrade();
+            }
+        }
+    }
+
+    /// Gives `session` to the next `accept`.
+    fn push(&mut self, session: Session) {
+        self.ready.push_back(session);
+        self.accepting.drain(..).for_each(Waker::wake);
     }
 
     /// The entry of `node`, new when it has none. First it drops each entry with no
@@ -157,10 +180,9 @@ impl Table {
         self.nodes.entry(node).or_default()
     }
 
-    /// The next session that a dial made, or `None`, and then `cx` wakes when one
-    /// comes.
-    fn poll_dialed(&mut self, cx: &Context<'_>) -> Option<Session> {
-        let session = self.dialed.pop_front();
+    /// The next session for `accept`, or `None`, and then `cx` wakes when one comes.
+    fn poll_ready(&mut self, cx: &Context<'_>) -> Option<Session> {
+        let session = self.ready.pop_front();
         if session.is_none() {
             wake::register(&mut self.accepting, cx.waker());
         }
@@ -509,6 +531,62 @@ mod tests {
             }
             let closed = Error::PeerClosed { code: Code(1) };
             assert_eq!(sessions[0].closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // Each node dials the other. The session from the server ends first, and the
+    // client's dialed session stays the open one.
+    #[test]
+    fn a_dial_gives_the_open_session_after_a_newer_session_from_the_peer_ended() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 200))
+                .await;
+            let mine = transport.dial(CLIENT.public(), &back).await;
+            mine.expect("a session").close(Code(1));
+            drop(transport.accept().await.expect("the dialed session"));
+            let theirs = transport.accept().await.expect("the client's session");
+            let closed = Error::PeerClosed { code: Code(2) };
+            assert_eq!(theirs.closed().await, closed);
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let dialed = transport.dial(SERVER.public(), &at).await;
+            let dialed = dialed.expect("a session");
+            drop(transport.accept().await.expect("the dialed session"));
+            let theirs = transport.accept().await.expect("the server's session");
+            let closed = Error::PeerClosed { code: Code(1) };
+            assert_eq!(theirs.closed().await, closed);
+            let again = transport.dial(SERVER.public(), &[]).await;
+            again.expect("the open dialed session").close(Code(2));
+            assert_eq!(dialed.closed().await, Error::Closed { code: Code(2) });
+            linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // No `accept` runs on the client, so the server's session waits in the carrier.
+    #[test]
+    fn a_dial_that_fails_gives_the_peers_session_that_no_accept_took() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let dead = dead(&server);
+        testing::transport(&server, SERVER, move |transport, _| async move {
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let closed = Error::PeerClosed { code: Code(6) };
+            assert_eq!(dialed.expect("a session").closed().await, closed);
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let dialed = transport.dial(SERVER.public(), &dead).await;
+            let dialed = dialed.expect("the peer's session");
+            let accepted = transport.accept().await.expect("the peer's session");
+            assert_eq!(accepted.peer(), Peer::Node(SERVER.public()));
+            dialed.close(Code(6));
+            assert_eq!(accepted.closed().await, Error::Closed { code: Code(6) });
+            linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
     }
