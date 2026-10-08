@@ -3407,7 +3407,7 @@ How to read this record:
   `laptop.architect-2` on 2026-10-07
   (https://github.com/synnaxlabs/foundation/pull/1135#issuecomment-6032674524).
   A refused URI gives one error for each cause: `Scheme`, `UserInfo`, `Host`, and
-  `Port`, checked in that order, so no error holds text from a URI with user info.
+  `Port`, checked in that order.
   Text after `]` is part of the host up to a `:`, so `http://[fd00::2]8086/` gives
   `Host` (https://github.com/synnaxlabs/foundation/issues/1179#issuecomment-6032542190).
   A `[` in a host that is not in brackets gives `Host`. A built URI with an empty path
@@ -3416,6 +3416,36 @@ How to read this record:
   info, because `Debug` and the field still hold the password. Decided by
   `laptop.architect-2` on #1159
   (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
+  No error of a refused URI holds text from the URI: a `/` or `?` in a password ends
+  the authority early and puts the password in the host or the port.
+  `connector::http::uri` reads a config value as a URI that `send` takes, with no I/O.
+  Each refusal, and a fragment, which `send` never sends, is `connector.bad-uri` at the
+  value. Lost: a `check(&Uri)` and a code for each kind, which each HTTP kind repeats.
+  Decided by `laptop.architect-2` on #1794
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931,
+  2026-10-08 05:03 UTC). Supersedes the `Host` and `Port` fields and messages of
+  https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253.
+- **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
+  (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
+  reads `address` through `connector::http::uri`, so a plan finds an address that
+  `send` refuses before a run. `node` puts the kind in its table only in #1734, when
+  `run` works, so until then a file with an influx connector gives
+  `connector.unknown-kind` at plan. `check` gives no channels, and `discover` no
+  documents. Until #1734, `run` fails with `Error::Config` and `influx.not-yet`.
+  Decided by `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC). The kind also refuses a path other than empty or `/`, and a
+  query, at the value: a path (a proxy prefix) can come later as a compatible change,
+  and a refusal cannot. Each diagnostic of a kind names its document
+  `connector::kind::NOUN` ("the connector"), as `reader::read` does. Decided by
+  `laptop.architect-2` on #1794
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931,
+  2026-10-08 05:03 UTC). The code of that refusal is `influx.bad-address`. Proposed by
+  `connector` as its address code
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052532087,
+  2026-10-08 04:51 UTC), and approved by item 4 of
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931
+  (2026-10-08 05:03 UTC).
 - **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
   names one sample of an index on each path (X31), and InfluxDB keys a point by
   measurement, tag set, and time, so a resend stores each sample once. Each run of
@@ -3429,8 +3459,12 @@ How to read this record:
   index to one database from replacing each other's gap lines. Until a later sample
   comes, the connector keeps one gap per index, and from #1270 one per index and path.
   After a restart the buffer reports the gap again (READER RULES), so a lost gap line is
-  sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
-  data measurement.
+  sent again. The measurement name is fixed. #1734 names the data measurement, and its
+  kind check refuses `foundation_gaps` as one (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC). Supersedes the clause of
+  https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6032215953 that the
+  kind check (#1153) refuses a config that maps a data measurement to `foundation_gaps`.
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
   reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, where
   `seq(stamp)` is the seq of the data point at its stamp, in the data measurement of
