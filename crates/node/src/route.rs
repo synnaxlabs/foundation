@@ -13,7 +13,8 @@ use crate::scope::Scope;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
 /// transport stops, and gives the error that stopped it. Admits every peer; `mesh`,
-/// when the node has one, checks each message against its region.
+/// when the node has one, checks each message against its region, and the hub serves
+/// each node.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
     mesh: Option<Mesh>,
@@ -70,6 +71,7 @@ async fn route(mut incoming: Incoming, peer: Peer, mesh: Option<Mesh>, link: Lin
         Protocol::Hub => match peer {
             // `serve` stops the stream with the code of its error.
             Peer::Node(_) => drop(link.serve(incoming).await),
+            // Until `node` handles a `Served::Request` (#1744).
             Peer::Client => reject(incoming),
         },
         Protocol::Clock | Protocol::Replica | Protocol::Blob => reject(incoming),
