@@ -3839,6 +3839,37 @@ mod tests {
     }
 
     #[test]
+    fn the_stretch_buffer_stays_under_twice_the_peer_largest() {
+        testing::run(1, |shard| {
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            let config = Config {
+                message_bytes_max: NonZeroUsize::new(1_600).expect("not zero"),
+                ..shard.config(pair::SERVER_KEY, Span::SECOND)
+            };
+            let shard_key = pair::SERVER_SHARD;
+            pair.server.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
+            pair.dial(pair::SERVER_KEY.public());
+            pair.run(RUN);
+            let sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            let parts: Vec<_> = (0..200)
+                .map(|at| Part {
+                    range: at * 10..at * 10 + 8,
+                    zeros: 0,
+                })
+                .collect();
+            let block = shard.block(&[3; 2_000]);
+            let given = pair.client.endpoint.try_write(now, &sender, block, &parts);
+            assert!(matches!(given, Ok(None)), "{given:?}");
+            let key = key(&pair.client);
+            let connection =
+                crate::quic::find(&mut pair.client.endpoint.connections, key);
+            let buffer = &connection.expect("a connection").streams.sending.buffer;
+            assert!(buffer.capacity() < 2 * 1_600, "{}", buffer.capacity());
+        });
+    }
+
+    #[test]
     fn a_reply_over_the_peer_largest_fails_the_write() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
