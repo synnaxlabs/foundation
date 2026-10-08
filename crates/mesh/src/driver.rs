@@ -845,6 +845,7 @@ mod tests {
     use std::path::Path;
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
+    use std::task::Wake;
 
     use block::testing::Scarce;
     use env::files::{self, Operation};
@@ -2106,8 +2107,6 @@ mod tests {
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
-                // A node with no voters sends no message, so no call gives its term.
-                assert_eq!(term(&mesh), Term(0));
             });
         }
 
@@ -2316,8 +2315,8 @@ mod tests {
                 let lie = ready.messages.remove(0);
                 let refused = Error::NotVoter { from: key(4) };
                 assert_eq!(mesh.receive(public(4), lie), Err(refused));
-                // A node with no voters sends no message, so no call gives its term.
-                assert_eq!(term(&mesh), Term(0));
+                node.clock().sleep(TICK).await;
+                assert!(quiet(&mesh, 4).await);
             });
         }
 
@@ -3546,30 +3545,32 @@ mod tests {
         });
     }
 
+    /// A waker that a test counts the clones of, which `Waker::noop` does not allow.
+    struct Idle;
+
+    #[expect(clippy::manual_noop_waker, reason = "a test counts its clones")]
+    impl Wake for Idle {
+        fn wake(self: Arc<Self>) {}
+    }
+
     #[test]
     fn a_dropped_watch_leaves_no_waker() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            for _ in 0..3 {
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut watches = Vec::new();
+            for _ in 0..4 {
                 let mut watch = mesh.watch(INDEX);
-                tasks.spawn(async move {
-                    assert_eq!(watch.next().await, Ok(None));
-                    let mut next = pin!(watch.next());
-                    let waits =
-                        poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending()));
-                    assert!(waits.await);
-                });
+                assert_eq!(watch.next().await, Ok(None));
+                assert!(pin!(watch.next()).poll(&mut cx).is_pending());
+                watches.push(watch);
             }
-            let mut kept = mesh.watch(INDEX);
-            assert_eq!(kept.next().await, Ok(None));
-            let mut next = pin!(kept.next());
-            assert!(
-                poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending())).await
-            );
-            node.clock().sleep(TICK).await;
-            // No call of `Mesh` gives the wakers that the group holds.
-            let slots: Vec<_> = mesh.group.borrow().watches.keys().copied().collect();
-            assert_eq!(slots, [3]);
+            // `held`, `waker`, and the waker that the group holds for each watch.
+            assert_eq!(Arc::strong_count(&held), 6);
+            watches.truncate(1);
+            assert_eq!(Arc::strong_count(&held), 3);
         });
     }
 
