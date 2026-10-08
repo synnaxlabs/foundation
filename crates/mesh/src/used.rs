@@ -20,8 +20,9 @@ pub struct Spec {
     pub pointer: Option<Pointer>,
     /// The definitions of the spec in use, by tree key.
     pub definitions: Rc<BTreeMap<Name, Definition>>,
-    /// Why the node does not use the newest committed pointer that it knows, or
-    /// `None` when it does.
+    /// Why the last read of the newest committed pointer that the node knows
+    /// failed, or `None` when the node uses that pointer or its first read has not
+    /// ended. A retry keeps the cause of the read before it.
     pub behind: Option<Behind>,
 }
 

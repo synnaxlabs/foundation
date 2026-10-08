@@ -33,11 +33,14 @@ const RETRY: Span = Span::SECOND;
 /// use yet. It holds at most two trees: the tree in use, and the chunks of the tree
 /// of the newest pointer that a read got.
 pub(super) struct Used {
-    spec: Spec,
+    // The pointer in use, or `None` when the node uses no spec.
+    pointer: Option<Pointer>,
+    definitions: Rc<BTreeMap<Name, Definition>>,
     // The chunks of the tree in use.
     pub(super) chunks: Chunks,
-    // When `spec.behind` is set, it names this pointer.
     pub(super) newest: Option<Newest>,
+    // The version of the newest pointer whose first read ended.
+    settled: u64,
     // The task of `keep`, while it waits for a pointer to read.
     task: Option<Waker>,
 }
@@ -51,6 +54,8 @@ pub(super) struct Newest {
     // Each chunk of its tree that a read got from the store.
     got: Vec<Vec<u8>>,
     step: Step,
+    // Why its last read failed.
+    cause: Option<Cause>,
 }
 
 /// What the task does next for the newest pointer.
@@ -101,6 +106,7 @@ impl Used {
             listed,
             got: Vec::new(),
             step: Step::Read,
+            cause: None,
         });
         self.wake();
     }
@@ -114,16 +120,25 @@ impl Used {
 
     // The version of the newest pointer that this node knows.
     fn known(&self) -> u64 {
-        let used = self.spec.pointer.map(|pointer| pointer.version);
+        let used = self.pointer.map(|pointer| pointer.version);
         let newest = self.newest.as_ref().map(|newest| newest.pointer.version);
         used.max(newest).unwrap_or(0)
     }
 
-    // Whether this node has read the spec of a pointer at `version` or later.
-    fn read(&self, version: u64) -> bool {
-        let used = self.spec.pointer.iter();
-        let behind = self.spec.behind.iter().map(|behind| &behind.pointer);
-        used.chain(behind).any(|pointer| pointer.version >= version)
+    // The spec in use, and why the node does not use the newest pointer.
+    fn spec(&self) -> Spec {
+        let behind = self.newest.as_ref().and_then(|newest| {
+            let cause = newest.cause.clone()?;
+            Some(Behind {
+                pointer: newest.pointer,
+                cause,
+            })
+        });
+        Spec {
+            pointer: self.pointer,
+            definitions: Rc::clone(&self.definitions),
+            behind,
+        }
     }
 
     // The next job for the newest pointer, once its step allows one.
@@ -163,24 +178,21 @@ impl Used {
     // Records what the job for `pointer` gave. A job for a pointer that a newer one
     // replaced changes nothing, unless its spec took effect.
     fn settle(&mut self, pointer: Pointer, done: Done) {
+        self.settled = self.settled.max(pointer.version);
         let newest = self
             .newest
             .as_mut()
             .filter(|newest| newest.pointer == pointer);
-        let cause = match (done, newest) {
+        match (done, newest) {
             (Done::Taken(definitions, chunks), newest) => {
                 if newest.is_some() {
                     self.newest = None;
                 }
-                self.spec = Spec {
-                    pointer: Some(pointer),
-                    definitions: Rc::new(definitions),
-                    behind: None,
-                };
+                self.pointer = Some(pointer);
+                self.definitions = Rc::new(definitions);
                 self.chunks = chunks;
-                return;
             }
-            (_, None) => return,
+            (_, None) => {}
             (Done::Failed { cause, got }, Some(newest)) => {
                 newest.got.extend(got);
                 newest.step = match &cause {
@@ -190,17 +202,19 @@ impl Used {
                     Cause::Blob(_) | Cause::Files(_) => Step::Retry,
                     Cause::Read(_) | Cause::Problems(_) => Step::Stuck,
                 };
-                cause
+                newest.cause = Some(cause);
             }
             (Done::Got(_, Ok(Some(chunk))), Some(newest)) => {
                 newest.got.push(chunk);
                 newest.step = Step::Read;
-                return;
             }
-            (Done::Got(digest, Ok(None)), Some(_)) => missing(digest),
-            (Done::Got(_, Err(error)), Some(_)) => Cause::Blob(error),
-        };
-        self.spec.behind = Some(Behind { pointer, cause });
+            (Done::Got(digest, Ok(None)), Some(newest)) => {
+                newest.cause = Some(missing(digest));
+            }
+            (Done::Got(_, Err(error)), Some(newest)) => {
+                newest.cause = Some(Cause::Blob(error));
+            }
+        }
     }
 }
 
@@ -261,12 +275,14 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
     let Some((pointer, _)) = file else {
         let problems = spec::region::check(prefix, &definitions);
         if problems.is_empty() {
-            let spec = Spec {
+            return Ok(Used {
                 pointer: Some(founding),
                 definitions: Rc::new(definitions),
-                behind: None,
-            };
-            return Ok(used(spec, chunks, None));
+                chunks,
+                newest: None,
+                settled: 0,
+                task: None,
+            });
         }
         let failed = Done::Failed {
             cause: Cause::Problems(problems),
@@ -284,42 +300,36 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
         &mut got,
     );
     match read.await {
-        Ok((definitions, chunks)) => {
-            let spec = Spec {
-                pointer: Some(pointer),
-                definitions: Rc::new(definitions),
-                behind: None,
-            };
-            Ok(used(spec, chunks, None))
-        }
+        Ok((definitions, chunks)) => Ok(Used {
+            pointer: Some(pointer),
+            definitions: Rc::new(definitions),
+            chunks,
+            newest: None,
+            settled: pointer.version,
+            task: None,
+        }),
         Err(cause) => Ok(behind(pointer, Done::Failed { cause, got })),
-    }
-}
-
-fn used(spec: Spec, chunks: Chunks, newest: Option<Newest>) -> Used {
-    Used {
-        spec,
-        chunks,
-        newest,
-        task: None,
     }
 }
 
 // The state of a node that uses no spec, since the read of the spec of `pointer`
 // failed.
 fn behind(pointer: Pointer, failed: Done) -> Used {
-    let spec = Spec {
-        pointer: None,
-        definitions: Rc::default(),
-        behind: None,
-    };
     let newest = Newest {
         pointer,
         listed: BTreeSet::new(),
         got: Vec::new(),
         step: Step::Read,
+        cause: None,
     };
-    let mut used = used(spec, Chunks::default(), Some(newest));
+    let mut used = Used {
+        pointer: None,
+        definitions: Rc::default(),
+        chunks: Chunks::default(),
+        newest: Some(newest),
+        settled: 0,
+        task: None,
+    };
     used.settle(pointer, failed);
     used
 }
@@ -421,7 +431,7 @@ async fn read(
 // Makes the file in `held` that names `pointer` durable, then removes each other file
 // in `held`. A failed removal leaves a file that the next change or open removes.
 async fn name(files: &Files, held: &Path, pointer: Pointer) -> Result<(), Cause> {
-    let name = PathBuf::from(format!("{}-{}", pointer.version, pointer.root));
+    let name = file(pointer);
     let created = files.open(&held.join(&name), Mode::Create { len: 0 }).await;
     drop(created.map_err(Cause::Files)?);
     files.sync_dir(held).await.map_err(Cause::Files)?;
@@ -450,7 +460,12 @@ fn pointer(name: &Path) -> Option<Pointer> {
         version,
         root: Digest(bytes),
     };
-    (format!("{}-{}", pointer.version, pointer.root) == name).then_some(pointer)
+    (file(pointer) == Path::new(name)).then_some(pointer)
+}
+
+// The name of the file that names `pointer`.
+fn file(pointer: Pointer) -> PathBuf {
+    PathBuf::from(format!("{}-{}", pointer.version, pointer.root))
 }
 
 impl Mesh {
@@ -466,8 +481,8 @@ impl Mesh {
         let committed = self.group.borrow().state.pointer().version;
         poll_fn(|cx| {
             let mut group = self.group.borrow_mut();
-            if group.used.read(committed) {
-                return Poll::Ready(Ok(group.used.spec.clone()));
+            if group.used.settled >= committed {
+                return Poll::Ready(Ok(group.used.spec()));
             }
             if let Some(stopped) = group.stopped.get() {
                 return Poll::Ready(Err(stopped.clone()));

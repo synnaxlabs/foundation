@@ -520,3 +520,59 @@ fn a_member_that_lacks_the_chunks_of_three_changes_uses_the_newest_once_it_gets_
     cluster.run(seconds(5));
     assert_eq!(cluster.board().specs[&3], seen(at, &changes[2]));
 }
+
+/// Builds the tree of `definitions`, puts each chunk but the root in the store, and
+/// gives the chunks and the root.
+async fn create_rootless(
+    mesh: &Mesh,
+    definitions: &BTreeMap<Name, Definition>,
+) -> (Chunks, Digest) {
+    let mut chunks = Chunks::default();
+    let update = spec::region::tree(&mut chunks, definitions);
+    let root = update.root;
+    let others: Vec<_> = update.chunks.into_iter().filter(|d| *d != root).collect();
+    put(&mesh.store, &mesh.pool, &chunks, &others)
+        .await
+        .unwrap();
+    (chunks, root)
+}
+
+// The read of v2 waits on a get of its root while v3 commits, then fails. The read of
+// v3 waits on a get of its root, which never ends.
+#[test]
+fn a_call_ends_when_the_read_of_its_pointer_ends_after_a_later_pointer_commits() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let clock = node.clock();
+        let a = create_subjects(&["plant.a"], 1);
+        let first = mesh.apply(base(), a.clone()).await.unwrap();
+        let (admin_chunks, admin_root) = create_rootless(&mesh, &create_admin()).await;
+        let b = create_subjects(&["plant.b"], 1);
+        let (b_chunks, b_root) = create_rootless(&mesh, &b).await;
+        let admin_block = mesh
+            .pool
+            .copy(admin_chunks.get(admin_root).unwrap())
+            .unwrap();
+        let b_block = mesh.pool.copy(b_chunks.get(b_root).unwrap()).unwrap();
+        let mut admin_put = pin!(mesh.store.put(admin_root, &admin_block));
+        assert!(now(admin_put.as_mut()).await.is_pending());
+        let mut b_put = pin!(mesh.store.put(b_root, &b_block));
+        assert!(now(b_put.as_mut()).await.is_pending());
+        let holders: BTreeSet<node::Key> = [key(1)].into();
+        let second = mesh
+            .settle_spec(first, admin_root, BTreeSet::new(), holders.clone())
+            .await
+            .unwrap();
+        clock.sleep(TICK).await;
+        let mut call = pin!(mesh.spec());
+        assert_eq!(now(call.as_mut()).await, Poll::Pending);
+        let third = mesh
+            .settle_spec(second, b_root, BTreeSet::new(), holders)
+            .await
+            .unwrap();
+        assert_eq!(third.version, 3);
+        admin_put.await.unwrap();
+        clock.sleep(seconds(3)).await;
+        assert_eq!(now(call.as_mut()).await, Poll::Ready(Ok(in_use(first, &a))));
+    });
+}
