@@ -823,10 +823,15 @@ RELOCATION RECORDS FOR [.text]:
 OFFSET           TYPE              VALUE
 0000000000000008 R_AARCH64_ADR_PREL_PG_HI21  UA_DateTime_now
 000000000000000c R_AARCH64_ADD_ABS_LO12_NC  UA_DateTime_now
+0000000000000010 R_AARCH64_ADR_GOT_PAGE  UA_DateTime_nowMonotonic
+0000000000000014 R_AARCH64_LD64_GOT_LO12_NC  UA_DateTime_nowMonotonic
 ";
         assert_eq!(
             clock_addresses(text, "Disassembly of section .text:\n"),
-            [(".text".to_owned(), "UA_DateTime_now")]
+            [
+                (".text".to_owned(), "UA_DateTime_now"),
+                (".text".to_owned(), "UA_DateTime_nowMonotonic"),
+            ]
         );
     }
 
