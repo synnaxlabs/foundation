@@ -238,12 +238,12 @@ mod tests {
 
     #[test]
     fn a_dropped_recv_gives_its_wait_for_room_to_the_next_stream() {
-        dropped_wait(false);
+        dropped_wait(Read::Recv);
     }
 
     #[test]
     fn a_dropped_recv_into_gives_its_wait_for_room_to_the_next_stream() {
-        dropped_wait(true);
+        dropped_wait(Read::RecvInto);
     }
 
     #[test]
@@ -317,7 +317,14 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    fn dropped_wait(into: bool) {
+    /// The read that a test runs.
+    #[derive(Clone, Copy)]
+    enum Read {
+        Recv,
+        RecvInto,
+    }
+
+    fn dropped_wait(read: Read) {
         // The receive budget is the window plus the largest message: 2^17 bytes.
         let narrow = |config| Config {
             window_bytes: 1 << 16,
@@ -354,12 +361,13 @@ mod tests {
                 assert!(poll_once(pin!(second.recv())).await.is_none());
                 // Boxed, so that the drop below ends the future, not only a borrow.
                 let mut buffer = vec![0; 1 << 16];
-                let mut waiting: Pin<Box<dyn Future<Output = _>>> = if into {
-                    Box::pin(async {
+                let mut waiting: Pin<Box<dyn Future<Output = _>>> = match read {
+                    Read::Recv => {
+                        Box::pin(async { waits.recv().await.map(|m| m.is_some()) })
+                    }
+                    Read::RecvInto => Box::pin(async {
                         waits.recv_into(&mut buffer).await.map(|len| len.is_some())
-                    })
-                } else {
-                    Box::pin(async { waits.recv().await.map(|m| m.is_some()) })
+                    }),
                 };
                 assert!(poll_once(Pin::new(&mut waiting)).await.is_none());
                 // The small message fits, but waits behind the one before it.
