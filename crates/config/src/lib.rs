@@ -2895,12 +2895,44 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_private_key_at_any_depth() {
+            let private = Value {
+                kind: string("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"),
+                span: at(0, 70),
+            };
+            let call = Kind::Call(document::value::Call {
+                function: "secret".into(),
+                function_span: at(0, 60),
+                arguments: vec![private.clone()],
+            });
+            let cases = [
+                list(&[Kind::List(vec![private])]),
+                list(&[string(ALICE), call]),
+            ];
+            for keys in cases {
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![refused(
+                        "config.private-key",
+                        at(0, 70),
+                        "the value is a private key, which must never be in a file",
+                        "Remove the private key from this file now, and use the one \
+                         line of its `.pub` file",
+                    )]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
         fn refuses_a_key_of_another_algorithm_by_its_name() {
             let cases = [
                 "ssh-rsa",
                 "ecdsa-sha2-nistp256",
                 "sk-ssh-ed25519@openssh.com",
                 "ssh-ed25519-cert-v01@openssh.com",
+                "sk-ssh-ed25519-cert-v01@openssh.com",
+                "ssh-xmss@openssh.com",
             ];
             for algorithm in cases {
                 let keys = string(&line(algorithm, &[0; 51]));
@@ -2942,14 +2974,6 @@ mod tests {
                     string("---- BEGIN SSH2 PUBLIC KEY ----\nAAAAC3NzaC1lZDI1NTE5"),
                     NOT_A_LINE,
                 ),
-                (
-                    string(&format!("{ALICE}\n{}", ed25519([9; 32]))),
-                    "the public key is more than one line",
-                ),
-                (
-                    string(&format!("{ALICE}\r{}", ed25519([9; 32]))),
-                    "the public key is more than one line",
-                ),
                 (string("ssh-ed25519 !!!!"), NOT_ED25519),
                 (string(&ALICE.replace(" alice", "= alice")), NOT_ED25519),
                 (
@@ -2976,6 +3000,19 @@ mod tests {
                     check(&documents),
                     Err(vec![bad(at(0, 11), message)]),
                     "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_two_lines_split_by_any_line_break() {
+            for split in ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}']
+            {
+                let keys = string(&format!("{ALICE}{split}{}", ed25519([9; 32])));
+                assert_eq!(
+                    check(&subject(&[("keys", keys)])),
+                    Err(vec![bad(at(0, 11), "the public key is more than one line")]),
+                    "{split:?}"
                 );
             }
         }

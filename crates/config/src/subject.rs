@@ -22,7 +22,7 @@ const KEYS: [&str; 1] = ["keys"];
 const ALGORITHM: &str = "ssh-ed25519";
 /// The name of each other algorithm of an OpenSSH public key. A message names only
 /// these, since another first word can be a secret.
-const OTHER_ALGORITHMS: [&str; 14] = [
+const OTHER_ALGORITHMS: [&str; 17] = [
     "ssh-rsa",
     "ssh-dss",
     "ecdsa-sha2-nistp256",
@@ -37,7 +37,13 @@ const OTHER_ALGORITHMS: [&str; 14] = [
     "ecdsa-sha2-nistp521-cert-v01@openssh.com",
     "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
     "ssh-ed25519-cert-v01@openssh.com",
+    "sk-ssh-ed25519-cert-v01@openssh.com",
+    "ssh-xmss@openssh.com",
+    "ssh-xmss-cert-v01@openssh.com",
 ];
+/// Each Unicode line break.
+const LINE_BREAKS: [char; 7] =
+    ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
 const NOT_A_LINE: &str = "the public key is not the line of a `.pub` file";
 /// The decoded key of an Ed25519 line starts with the length and the name of its
 /// algorithm, then the length of the key.
@@ -63,7 +69,7 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
         Kind::List(items) => items.as_slice(),
         _ => slice::from_ref(value),
     };
-    items.iter().try_for_each(no_private_key)?;
+    no_private_key(value)?;
     let keys = items.iter().map(key).collect::<Result<_, _>>()?;
     Subject::new(keys).map_err(|error| {
         let (message, fix) = (error.to_string(), error.fix().into());
@@ -83,23 +89,29 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
     })
 }
 
-/// Refuses a value that holds a private key. A list is checked whole before any key
-/// is read, so a bad item before a private key does not hide the alarm.
+/// Refuses a value that holds a private key at any depth. The whole value is checked
+/// before any key is read, so a bad item before a private key does not hide the alarm.
 fn no_private_key(value: &Value) -> Result<(), Diagnostic> {
-    let Kind::String(text) = &value.kind else {
-        return Ok(());
-    };
-    if !PRIVATE_MARKS.iter().any(|mark| text.contains(mark)) {
-        return Ok(());
+    match &value.kind {
+        Kind::String(text) if PRIVATE_MARKS.iter().any(|mark| text.contains(mark)) => {
+            Err(Diagnostic::new(
+                PRIVATE_KEY,
+                value.span,
+                "the value is a private key, which must never be in a file".into(),
+                "Remove the private key from this file now, and use the one line of \
+                 its `.pub` file"
+                    .into(),
+            ))
+        }
+        Kind::List(items) => items.iter().try_for_each(no_private_key),
+        Kind::Map(map) => map.iter().try_for_each(|item| no_private_key(&item.value)),
+        Kind::Call(call) => call.arguments.iter().try_for_each(no_private_key),
+        Kind::Bool(_)
+        | Kind::Integer(_)
+        | Kind::Float(_)
+        | Kind::String(_)
+        | Kind::Reference(_) => Ok(()),
     }
-    Err(Diagnostic::new(
-        PRIVATE_KEY,
-        value.span,
-        "the value is a private key, which must never be in a file".into(),
-        "Remove the private key from this file now, and use the one line of its \
-         `.pub` file"
-            .into(),
-    ))
 }
 
 /// Reads the line of an OpenSSH `.pub` file of an Ed25519 key: `ssh-ed25519`, the
@@ -135,7 +147,7 @@ fn key(value: &Value) -> Result<PublicKey, Diagnostic> {
                 .into(),
         ));
     }
-    if text.trim().contains(['\n', '\r']) {
+    if text.trim().contains(LINE_BREAKS) {
         return Err(bad("the public key is more than one line"));
     }
     let mut blob = [0; BLOB_BYTES];
