@@ -44,6 +44,7 @@ use send::Senders;
 mod apply;
 mod end;
 mod home;
+mod propose;
 mod send;
 mod stream;
 

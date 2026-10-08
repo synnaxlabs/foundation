@@ -6,7 +6,7 @@ use spec::definition::Definition;
 use spec::tree::Chunks;
 use types::name::Name;
 
-use super::{Mesh, TICK};
+use super::Mesh;
 use crate::change::{CHUNKS_MAX, Change};
 use crate::error::Error;
 use crate::pointer::Pointer;
@@ -56,13 +56,7 @@ impl Mesh {
             chunks: update.chunks.into_iter().collect(),
         };
         loop {
-            let attempt = self.attempt()?;
-            let Some(at) = attempt.place(change.clone()).await? else {
-                drop(attempt);
-                self.clock.sleep(TICK).await;
-                continue;
-            };
-            match attempt.applied(at).await? {
+            match self.attempt()?.settle(change.clone()).await? {
                 Some(Ok(())) => {
                     let version = base
                         .version
