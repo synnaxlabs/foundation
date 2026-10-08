@@ -937,9 +937,9 @@ How to read this record:
   surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
   Amended (2026-10-08T00:13:26Z, #1625): `reader::Session` is the home's side of a
-  reader, which `Reader` and `Hub::serve` drive. The split costs `latest next` +1 ns
-  per frame (16 against 17 ns net on a quiet host), which adds 0.3% to the write of one
-  frame. Accepted by laptop.architect:
+  reader, which `Reader` drives, and which `Hub::serve` (#1636) will drive. The split
+  costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet host), which
+  adds 0.3% to the write of one frame. Accepted by laptop.architect:
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
