@@ -56,6 +56,10 @@ mod testing;
     not(test),
     expect(dead_code, reason = "the TCP and QUIC carriers are the first users")
 )]
+#[cfg_attr(
+    not(feature = "fuzzing"),
+    expect(unreachable_pub, reason = "only the fuzzing feature exports it")
+)]
 mod tls;
 #[cfg_attr(
     not(test),

@@ -2259,6 +2259,15 @@ How to read this record:
   claim and each request of `hub::client`. Decided by `laptop.architect` at
   2026-10-08T08:12:49Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6055665349).
+  `transport::fuzzing::peer(chain)` and `transport::fuzzing::certificate`, behind the
+  `fuzzing` feature, give the fuzz target `transport_certificate` the server's
+  reading of a dialer's chain and a node's certificate. The protocol is fixed at
+  `foundation/1`: rustls agrees only a protocol from the server's own list, so the
+  compare sees that protocol or none, which the handshake tests cover. Approved by
+  `laptop.architect-2` at 2026-10-08T15:11:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892). The
+  reason was changed by `laptop.architect-2` at 2026-10-08T15:31:46Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063367399).
 
 ### 1.8 Consensus, regions, and the spec
 
