@@ -117,8 +117,8 @@ impl Unplaced {
                 "Name a `home` in the placement, or write the index with a connector"
             }
             Self::NoHome { placement: None } => {
-                "Select the index with a placement that names a `home`, or write it with \
-                 a connector"
+                "Select the index with a placement that names a `home`, or write it \
+                 with a connector"
             }
             Self::Overlap { .. } => {
                 "Name a `home` in the placement, or remove the node from it"
