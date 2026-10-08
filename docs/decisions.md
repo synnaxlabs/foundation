@@ -2081,7 +2081,12 @@ How to read this record:
   node keeps the last spec it used (#1741). The pointer before the first change is
   version 0 at the root of the tree of `Config::founding`. No BQ12 signature check on
   the change in this milestone (#1213). Trigger: `mesh::Pointer` moves to a layer 1
-  crate in a refactor PR before a `wire` message carries it. Decided by
+  crate in a refactor PR before a `wire` message carries it. `Mesh::open` runs no check
+  of `Config::founding`: the founding is agreed region state, and a check at each open
+  stops a node on a later build whose checks find more problems. The node that founds
+  the region checks the founding with the `spec` function of #1841, and does not found
+  a region whose founding has problems (#1744). A founding with problems at a later
+  build follows the rule of a committed spec with problems (#1741). Decided by
   `laptop.architect`: chunks through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a
   spec with problems, 2026-10-07T07:03:20Z
@@ -2089,7 +2094,9 @@ How to read this record:
   founding definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   kind, its byte form, `CHUNKS_MAX`, and `Refused::Stale`, 2026-10-08T08:22:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
+  check of the founding at open, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
@@ -2971,7 +2978,12 @@ How to read this record:
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
-  crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
+  crate map. `Config::founding` adds `spec::definition::Definition` and
+  `types::name::Name`, and `Mesh::pointer` gives a `Pointer`, whose root is a
+  `types::digest::Digest`. So a crate that opens a region also has `spec` in its line
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771,
+  https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
   `Status`: no public call reads the one or gives the two. The join answer of #336
   decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
   Decided by `laptop.architect` (2026-10-07T22:33:29Z):
