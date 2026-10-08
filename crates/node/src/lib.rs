@@ -2,7 +2,7 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
-#[cfg(feature = "bench")]
+#[cfg(feature = "sim")]
 #[doc(hidden)]
 pub mod bench;
 mod directory;

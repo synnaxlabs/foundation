@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
-use block::Pool;
+use block::{Block, Pool};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::Files;
@@ -20,7 +20,10 @@ use types::channel;
 use types::name::Prefix;
 use types::node::{self, PrivateKey, PublicKey};
 use types::time::{Span, Stamp};
+use wire::Protocol;
 
+use crate::applied::Applied;
+use crate::bytes::block;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Signer};
 use crate::ed25519;
@@ -32,12 +35,18 @@ use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
 use send::Senders;
 
+mod home;
 mod send;
 mod stream;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
 const ELECTION_TICKS: u32 = 10;
+
+/// The header that goes first on each stream that this node opens.
+fn header(pool: &Pool) -> Result<Block, block::Error> {
+    block(pool, &wire::header::encode(Protocol::Mesh))
+}
 const HEARTBEAT_TICKS: u32 = 1;
 /// The most messages that wait for one member.
 const QUEUE_MAX: usize = 64;
@@ -89,6 +98,7 @@ pub struct Config {
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
     pool: Rc<Pool>,
+    clock: Clock,
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the join answer of #336 is the first user")
@@ -190,18 +200,21 @@ impl Mesh {
             waits: None,
             fresh: Vec::new(),
             starter: None,
+            applied: Applied::default(),
+            calls: BTreeMap::new(),
         }));
         let weak = Rc::downgrade(&group);
         config.tasks.spawn(run(
             weak,
             log,
             signer,
-            config.clock,
+            config.clock.clone(),
             config.entropy.clone(),
         ));
         Ok(Self {
             group,
             pool,
+            clock: config.clock,
             entropy: config.entropy,
         })
     }
@@ -261,13 +274,11 @@ impl Mesh {
         if public_key(from) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
-        let Voters { incoming, outgoing } = group.raft.voters();
-        let voter = incoming.contains(&from) || outgoing.contains(&from);
-        if request(&message.body) && !voter {
+        if request(&message.body) && !group.voter(from) {
             return Err(Error::NotVoter { from });
         }
         claim::check(&group.raft, &message, public_key)?;
-        group.raft.step(message)?;
+        group.input(|raft| raft.step(message))?;
         group.wake();
         Ok(())
     }
@@ -525,7 +536,7 @@ struct Group {
     // Each proposal since the task last took a `Ready`. The next `Ready` holds the
     // entry of each, unless a new leader replaced the entry.
     proposals: Vec<Rc<Proposal>>,
-    // The count of slots given, which is the slot of the next watch.
+    // The count of slots given, which is the slot of the next watch or try.
     slots: u64,
     // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
@@ -533,6 +544,9 @@ struct Group {
     fresh: Vec<node::Key>,
     // The task of `Senders::run`, while it waits for a new queue.
     starter: Option<Waker>,
+    applied: Applied,
+    // The task of each call that waits for the outcome of a try of its proposal.
+    calls: BTreeMap<u64, Waker>,
 }
 
 impl Group {
@@ -550,6 +564,22 @@ impl Group {
             Some(cause) => Err(Error::Pool(cause.clone())),
             None => Ok(()),
         }
+    }
+
+    // Whether `key` votes in one half of the configuration, at least.
+    fn voter(&self, key: node::Key) -> bool {
+        let Voters { incoming, outgoing } = self.raft.voters();
+        incoming.contains(&key) || outgoing.contains(&key)
+    }
+
+    // Gives `raft` an input, and wakes each call when the leader or the term changes.
+    fn input<T>(&mut self, input: impl FnOnce(&mut Raft) -> T) -> T {
+        let lead = (self.raft.leader(), self.raft.term());
+        let output = input(&mut self.raft);
+        if lead != (self.raft.leader(), self.raft.term()) {
+            self.wake_calls();
+        }
+        output
     }
 
     fn slot(&mut self) -> u64 {
@@ -605,6 +635,8 @@ impl Group {
     // Applies each change in `committed`, and wakes the watches when a home moves.
     fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
         for Entry { at, data } in committed {
+            self.applied.push(at);
+            self.wake_calls();
             let bytes = match data {
                 Data::Bytes(bytes) => bytes,
                 Data::Empty | Data::Voters(_) => continue,
@@ -631,6 +663,7 @@ impl Group {
         self.stopped.get_or_init(|| stopped);
         self.end_senders();
         self.wake_watches();
+        self.wake_calls();
         for proposal in &self.proposals {
             proposal.wake();
         }
@@ -638,6 +671,12 @@ impl Group {
 
     fn wake_watches(&mut self) {
         mem::take(&mut self.watches)
+            .into_values()
+            .for_each(Waker::wake);
+    }
+
+    fn wake_calls(&mut self) {
+        mem::take(&mut self.calls)
             .into_values()
             .for_each(Waker::wake);
     }
@@ -739,7 +778,7 @@ async fn run(
             // A tick that a slow write hides is lost, so the group's time only
             // slows.
             while Pin::new(&mut tick).poll(cx).is_ready() {
-                group.raft.tick(rng.next_u64());
+                group.input(|raft| raft.tick(rng.next_u64()));
                 tick = clock.sleep(TICK);
             }
             let ready = group.raft.ready();
@@ -859,6 +898,13 @@ mod tests {
         requests: BTreeMap<u8, Request>,
         /// The join that each node stamped.
         stamped: BTreeMap<u8, Change>,
+        /// The node that is not a voter.
+        learner: Option<u8>,
+        /// The home that each node sets next.
+        sets: BTreeMap<u8, u8>,
+        /// Each call of `set_home` that returned, in order: its node, the home on
+        /// that node at the return, and what the call gave.
+        set: Vec<(u8, Option<node::Key>, Result<(), Error>)>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -1117,6 +1163,21 @@ mod tests {
         }
     }
 
+    /// Sets the home that the board gives node `id`, and puts the result on the
+    /// board.
+    async fn set(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let home = board.lock().unwrap().sets.remove(&id);
+            let Some(home) = home else {
+                continue;
+            };
+            let result = mesh.set_home(INDEX, key(home)).await;
+            let home = mesh.group.borrow().state.home(INDEX);
+            board.lock().unwrap().set.push((id, home, result));
+        }
+    }
+
     /// Three voters, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
@@ -1207,9 +1268,14 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let base = config_at(&node, &tasks, id, PORT, &IDS, &IDS);
+        let (hidden, learner) = {
+            let board = board.lock().unwrap();
+            (board.hidden, board.learner)
+        };
+        let voters: Vec<u8> =
+            IDS.into_iter().filter(|&of| Some(of) != learner).collect();
+        let base = config_at(&node, &tasks, id, PORT, &IDS, &voters);
         let transport = Rc::clone(&base.transport);
-        let hidden = board.lock().unwrap().hidden;
         let member = |of| {
             if hidden == Some(of) {
                 common::member(of)
@@ -1240,6 +1306,10 @@ mod tests {
         let time = synced(&node);
         tasks.spawn(async move {
             stamp(stamping, clock, time, id, requests).await;
+        });
+        let (setting, clock, sets) = (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            set(setting, clock, id, sets).await;
         });
         let mut watch = mesh.watch(INDEX);
         loop {
@@ -1484,8 +1554,9 @@ mod tests {
     async fn within<F: Future>(
         clock: &Clock,
         limit: Span,
-        mut future: Pin<&mut F>,
+        future: F,
     ) -> Option<F::Output> {
+        let mut future = pin!(future);
         let mut end = clock.sleep(limit);
         poll_fn(|cx| {
             if let Poll::Ready(output) = future.as_mut().poll(cx) {
@@ -1682,6 +1753,7 @@ mod tests {
         });
     }
 
+    mod home;
     mod send;
     mod serve;
 
@@ -1939,6 +2011,23 @@ mod tests {
     mod receive {
         use super::*;
 
+        // The link at `index` of the term before `TERM`, by leader 2: the voters
+        // move from `outgoing` to 1, 2 and 3.
+        fn link(index: u64, outgoing: &[u8]) -> raft::Link {
+            let at = Position {
+                term: Term(common::TERM.0 - 1),
+                index,
+            };
+            let voters = Voters {
+                incoming: [1, 2, 3].map(key).into(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            };
+            let Data::Voters(change) = common::change(2, at, voters).data else {
+                unreachable!("a change is a voters entry");
+            };
+            raft::Link { at, change }
+        }
+
         fn requests() -> [Body; 4] {
             let last = Position::default();
             [
@@ -2142,21 +2231,6 @@ mod tests {
             solo(|node, tasks| async move {
                 let all = [1, 2, 3, 4];
                 let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
-                let link = |index, outgoing: &[u8]| {
-                    let at = Position {
-                        term: Term(common::TERM.0 - 1),
-                        index,
-                    };
-                    let voters = Voters {
-                        incoming: [1, 2, 3].map(key).into(),
-                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
-                    };
-                    let Data::Voters(change) = common::change(2, at, voters).data
-                    else {
-                        unreachable!("a change is a voters entry");
-                    };
-                    raft::Link { at, change }
-                };
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
                 let short = heartbeat.clone();
@@ -2173,6 +2247,53 @@ mod tests {
                 assert_eq!(term(&mesh), Term(0));
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
                 assert_eq!(term(&mesh), common::TERM);
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            });
+        }
+
+        // The message of `takes_a_leader_that_the_chain_proves`, for node 3 in place
+        // of node 1. `step` refuses a message for another node before it reads a
+        // link, so `receive` checks no link of it.
+        #[test]
+        fn checks_no_link_of_a_message_for_another_node() {
+            solo(|node, tasks| async move {
+                let all = [1, 2, 3, 4];
+                let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
+                let mut heartbeat = proven(2, 3, Body::Heartbeat { commit: 0 });
+                heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
+                heartbeat.chain = vec![link(1, &all), link(2, &[])];
+                let misrouted = Error::Raft(raft::Error::Misrouted { to: key(3) });
+                let honest = mesh.receive(public(2), heartbeat.clone());
+                assert_eq!(honest, Err(misrouted.clone()));
+                let mut forged = heartbeat;
+                forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(2), forged), Err(misrouted));
+                assert_eq!(term(&mesh), Term(0));
+            });
+        }
+
+        // `step` refuses a second leader of its term before it reads a claim, so
+        // `receive` checks no grant of its proof.
+        #[test]
+        fn checks_no_grant_of_a_second_leader() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let led = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), led), Ok(()));
+                let second = proven(3, 1, Body::Heartbeat { commit: 0 });
+                let refused = Error::Raft(raft::Error::SecondLeader {
+                    term: common::TERM,
+                    from: key(3),
+                });
+                assert_eq!(
+                    mesh.receive(public(3), second.clone()),
+                    Err(refused.clone())
+                );
+                let mut forged = second;
+                let proof = forged.proof.as_mut().unwrap();
+                proof.voters.get_mut(&key(1)).unwrap().as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(3), forged), Err(refused));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });

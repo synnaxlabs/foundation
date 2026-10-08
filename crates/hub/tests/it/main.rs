@@ -1323,3 +1323,86 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }
+
+/// Polls `reader.next()` once with `waker`, and says whether it gave a frame.
+fn poll_next(reader: &mut Reader, waker: &Waker) -> bool {
+    let mut next = pin!(reader.next());
+    match next.as_mut().poll(&mut Context::from_waker(waker)) {
+        Poll::Ready(received) => {
+            received.expect("a frame");
+            true
+        }
+        Poll::Pending => false,
+    }
+}
+
+#[test]
+fn starts_a_new_streak_after_a_wait() {
+    run(31, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[0]);
+        test.clock.sleep(SETTLE).await;
+        let waker = Waker::noop();
+        assert!(poll_next(&mut reader, waker), "the first frame waits");
+        assert!(!poll_next(&mut reader, waker), "no frame waits");
+        for n in 1..=128 {
+            write(&mut writer, &[now + n], &[n]);
+        }
+        test.clock.sleep(SETTLE).await;
+        let given = (0..129)
+            .take_while(|_| poll_next(&mut reader, waker))
+            .count();
+        assert_eq!(given, 128, "a wait ends the streak");
+    });
+}
+
+#[test]
+fn keeps_no_waker_of_a_dropped_reader() {
+    run(32, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(Arc::clone(&flag));
+        assert!(!poll_next(&mut reader, &waker), "no frame waits");
+        drop(waker);
+        drop(reader);
+        assert_eq!(Arc::strong_count(&flag), 1, "the hub keeps the waker");
+    });
+}
+
+/// A local complete reader spends the whole frame, not only its channels.
+#[test]
+fn charges_a_local_complete_reader_on_some_channels_for_the_whole_frame() {
+    const SAMPLES: i64 = 1000;
+    run(16, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        let frames = 100;
+        for n in 0..frames {
+            let stamps: Vec<_> = (now + n * SAMPLES..now + (n + 1) * SAMPLES).collect();
+            let values: Vec<_> = stamps
+                .iter()
+                .map(|&s| {
+                    let x = s.wrapping_mul(6_364_136_223_846_793_005);
+                    x ^ (x >> 29)
+                })
+                .collect();
+            write_series(&mut writer, &[(1, &stamps), (2, &values), (5, &values)]);
+            test.clock.sleep(SETTLE).await;
+        }
+        let mut got = 0;
+        loop {
+            match poll_once(reader.next()) {
+                Poll::Ready(Ok(_)) => got += 1,
+                Poll::Ready(Err(ended)) => {
+                    assert_behind(&ended);
+                    assert!(got < frames, "{got} frames before the end");
+                    break;
+                }
+                Poll::Pending => panic!("the reader took all {got} frames and waits"),
+            }
+        }
+    });
+}
