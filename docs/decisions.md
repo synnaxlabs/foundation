@@ -1191,7 +1191,8 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349).
   Supersedes the `Hub::define` clause of
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575, the patch
-  that took a `hub::Channel`. Its `Config::pool` clause stands.
+  that took a `hub::Channel`. Decided by `laptop.architect` (2026-10-08T18:36:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
   it on drop, and the task ends at its first poll after that. Lost:
@@ -5274,8 +5275,10 @@ How to read this record:
   `laptop.architect` (2026-10-08T18:16:38Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
-  transport and the mesh, and never a zero key: #1660 changes only where `node` gets
-  the key (`laptop.architect`, by message to `box1.builder-2`, 2026-10-08).
+  transport and the mesh, and never a zero key. #1660 changes only where `node` gets
+  the key. The test waits on #1744, whose client hello is the first that a `node` test
+  admits through `Hub::link`. Decided by `laptop.architect` (2026-10-08T18:36:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies, connectors, and subjects itself. A policy reaches a name when
