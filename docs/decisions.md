@@ -164,6 +164,12 @@ How to read this record:
   as the default: `config` gives each edge as a name, and `plan` gives each name its
   key. `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
+  `Kind::edges` gives each edge and the channel it points at, in this order: the error
+  then the control channel of an index, or the index then the quality channel of a
+  data channel. `check` reads the edges through it, and `config` will too. Each user
+  error has a fix: `unit::Error::fix`, and `document::value::Kind::noun` names a value
+  that has the wrong kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
   `types` owns the text of `sample::Type` both ways (`Display` and `FromStr`): exact
   case, no leading zero in a count, and one space after the comma of a list; `Stamp` and
   `Span` read and show as `timestamp` and `duration` (A9), so a text that reads shows as
