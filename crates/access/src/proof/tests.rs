@@ -265,6 +265,18 @@ mod admit {
     }
 
     #[test]
+    fn refuses_a_hello_signed_with_another_listed_key() {
+        let both =
+            rules(&[("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))])]);
+        let hello = create_hello();
+        let signature = sign(&pair(TEST_2), &super::hello(&hello));
+
+        let error = both.admit(NOW, PEER, hello, &signature).unwrap_err();
+
+        assert_eq!(error, Error::Signature);
+    }
+
+    #[test]
     fn refuses_a_hello_changed_after_its_signature() {
         let signature = sign(&pair(TEST_1), &super::hello(&create_hello()));
         let mut hello = create_hello();
@@ -492,6 +504,19 @@ mod verify {
         let signature = sign(&pair(TEST_1), &request(other, body));
 
         let verified = listed().verify(&admitted(), NOW, body, &signature);
+
+        assert_eq!(verified, Err(Error::Signature));
+    }
+
+    #[test]
+    fn refuses_a_request_signed_with_another_listed_key() {
+        let body = b"open site_a.pt_1";
+        let both =
+            rules(&[("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))])]);
+        let admitted = admit(&both, NOW, create_hello()).unwrap();
+        let signature = sign(&pair(TEST_2), &request(create_hello().connection, body));
+
+        let verified = both.verify(&admitted, NOW, body, &signature);
 
         assert_eq!(verified, Err(Error::Signature));
     }

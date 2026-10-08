@@ -4206,6 +4206,7 @@ How to read this record:
   `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
   that key from the hello's subject with `spec::definition::Kind::key`, so no caller
   builds it and only `spec` holds the key form (`laptop.architect`,
+  2026-10-08T06:56:19Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636; the
   tree key in place of `<name>`: PENDING).
 - **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
