@@ -113,10 +113,8 @@ fn a_lone_voter_uses_the_spec_of_each_change_that_it_applies() {
 fn a_region_opened_with_one_founding_definition_reads_it_from_its_spec() {
     solo(|node, tasks| async move {
         let founding = create_subjects(&["plant.app"], 1);
-        let config = Config {
-            founding: founding.clone(),
-            ..config(&node, &tasks, 1, &[1], &[1]).await
-        };
+        let mut config = config(&node, &tasks, 1, &[1], &[1]).await;
+        config.founding.definitions = founding.clone();
         let mesh = Mesh::start(config).await.unwrap();
         let spec = in_use(pointer(0, &founding), &founding);
         assert_eq!(mesh.spec().await, Ok(spec));
@@ -159,10 +157,8 @@ fn a_replayed_pointer_at_or_below_the_one_in_use_leaves_the_spec_in_use() {
 fn a_founding_spec_with_problems_gives_no_spec_in_use_until_a_valid_change() {
     solo(|node, tasks| async move {
         let founding = create_admin();
-        let config = Config {
-            founding: founding.clone(),
-            ..config(&node, &tasks, 1, &[1], &[1]).await
-        };
+        let mut config = config(&node, &tasks, 1, &[1], &[1]).await;
+        config.founding.definitions = founding.clone();
         let mesh = Mesh::start(config).await.unwrap();
         let founded = pointer(0, &founding);
         let none = Spec {

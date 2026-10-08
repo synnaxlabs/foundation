@@ -208,8 +208,8 @@ impl Mesh {
             dir: &config.dir,
             store: &config.store,
             prefix: state.prefix(),
-            root: founding.root,
-            definitions: config.founding,
+            root: tree.root,
+            definitions,
             chunks,
         })
         .await?;

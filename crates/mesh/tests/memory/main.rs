@@ -16,6 +16,7 @@ use std::task::{Context, Waker};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
+use mesh::region::Founding;
 use mesh::status::Status;
 use mesh::{Config, Error, Member, Mesh};
 use sim::Sim;
@@ -203,10 +204,12 @@ async fn create_config(node: &Node, tasks: &Tasks) -> Config {
     Config {
         key: KEY,
         private_key: PRIVATE_KEY,
-        region: "plant".parse::<Prefix>().expect("a prefix"),
-        voters: [KEY].into(),
-        members: vec![member],
-        founding: BTreeMap::new(),
+        founding: Founding {
+            prefix: "plant".parse::<Prefix>().expect("a prefix"),
+            members: vec![member],
+            voters: [KEY].into(),
+            definitions: BTreeMap::new(),
+        },
         files: node.files(),
         dir: PathBuf::new(),
         clock: node.clock(),
