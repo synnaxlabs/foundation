@@ -99,24 +99,6 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The canonical bytes of the plan, which start with the plan format version. The
-    /// bytes hold no span, so [`Plan::decode`] gives each `label_span` as `None`.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        codec::encode(self)
-    }
-
-    /// Reads the bytes of [`Plan::encode`]. Never panics: the bytes come from a user.
-    /// A plan that it reads encodes to the same bytes.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::Version`] when the format version is not the one this build writes.
-    /// - [`Error::Malformed`] at the first byte that [`Plan::encode`] does not write.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        codec::decode(bytes)
-    }
-
     /// The definitions of the spec after the plan, by tree key: `applied` with each
     /// change. A channel keeps the key of the stored channel at its name, and a new
     /// name gets a key from `key`, in name order. An edge to a name that is no channel

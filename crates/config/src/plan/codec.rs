@@ -54,34 +54,96 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub(super) fn encode(plan: &Plan) -> Vec<u8> {
-    let mut out = vec![VERSION];
-    out.extend_from_slice(&plan.base.version.to_le_bytes());
-    out.extend_from_slice(&plan.base.root.0);
-    count(&mut out, plan.changes.len());
-    for change in &plan.changes {
-        text(&mut out, change.name.as_str());
-        match change.old {
-            None => out.push(0),
-            Some(old) => {
-                out.push(1);
-                out.extend_from_slice(&old.0);
+impl Plan {
+    /// The canonical bytes of the plan, which start with the plan format version. The
+    /// bytes hold no span, so [`Plan::decode`] gives each `label_span` as `None`.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = vec![VERSION];
+        out.extend_from_slice(&self.base.version.to_le_bytes());
+        out.extend_from_slice(&self.base.root.0);
+        count(&mut out, self.changes.len());
+        for change in &self.changes {
+            text(&mut out, change.name.as_str());
+            match change.old {
+                None => out.push(0),
+                Some(old) => {
+                    out.push(1);
+                    out.extend_from_slice(&old.0);
+                }
+            }
+            match &change.new {
+                None => out.push(0),
+                Some(entry) => {
+                    out.push(1);
+                    definition(&mut out, &entry.definition);
+                }
             }
         }
-        match &change.new {
-            None => out.push(0),
-            Some(entry) => {
-                out.push(1);
-                definition(&mut out, &entry.definition);
-            }
+        count(&mut out, self.homes.len());
+        for (index, home) in &self.homes {
+            text(&mut out, index.as_str());
+            text(&mut out, home.as_str());
         }
+        out
     }
-    count(&mut out, plan.homes.len());
-    for (index, home) in &plan.homes {
-        text(&mut out, index.as_str());
-        text(&mut out, home.as_str());
+
+    /// Reads the bytes of [`Plan::encode`]. Never panics: the bytes come from a user.
+    /// A plan that it reads encodes to the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Version`] when the format version is not the one this build writes.
+    /// - [`Error::Malformed`] at the first byte that [`Plan::encode`] does not write.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = Reader { bytes, at: 0 };
+        let version = reader.byte()?;
+        if version != VERSION {
+            return Err(Error::Version { found: version });
+        }
+        let base = spec::Pointer {
+            version: u64::from_le_bytes(reader.array()?),
+            root: Digest(reader.array()?),
+        };
+        let mut changes: Vec<Change> = Vec::new();
+        for _ in 0..reader.count()? {
+            let at = reader.at;
+            let name = reader.name()?;
+            if changes.last().is_some_and(|last| last.name >= name) {
+                return Err(Error::Malformed { at });
+            }
+            let old = reader
+                .flag()?
+                .then(|| reader.array().map(Digest))
+                .transpose()?;
+            let at = reader.at;
+            let new = reader.flag()?.then(|| reader.entry()).transpose()?;
+            if old.is_none() && new.is_none() {
+                return Err(Error::Malformed { at });
+            }
+            changes.push(Change { name, old, new });
+        }
+        let mut homes = BTreeMap::new();
+        for _ in 0..reader.count()? {
+            let at = reader.at;
+            let index = reader.name()?;
+            if homes
+                .last_key_value()
+                .is_some_and(|(last, _)| *last >= index)
+            {
+                return Err(Error::Malformed { at });
+            }
+            homes.insert(index, reader.name()?);
+        }
+        if reader.at != bytes.len() {
+            return Err(Error::Malformed { at: reader.at });
+        }
+        Ok(Plan {
+            base,
+            changes,
+            homes,
+        })
     }
-    out
 }
 
 fn definition(out: &mut Vec<u8>, definition: &Definition) {
@@ -125,56 +187,6 @@ fn optional(out: &mut Vec<u8>, found: Option<&str>) {
             text(out, found);
         }
     }
-}
-
-pub(super) fn decode(bytes: &[u8]) -> Result<Plan, Error> {
-    let mut reader = Reader { bytes, at: 0 };
-    let version = reader.byte()?;
-    if version != VERSION {
-        return Err(Error::Version { found: version });
-    }
-    let base = spec::Pointer {
-        version: u64::from_le_bytes(reader.array()?),
-        root: Digest(reader.array()?),
-    };
-    let mut changes: Vec<Change> = Vec::new();
-    for _ in 0..reader.count()? {
-        let at = reader.at;
-        let name = reader.name()?;
-        if changes.last().is_some_and(|last| last.name >= name) {
-            return Err(Error::Malformed { at });
-        }
-        let old = reader
-            .flag()?
-            .then(|| reader.array().map(Digest))
-            .transpose()?;
-        let at = reader.at;
-        let new = reader.flag()?.then(|| reader.entry()).transpose()?;
-        if old.is_none() && new.is_none() {
-            return Err(Error::Malformed { at });
-        }
-        changes.push(Change { name, old, new });
-    }
-    let mut homes = BTreeMap::new();
-    for _ in 0..reader.count()? {
-        let at = reader.at;
-        let index = reader.name()?;
-        if homes
-            .last_key_value()
-            .is_some_and(|(last, _)| *last >= index)
-        {
-            return Err(Error::Malformed { at });
-        }
-        homes.insert(index, reader.name()?);
-    }
-    if reader.at != bytes.len() {
-        return Err(Error::Malformed { at: reader.at });
-    }
-    Ok(Plan {
-        base,
-        changes,
-        homes,
-    })
 }
 
 struct Reader<'b> {
