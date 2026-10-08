@@ -1,9 +1,9 @@
 use std::slice;
 
 use base64ct::{Base64, Encoding};
-use document::Block;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::{Kind, Value};
+use document::{Block, Span};
 use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
@@ -89,29 +89,36 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
     })
 }
 
-/// Refuses a value that holds a private key at any depth. The whole value is checked
-/// before any key is read, so a bad item before a private key does not hide the alarm.
+/// Refuses a value that holds a private key at any depth, in a string or a map key.
+/// The whole value is checked before any key is read, so a bad item before a private
+/// key does not hide the alarm.
 fn no_private_key(value: &Value) -> Result<(), Diagnostic> {
     match &value.kind {
-        Kind::String(text) if PRIVATE_MARKS.iter().any(|mark| text.contains(mark)) => {
-            Err(Diagnostic::new(
-                PRIVATE_KEY,
-                value.span,
-                "the value is a private key, which must never be in a file".into(),
-                "Remove the private key from this file now, and use the one line of \
-                 its `.pub` file"
-                    .into(),
-            ))
-        }
+        Kind::String(text) => no_private_text(text, value.span),
         Kind::List(items) => items.iter().try_for_each(no_private_key),
-        Kind::Map(map) => map.iter().try_for_each(|item| no_private_key(&item.value)),
+        Kind::Map(map) => map.iter().try_for_each(|item| {
+            no_private_text(&item.key, item.key_span)?;
+            no_private_key(&item.value)
+        }),
         Kind::Call(call) => call.arguments.iter().try_for_each(no_private_key),
-        Kind::Bool(_)
-        | Kind::Integer(_)
-        | Kind::Float(_)
-        | Kind::String(_)
-        | Kind::Reference(_) => Ok(()),
+        Kind::Bool(_) | Kind::Integer(_) | Kind::Float(_) | Kind::Reference(_) => {
+            Ok(())
+        }
     }
+}
+
+fn no_private_text(text: &str, span: Option<Span>) -> Result<(), Diagnostic> {
+    if !PRIVATE_MARKS.iter().any(|mark| text.contains(mark)) {
+        return Ok(());
+    }
+    Err(Diagnostic::new(
+        PRIVATE_KEY,
+        span,
+        "the value is a private key, which must never be in a file".into(),
+        "Remove the private key from this file now, and use the one line of its \
+         `.pub` file"
+            .into(),
+    ))
 }
 
 /// Reads the line of an OpenSSH `.pub` file of an Ed25519 key: `ssh-ed25519`, the

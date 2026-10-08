@@ -2905,9 +2905,20 @@ mod tests {
                 function_span: at(0, 60),
                 arguments: vec![private.clone()],
             });
+            let map = Map::new(vec![Attribute {
+                key: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n".into(),
+                key_span: at(0, 70),
+                value: Value {
+                    kind: Kind::Integer(1),
+                    span: at(0, 80),
+                },
+            }])
+            .unwrap();
             let cases = [
                 list(&[Kind::List(vec![private])]),
                 list(&[string(ALICE), call]),
+                Kind::Map(map.clone()),
+                list(&[Kind::Map(map)]),
             ];
             for keys in cases {
                 assert_eq!(
