@@ -272,6 +272,19 @@ impl Disk {
         Ok(())
     }
 
+    /// Unlinks file `inode` at `path`. `NotFound` when `path` no longer names it.
+    pub(crate) fn unlink(&mut self, inode: u64, path: &Path) -> Result<(), Cause> {
+        let segments = segments(path);
+        let (name, parent) = segments
+            .split_last()
+            .expect("invariant: an unlink is of a file");
+        let dir = self.dir_mut(self.dir(parent)?);
+        if dir.entries.get(*name) != Some(&inode) {
+            return Err(Cause::NotFound);
+        }
+        self.remove(path)
+    }
+
     /// Moves the entry of file `inode` from `from` to `to`, both in one directory.
     /// `NotFound` when `from` no longer names it; `Exists` when `to` is taken.
     pub(crate) fn rename(

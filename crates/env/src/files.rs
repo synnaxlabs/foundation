@@ -161,7 +161,9 @@ impl Files {
     /// Removes the file at `path`. A file that is not there counts as removed. A remove
     /// that a drop leaves to run removes what the path names when it ends. The removal
     /// is not durable until [`Files::sync_dir`] on its directory ends. Count the file's
-    /// room as used until then, and while a handle holds the file.
+    /// room as used until then, and while a handle holds the file. To remove a file and
+    /// then make one at its path, remove it through its write handle
+    /// ([`File::remove`]).
     ///
     /// # Errors
     ///
@@ -478,6 +480,43 @@ impl File {
         self.descriptor.close().await;
     }
 
+    /// Removes the file of this handle from its directory, then closes the handle as
+    /// [`File::close`]. Until the remove ends, also after a drop of the future, a
+    /// write open of the path gives [`Error::Busy`]. The removal is not durable until
+    /// [`Files::sync_dir`] on its directory ends. Count the file's room as used until
+    /// then.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] when the path of the handle no longer names its file:
+    ///   another call removed the path. Nothing is removed.
+    /// - [`Error::Io`] when the OS cannot remove the file.
+    ///
+    /// The handle closes either way.
+    ///
+    /// # Panics
+    ///
+    /// When the file was opened with [`Mode::Read`].
+    ///
+    /// ```
+    /// async fn replace(
+    ///     files: &env::files::Files,
+    ///     file: env::files::File,
+    ///     path: &std::path::Path,
+    /// ) -> Result<env::files::File, env::files::Error> {
+    ///     file.remove().await?;
+    ///     files.open(path, env::files::Mode::Create { len: 1 << 20 }).await
+    /// }
+    /// ```
+    pub async fn remove(self) -> Result<(), Error> {
+        assert!(
+            self.mode != Mode::Read,
+            "remove {}, which was opened to read",
+            self.path.display()
+        );
+        self.descriptor.remove(self.path).await
+    }
+
     fn check_poison(&self) -> Result<(), Error> {
         if self.poisoned.get() {
             return Err(Error::Poisoned {
@@ -667,7 +706,7 @@ pub enum Operation {
     List,
     /// [`Files::create_dir`].
     CreateDir,
-    /// [`Files::remove`].
+    /// [`Files::remove`] and [`File::remove`].
     Remove,
     /// [`Files::sync_dir`].
     SyncDir,
@@ -785,6 +824,16 @@ pub trait Descriptor {
     /// Closes the file. The future ends after the calls of the descriptor end and the
     /// file is closed.
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>>;
+
+    /// Removes `path` when it names this file, then closes the file. It gives
+    /// [`Error::NotFound`] when `path` names another file or none, and then removes
+    /// nothing. The future ends after the calls of the descriptor end, the remove
+    /// ends, and the file is closed; it closes the file either way. [`File`] has
+    /// checked that the file was opened to write.
+    fn remove(
+        self: Box<Self>,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>>;
 }
 
 #[cfg(test)]
@@ -909,6 +958,23 @@ mod tests {
             self.record("close".into());
             Box::pin(async {})
         }
+
+        fn remove(
+            self: Box<Self>,
+            path: PathBuf,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>> {
+            self.record(format!("remove {}", path.display()));
+            let result = match path.file_name().and_then(OsStr::to_str) {
+                Some("gone") => Err(Error::NotFound { path }),
+                Some("locked") => Err(Error::Io {
+                    path,
+                    operation: Operation::Remove,
+                    code: 13,
+                }),
+                _ => Ok(()),
+            };
+            Box::pin(async { result })
+        }
     }
 
     /// A driver that hangs the call of `on` after `remaining` calls of it ended.
@@ -968,6 +1034,19 @@ mod tests {
 
         fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
             Box::pin(async {})
+        }
+
+        fn remove(
+            self: Box<Self>,
+            _: PathBuf,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>> {
+            let stuck = self.on == Operation::Remove;
+            Box::pin(async move {
+                if stuck {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            })
         }
     }
 
@@ -1433,6 +1512,79 @@ mod tests {
             assert_eq!(ready(file.sync()), Err(io(Operation::Sync)));
             ready(file.close());
             assert_eq!(calls.borrow()[1..], ["sync", "close"]);
+        }
+    }
+
+    mod remove_file {
+        use super::*;
+
+        #[test]
+        fn removes_the_path_of_the_handle_and_closes_nothing_else() {
+            let (files, calls) = Fixed::files(8);
+            let file = open(&files, Mode::Write);
+            assert_eq!(ready(file.remove()), Ok(()));
+            assert_eq!(calls.borrow()[1..], ["remove ring/0"]);
+        }
+
+        #[test]
+        fn removes_the_new_path_after_a_rename() {
+            let (files, calls) = Fixed::files(8);
+            let mut file = open(&files, Mode::Write);
+            ready(file.rename(Path::new("ring/1"))).expect("the driver renames");
+            assert_eq!(ready(file.remove()), Ok(()));
+            assert_eq!(calls.borrow()[3..], ["remove ring/1"]);
+        }
+
+        #[test]
+        fn gives_not_found_and_other_errors_as_the_driver_does() {
+            let (files, _) = Fixed::files(8);
+            let file = ready(files.open(Path::new("ring/gone"), Mode::Write))
+                .expect("the driver opens");
+            assert_eq!(
+                ready(file.remove()),
+                Err(Error::NotFound {
+                    path: "ring/gone".into()
+                })
+            );
+            let file = ready(files.open(Path::new("ring/locked"), Mode::Write))
+                .expect("the driver opens");
+            assert_eq!(
+                ready(file.remove()),
+                Err(Error::Io {
+                    path: "ring/locked".into(),
+                    operation: Operation::Remove,
+                    code: 13,
+                })
+            );
+        }
+
+        #[test]
+        fn removes_a_poisoned_file() {
+            let (files, calls) = Fixed::with_sync(8, Err(io(Operation::Sync)));
+            let file = open(&files, Mode::Write);
+            assert_eq!(ready(file.sync()), Err(io(Operation::Sync)));
+            assert_eq!(ready(file.remove()), Ok(()));
+            assert_eq!(calls.borrow()[1..], ["sync", "remove ring/0"]);
+        }
+
+        #[test]
+        fn removes_a_file_opened_to_create() {
+            let (files, calls) = Fixed::files(8);
+            let file = open(&files, Mode::Create { len: 8 });
+            assert_eq!(ready(file.remove()), Ok(()));
+            assert_eq!(calls.borrow()[1..], ["remove ring/0"]);
+        }
+
+        #[test]
+        fn waits_for_the_driver() {
+            drop_pending(Stuck::file(Operation::Remove).remove());
+        }
+
+        #[test]
+        #[should_panic(expected = "remove ring/0, which was opened to read")]
+        fn panics_on_a_file_opened_to_read() {
+            let (files, _) = Fixed::files(8);
+            drop(ready(open(&files, Mode::Read).remove()));
         }
     }
 

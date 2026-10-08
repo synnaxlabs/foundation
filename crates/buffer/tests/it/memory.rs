@@ -290,4 +290,23 @@ impl Descriptor for Open {
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
         Box::pin(async move { drop(self) })
     }
+
+    fn remove(
+        self: Box<Self>,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>> {
+        let mut files = lock(&self.files);
+        let result = match files.get(&key(&path)) {
+            Some(bytes) if Arc::ptr_eq(bytes, &self.bytes) => {
+                files.remove(&key(&path));
+                Ok(())
+            }
+            _ => Err(Error::NotFound { path }),
+        };
+        drop(files);
+        Box::pin(async move {
+            drop(self);
+            result
+        })
+    }
 }

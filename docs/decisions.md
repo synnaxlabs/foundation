@@ -4054,9 +4054,7 @@ How to read this record:
   Amended (2026-10-07, #1310): a call of `Files` whose future drops can still run. A
   remove left so removes what the path names when it ends. Count the room of a
   removed file as used until `sync_dir` on its directory ends, and while a handle holds
-  the file (#1301). Lost: `File::remove`, a remove through the write handle, which the
-  handle rule would cover with `Busy`; after #1441 it had no caller. Decided by
-  `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
+  the file (#1301). Decided by `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
   (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245).
   Supersedes
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
@@ -4072,6 +4070,19 @@ How to read this record:
   sweep, and a caller already learns from its own header whether a file holds data.
   Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
+  Amended (2026-10-08, #1604): `File::remove(self)` removes the file of a write handle,
+  then closes the handle as `File::close`. It removes the file of the handle, by device
+  and inode with no follow of a link, as FILE RENAME does: `NotFound { path }` when the
+  path no longer names it, and nothing is removed. Until the remove ends, also after a
+  drop of its future, a write open of the path gives `Busy`; on `os` the descriptor
+  closes after the unlink, so the lock holds across processes until then. The removal
+  is not durable until `sync_dir` on its directory ends. A read handle panics. The
+  caller is `mesh::log`, which removes a sealed file and makes one at its path. Lost:
+  a spare name in `mesh` only, which adds a second kind of file to the directory of a
+  log and a sweep of it in `Log::open`. Supersedes the "Lost: `File::remove`" sentence
+  of https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245.
+  Decided by `laptop.architect-2`, #1604, 2026-10-07T20:24:12Z
+  (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
