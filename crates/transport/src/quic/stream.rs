@@ -3475,6 +3475,8 @@ mod tests {
             }
         }
 
+        // The share cannot reach the `Latest` floor: `Latest` goes first while it is
+        // owed, so its credit stays under one message and one window of `Complete`.
         #[test]
         fn a_class_that_does_not_wait_keeps_no_credit_past_one_window_of_its_own() {
             let mut share = Share::new(99);
