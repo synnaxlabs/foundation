@@ -356,7 +356,7 @@ impl Endpoint {
     ) -> Result<Poll<()>, Error> {
         let bytes = message
             .as_ref()
-            .map_or(0, |block| stream::size(parts, block.len()));
+            .map_or(0, |block| crate::stream::size(parts, block.len()));
         sender.check_open();
         stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
@@ -390,7 +390,7 @@ impl Endpoint {
         message: Block,
         parts: &[Part],
     ) -> Result<Option<Block>, Error> {
-        let bytes = stream::size(parts, message.len());
+        let bytes = crate::stream::size(parts, message.len());
         sender.check_open();
         stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;

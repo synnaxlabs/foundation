@@ -40,6 +40,51 @@ impl Part {
     }
 }
 
+/// The zeros of every [`Part`].
+pub(crate) const ZEROS: &[u8; 255] = &[0; 255];
+
+/// The size of a message of `parts` of a block of `bytes`.
+///
+/// # Panics
+///
+/// When a range starts after its end or ends past the block.
+pub(crate) fn size(parts: &[Part], bytes: usize) -> usize {
+    if let [Part { range, zeros: 0 }] = parts
+        && *range == (0..bytes)
+    {
+        return bytes;
+    }
+    // When no sum can overflow, one pass with no branch per part. A range in the
+    // block that starts after its end wraps its length past `bytes`.
+    let bound = bytes.checked_add(usize::from(u8::MAX));
+    if bound
+        .and_then(|bound| bound.checked_mul(parts.len()))
+        .is_some()
+    {
+        let (size, most) =
+            parts.iter().fold((0, 0), |(size, most): (usize, _), part| {
+                let len = part.range.end.wrapping_sub(part.range.start);
+                let size = size.wrapping_add(len).wrapping_add(usize::from(part.zeros));
+                (
+                    size,
+                    most.max(len).max(part.range.start).max(part.range.end),
+                )
+            });
+        if most <= bytes {
+            return size;
+        }
+    }
+    parts.iter().fold(0, |size: usize, part| {
+        let Range { start, end } = part.range;
+        assert!(
+            start <= end && end <= bytes,
+            "the range {start}..{end} of a part is not in a block of {bytes} bytes"
+        );
+        size.saturating_add(end - start)
+            .saturating_add(usize::from(part.zeros))
+    })
+}
+
 /// The sending half of a stream. Dropping it without [`finish`](Self::finish) resets
 /// the stream with `Code(0)`, so the peer never reads a cut-off stream as complete.
 /// Dropping it after `finish` lets delivery go on.
@@ -505,6 +550,7 @@ impl Incoming {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::ops::Range;
     use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -1210,6 +1256,49 @@ mod tests {
             },
         );
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_size_of_parts_is_the_sum_of_their_bytes_or_names_the_first_outside(
+            drawn in proptest::collection::vec(
+                (0..20_usize, 0..20_usize, proptest::bool::ANY, 0..4_u8),
+                0..6,
+            ),
+            wide in proptest::bool::ANY,
+        ) {
+            // A block of `usize::MAX` bytes sums with no bound on the sum.
+            let bytes = if wide { usize::MAX } else { 16 };
+            let parts: Vec<_> = drawn
+                .into_iter()
+                .map(|(start, end, huge, zeros)| {
+                    let start = if huge { usize::MAX - start } else { start };
+                    Part { range: start..end, zeros }
+                })
+                .collect();
+            let outside = parts.iter().find(|part| {
+                part.range.start > part.range.end || part.range.end > bytes
+            });
+            let sized = std::panic::catch_unwind(|| super::size(&parts, bytes));
+            match outside {
+                None => {
+                    let sum = parts.iter().map(|part| part.range.len()).sum::<usize>();
+                    let zeros = parts.iter().map(|part| usize::from(part.zeros));
+                    let zeros = zeros.sum::<usize>();
+                    proptest::prop_assert_eq!(sized.ok(), Some(sum + zeros));
+                }
+                Some(part) => {
+                    let Range { start, end } = part.range;
+                    let message = format!(
+                        "the range {start}..{end} of a part is not in a block of \
+                         {bytes} bytes"
+                    );
+                    let given = sized.expect_err("a panic");
+                    let given = given.downcast_ref::<String>();
+                    proptest::prop_assert_eq!(given, Some(&message));
+                }
+            }
+        }
     }
 
     #[test]
