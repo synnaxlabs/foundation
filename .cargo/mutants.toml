@@ -65,9 +65,6 @@ exclude_re = [
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
-  # macOS tests only, as above.
-  # `delayed_unsent_bytes_stay_at_most_the_bound_plus_one_segment` catches its mutant.
-  'crates/os/src/net/lowat\.rs:.*replace segment ->',
   # macOS only, as above. `a_write_takes_at_most_the_unsent_bound` catches its
   # mutants.
   'crates/os/src/net/unsent\.rs:.*Bound::new',

@@ -47,7 +47,8 @@ pub(super) fn get(fd: BorrowedFd<'_>) -> Result<c_int, Errno> {
 }
 
 /// The largest segment `fd` sends.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
+#[cfg(target_os = "macos")]
 pub(super) fn segment(fd: BorrowedFd<'_>) -> Result<c_int, Errno> {
     read(fd, libc::TCP_MAXSEG)
 }
