@@ -243,7 +243,7 @@ impl Series {
         let mut chunk = self.take(time);
         match chunk.times.binary_search(&time) {
             Ok(at) => chunk.set(at, fields),
-            Err(at) if chunk.times.len() < CHUNK => chunk.insert(at, time, fields),
+            Err(at) if !chunk.full() => chunk.insert(at, time, fields),
             Err(at) => {
                 let mut right = chunk.split();
                 let half = chunk.times.len();
@@ -265,13 +265,13 @@ impl Series {
             .chunks
             .range(..=time)
             .next_back()
-            .filter(|(_, chunk)| chunk.times.len() < CHUNK || time <= chunk.last());
+            .filter(|(_, chunk)| !chunk.full() || time <= chunk.last());
         let key = before
             .or_else(|| {
                 self.chunks
                     .range(time..)
                     .next()
-                    .filter(|(_, chunk)| chunk.times.len() < CHUNK)
+                    .filter(|(_, chunk)| !chunk.full())
             })
             .map(|(&key, _)| key);
         key.and_then(|key| self.chunks.remove(&key))
@@ -284,6 +284,10 @@ impl Series {
 }
 
 impl Chunk {
+    fn full(&self) -> bool {
+        self.times.len() >= CHUNK
+    }
+
     fn first(&self) -> Stamp {
         *self.times.first().expect("a chunk holds a point")
     }

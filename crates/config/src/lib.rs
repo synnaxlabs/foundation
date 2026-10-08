@@ -1,6 +1,7 @@
 //! Checks core definitions in Documents, expands templates, hands connector blocks to
 //! kinds, and computes plans, explains, and exports.
 
+mod access;
 mod channel;
 mod node_settings;
 mod placement;
@@ -15,9 +16,6 @@ use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
-const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
-const MISSING_ATTRIBUTE: Code = Code::new("config.missing-attribute");
 const LABEL_COUNT: Code = Code::new("config.label-count");
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
@@ -28,7 +26,8 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
-const KINDS: [(Kind, Check); 4] = [
+const KINDS: [(Kind, Check); 5] = [
+    (Kind::Access, access::check),
     (Kind::Channel, channel::check),
     (Kind::NodeSettings, node_settings::check),
     (Kind::Placement, placement::check),
@@ -73,43 +72,28 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
         channels: channels(documents),
         ..Found::default()
     };
+    let kinds = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
-        for attribute in document.attributes.iter() {
-            found.diagnostics.push(Diagnostic::new(
-                UNKNOWN_ATTRIBUTE,
-                attribute.key_span,
-                format!("`{}` is an attribute outside a block", attribute.key),
-                "Move it into the block that it sets, or remove it".into(),
-            ));
-        }
+        found
+            .diagnostics
+            .extend(read::unknown(document, "a file", &[], &kinds));
         for block in &document.blocks {
-            match KINDS
+            let Some((kind, check_block)) = KINDS
                 .iter()
                 .find(|(kind, _)| kind.as_str() == &*block.keyword)
-            {
-                Some((kind, check_block)) => {
-                    let key = found.key(block, *kind);
-                    let definition = check_block(&mut found, block);
-                    if let (Some((key, label_span)), Some(definition)) =
-                        (key, definition)
-                    {
-                        let entry = Entry {
-                            definition,
-                            label_span,
-                        };
-                        found.entries.insert(key, entry);
-                    }
-                }
-                None => found.diagnostics.push(Diagnostic::new(
-                    UNKNOWN_BLOCK,
-                    block.keyword_span,
-                    format!("`{}` is not a kind of block", block.keyword),
-                    format!(
-                        "Use {}, or remove the block",
-                        one_of(&KINDS.map(|(kind, _)| kind.as_str()))
-                    ),
-                )),
+            else {
+                // `read::unknown` reported it.
+                continue;
+            };
+            let key = found.key(block, *kind);
+            let definition = check_block(&mut found, block);
+            if let (Some((key, label_span)), Some(definition)) = (key, definition) {
+                let entry = Entry {
+                    definition,
+                    label_span,
+                };
+                found.entries.insert(key, entry);
             }
         }
         found.diagnostics[start..]
@@ -135,17 +119,12 @@ fn channels(documents: &[Document]) -> BTreeSet<Name> {
         .collect()
 }
 
-/// `words` in backticks, as a list that ends with "or".
-fn one_of(words: &[&str]) -> String {
-    match words {
-        [] => String::new(),
-        [word] => format!("`{word}`"),
-        [first, second] => format!("`{first}` or `{second}`"),
-        [rest @ .., last] => {
-            let rest: Vec<String> =
-                rest.iter().map(|word| format!("`{word}`")).collect();
-            format!("{}, or `{last}`", rest.join(", "))
-        }
+/// The text of a string or a reference, as the file wrote it.
+fn written(value: &Value) -> Option<&str> {
+    match &value.kind {
+        document::value::Kind::String(text) => Some(text),
+        document::value::Kind::Reference(name) => Some(name.as_str()),
+        _ => None,
     }
 }
 
@@ -275,44 +254,19 @@ impl<'a> Found<'a> {
             .transpose()
     }
 
-    /// Reports each attribute of `block` that is not one of `keys`.
-    fn unknown_attributes(
-        &mut self,
-        block: &Block,
-        keys: &[&str],
-    ) -> Result<(), Reported> {
-        let mut result = Ok(());
-        for attribute in block.body.attributes.iter() {
-            if keys.contains(&&*attribute.key) {
-                continue;
-            }
-            self.diagnostics.push(Diagnostic::new(
-                UNKNOWN_ATTRIBUTE,
-                attribute.key_span,
-                format!(
-                    "`{}` is not an attribute of the `{}` block",
-                    attribute.key, block.keyword
-                ),
-                format!("Use {}, or remove it", one_of(keys)),
-            ));
-            result = Err(Reported);
-        }
-        result
-    }
-
-    /// Reports each block in the body of `block`, which holds none.
-    fn unknown_blocks(&mut self, block: &Block) {
-        for inner in &block.body.blocks {
-            self.diagnostics.push(Diagnostic::new(
-                UNKNOWN_BLOCK,
-                inner.keyword_span,
-                format!(
-                    "the `{}` block cannot hold the `{}` block",
-                    block.keyword, inner.keyword
-                ),
-                "Remove it".into(),
-            ));
-        }
+    /// Reports each attribute of `block` that is not one of `keys`, and each block in
+    /// its body, since a block that `config` checks holds none.
+    ///
+    /// # Errors
+    ///
+    /// `Reported` when an attribute is unknown. A block inside does not stop the
+    /// check of the definition.
+    fn unknown(&mut self, block: &Block, keys: &[&str]) -> Result<(), Reported> {
+        let found = read::unknown(&block.body, &of(block), keys, &[]);
+        // Each block inside gives one diagnostic, so any more are attributes.
+        let attributes = found.len() > block.body.blocks.len();
+        self.diagnostics.extend(found);
+        if attributes { Err(Reported) } else { Ok(()) }
     }
 
     /// The `select` attribute of a policy block, as [`Found::required`] reads it. The
@@ -330,7 +284,7 @@ impl<'a> Found<'a> {
     }
 
     /// The attribute `key` of `block` as `read` reads it. When the block has none, it
-    /// reports `config.missing-attribute` with `fix`.
+    /// reports `document.missing-attribute` with `fix`.
     fn required<T>(
         &mut self,
         block: &Block,
@@ -338,22 +292,20 @@ impl<'a> Found<'a> {
         read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
         fix: String,
     ) -> Result<T, Reported> {
-        if let Some(value) = self.attribute(block, key, read)? {
-            return Ok(value);
-        }
-        self.missing(block, &[key], fix);
-        Err(Reported)
+        let at = block.keyword_span;
+        self.report(read::required(&block.body, &of(block), at, key, read, fix))
     }
 
     /// Reports that `block` has none of the attributes `keys`.
     fn missing(&mut self, block: &Block, keys: &[&str], fix: String) {
-        self.diagnostics.push(Diagnostic::new(
-            MISSING_ATTRIBUTE,
-            block.keyword_span,
-            format!("the `{}` block has no {}", block.keyword, one_of(keys)),
-            fix,
-        ));
+        let missing = read::missing(&of(block), block.keyword_span, keys, fix);
+        self.diagnostics.push(missing);
     }
+}
+
+/// The name of `block` in a message: "the `retention` block".
+fn of(block: &Block) -> String {
+    format!("the `{}` block", block.keyword)
 }
 
 #[cfg(test)]
@@ -447,7 +399,7 @@ mod tests {
     }
 
     /// Asserts that each of two blocks inside a `keyword` block with `attributes` adds
-    /// one `config.unknown-block` diagnostic to what `check` gives without them.
+    /// one `document.unknown-block` diagnostic to what `check` gives without them.
     fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
         let mut policy = block(0, 0, keyword, &["edge"], attributes);
         let mut expected = check(&[document(vec![policy.clone()])])
@@ -456,7 +408,7 @@ mod tests {
         for (offset, inner) in [(90, "inner"), (95, "other")] {
             policy.body.blocks.push(block(0, offset, inner, &[], &[]));
             expected.push(refused(
-                "config.unknown-block",
+                "document.unknown-block",
                 at(0, offset),
                 &format!("the `{keyword}` block cannot hold the `{inner}` block"),
                 "Remove it",
@@ -563,11 +515,11 @@ mod tests {
         assert_eq!(
             check(&documents),
             Err(vec![refused(
-                "config.unknown-block",
+                "document.unknown-block",
                 at(0, 0),
-                "`nodes` is not a kind of block",
-                "Use `channel`, `node_settings`, `placement`, or `retention`, or \
-                 remove the block",
+                "a file cannot hold the `nodes` block",
+                "Use `access`, `channel`, `node_settings`, `placement`, or \
+                 `retention`, or remove it",
             )])
         );
     }
@@ -589,10 +541,11 @@ mod tests {
         assert_eq!(
             check(&documents),
             Err(vec![refused(
-                "config.unknown-attribute",
+                "document.unknown-attribute",
                 at(0, 3),
-                "`disk` is an attribute outside a block",
-                "Move it into the block that it sets, or remove it",
+                "`disk` is not an attribute of a file",
+                "Move it into the `access`, `channel`, `node_settings`, `placement`, \
+                 or `retention` block that it sets, or remove it",
             )])
         );
     }
@@ -700,13 +653,13 @@ mod tests {
             check(&[document(vec![block])]),
             Err(vec![
                 refused(
-                    "config.unknown-attribute",
+                    "document.unknown-attribute",
                     at(0, 12),
                     "`disks` is not an attribute of the `node_settings` block",
                     "Use `select`, `disk`, or `pool`, or remove it",
                 ),
                 refused(
-                    "config.unknown-block",
+                    "document.unknown-block",
                     at(0, 50),
                     "the `node_settings` block cannot hold the `node_settings` block",
                     "Remove it",
@@ -724,7 +677,7 @@ mod tests {
         ])];
         let missing = |offset| {
             refused(
-                "config.missing-attribute",
+                "document.missing-attribute",
                 at(0, offset),
                 "the `node_settings` block has no `select`",
                 "Add a `select` attribute with the nodes that it sets, such as \
@@ -745,13 +698,13 @@ mod tests {
             check(&[document(vec![policy])]),
             Err(vec![
                 refused(
-                    "config.missing-attribute",
+                    "document.missing-attribute",
                     at(0, 0),
                     "the `node_settings` block has no `disk` or `pool`",
                     NO_BUDGET_FIX,
                 ),
                 refused(
-                    "config.unknown-block",
+                    "document.unknown-block",
                     at(0, 50),
                     "the `node_settings` block cannot hold the `inner` block",
                     "Remove it",
@@ -834,7 +787,7 @@ mod tests {
         assert_eq!(
             check(&documents),
             Err(vec![refused(
-                "config.missing-attribute",
+                "document.missing-attribute",
                 at(0, 0),
                 "the `node_settings` block has no `disk` or `pool`",
                 NO_BUDGET_FIX,
@@ -1105,7 +1058,7 @@ mod tests {
             assert_eq!(
                 check(&documents),
                 Err(vec![refused(
-                    "config.missing-attribute",
+                    "document.missing-attribute",
                     at(0, 0),
                     "the `placement` block has no `select`",
                     "Add a `select` attribute with the connectors and indexes that it \
@@ -1299,7 +1252,7 @@ mod tests {
             assert_eq!(
                 check(&placement(&attributes)),
                 Err(vec![refused(
-                    "config.unknown-attribute",
+                    "document.unknown-attribute",
                     at(0, 12),
                     "`node` is not an attribute of the `placement` block",
                     "Use `select`, `home`, `standby`, or `copies`, or remove it",
@@ -1318,7 +1271,7 @@ mod tests {
             assert_eq!(
                 check(&[documents]),
                 Err(vec![refused(
-                    "config.unknown-block",
+                    "document.unknown-block",
                     at(0, 50),
                     "the `placement` block cannot hold the `inner` block",
                     "Remove it",
@@ -1343,7 +1296,7 @@ mod tests {
                         "Name a `home`, a `standby`, or a node in `copies`",
                     ),
                     refused(
-                        "config.unknown-block",
+                        "document.unknown-block",
                         at(0, 50),
                         "the `placement` block cannot hold the `inner` block",
                         "Remove it",
@@ -1362,7 +1315,7 @@ mod tests {
             assert_eq!(
                 check(&placement(&attributes)),
                 Err(vec![refused(
-                    "config.unknown-attribute",
+                    "document.unknown-attribute",
                     at(0, 14),
                     "`node` is not an attribute of the `placement` block",
                     "Use `select`, `home`, `standby`, or `copies`, or remove it",
@@ -1385,13 +1338,13 @@ mod tests {
                 check(&[documents]),
                 Err(vec![
                     refused(
-                        "config.unknown-attribute",
+                        "document.unknown-attribute",
                         at(0, 14),
                         "`node` is not an attribute of the `placement` block",
                         "Use `select`, `home`, `standby`, or `copies`, or remove it",
                     ),
                     refused(
-                        "config.unknown-block",
+                        "document.unknown-block",
                         at(0, 50),
                         "the `placement` block cannot hold the `inner` block",
                         "Remove it",
@@ -1464,14 +1417,14 @@ mod tests {
         #[test]
         fn refuses_a_retention_without_select_or_keep() {
             let select = refused(
-                "config.missing-attribute",
+                "document.missing-attribute",
                 at(0, 0),
                 "the `retention` block has no `select`",
                 "Add a `select` attribute with the indexes that it caps, such as \
                  \"site_a.**\"",
             );
             let keep = refused(
-                "config.missing-attribute",
+                "document.missing-attribute",
                 at(0, 0),
                 "the `retention` block has no `keep`",
                 "Add a `keep` attribute with a span such as \"3d\"",
@@ -1531,7 +1484,7 @@ mod tests {
             assert_eq!(
                 check(&documents),
                 Err(vec![refused(
-                    "config.unknown-attribute",
+                    "document.unknown-attribute",
                     at(0, 14),
                     "`hold` is not an attribute of the `retention` block",
                     "Use `select` or `keep`, or remove it",
@@ -1549,7 +1502,7 @@ mod tests {
             assert_eq!(
                 check(&documents),
                 Err(vec![refused(
-                    "config.unknown-attribute",
+                    "document.unknown-attribute",
                     at(0, 14),
                     "`hold` is not an attribute of the `retention` block",
                     "Use `select` or `keep`, or remove it",
@@ -1575,7 +1528,7 @@ mod tests {
                         "Write a keep time of zero or more",
                     ),
                     refused(
-                        "config.unknown-block",
+                        "document.unknown-block",
                         at(0, 50),
                         "the `retention` block cannot hold the `inner` block",
                         "Remove it",
@@ -1595,7 +1548,7 @@ mod tests {
             assert_eq!(
                 check(&[documents]),
                 Err(vec![refused(
-                    "config.unknown-block",
+                    "document.unknown-block",
                     at(0, 50),
                     "the `retention` block cannot hold the `inner` block",
                     "Remove it",
@@ -1618,13 +1571,13 @@ mod tests {
                 check(&[documents]),
                 Err(vec![
                     refused(
-                        "config.unknown-attribute",
+                        "document.unknown-attribute",
                         at(0, 14),
                         "`hold` is not an attribute of the `retention` block",
                         "Use `select` or `keep`, or remove it",
                     ),
                     refused(
-                        "config.unknown-block",
+                        "document.unknown-block",
                         at(0, 50),
                         "the `retention` block cannot hold the `inner` block",
                         "Remove it",
@@ -1652,8 +1605,345 @@ mod tests {
         }
     }
 
+    mod accesses {
+        use spec::access::{Action, Actions, Policy};
+        use types::authority::Authority;
+
+        use super::*;
+
+        const ACTION_FIX: &str = "Use `read`, `write`, `plan`, `apply`, `secret`, or \
+                                  `admin`";
+        const AUTHORITY_FIX: &str = "Write an integer from 0 to 255";
+
+        /// An `access` block in file 0 at offset 0, labeled `edge`.
+        fn access(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(0, 0, "access", &["edge"], attributes)])]
+        }
+
+        /// A list of `items`, the item `i` at offset `50 + i`.
+        fn list(items: Vec<Kind>) -> Kind {
+            let items = (50..).zip(items).map(|(offset, kind)| Value {
+                kind,
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        fn reference(text: &str) -> Kind {
+            Kind::Reference(text.parse().unwrap())
+        }
+
+        /// The attributes of a policy that allows `allow`, with `authority` when given.
+        fn attributes(
+            allow: Kind,
+            authority: Option<i128>,
+        ) -> Vec<(&'static str, Kind)> {
+            let mut attributes = vec![
+                ("subjects", string("site_a.operators.*")),
+                ("select", string("edge.**")),
+                ("allow", allow),
+            ];
+            attributes.extend(authority.map(|n| ("authority", Kind::Integer(n))));
+            attributes
+        }
+
+        /// The one entry of an access policy labeled `edge`.
+        fn allowed(actions: &[Action], authority: u8) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(
+                selector(&["site_a.operators.*"]),
+                selector(&["edge.**"]),
+                actions.iter().copied().collect(),
+                Authority(authority),
+            );
+            let entry = Entry {
+                definition: Definition::Spec(definition::Definition::Access(policy)),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@access"), entry)])
+        }
+
+        fn policy(entries: &BTreeMap<Name, Entry>) -> &Policy {
+            match &entries[&key("edge.@access")].definition {
+                Definition::Spec(definition::Definition::Access(policy)) => policy,
+                definition => panic!("not an access policy: {definition:?}"),
+            }
+        }
+
+        #[test]
+        fn reads_an_access_policy_from_strings_and_bare_words() {
+            let both = [Action::Read, Action::Write];
+            let cases = [
+                (list(vec![string("read"), string("write")]), &both[..]),
+                (list(vec![reference("read"), reference("write")]), &both[..]),
+                (list(vec![string("write"), reference("read")]), &both[..]),
+                (string("read"), &[Action::Read][..]),
+                (string("write"), &[Action::Write][..]),
+                (string("plan"), &[Action::Plan][..]),
+                (reference("apply"), &[Action::Apply][..]),
+                (string("secret"), &[Action::Secret][..]),
+                (reference("admin"), &[Action::Admin][..]),
+                (
+                    list(vec![string("read"), reference("read")]),
+                    &[Action::Read][..],
+                ),
+            ];
+            for (allow, actions) in cases {
+                let written = actions.contains(&Action::Write).then_some(200);
+                let documents = access(&attributes(allow.clone(), written));
+                assert_eq!(check(&documents), Ok(allowed(actions, 200)), "{allow:?}");
+            }
+            let every = ["read", "write", "plan", "apply", "secret", "admin"];
+            let documents = access(&attributes(
+                list(every.iter().map(|word| string(word)).collect()),
+                Some(255),
+            ));
+            let all = [
+                Action::Read,
+                Action::Write,
+                Action::Plan,
+                Action::Apply,
+                Action::Secret,
+                Action::Admin,
+            ];
+            assert_eq!(check(&documents), Ok(allowed(&all, 255)));
+        }
+
+        #[test]
+        fn caps_a_write_at_the_least_authority_by_default() {
+            let read = check(&access(&attributes(string("write"), None))).unwrap();
+            assert_eq!(read, allowed(&[Action::Write], 0));
+            assert_eq!(policy(&read).authority(), Some(Authority(0)));
+            let zero = check(&access(&attributes(string("write"), Some(0)))).unwrap();
+            assert_eq!(zero, read);
+        }
+
+        #[test]
+        fn reads_no_authority_without_write_as_none() {
+            let read = check(&access(&attributes(string("read"), None))).unwrap();
+            assert_eq!(policy(&read).authority(), None);
+            assert_eq!(
+                policy(&read).allow(),
+                Actions::NONE.union([Action::Read].into_iter().collect())
+            );
+        }
+
+        #[test]
+        fn refuses_an_authority_without_write() {
+            let message = "the policy has an `authority` and no `write` in `allow`, \
+                           and only a write uses an authority";
+            let fix = "Add `write` to `allow`, or remove `authority`";
+            for (allow, authority) in [
+                (string("read"), 200),
+                (list(vec![string("read"), reference("plan")]), 0),
+            ] {
+                assert_eq!(
+                    check(&access(&attributes(allow, Some(authority)))),
+                    Err(vec![refused(
+                        "config.authority-without-write",
+                        at(0, 17),
+                        message,
+                        fix,
+                    )]),
+                    "{authority}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_only_a_missing_subjects_beside_an_authority_without_write() {
+            let documents = access(&[
+                ("select", string("edge.**")),
+                ("allow", string("read")),
+                ("authority", Kind::Integer(5)),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.missing-attribute",
+                    at(0, 0),
+                    "the `access` block has no `subjects`",
+                    "Add a `subjects` attribute with the subjects that it allows, \
+                     such as \"site_a.operators.*\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_only_the_action_of_a_bad_allow_with_an_authority() {
+            assert_eq!(
+                check(&access(&attributes(string("erase"), Some(5)))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "`erase` is not an action",
+                    ACTION_FIX,
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_word_that_is_not_an_action() {
+            let cases = [
+                (string("erase"), at(0, 15), "`erase` is not an action"),
+                (reference("Read"), at(0, 15), "`Read` is not an action"),
+                (
+                    reference("site_a.read"),
+                    at(0, 15),
+                    "`site_a.read` is not an action",
+                ),
+                (
+                    list(vec![string("read"), string("erase")]),
+                    at(0, 51),
+                    "`erase` is not an action",
+                ),
+                (
+                    list(vec![Kind::Integer(1), string("erase")]),
+                    at(0, 50),
+                    "an action is a string or a reference, not an integer",
+                ),
+                (
+                    Kind::Bool(true),
+                    at(0, 15),
+                    "an action is a string or a reference, not a bool",
+                ),
+            ];
+            for (allow, span, message) in cases {
+                assert_eq!(
+                    check(&access(&attributes(allow, None))),
+                    Err(vec![refused(
+                        "config.bad-action",
+                        span,
+                        message,
+                        ACTION_FIX
+                    )]),
+                    "{message}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_empty_allow() {
+            assert_eq!(
+                check(&access(&attributes(list(vec![]), None))),
+                Err(vec![refused(
+                    "config.empty-allow",
+                    at(0, 15),
+                    "the `allow` list holds no action",
+                    "Add one or more actions, such as \"read\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_authority_that_is_not_from_0_to_255() {
+            for (authority, message) in [
+                (Kind::Integer(256), "the authority 256 is not from 0 to 255"),
+                (Kind::Integer(-1), "the authority -1 is not from 0 to 255"),
+                (string("high"), "an authority is an integer, not a string"),
+            ] {
+                let mut attributes = attributes(string("write"), None);
+                attributes.push(("authority", authority));
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![refused(
+                        "config.bad-authority",
+                        at(0, 17),
+                        message,
+                        AUTHORITY_FIX,
+                    )]),
+                    "{message}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_access_without_subjects_select_or_allow() {
+            let subjects = refused(
+                "document.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `subjects`",
+                "Add a `subjects` attribute with the subjects that it allows, such as \
+                 \"site_a.operators.*\"",
+            );
+            let select = refused(
+                "document.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `select`",
+                "Add a `select` attribute with the names that it allows them to use, \
+                 such as \"site_a.**\"",
+            );
+            let allow = refused(
+                "document.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `allow`",
+                "Add an `allow` attribute with the actions that it allows, such as \
+                 \"read\"",
+            );
+            let full = attributes(string("read"), None);
+            for (i, diagnostic) in [subjects.clone(), select.clone(), allow.clone()]
+                .into_iter()
+                .enumerate()
+            {
+                let mut attributes = full.clone();
+                attributes.remove(i);
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![diagnostic.clone()]),
+                    "{diagnostic:?}"
+                );
+            }
+            assert_eq!(
+                check(&access(&[("authority", Kind::Integer(1))])),
+                Err(vec![subjects, select, allow])
+            );
+        }
+
+        #[test]
+        fn refuses_what_an_access_block_cannot_hold() {
+            // An unknown attribute also hides an `authority` with no `write`.
+            for (authority, key) in [(None, 16), (Some(5), 18)] {
+                let mut attributes = attributes(string("read"), authority);
+                attributes.push(("deny", string("write")));
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![refused(
+                        "document.unknown-attribute",
+                        at(0, key),
+                        "`deny` is not an attribute of the `access` block",
+                        "Use `subjects`, `select`, `allow`, or `authority`, or remove \
+                         it",
+                    )])
+                );
+            }
+            assert_inner_blocks_refused(
+                "access",
+                &self::attributes(string("read"), None),
+            );
+        }
+
+        #[test]
+        fn reads_an_access_and_a_node_settings_with_one_label() {
+            let documents = [document(vec![
+                block(0, 0, "access", &["edge"], &attributes(string("read"), None)),
+                settings(
+                    0,
+                    100,
+                    "edge",
+                    &[("select", string("edge.*")), ("disk", string("1GiB"))],
+                ),
+            ])];
+            let keys: Vec<String> = check(&documents)
+                .unwrap()
+                .keys()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(keys, ["edge.@access", "edge.@node_settings"]);
+        }
+    }
+
     mod channels {
-        use spec::channel::{self, Data, DataType};
+        use spec::channel::{self, Data};
+        use spec::data_type::DataType;
         use spec::unit::Unit;
         use types::sample::{self, Scalar};
 
@@ -2145,13 +2435,13 @@ mod tests {
                 check(&documents),
                 Err(vec![
                     refused(
-                        "config.unknown-attribute",
+                        "document.unknown-attribute",
                         at(0, 12),
                         "`index` is not an attribute of the `channel` block",
                         "Use `kind`, `error`, or `control`, or remove it",
                     ),
                     refused(
-                        "config.unknown-attribute",
+                        "document.unknown-attribute",
                         at(0, 114),
                         "`error` is not an attribute of the `channel` block",
                         "Use `kind`, `data_type`, `index`, `quality`, or `unit`, or \
@@ -2167,14 +2457,14 @@ mod tests {
                 check(&value(&[])),
                 Err(vec![
                     refused(
-                        "config.missing-attribute",
+                        "document.missing-attribute",
                         at(0, 100),
                         "the `channel` block has no `index`",
                         "Add an `index` attribute with the name of an index channel, \
                          such as \"edge.time\"",
                     ),
                     refused(
-                        "config.missing-attribute",
+                        "document.missing-attribute",
                         at(0, 100),
                         "the `channel` block has no `data_type`",
                         "Add a `data_type` attribute such as \"f64\"",
@@ -2186,6 +2476,7 @@ mod tests {
         #[test]
         fn refuses_a_block_inside_a_channel() {
             assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
+            assert_inner_blocks_refused("channel", &[("kind", string("stream"))]);
             assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
         }
 
@@ -2327,7 +2618,7 @@ mod tests {
                         "no `channel` block defines the error channel `edge.err`",
                     ),
                     refused(
-                        "config.unknown-attribute",
+                        "document.unknown-attribute",
                         at(0, 14),
                         "`unit` is not an attribute of the `channel` block",
                         "Use `kind`, `error`, or `control`, or remove it",
@@ -2351,7 +2642,7 @@ mod tests {
                         "no `channel` block defines the index channel `edge.tim`",
                     ),
                     refused(
-                        "config.unknown-attribute",
+                        "document.unknown-attribute",
                         at(0, 114),
                         "`unit2` is not an attribute of the `channel` block",
                         "Use `kind`, `data_type`, `index`, `quality`, or `unit`, or \

@@ -115,8 +115,8 @@ state on `main`.
 - The first message of a stream, and each datagram, starts with a `wire` header
   (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
   counts such a datagram. A client opens only hub streams; `node` refuses the other
-  protocols from a client. `wire::header` landed; the dispatch table in `node` is not
-  built.
+  protocols from a client. `node` stops and resets each stream until a protocol has a
+  server. It reads no datagram yet (#1661), and admits every peer (#1628).
 
 ### Subject to owner
 
@@ -354,7 +354,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
-| `spec_data_type` | `spec::channel::DataType` | Prints as the text it was read from |
+| `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
@@ -377,5 +377,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`),
 `mesh::Member::decode` (the join answer of #336 adds its target), `spec` tree chunks
-(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), and
-each connector's protocol parser.
+(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), the
+names of a mesh log directory (`mesh::log::sequence`, #1746), and each connector's
+protocol parser.
