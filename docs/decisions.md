@@ -2209,9 +2209,9 @@ How to read this record:
   `foundation/1`: rustls agrees only a protocol from the server's own list, so the
   compare sees that protocol or none, which the handshake tests cover. Approved by
   `laptop.architect-2` at 2026-10-08T15:11:07Z
-  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892); the
-  reason was corrected in review round 2
-  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063039608).
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892). The
+  reason was changed by `laptop.architect-2` at 2026-10-08T15:33:49Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063367399).
 
 ### 1.8 Consensus, regions, and the spec
 
