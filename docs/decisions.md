@@ -5320,14 +5320,14 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
   Supersedes the name `Hub::rules` of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140.
-  A rule of the client wire, which each SDK follows: a program sends its first request
-  once the challenge after its hello comes. The node sends it only after it admits
-  the hello, so this rule also makes the hello stream the first that `Link::serve`
-  gets, in any order of the headers. A program that breaks it gets `Unadmitted` or
-  `Message` with `Kind`. Lost: a node that holds each request stream until it admits
-  a hello, which adds a queue, its bound, and its timeout to `hub` to save one round
-  trip for each session. Decided by
-  `laptop.architect` (2026-10-08T18:16:38Z,
+  A rule of the client wire, which each SDK follows: a program opens its first request
+  stream once the challenge after its hello comes. The node sends it only after it
+  admits the hello, so this rule also makes the hello stream the first that
+  `Link::serve` gets, in any order of the headers. A program that breaks it gets
+  `Unadmitted` or `Message` with `Kind`, also when it sends its request after that
+  challenge. Lost: a node that holds each request stream until it admits a hello,
+  which adds a queue, its bound, and its timeout to `hub` to save one round trip for
+  each session. Decided by `laptop.architect` (2026-10-08T18:16:38Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520). The
   sentence on the hello stream is by `laptop.architect` (2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418),
