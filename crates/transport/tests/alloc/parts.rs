@@ -3,6 +3,7 @@
 //! takes such a copy in part, and one for each growth of the segment queue of
 //! noq-proto.
 
+use std::iter;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::ops::Range;
@@ -166,6 +167,30 @@ pub(crate) fn main() {
             short.cause
         );
     });
+    // A stretch of 100 bytes, then a run of 4000 bytes, on a new connection: the
+    // stretch buffer grows only with the walk. In one part, one allocation of 100
+    // bytes. In parts of 8 bytes, 100, then each doubling to 1600.
+    let adjacent = (0..500).map(|at| series(200 + at * 8..208 + at * 8, 0));
+    let walks = [
+        (vec![series(0..100, 0), series(200..4_200, 0)], 1),
+        (iter::once(series(0..100, 0)).chain(adjacent).collect(), 5),
+    ];
+    for (parts, over) in walks {
+        run(WIDE, async move |session, pool, clock| {
+            let opened = session.open_sender(Class::Complete).await;
+            let mut sender = opened.expect("a stream");
+            clock.sleep(PAUSE).await;
+            poll(&mut sender, filled(&pool, 8), &[]);
+            clock.sleep(PAUSE).await;
+            let block = filled(&pool, 4_100);
+            let sent = ALLOCATOR.count(|| poll(&mut sender, block, &[])).1;
+            clock.sleep(PAUSE).await;
+            let block = filled(&pool, 4_200);
+            let parted = ALLOCATOR.count(|| poll(&mut sender, block, &parts)).1;
+            sender.finish().expect("finished");
+            assert_eq!(parted, sent + over, "the growths of the stretch buffer");
+        });
+    }
     run(NARROW, async |session, pool, clock| {
         let mut sender = session
             .open_sender(Class::Complete)
