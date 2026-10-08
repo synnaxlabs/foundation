@@ -436,3 +436,16 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn decodes_the_fuzz_inputs_to_the_fixture_plans() {
+    let added = include_bytes!("../../../../../oracles/fuzz/config_plan/added");
+    let changed = include_bytes!("../../../../../oracles/fuzz/config_plan/changed");
+    let empty = include_bytes!("../../../../../oracles/fuzz/config_plan/empty");
+    let found = [added.as_slice(), changed].map(Plan::decode);
+    assert_eq!(found, plans().map(|plan| Ok(spanless(plan))));
+    assert_eq!(
+        Plan::decode(empty).map(|plan| plan.encode()),
+        Ok(bytes(&[]))
+    );
+}
