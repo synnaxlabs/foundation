@@ -288,7 +288,9 @@ fn of_two_applies_from_one_base_one_gives_the_pointer_and_the_other_stale() {
         cluster.script(|_| home(9));
         cluster.run(seconds(5));
         let board = cluster.board();
-        let [(_, _, Ok(moved)), (loser, _, Err(stale))] = board.applied.as_slice()
+        let mut applied = board.applied.clone();
+        applied.sort_by_key(|(_, _, result)| result.is_err());
+        let [(winner, _, Ok(moved)), (loser, _, Err(stale))] = applied.as_slice()
         else {
             panic!("run {run}: the calls gave {:?}", board.applied);
         };
@@ -302,6 +304,7 @@ fn of_two_applies_from_one_base_one_gives_the_pointer_and_the_other_stale() {
         };
         assert_eq!(*stale, stale_error, "run {run}");
         assert!([leader, follower].contains(loser), "run {run}");
+        assert_ne!(winner, loser, "run {run}");
         let pointers: BTreeMap<_, _> = IDS.map(|id| (id, *moved)).into();
         assert_eq!(board.pointers, pointers, "run {run}");
     }

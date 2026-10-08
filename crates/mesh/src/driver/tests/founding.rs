@@ -1,0 +1,339 @@
+//! Tests of the founding that the first open of a mesh directory keeps, and that each
+//! later open checks `Config::founding` against.
+
+use env::files::Mode;
+
+use super::*;
+
+const FILE: &str = "founding";
+
+/// The founding of node 1 with the members and voters `IDS`.
+async fn create_region(node: &sim::node::Node, tasks: &Tasks) -> region::Founding {
+    config(node, tasks, 1, &IDS, &IDS).await.founding
+}
+
+/// Opens node 1 with `founding`, and drops the mesh.
+fn run_with(sim: &mut Sim, node: &sim::node::Node, founding: region::Founding) {
+    sim.run_on(node, |node, tasks| async move {
+        let config = Config {
+            founding,
+            ..config(&node, &tasks, 1, &IDS, &IDS).await
+        };
+        Mesh::start(config).await.unwrap();
+    })
+    .unwrap();
+}
+
+/// Writes a hard state to the log of node 1. One voter of three writes none alone.
+fn write_record(sim: &mut Sim, node: &sim::node::Node) {
+    sim.run_on(node, |node, _| async move {
+        let (mut log, _) = Log::open(node.files(), LOG.into(), create_pool())
+            .await
+            .unwrap();
+        let hard = Hard {
+            term: Term(1),
+            vote: Some(key(1)),
+            leader: None,
+            proof: None,
+        };
+        log.write(Some(hard), &[]).await.unwrap();
+    })
+    .unwrap();
+}
+
+/// A first open with the founding of [`create_region`], and a record in the log.
+fn founded(seed: u64) -> (Sim, sim::node::Node, region::Founding) {
+    let mut sim = Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config::default());
+    let region = sim
+        .run_on(&node, |node, tasks| async move {
+            create_region(&node, &tasks).await
+        })
+        .unwrap();
+    run_with(&mut sim, &node, region.clone());
+    write_record(&mut sim, &node);
+    (sim, node, region)
+}
+
+/// Opens node 1 with `founding`, and gives the error of the open.
+fn refused(sim: &mut Sim, node: &sim::node::Node, founding: region::Founding) -> Error {
+    sim.run_on(node, |node, tasks| async move {
+        let config = Config {
+            founding,
+            ..config(&node, &tasks, 1, &IDS, &IDS).await
+        };
+        Mesh::start(config).await.err().unwrap()
+    })
+    .unwrap()
+}
+
+/// What the log of node 1 holds.
+fn logged(sim: &mut Sim, node: &sim::node::Node) -> log::Stored {
+    sim.run_on(node, |node, _| async move {
+        let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+            .await
+            .unwrap();
+        stored
+    })
+    .unwrap()
+}
+
+/// The error of an open with `given` after a first open with `stored`.
+fn mismatch(stored: &region::Founding, given: &region::Founding) -> Error {
+    Error::Founding {
+        stored: Box::new(stored.clone()),
+        given: Box::new(given.clone()),
+    }
+}
+
+#[test]
+fn a_reopen_with_fewer_voters_is_refused_before_raft_starts() {
+    let (mut sim, node, region) = founded(0);
+    let before = logged(&mut sim, &node);
+    assert_ne!(before, log::Stored::default());
+    let given = region::Founding {
+        voters: [key(1)].into(),
+        ..region.clone()
+    };
+    let error = refused(&mut sim, &node, given.clone());
+    assert_eq!(error, mismatch(&region, &given));
+    let text = format!(
+        "the mesh was founded with voters {{{}, {}, {}}}, not {{{}}}",
+        key(1),
+        key(2),
+        key(3),
+        key(1)
+    );
+    assert_eq!(error.to_string(), text);
+    assert_eq!(logged(&mut sim, &node), before);
+}
+
+#[test]
+fn a_reopen_with_another_prefix_is_refused() {
+    let (mut sim, node, region) = founded(0);
+    let given = region::Founding {
+        prefix: Prefix::ROOT,
+        ..region.clone()
+    };
+    let error = refused(&mut sim, &node, given.clone());
+    assert_eq!(error, mismatch(&region, &given));
+    let text = "the mesh was founded with prefix \"plant\", not \"\"";
+    assert_eq!(error.to_string(), text);
+}
+
+#[test]
+fn a_reopen_with_another_record_of_a_member_is_refused() {
+    let (mut sim, node, region) = founded(0);
+    let mut given = region.clone();
+    given.members = vec![common::member(1), record(2, 2, 9), common::member(3)];
+    let error = refused(&mut sim, &node, given.clone());
+    assert_eq!(error, mismatch(&region, &given));
+    let text = format!(
+        "the mesh was founded with another record of member {}",
+        key(2)
+    );
+    assert_eq!(error.to_string(), text);
+}
+
+#[test]
+fn a_reopen_with_a_member_more_or_less_is_refused() {
+    let (mut sim, node, region) = founded(0);
+    let less = region::Founding {
+        members: common::create_members(&[1, 2]),
+        voters: [key(1), key(2)].into(),
+        ..region.clone()
+    };
+    let error = refused(&mut sim, &node, less);
+    let text = format!(
+        "the mesh was founded with member {}, which the config lacks",
+        key(3)
+    );
+    assert_eq!(error.to_string(), text);
+    let more = region::Founding {
+        members: common::create_members(&[1, 2, 3, 4]),
+        ..region.clone()
+    };
+    let error = refused(&mut sim, &node, more);
+    let text = format!("the mesh was founded with no member {}", key(4));
+    assert_eq!(error.to_string(), text);
+}
+
+#[test]
+fn a_reopen_with_other_definitions_is_refused() {
+    let (mut sim, node, region) = founded(0);
+    let name = |label: &str| spec::definition::Kind::Subject.key(label).unwrap();
+    let subject = |id: u8| {
+        Definition::Subject(spec::subject::Subject::new(vec![public(id)]).unwrap())
+    };
+    let more = region::Founding {
+        definitions: [(name("plant.app"), subject(1))].into(),
+        ..region.clone()
+    };
+    let error = refused(&mut sim, &node, more.clone());
+    assert_eq!(error, mismatch(&region, &more));
+    let text = "the mesh was founded with no definition plant.app.@subject";
+    assert_eq!(error.to_string(), text);
+
+    let error = refused(&mut sim, &node, more.clone());
+    assert_eq!(error, mismatch(&region, &more), "a second refused open");
+}
+
+#[test]
+fn a_reopen_with_the_same_founding_opens_whatever_the_order_of_its_members() {
+    let (mut sim, node, mut region) = founded(0);
+    region.members.reverse();
+    run_with(&mut sim, &node, region);
+}
+
+#[test]
+fn a_founding_with_definitions_opens_again() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let region = sim
+        .run_on(&node, |node, tasks| async move {
+            region::Founding {
+                definitions: super::create_founding(),
+                ..create_region(&node, &tasks).await
+            }
+        })
+        .unwrap();
+    run_with(&mut sim, &node, region.clone());
+    run_with(&mut sim, &node, region);
+}
+
+#[test]
+fn a_log_with_no_founding_is_refused() {
+    let (mut sim, node, region) = founded(0);
+    sim.run_on(&node, |node, _| async move {
+        node.files().remove(Path::new(FILE)).await.unwrap();
+    })
+    .unwrap();
+    let error = refused(&mut sim, &node, region);
+    let path = PathBuf::from(FILE);
+    assert_eq!(error, Error::Unfounded { path });
+    let text = "the log of the mesh directory holds a record, but founding is not there \
+                or does not read back whole";
+    assert_eq!(error.to_string(), text);
+}
+
+/// Flips the bytes of the check, of the version, and of the start and end of the
+/// body, one at a time.
+#[test]
+fn a_founding_with_a_flipped_byte_is_refused() {
+    let (mut sim, node, region) = founded(0);
+    let flip = |sim: &mut Sim, at: u64| {
+        sim.run_on(&node, move |node, _| async move {
+            let path = Path::new(FILE);
+            let file = node.files().open(path, Mode::Write).await.unwrap();
+            let pool = create_pool();
+            let byte = file.read_at(at, pool.alloc(1).unwrap()).await.unwrap();
+            let flipped = byte.first().unwrap() ^ 1;
+            let block = crate::bytes::block(&pool, &[flipped]).unwrap();
+            file.write_at(at, &[block]).await.unwrap();
+            file.sync().await.unwrap();
+            file.len()
+        })
+        .unwrap()
+    };
+    let len = flip(&mut sim, 0);
+    flip(&mut sim, 0);
+    let last = len.checked_sub(1).unwrap();
+    for at in (0..16).chain([last]) {
+        flip(&mut sim, at);
+        let error = refused(&mut sim, &node, region.clone());
+        let path = PathBuf::from(FILE);
+        assert_eq!(error, Error::Unfounded { path }, "byte {at}");
+        flip(&mut sim, at);
+    }
+    run_with(&mut sim, &node, region);
+}
+
+/// A founding whose check holds, with another version or a body that does not read.
+#[test]
+fn a_founding_of_another_version_or_form_is_refused() {
+    let forms = [(2_u16, vec![0]), (1, vec![]), (1, vec![9; 40])];
+    for (version, body) in forms {
+        let (mut sim, node, region) = founded(0);
+        sim.run_on(&node, move |node, _| async move {
+            let mut rest = version.to_le_bytes().to_vec();
+            rest.extend(body);
+            let check = types::digest::Digest::of(&rest).0;
+            let mut bytes = check.get(..8).unwrap().to_vec();
+            bytes.extend(rest);
+            let pool = create_pool();
+            let path = Path::new(FILE);
+            node.files().remove(path).await.unwrap();
+            let len = u64::try_from(bytes.len()).unwrap();
+            let file = node.files().open(path, Mode::Create { len }).await;
+            let file = file.unwrap();
+            let block = crate::bytes::block(&pool, &bytes).unwrap();
+            file.write_at(0, &[block]).await.unwrap();
+            file.sync().await.unwrap();
+        })
+        .unwrap();
+        let error = refused(&mut sim, &node, region);
+        let path = PathBuf::from(FILE);
+        assert_eq!(error, Error::Unfounded { path }, "version {version}");
+    }
+}
+
+/// A power cut at any point of a first open leaves a directory that opens again with
+/// the same founding. Once `founding` is in the directory, an open with another one is
+/// refused.
+#[test]
+fn a_power_cut_in_the_first_open_keeps_a_whole_founding_or_none() {
+    let (mut cut_before, mut cut_after) = (0_usize, 0_usize);
+    for step in 0..64 {
+        let mut sim = Sim::new(sim::Config {
+            seed: step,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        let region = sim
+            .run_on(&node, |node, tasks| async move {
+                create_region(&node, &tasks).await
+            })
+            .unwrap();
+        let shard = env::shards::Config {
+            name: "open".into(),
+            core: None,
+        };
+        let (own, first) = (node.clone(), region.clone());
+        let started = node.shards().start(shard, move |tasks| async move {
+            let config = Config {
+                founding: first,
+                ..config(&own, &tasks, 1, &IDS, &IDS).await
+            };
+            let _mesh = Mesh::start(config).await;
+            own.clock().sleep(TICK).await;
+        });
+        drop(started.unwrap());
+        sim.run_for(Span::from_nanos(
+            i64::try_from(step).unwrap().saturating_mul(100_000),
+        ))
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let kept = sim
+            .run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
+        if kept.contains(&PathBuf::from(FILE)) {
+            cut_after = cut_after.saturating_add(1);
+            let given = region::Founding {
+                voters: [key(1)].into(),
+                ..region.clone()
+            };
+            let error = refused(&mut sim, &node, given.clone());
+            assert_eq!(error, mismatch(&region, &given), "step {step}");
+        } else {
+            cut_before = cut_before.saturating_add(1);
+        }
+        run_with(&mut sim, &node, region);
+    }
+    assert_ne!(cut_before, 0, "no cut came before the founding was kept");
+    assert_ne!(cut_after, 0, "no cut came after the founding was kept");
+}
