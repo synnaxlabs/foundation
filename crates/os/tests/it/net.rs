@@ -326,6 +326,46 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
     });
 }
 
+/// A write of no parts waits for the stream to be ready, as a write of bytes does.
+#[test]
+fn a_write_of_no_parts_waits_at_the_unsent_bound() {
+    on_thread("net-none-wait", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.send_buffer_bytes = 1 << 20;
+        let mut client = net.connect(&config).await.expect("the listener accepts");
+        let _server = accept(&mut listener).await;
+        write(&mut client, &[&[7]]).await.expect("one byte");
+        let bytes = vec![7; 1 << 22];
+        while write_once(&mut client, &bytes).is_ready() {}
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(client.poll_write(&mut cx, &[]), Poll::Pending);
+    });
+}
+
+/// With a send buffer of the unsent bound, the kernel can refuse a write before the
+/// bytes since the last wait reach the bound. The write then waits.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_full_send_buffer_below_the_bound_makes_a_write_wait() {
+    on_thread("net-full", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.send_buffer_bytes = config.options.unsent_bytes_max;
+        let mut client = net.connect(&config).await.expect("the listener accepts");
+        let _server = accept(&mut listener).await;
+        let bytes = vec![7; 1 << 20];
+        let bound = Duration::from_millis(250);
+        while let Ok(sent) =
+            tokio::time::timeout(bound, write(&mut client, &[&bytes])).await
+        {
+            sent.expect("the write takes bytes or waits");
+        }
+    });
+}
+
 /// On macOS, one write takes at most the unsent bound, since the kernel applies it
 /// only to the write event. An accepted stream keeps the bound of its listener.
 #[test]
