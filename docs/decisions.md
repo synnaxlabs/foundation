@@ -4891,7 +4891,10 @@ How to read this record:
   replaces https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872).
   Lost: the lossy text, with which two files give one place; the `Debug` form in
   `Place::file`, which each JSON reader must decode; and the escaped path in the
-  message of `ops.unknown-extension`, which an agent must decode.
+  message of `ops.unknown-extension`, which an agent must decode. The `Place::file` doc
+  names the code, not the function that refuses the path (`laptop.architect-2`,
+  2026-10-08T18:12:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066177474).
   Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
 
