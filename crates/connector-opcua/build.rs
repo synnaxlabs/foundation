@@ -24,7 +24,9 @@ fn main() {
     // The shim is our code, so its warnings are errors. It reads the headers of the
     // copy as system headers, which keeps their warnings out.
     let mut shim = cc::Build::new();
-    shim.warnings_into_errors(true);
+    shim.warnings(true)
+        .extra_warnings(true)
+        .warnings_into_errors(true);
     for flag in read("flags.txt").lines() {
         // Each include path is relative to the copy.
         if let Some(dir) = flag.strip_prefix("-I") {
