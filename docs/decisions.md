@@ -3244,7 +3244,11 @@ How to read this record:
   and the definitions:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600. The
   lock of the log comes before the write of `founding`, not after it as in the plan, so
-  two opens of one directory never write it at once. Lost: a digest of the whole value
+  two opens of one directory never write it at once. A failed file call on `founding`
+  gives `Error::Files`, and a pool with no block for it gives `Error::Pool`, not
+  `Error::Log`, which names a part that did not fail (`laptop.architect`,
+  2026-10-08T16:10:01Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064069802). Lost: a digest of the whole value
   in the file, because the operator cannot see which field differs and the region does
   not read back; one variant per field, four variants for one contract; the root of the
   definitions alone, because the file is then not the whole value.
