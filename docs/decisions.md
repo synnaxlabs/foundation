@@ -5452,3 +5452,19 @@ after the heal in place of `OUTAGE`: two times the sum of the delay before the d
 starts and the time to send `WRITTEN` at the drain rate measured in the lab.
 `laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
+
+**ONE NODE (2026-10-08)** The third milestone: one real node moves OPC UA samples to
+InfluxDB. The `foundation` binary starts a node on a real disk and network, reads an
+OPC UA server through `connector-opcua`, and pushes the samples to InfluxDB through
+`connector-influx`. Its acceptance is a simulated OPC UA server, the node, and a
+simulated InfluxDB. A first version runs with no OPC UA security, so the crypto plugin
+(5.1 item 2) does not block it. The developer experience on one node is part of the
+goal: install and start in a few commands, a config that is easy to write, clear errors
+for a wrong config or a wrong connection, and a way to see that samples flow. It comes
+after FIRST SLICE, which keeps priority. When it and STORE AND FORWARD both have ready
+issues, ONE NODE goes first. The plan is on #1737. The person decided on 2026-10-08,
+relayed by `laptop.monitor`: the milestone ("Yes",
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089) and the
+order ("Yes, let's do one node first. We should really prioritize a working devx that
+feels relatively good with one node. and an influxdb to opc ua connector is prime for
+that", https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050570677).
