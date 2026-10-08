@@ -46,7 +46,7 @@ struct Held {
     order: Box<[u32]>,
     /// The places name each entry of the key set in entry order, so the reader's frame
     /// is the home's frame.
-    whole: bool,
+    identical: bool,
 }
 
 impl Places {
@@ -68,34 +68,21 @@ impl Places {
     ///
     /// If `set` is not the key set of `frame`.
     pub fn lay(&mut self, frame: &Frame, set: &KeySet) -> &[Placed] {
-        let held = self
-            .held
-            .entry(set.key())
-            .or_insert_with(|| Held::new(&self.slots, set));
+        let held = held(&mut self.held, &self.slots, frame, set);
         lay(held, frame, &mut self.bounds, &mut self.placed);
         &self.placed
     }
 
     /// The [`Frame::charge`] of the frame that the reader builds from `frame`, of key
     /// set `set`. O(1) when the places name each entry of `set` in entry order, as
-    /// the reader's frame is then `frame`; else as for [`Places::lay`], with no
-    /// sort by place.
+    /// the reader's frame is then `frame`; else as for [`Places::lay`].
     ///
     /// # Panics
     ///
     /// If `set` is not the key set of `frame`.
     pub fn charge(&mut self, frame: &Frame, set: &KeySet) -> u64 {
-        let held = self
-            .held
-            .entry(set.key())
-            .or_insert_with(|| Held::new(&self.slots, set));
-        if held.whole {
-            assert!(
-                frame.key_set() == set.key(),
-                "the frame is of key set {} and the places of key set {}",
-                frame.key_set().get(),
-                set.key().get()
-            );
+        let held = held(&mut self.held, &self.slots, frame, set);
+        if held.identical {
             let (_, descriptors, body) = parts(&frame.0);
             return charge(descriptors.len(), body.len());
         }
@@ -108,6 +95,23 @@ impl Places {
         });
         charge(series, body)
     }
+}
+
+/// What `slots` learn of `set`, the key set of `frame`, from `held`, or new.
+fn held<'a>(
+    held: &'a mut hash::Map<key_set::Key, Held>,
+    slots: &[Slot],
+    frame: &Frame,
+    set: &KeySet,
+) -> &'a Held {
+    assert!(
+        frame.key_set() == set.key(),
+        "the frame is of key set {} and the places of key set {}",
+        frame.key_set().get(),
+        set.key().get()
+    );
+    held.entry(set.key())
+        .or_insert_with(|| Held::new(slots, set))
 }
 
 /// Calls `f` with the position in `held.entries` and the bounds of each series of
@@ -164,19 +168,26 @@ fn gallop(entries: &[(u32, u32)], at: usize, entry: u32) -> usize {
     start + entries[start..end].partition_point(|&(held, _)| held < entry)
 }
 
+/// A place as a `u32`.
+fn place_u32(place: usize) -> u32 {
+    u32::try_from(place).expect("invariant: an open's keys fit a u32")
+}
+
 impl Held {
     fn new(slots: &[Slot], set: &KeySet) -> Self {
         let mut entries: Vec<(u32, u32)> = slots
             .iter()
             .enumerate()
-            .filter_map(|(place, &slot)| Some((to_u32(set.find(slot)?), to_u32(place))))
+            .filter_map(|(place, &slot)| {
+                Some((to_u32(set.find(slot)?), place_u32(place)))
+            })
             .collect();
         // Each entry keeps its first place.
         entries.sort_unstable();
         entries.dedup_by_key(|&mut (entry, _)| entry);
         let mut order: Vec<u32> = (0..to_u32(entries.len())).collect();
         order.sort_unstable_by_key(|&at| entries[to_usize(at)].1);
-        let whole = entries.len() == set.entries().len()
+        let identical = entries.len() == set.entries().len()
             && order.iter().enumerate().all(|(n, &at)| to_usize(at) == n);
         Self {
             mask: Mask::of_entries(
@@ -185,7 +196,7 @@ impl Held {
             ),
             entries: entries.into(),
             order: order.into(),
-            whole,
+            identical,
         }
     }
 }
@@ -374,6 +385,19 @@ mod tests {
     }
 
     #[test]
+    fn charges_a_padded_last_series_as_the_unpadded_one() {
+        // Each size class of a block ends at a quarter step of a power of two.
+        for shift in 3..31 {
+            for quarter in 0..4 {
+                let end = (1_usize << shift) + quarter * (1 << shift) / 4;
+                for len in end.saturating_sub(64)..end + 64 {
+                    assert_eq!(charge(3, padded(len)), charge(3, len), "{len} bytes");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn lays_nothing_of_a_frame_without_a_placed_series() {
         let (one, two) = two_sets();
         let mut places = Places::new([two.entries()[3].slot].into());
@@ -383,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the frame is of key set 0 and the mask of key set 1")]
+    #[should_panic(expected = "the frame is of key set 0 and the places of key set 1")]
     fn panics_on_a_frame_of_another_key_set_in_lay() {
         let (one, two) = two_sets();
         let mut places = Places::new([one.entries()[1].slot].into());

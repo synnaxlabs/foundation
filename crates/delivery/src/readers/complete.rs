@@ -66,8 +66,7 @@ impl Cost {
     }
 
     /// What `frame`, of key set `set` and [`Frame::charge`] `whole`, costs the
-    /// session. Time is as for [`frame::Places::charge`]. Allocates only for the
-    /// first frame of each key set.
+    /// session, in the time of [`frame::Places::charge`].
     pub(super) fn charge(&mut self, frame: &Frame, set: &KeySet, whole: u64) -> u64 {
         match self {
             Self::Whole => whole,

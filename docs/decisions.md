@@ -1514,7 +1514,9 @@ How to read this record:
   frame; `Places::charge` is the `Frame::charge` of that frame, in O(1) when the places
   name each entry of the key set in entry order. Lost: a free function that lays one
   frame, with each caller keeping its own state for each key set, so `delivery` and
-  `serve` each repeat it. Decided by laptop.architect:
+  `serve` each repeat it. Also lost: one `Places` for each remote session, whose layout
+  `release` keeps with each frame for `serve`: each frame in the queue would hold its
+  layout. So a remote session holds two. Decided by laptop.architect:
   https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
