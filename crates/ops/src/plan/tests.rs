@@ -578,3 +578,21 @@ fn reads_a_name_that_is_not_utf8_by_its_extension() {
     .expect("a plan");
     assert_eq!(planned.added, 3);
 }
+
+#[test]
+fn places_each_sequence_that_is_not_utf8_as_one_replacement() {
+    let error = plan(
+        &bytes(&[b"a\xe2\x82.hcl"], "{"),
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &front_ends(),
+        &Table::new(),
+    )
+    .expect_err("problems");
+    let Error::Config(problems) = error else {
+        panic!("a config error");
+    };
+    let place = problems[0].place.as_ref().expect("a place");
+    assert_eq!(place.file, "a\u{fffd}.hcl");
+}
