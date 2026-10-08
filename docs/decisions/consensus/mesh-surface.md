@@ -148,8 +148,9 @@
   `admits -> bool`, which fits only one caller. Decided by `laptop.architect`
   (2026-10-08T22:29:26Z:
   https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077). The
-  scan makes `region::State::new` O(n²) in the members: 129 µs at 255 members,
-  accepted by `laptop.architect` (2026-10-08T23:10:50Z:
+  scan makes `region::State::new` O(n²) in the members: 129 µs at 255 members on a
+  shared Intel Xeon Platinum 8488C, accepted by `laptop.architect`
+  (2026-10-08T23:10:50Z:
   https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070861987). Trigger
   for a map by public key: a caller of `holder` for each message, or a measured
   `State::new` over 10 ms.
