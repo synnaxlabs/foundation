@@ -25,7 +25,7 @@ use wire::Protocol;
 use crate::applied::Applied;
 use crate::bytes::block;
 use crate::change::{Change, Join, Malformed};
-use crate::claim::{self, Signer};
+use crate::claim::{self, Known, Signer};
 use crate::ed25519;
 use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
@@ -173,6 +173,7 @@ impl Mesh {
         }
         let pool = Rc::clone(&config.pool);
         let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
+        let unapplied = written(&stored.entries).collect();
         let start = Start {
             hard: stored.hard,
             voters: Voters {
@@ -197,6 +198,8 @@ impl Mesh {
             watches: BTreeMap::new(),
             proposals: Vec::new(),
             slots: 0,
+            unapplied,
+            synced: Position::default(),
             waits: None,
             fresh: Vec::new(),
             starter: None,
@@ -217,6 +220,12 @@ impl Mesh {
             clock: config.clock,
             entropy: config.entropy,
         })
+    }
+
+    /// This node: [`Config::key`].
+    #[must_use]
+    pub fn key(&self) -> node::Key {
+        self.group.borrow().raft.key()
     }
 
     /// A watch of the home of `index`.
@@ -255,7 +264,14 @@ impl Mesh {
     ///   names as its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
     ///   voter of this node's configuration.
-    /// - [`Error::Claim`] when a claim in the message does not hold.
+    /// - [`Error::Claim`] when a claim of a known signer in the message does not
+    ///   hold. A claim of a signer with no key at this node is not an error: a voter
+    ///   of the proof with no key is removed, and an append is cut before the first
+    ///   entry with a claim of such a signer, so the group takes the shorter run. A
+    ///   claim that does not hold under the key of a join that is not applied is
+    ///   such a claim: only the apply proves a key. The grant of a reply is the
+    ///   exception: the sender check proved that the peer holds that key, so a
+    ///   grant that fails under it is forged.
     /// - [`Error::Raft`] when `raft` refuses the message.
     ///
     /// # Panics
@@ -265,20 +281,20 @@ impl Mesh {
     pub(crate) fn receive(
         &self,
         peer: PublicKey,
-        message: raft::Message,
+        mut message: raft::Message,
     ) -> Result<(), Error> {
         let mut group = self.group.borrow_mut();
         group.taking()?;
         let from = message.from;
-        let public_key = |key| group.state.member(key).map(Member::public_key);
-        if public_key(from) != Some(peer) {
+        if group.public_key(from).map(Known::public_key) != Some(peer) {
             return Err(Error::Spoofed { from });
         }
         if request(&message.body) && !group.voter(from) {
             return Err(Error::NotVoter { from });
         }
-        claim::check(&group.raft, &message, public_key)?;
+        claim::check(&group.raft, &mut message, |key| group.public_key(key))?;
         group.input(|raft| raft.step(message))?;
+        group.sync();
         group.wake();
         Ok(())
     }
@@ -300,13 +316,54 @@ impl Mesh {
         self.propose_data(data).await
     }
 
+    /// Proposes `voters` as the next set of voters, and returns once the entry is on
+    /// disk here. `raft` moves to the set through a joint configuration (RAFT
+    /// VOTERS).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Stopped`] when the group stopped, or stops before the write ends.
+    /// - [`Error::NotMember`] when a node of the set is not a member in the applied
+    ///   state of this node.
+    /// - [`Error::Raft`] when `raft` refuses the set ([`Raft::propose_voters`]), or
+    ///   with [`raft::Error::NotLeader`] when a new leader replaces the entry before
+    ///   a write holds it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the join answer of #336 is the first user")
+    )]
+    pub(crate) async fn propose_voters(
+        &self,
+        voters: BTreeSet<node::Key>,
+    ) -> Result<Position, Error> {
+        self.proposed(|group| {
+            let mut members = voters.iter();
+            if let Some(&key) = members.find(|&&key| group.state.member(key).is_none())
+            {
+                return Err(Error::NotMember(key));
+            }
+            Ok(group.raft.propose_voters(voters)?)
+        })
+        .await
+    }
+
     // Proposes `data` as it is, which need not be a change.
     async fn propose_data(&self, data: Vec<u8>) -> Result<Position, Error> {
+        self.proposed(|group| Ok(group.raft.propose(data)?)).await
+    }
+
+    // Waits for the write of the entry that `propose` appends.
+    async fn proposed(
+        &self,
+        propose: impl FnOnce(&mut Group) -> Result<Position, Error>,
+    ) -> Result<Position, Error> {
         let proposal = {
             let mut group = self.group.borrow_mut();
             group.taking()?;
+            let at = propose(&mut group)?;
+            group.sync();
             let proposal = Rc::new(Proposal {
-                at: group.raft.propose(data)?,
+                at,
                 held: Cell::new(None),
                 waker: Cell::new(None),
             });
@@ -352,7 +409,7 @@ impl Mesh {
             group.taking()?;
             let Voters { incoming, outgoing } = group.raft.voters();
             let holds = |voter: &node::Key| {
-                group.state.member(*voter).map(Member::public_key) == Some(peer)
+                group.public_key(*voter).map(Known::public_key) == Some(peer)
             };
             if !incoming.iter().chain(outgoing).any(holds) {
                 return Err(Error::PeerNotVoter { peer });
@@ -538,6 +595,11 @@ struct Group {
     proposals: Vec<Rc<Proposal>>,
     // The count of slots given, which is the slot of the next watch or try.
     slots: u64,
+    // Each join and configuration entry in the log that `raft` holds and this
+    // node has not applied, by index.
+    unapplied: BTreeMap<u64, Written>,
+    // The last entry whose join or configuration entry `sync` took.
+    synced: Position,
     // Why the last try of a write of the log found no block, until that write ends.
     waits: Option<block::Error>,
     // Each member that got its queue since `Senders::run` last took this.
@@ -550,6 +612,62 @@ struct Group {
 }
 
 impl Group {
+    // The public key of `key` in the applied state, else in the joins of the log
+    // as `raft` holds it. When those name two public keys, the joins below the
+    // first configuration entry whose incoming half names `key` decide: the leader
+    // applied the join that made `key` a voter before it wrote that entry, so that
+    // join is below it, and a later join can be a forgery. Two keys there too give
+    // none until the apply decides. An outgoing half repeats an earlier incoming
+    // half, so it names no node first.
+    fn public_key(&self, key: node::Key) -> Option<Known> {
+        if let Some(member) = self.state.member(key) {
+            return Some(Known::Applied(member.public_key()));
+        }
+        let joins = |below| {
+            self.unapplied
+                .range(..below)
+                .filter_map(|(_, written)| match written {
+                    Written::Join(of, public) if *of == key => Some(*public),
+                    _ => None,
+                })
+        };
+        if let Some(public) = one(joins(u64::MAX)) {
+            return Some(Known::Unapplied(public));
+        }
+        let named =
+            self.unapplied
+                .iter()
+                .find_map(|(&index, written)| match written {
+                    Written::Named(named) if named.contains(&key) => Some(index),
+                    _ => None,
+                })?;
+        one(joins(named)).map(Known::Unapplied)
+    }
+
+    // Takes the joins and configuration entries that `raft` appended since the last
+    // sync. It runs after each step and proposal; a tick adds none. When `unstable`
+    // no longer holds the synced entry, a step can have replaced it, and the
+    // entries from the first unstable index go.
+    fn sync(&mut self) {
+        let unstable = self.raft.unstable();
+        let (Some(first), Some(last)) = (unstable.first(), unstable.last()) else {
+            return;
+        };
+        let synced = self.synced;
+        let new = unstable.iter().rev().take_while(|entry| entry.at != synced);
+        let new = new.count();
+        if new == unstable.len() {
+            while let Some(entry) = self.unapplied.last_entry()
+                && *entry.key() >= first.at.index
+            {
+                entry.remove();
+            }
+        }
+        let (_, new) = unstable.split_at(unstable.len().saturating_sub(new));
+        self.unapplied.extend(written(new));
+        self.synced = last.at;
+    }
+
     fn running(&self) -> Result<(), Error> {
         match self.stopped.get() {
             Some(stopped) => Err(Error::Stopped(stopped.clone())),
@@ -634,6 +752,10 @@ impl Group {
 
     // Applies each change in `committed`, and wakes the watches when a home moves.
     fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
+        if let Some(last) = committed.last() {
+            let last = last.at.index;
+            self.unapplied.retain(|&index, _| index > last);
+        }
         for Entry { at, data } in committed {
             self.applied.push(at);
             self.wake_calls();
@@ -740,6 +862,39 @@ fn holds(entries: &[Entry], at: Position) -> bool {
     let offset = offset.and_then(|offset| usize::try_from(offset).ok());
     let entry = offset.and_then(|offset| entries.get(offset));
     entry.is_some_and(|entry| entry.at == at)
+}
+
+// A join or a configuration entry of the log.
+#[derive(Debug)]
+enum Written {
+    // The node key and public key of a join.
+    Join(node::Key, PublicKey),
+    // The nodes in the incoming half of a configuration entry.
+    Named(BTreeSet<node::Key>),
+}
+
+// Each join and configuration entry of `entries`, with its index.
+fn written(entries: &[Entry]) -> impl Iterator<Item = (u64, Written)> {
+    entries.iter().filter_map(|entry| {
+        let written = match &entry.data {
+            Data::Voters(change) => Written::Named(change.voters.incoming.clone()),
+            Data::Bytes(bytes) => {
+                let Ok(Change::Join(join)) = Change::decode(bytes) else {
+                    return None;
+                };
+                let card = &join.card;
+                Written::Join(card.key, card.card.public_key)
+            }
+            Data::Empty => return None,
+        };
+        Some((entry.at.index, written))
+    })
+}
+
+// The one key of `keys`, when they are all the same.
+fn one(mut keys: impl Iterator<Item = PublicKey>) -> Option<PublicKey> {
+    let first = keys.next()?;
+    keys.all(|key| key == first).then_some(first)
 }
 
 // Whether `body` asks its receiver to act. The other bodies answer a request.
@@ -1757,6 +1912,28 @@ mod tests {
     mod send;
     mod serve;
 
+    /// The entries in the log of `node`, which had a power cut.
+    fn stored(sim: &mut Sim, node: &sim::node::Node) -> Vec<Entry> {
+        sim.run_on(node, |node, _| async move {
+            let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                .await
+                .unwrap();
+            stored.entries
+        })
+        .unwrap()
+    }
+
+    /// Runs `body` on node 1, and gives the entries its log then holds.
+    fn solo_stored<F: Future<Output = ()> + 'static>(
+        body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+    ) -> Vec<Entry> {
+        let mut sim = Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        sim.run_on(&node, body).unwrap();
+        sim.crash(&node, Crash::Power);
+        stored(&mut sim, &node)
+    }
+
     mod answer {
         use super::*;
 
@@ -2011,6 +2188,23 @@ mod tests {
     mod receive {
         use super::*;
 
+        // The link at `index` of the term before `TERM`, by leader 2: the voters
+        // move from `outgoing` to 1, 2 and 3.
+        fn link(index: u64, outgoing: &[u8]) -> raft::Link {
+            let at = Position {
+                term: Term(common::TERM.0 - 1),
+                index,
+            };
+            let voters = Voters {
+                incoming: [1, 2, 3].map(key).into(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            };
+            let Data::Voters(change) = common::change(2, at, voters).data else {
+                unreachable!("a change is a voters entry");
+            };
+            raft::Link { at, change }
+        }
+
         fn requests() -> [Body; 4] {
             let last = Position::default();
             [
@@ -2151,12 +2345,13 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_grant_of_a_voter_that_is_not_a_member() {
+        fn takes_a_proof_with_a_bad_claim_of_a_node_with_no_key() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
-                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                let refused = Error::Claim(claim::Error::NotMember { signer: key(3) });
-                assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
+                let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                let proof = heartbeat.proof.as_mut().unwrap();
+                proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             });
         }
 
@@ -2214,21 +2409,6 @@ mod tests {
             solo(|node, tasks| async move {
                 let all = [1, 2, 3, 4];
                 let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
-                let link = |index, outgoing: &[u8]| {
-                    let at = Position {
-                        term: Term(common::TERM.0 - 1),
-                        index,
-                    };
-                    let voters = Voters {
-                        incoming: [1, 2, 3].map(key).into(),
-                        outgoing: outgoing.iter().map(|&id| key(id)).collect(),
-                    };
-                    let Data::Voters(change) = common::change(2, at, voters).data
-                    else {
-                        unreachable!("a change is a voters entry");
-                    };
-                    raft::Link { at, change }
-                };
                 let mut heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
                 let short = heartbeat.clone();
@@ -2245,6 +2425,53 @@ mod tests {
                 assert_eq!(term(&mesh), Term(0));
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
                 assert_eq!(term(&mesh), common::TERM);
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+            });
+        }
+
+        // The message of `takes_a_leader_that_the_chain_proves`, for node 3 in place
+        // of node 1. `step` refuses a message for another node before it reads a
+        // link, so `receive` checks no link of it.
+        #[test]
+        fn checks_no_link_of_a_message_for_another_node() {
+            solo(|node, tasks| async move {
+                let all = [1, 2, 3, 4];
+                let mesh = open(&node, &tasks, 1, &all, &all).await.unwrap();
+                let mut heartbeat = proven(2, 3, Body::Heartbeat { commit: 0 });
+                heartbeat.proof.as_mut().unwrap().voters.remove(&key(1));
+                heartbeat.chain = vec![link(1, &all), link(2, &[])];
+                let misrouted = Error::Raft(raft::Error::Misrouted { to: key(3) });
+                let honest = mesh.receive(public(2), heartbeat.clone());
+                assert_eq!(honest, Err(misrouted.clone()));
+                let mut forged = heartbeat;
+                forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(2), forged), Err(misrouted));
+                assert_eq!(term(&mesh), Term(0));
+            });
+        }
+
+        // `step` refuses a second leader of its term before it reads a claim, so
+        // `receive` checks no grant of its proof.
+        #[test]
+        fn checks_no_grant_of_a_second_leader() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let led = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), led), Ok(()));
+                let second = proven(3, 1, Body::Heartbeat { commit: 0 });
+                let refused = Error::Raft(raft::Error::SecondLeader {
+                    term: common::TERM,
+                    from: key(3),
+                });
+                assert_eq!(
+                    mesh.receive(public(3), second.clone()),
+                    Err(refused.clone())
+                );
+                let mut forged = second;
+                let proof = forged.proof.as_mut().unwrap();
+                proof.voters.get_mut(&key(1)).unwrap().as_mut().unwrap().0[63] ^= 1;
+                assert_eq!(mesh.receive(public(3), forged), Err(refused));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
@@ -2319,6 +2546,976 @@ mod tests {
                 let received =
                     mesh.receive(public(2), message(2, 3, Body::HeartbeatReply));
                 assert_eq!(received, Err(misrouted));
+            });
+        }
+    }
+
+    mod unapplied {
+        use super::*;
+        use crate::common::{TERM, proven_at};
+
+        pub(super) fn later() -> Term {
+            Term(common::TERM.0 + 1)
+        }
+
+        /// An append of `data` from index 1 in `term`, which commits nothing. Node 2
+        /// signs each change in it as its leader.
+        fn append(term: Term, data: Vec<Data>) -> Body {
+            let entries = iter::zip(1.., data)
+                .map(|(index, data)| Entry {
+                    at: Position { term, index },
+                    data,
+                })
+                .collect();
+            let mut ready = Ready {
+                entries,
+                ..Ready::default()
+            };
+            common::signer(2).sign(&mut ready);
+            Body::Append {
+                prev: Position::default(),
+                entries: ready.entries,
+                commit: 0,
+            }
+        }
+
+        pub(super) fn changes(changes: &[Change]) -> Vec<Data> {
+            let bytes = changes.iter().map(|change| Data::Bytes(encoded(change)));
+            bytes.collect()
+        }
+
+        /// A change to `incoming` and `outgoing` by leader 2 in `term`, with the
+        /// votes of 1, 2 and 3, and no signature yet.
+        fn voters(term: Term, incoming: &[u8], outgoing: &[u8]) -> Data {
+            let keys = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
+            let votes = [1, 2, 3].map(|voter| (voter, voter));
+            let proof = proven_at(2, 1, term, &votes, Body::HeartbeatReply).proof;
+            Data::Voters(raft::Change {
+                voters: Voters {
+                    incoming: keys(incoming),
+                    outgoing: keys(outgoing),
+                },
+                votes: proof.expect("a proven message holds a proof"),
+                signature: None,
+            })
+        }
+
+        /// A heartbeat from `leader` to node 1 in `term`, with the votes of each
+        /// `(voter, signer)`.
+        pub(super) fn heartbeat(
+            leader: u8,
+            term: Term,
+            votes: &[(u8, u8)],
+        ) -> raft::Message {
+            proven_at(leader, 1, term, votes, Body::Heartbeat { commit: 0 })
+        }
+
+        /// Gives node 1 the append of `data` from leader 2, and waits for its write.
+        pub(super) async fn write(mesh: &Mesh, data: Vec<Data>) {
+            let append = proven(2, 1, append(common::TERM, data));
+            assert_eq!(mesh.receive(public(2), append), Ok(()));
+            mesh.outgoing(key(2)).await.unwrap();
+        }
+
+        #[test]
+        fn takes_a_vote_of_a_node_whose_join_is_written_and_not_applied() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = changes(&[join(4)]);
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
+                write(&mesh, data).await;
+                let proven = heartbeat(4, later(), &[(2, 2), (4, 4)]);
+                assert_eq!(mesh.receive(public(4), proven), Ok(()));
+                assert_eq!(term(&mesh), later());
+            });
+        }
+
+        #[test]
+        fn takes_a_change_from_a_voter_whose_join_is_written_and_not_applied() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = changes(&[join(4)]);
+                data.push(voters(TERM, &[2, 4], &[2, 3]));
+                write(&mesh, data).await;
+                let answer = mesh.answer(public(4), home(1)).await;
+                let leader = Some(key(2));
+                assert_eq!(answer, Ok(Message::NotLeader { leader }));
+            });
+        }
+
+        #[test]
+        fn a_vote_of_a_node_with_no_key_proves_nothing() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let unproven = heartbeat(2, later(), &[(2, 2), (4, 4)]);
+                let error = raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                };
+                assert_eq!(mesh.receive(public(2), unproven), Err(Error::Raft(error)));
+                let proven = heartbeat(2, later(), &[(2, 2), (3, 3), (4, 4)]);
+                assert_eq!(mesh.receive(public(2), proven), Ok(()));
+                assert_eq!(term(&mesh), later());
+            });
+        }
+
+        // Node 1 holds a stale join of 4 with the key of 5. The true vote of 4
+        // fails under it, so the node removes the vote, and 2 and 3 prove the term.
+        #[test]
+        fn a_vote_that_fails_under_a_written_join_is_removed() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                let proven = heartbeat(2, later(), &[(2, 2), (3, 3), (4, 4)]);
+                assert_eq!(mesh.receive(public(2), proven), Ok(()));
+                assert_eq!(term(&mesh), later());
+                let stale = message(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), stale), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!((reply.body, reply.term), (Body::HeartbeatReply, later()));
+                let answer = mesh.outgoing(key(2)).await.unwrap();
+                let voters = answer.proof.map(|proof| proof.voters.into_keys());
+                let voters: Option<Vec<_>> = voters.map(Iterator::collect);
+                assert_eq!(voters, Some(vec![key(2), key(3)]));
+            });
+        }
+
+        #[test]
+        fn a_vote_of_a_node_with_no_key_is_in_no_proof_that_the_node_keeps() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                assert_eq!(term(&mesh), common::TERM);
+                let mut stale = message(2, 1, Body::Heartbeat { commit: 0 });
+                stale.term = Term(common::TERM.0 - 1);
+                assert_eq!(mesh.receive(public(2), stale), Ok(()));
+                let voters = |proof: Option<Proof>| {
+                    proof.map(|proof| proof.voters.into_keys().collect::<Vec<_>>())
+                };
+                let reply = message(1, 2, Body::HeartbeatReply);
+                assert_eq!(mesh.outgoing(key(2)).await, Ok(reply));
+                let answer = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(answer.body, Body::HeartbeatReply);
+                assert_eq!(voters(answer.proof), Some(vec![key(1), key(2)]));
+                drop(mesh);
+                node.clock().sleep(Span::MILLISECOND).await;
+                let (_, stored) = Log::open(node.files(), LOG.into(), create_pool())
+                    .await
+                    .unwrap();
+                assert_eq!(voters(stored.hard.proof), Some(vec![key(1), key(2)]));
+            });
+        }
+
+        #[test]
+        fn a_node_whose_written_joins_name_two_keys_has_none_until_the_apply() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                write(&mesh, changes(&[ticket(), Change::Join(forged), join(4)])).await;
+                let vote = |signer, commit| {
+                    let votes = [(2, 2), (3, 3), (4, signer)];
+                    proven_at(2, 1, common::TERM, &votes, Body::Heartbeat { commit })
+                };
+                assert_eq!(mesh.receive(public(2), vote(4, 0)), Ok(()));
+                assert_eq!(mesh.receive(public(2), vote(5, 0)), Ok(()));
+                assert_eq!(mesh.receive(public(2), vote(4, 3)), Ok(()));
+                node.clock().sleep(Span::MILLISECOND).await;
+                let admitted = mesh.member(key(4)).map(|member| member.card);
+                assert_eq!(admitted, Some(common::member(4).card));
+                let forged = Error::Claim(claim::Error::Forged { signer: key(4) });
+                assert_eq!(mesh.receive(public(2), vote(5, 3)), Err(forged));
+                assert_eq!(mesh.receive(public(2), vote(4, 3)), Ok(()));
+            });
+        }
+
+        // With no ticket 7 the apply refuses both joins, so nothing else removes
+        // their keys.
+        #[test]
+        fn a_refused_join_gives_its_node_no_key_once_applied() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(6)])).await;
+                let commit = proven(2, 1, Body::Heartbeat { commit: 2 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::from_nanos(1_000_000)).await;
+                assert_eq!(mesh.member(key(4)), None);
+                for id in [4, 6] {
+                    let reply = message(id, 1, Body::HeartbeatReply);
+                    let spoofed = Error::Spoofed { from: key(id) };
+                    assert_eq!(mesh.receive(public(id), reply), Err(spoofed));
+                }
+            });
+        }
+
+        // `raft` reads its configuration from the log that it holds, before the
+        // write, so the keys follow that log too.
+        #[test]
+        fn a_forged_join_gives_no_key_once_a_step_appends_the_real_join() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                write(&mesh, changes(&[Change::Join(forged)])).await;
+                let mut data = changes(&[join(4)]);
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
+                let entries = iter::zip(2.., data)
+                    .map(|(index, data)| Entry {
+                        at: Position {
+                            term: common::TERM,
+                            index,
+                        },
+                        data,
+                    })
+                    .collect();
+                let append = Body::Append {
+                    prev: Position {
+                        term: common::TERM,
+                        index: 1,
+                    },
+                    entries,
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+                let forged = heartbeat(2, later(), &[(2, 2), (4, 5)]);
+                let unproven = raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                };
+                assert_eq!(mesh.receive(public(2), forged), Err(Error::Raft(unproven)));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // As above, but the forged vote comes in an append whose `prev` is the
+        // forged join, below the real join.
+        #[test]
+        fn an_append_from_between_two_written_joins_takes_no_forged_vote() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                let mut data = changes(&[join(4)]);
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let entries = std::iter::zip(2.., data)
+                    .map(|(index, data)| Entry {
+                        at: at(index),
+                        data,
+                    })
+                    .collect();
+                let append = Body::Append {
+                    prev: at(1),
+                    entries,
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+                let probe = Body::Append {
+                    prev: at(1),
+                    entries: Vec::new(),
+                    commit: 0,
+                };
+                let forged = proven_at(2, 1, later(), &[(2, 2), (4, 5)], probe);
+                let unproven = raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                };
+                assert_eq!(mesh.receive(public(2), forged), Err(Error::Raft(unproven)));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        /// The append of leader 3 that replaces a written join of 4 with the real
+        /// one, and makes 4 a voter.
+        pub(super) fn replacing_forged() -> raft::Message {
+            let mut data = changes(&[join(4)]);
+            data.extend([
+                voters(later(), &[2, 3, 4], &[2, 3]),
+                voters(later(), &[2, 3, 4], &[]),
+            ]);
+            let replace = append(later(), data);
+            proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace)
+        }
+
+        /// The refusal of a heartbeat of 3 in the term after [`later`] with a vote
+        /// of 4 under the key of 5.
+        pub(super) fn forged_unproven() -> Error {
+            Error::Raft(raft::Error::Unproven {
+                term: Term(common::TERM.0 + 2),
+                from: key(3),
+            })
+        }
+
+        #[test]
+        fn a_step_that_replaces_a_forged_join_removes_its_key_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                assert_eq!(mesh.receive(public(3), replacing_forged()), Ok(()));
+                let next = Term(later().0.checked_add(1).unwrap());
+                let forged = heartbeat(3, next, &[(3, 3), (4, 5)]);
+                assert_eq!(mesh.receive(public(3), forged), Err(forged_unproven()));
+                assert_eq!(term(&mesh), later());
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(5), reply), Err(spoofed));
+            });
+        }
+
+        /// The join of node 4 with the key of node 5: a forgery that no leader
+        /// committed.
+        pub(super) fn stale_join() -> Change {
+            let Change::Join(mut forged) = join(4) else {
+                unreachable!()
+            };
+            forged.card.card.public_key = public(5);
+            Change::Join(forged)
+        }
+
+        /// The log of leader 3 of `later`, which 2 and 3 elected: the join of node
+        /// 4 and the change that makes it a voter. Then the change of leader 2 of
+        /// the term after, which 2 and 4 elected.
+        pub(super) fn replacing() -> Vec<Entry> {
+            let next = Term(common::TERM.0 + 2);
+            let at = |term, index| Position { term, index };
+            let set = |incoming: &[u8], outgoing: &[u8]| Voters {
+                incoming: incoming.iter().map(|&id| key(id)).collect(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            };
+            vec![
+                Entry {
+                    at: at(later(), 1),
+                    data: changes(&[join(4)]).remove(0),
+                },
+                common::change_voted(
+                    3,
+                    at(later(), 2),
+                    set(&[2, 3, 4], &[2, 3]),
+                    &[2, 3],
+                ),
+                common::change_voted(3, at(later(), 3), set(&[2, 3, 4], &[]), &[2, 3]),
+                common::change_voted(2, at(next, 4), set(&[2, 3, 4], &[]), &[2, 4]),
+            ]
+        }
+
+        /// The append of `entries` after `prev` from leader 3 of the term after the
+        /// one of `replacing`, to node 1.
+        pub(super) fn replace(prev: Position, entries: Vec<Entry>) -> raft::Message {
+            let body = Body::Append {
+                prev,
+                entries,
+                commit: 0,
+            };
+            let last = Term(common::TERM.0 + 3);
+            proven_at(3, 1, last, &[(2, 2), (3, 3)], body)
+        }
+
+        // Node 1 holds a stale join of node 4 at index 1. The log of leader 3
+        // replaces it with the real join, adds 4 to the voters, and holds a change
+        // that 4 voted in. The vote fails under the stale key, so the node cuts the
+        // run before it, and takes the rest from there.
+        #[test]
+        fn takes_a_change_voted_by_a_node_whose_stale_join_the_append_replaces() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                let first = replace(Position::default(), replacing());
+                assert_eq!(mesh.receive(public(3), first), Ok(()));
+                let reply = mesh.outgoing(key(3)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 3 });
+                let mut entries = replacing();
+                let rest = entries.split_off(3);
+                let prev = entries[2].at;
+                assert_eq!(mesh.receive(public(3), replace(prev, rest)), Ok(()));
+                let reply = mesh.outgoing(key(3)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            });
+            assert_eq!(entries, replacing());
+        }
+
+        // As above, but the leader probes from index 1, as a leader that backs up
+        // one index at a time does. The cut run does not match the stale join, so
+        // the node rejects it, and the leader backs up.
+        #[test]
+        fn rejects_a_probe_above_a_stale_join_that_the_probe_replaces() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                let mut entries = replacing();
+                let rest = entries.split_off(1);
+                let probe = replace(entries[0].at, rest);
+                assert_eq!(mesh.receive(public(3), probe), Ok(()));
+                let reply = mesh.outgoing(key(3)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReject { hint: 0 });
+            });
+        }
+
+        /// The log of leader 2 of `TERM`: the real join of 4, the change to the
+        /// voters 2 and 4, then a stale join of 4 with the key of 5.
+        pub(super) fn stale_second() -> Vec<Data> {
+            let mut data = changes(&[join(4)]);
+            data.extend([voters(TERM, &[2, 4], &[2, 3]), voters(TERM, &[2, 4], &[])]);
+            data.extend(changes(&[stale_join()]));
+            data
+        }
+
+        /// The append of `leader` of `later`, which 2 and 4 elected, that replaces
+        /// the stale join of [`stale_second`] from `prev` below it, with its
+        /// chain. And the log that a node holds after it.
+        pub(super) fn replace_second(leader: u8) -> (raft::Message, Vec<Entry>) {
+            let Body::Append {
+                entries: mut log, ..
+            } = append(TERM, stale_second())
+            else {
+                unreachable!()
+            };
+            let chain = log[1..3]
+                .iter()
+                .map(|entry| {
+                    let Data::Voters(change) = &entry.data else {
+                        unreachable!()
+                    };
+                    raft::Link {
+                        at: entry.at,
+                        change: change.clone(),
+                    }
+                })
+                .collect();
+            let empty = Entry {
+                at: Position {
+                    term: later(),
+                    index: 4,
+                },
+                data: Data::Empty,
+            };
+            let body = Body::Append {
+                prev: log[2].at,
+                entries: vec![empty.clone()],
+                commit: 0,
+            };
+            let mut replace = proven_at(leader, 1, later(), &[(2, 2), (4, 4)], body);
+            replace.chain = chain;
+            log.truncate(3);
+            log.push(empty);
+            (replace, log)
+        }
+
+        // The real join of 4 is below the change that names it, and the stale join
+        // above, so the real key proves the vote of 4, and the node takes the
+        // whole log of the leader.
+        #[test]
+        fn takes_an_append_that_replaces_a_stale_second_join_above_prev() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, stale_second()).await;
+                let (replace, _) = replace_second(2);
+                assert_eq!(mesh.receive(public(2), replace), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            });
+            assert_eq!(entries, replace_second(2).1);
+        }
+
+        // The forged join of 4 is below the change that names it too, so the node
+        // has no key for 4, and a leader that 2 and 4 elected is unproven here. A
+        // defect until #336 builds the voter that checks a join before it stamps it.
+        #[test]
+        fn a_leader_elected_under_a_change_above_two_written_joins_is_unproven() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = changes(&[stale_join(), join(4)]);
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
+                write(&mesh, data).await;
+                let elected = heartbeat(2, later(), &[(2, 2), (4, 4)]);
+                let unproven = Error::Raft(raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                });
+                assert_eq!(mesh.receive(public(2), elected), Err(unproven));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // The heartbeat of leader 2 in the term after `later`, with the `votes` of
+        // its election and the chain of leader 3 of `later` that makes 4 a voter
+        // from index 2.
+        fn elected_through_chain(votes: &[(u8, u8)]) -> raft::Message {
+            let at = |index| Position {
+                term: later(),
+                index,
+            };
+            let set = |outgoing: &[u8]| Voters {
+                incoming: [2, 3, 4].map(key).into(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            };
+            let link = |(index, voters)| {
+                let entry = common::change_voted(3, at(index), voters, &[2, 3]);
+                let Data::Voters(change) = entry.data else {
+                    unreachable!()
+                };
+                raft::Link {
+                    at: entry.at,
+                    change,
+                }
+            };
+            let next = Term(later().0.checked_add(1).unwrap());
+            let mut elected = heartbeat(2, next, votes);
+            elected.chain = [(2, set(&[2, 3])), (3, set(&[]))].map(link).into();
+            elected
+        }
+
+        // The `Unproven` of `elected_through_chain`.
+        fn chain_unproven() -> Error {
+            Error::Raft(raft::Error::Unproven {
+                term: Term(later().0.checked_add(1).unwrap()),
+                from: key(2),
+            })
+        }
+
+        // Node 1 holds the real join of 4 at 1 and a stale join at 2, and the
+        // change that names 4 in the chain only. A link proves the entry in the
+        // log of its sender, not the joins below it here, so 4 has no key and the
+        // leader is unproven. A limit of liveness, until #1623.
+        #[test]
+        fn a_leader_whose_chain_only_names_a_node_with_two_joins_is_unproven() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), stale_join()])).await;
+                let elected = elected_through_chain(&[(2, 2), (4, 4)]);
+                assert_eq!(mesh.receive(public(2), elected), Err(chain_unproven()));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // The same log, with the vote of 4 under its stale key: with two joins of 4
+        // in the log, the vote is not counted.
+        #[test]
+        fn a_vote_under_the_stale_key_of_a_node_only_a_chain_names_is_not_counted() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), stale_join()])).await;
+                let elected = elected_through_chain(&[(2, 2), (4, 5)]);
+                assert_eq!(mesh.receive(public(2), elected), Err(chain_unproven()));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // Only a leader writes a join, so a forged join alone in the log comes from
+        // a voter that lies, which `raft` trusts until #882: its key is the key of
+        // 4, and a vote under it counts.
+        #[test]
+        fn a_vote_under_the_key_of_the_one_forged_join_of_a_chain_only_node_counts() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                let elected = elected_through_chain(&[(2, 2), (4, 5)]);
+                assert_eq!(mesh.receive(public(2), elected), Ok(()));
+                assert_eq!(term(&mesh), Term(later().0 + 1));
+            });
+        }
+
+        // With the real join alone, the same heartbeat is proven.
+        #[test]
+        fn takes_a_leader_whose_chain_only_names_a_node_with_one_join() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4)])).await;
+                let elected = elected_through_chain(&[(2, 2), (4, 4)]);
+                assert_eq!(mesh.receive(public(2), elected), Ok(()));
+                assert_eq!(term(&mesh), Term(later().0 + 1));
+            });
+        }
+
+        // The first change of the log names 2 and 3 only, so it is not the line for
+        // 4: both joins of 4 are below the change that names 4, and a vote that the
+        // stale key signs does not count.
+        #[test]
+        fn a_change_that_does_not_name_a_node_is_not_its_line() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = changes(&[stale_join()]);
+                data.push(voters(TERM, &[2, 3], &[2, 3]));
+                data.extend(changes(&[join(4)]));
+                data.extend([
+                    voters(TERM, &[2, 4], &[2, 3]),
+                    voters(TERM, &[2, 4], &[]),
+                ]);
+                write(&mesh, data).await;
+                let forged = heartbeat(2, later(), &[(2, 2), (4, 5)]);
+                let unproven = Error::Raft(raft::Error::Unproven {
+                    term: later(),
+                    from: key(2),
+                });
+                assert_eq!(mesh.receive(public(2), forged), Err(unproven));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // A later change that names 4 again does not move the line: the joins below
+        // the first one decide.
+        #[test]
+        fn the_first_change_that_names_a_node_decides() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let mut data = stale_second();
+                data.push(voters(TERM, &[2, 3, 4], &[2, 4]));
+                write(&mesh, data).await;
+                let (replace, _) = replace_second(2);
+                assert_eq!(mesh.receive(public(2), replace), Ok(()));
+                let reply = mesh.outgoing(key(2)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            });
+        }
+
+        // Node 1 campaigns under the change to 1, 2 and 4, and 4 answers on the
+        // stream of the key of its stale join with a vote that its real key signs.
+        #[test]
+        fn a_vote_reply_that_fails_under_the_written_join_of_its_sender_is_forged() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut data = changes(&[stale_join()]);
+                data.push(voters(TERM, &[1, 2, 4], &[1, 2, 3]));
+                write(&mesh, data).await;
+                let sent = mesh.outgoing(key(2)).await.unwrap();
+                assert!(matches!(sent.body, Body::PreVote { .. }));
+                let answer = Answer::Granted(None);
+                let reply = raft::Message {
+                    term: sent.term,
+                    ..message(2, 1, Body::PreVoteReply { answer })
+                };
+                assert_eq!(mesh.receive(public(2), sign(2, reply)), Ok(()));
+                let vote = loop {
+                    let sent = mesh.outgoing(key(4)).await.unwrap();
+                    if matches!(sent.body, Body::Vote { .. }) {
+                        break sent;
+                    }
+                };
+                let reply = raft::Message {
+                    term: vote.term,
+                    ..message(4, 1, Body::VoteReply { answer })
+                };
+                let forged = Error::Claim(claim::Error::Forged { signer: key(4) });
+                assert_eq!(mesh.receive(public(5), sign(4, reply)), Err(forged));
+            });
+        }
+
+        /// `message` with each claim signed by the key of `signer`.
+        fn sign(signer: u8, message: raft::Message) -> raft::Message {
+            let mut ready = Ready {
+                messages: vec![message],
+                ..Ready::default()
+            };
+            common::signer(signer).sign(&mut ready);
+            ready.messages.remove(0)
+        }
+
+        // As above, with node 4 as the leader: its key is the real one.
+        #[test]
+        fn a_leader_with_a_stale_second_join_above_the_change_is_not_spoofed() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, stale_second()).await;
+                let (replace, _) = replace_second(4);
+                assert_eq!(mesh.receive(public(4), replace), Ok(()));
+                let reply = mesh.outgoing(key(4)).await.unwrap();
+                assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            });
+        }
+
+        #[test]
+        fn a_join_keeps_its_key_when_a_step_follows_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = proven(2, 1, append(common::TERM, changes(&[join(4)])));
+                assert_eq!(mesh.receive(public(2), joined), Ok(()));
+                let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply), Ok(()));
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_from_below_a_written_join_removes_its_key() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[home(1), join(4)])).await;
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_from_below_an_unwritten_join_removes_its_key() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = append(common::TERM, changes(&[home(1), join(4)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, joined)), Ok(()));
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_from_between_two_joins_keeps_only_the_first() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(6)])).await;
+                let at = |index| Position {
+                    term: later(),
+                    index,
+                };
+                let replace = Body::Append {
+                    prev: Position {
+                        term: common::TERM,
+                        index: 1,
+                    },
+                    entries: vec![Entry {
+                        at: at(2),
+                        data: changes(&[home(1)]).remove(0),
+                    }],
+                    commit: 0,
+                };
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = |id| message(id, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply(4)), Ok(()));
+                let spoofed = Error::Spoofed { from: key(6) };
+                assert_eq!(mesh.receive(public(6), reply(6)), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_replace_from_below_two_written_joins_drops_both() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(5)])).await;
+                let forged =
+                    |leader, term| heartbeat(leader, term, &[(2, 2), (3, 3), (4, 5)]);
+                let votes = [(2, 2), (3, 3)];
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &votes, replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                mesh.outgoing(key(3)).await.unwrap();
+                assert_eq!(mesh.receive(public(3), forged(3, later())), Ok(()));
+            });
+        }
+
+        #[test]
+        fn a_reopen_keeps_a_written_join_until_a_replace() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4)])).await;
+                drop(mesh);
+                node.clock().sleep(Span::MILLISECOND).await;
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let reply = || message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply()), Ok(()));
+                let votes = [(2, 2), (3, 3)];
+                let replace = append(later(), changes(&[home(1)]));
+                let replace = proven_at(3, 1, later(), &votes, replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply()), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_written_join_does_not_move_the_key_of_an_applied_member() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[ticket(), join(4)])).await;
+                let commit = proven(2, 1, Body::Heartbeat { commit: 2 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::MILLISECOND).await;
+                let admitted = mesh.member(key(4)).map(|member| member.card);
+                assert_eq!(admitted, Some(common::member(4).card));
+                let Change::Join(mut forged) = join(4) else {
+                    unreachable!()
+                };
+                forged.card.card.public_key = public(5);
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let next = Body::Append {
+                    prev: at(2),
+                    entries: vec![Entry {
+                        at: at(3),
+                        data: changes(&[Change::Join(forged)]).remove(0),
+                    }],
+                    commit: 2,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, next)), Ok(()));
+                let reply = || message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply()), Ok(()));
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(5), reply()), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_reopen_keeps_each_written_join() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), join(6)])).await;
+                drop(mesh);
+                node.clock().sleep(Span::MILLISECOND).await;
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                for id in [4, 6] {
+                    let reply = message(id, 1, Body::HeartbeatReply);
+                    assert_eq!(mesh.receive(public(id), reply), Ok(()), "{id}");
+                }
+            });
+        }
+
+        #[test]
+        fn a_join_after_the_synced_entry_gives_its_key_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let homes = append(common::TERM, changes(&[home(1), home(1)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, homes)), Ok(()));
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let mut data = changes(&[join(4), home(1)]).into_iter();
+                let entries = [3, 4].map(|index| Entry {
+                    at: at(index),
+                    data: data.next().unwrap(),
+                });
+                let next = Body::Append {
+                    prev: at(2),
+                    entries: entries.into(),
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, next)), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply), Ok(()));
+            });
+        }
+
+        // The test clears the joins that `sync` took. A later sync that decodes an
+        // entry again gives the key back, so the key shows each second decode.
+        #[test]
+        fn a_sync_decodes_no_entry_that_an_earlier_sync_took() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = append(common::TERM, changes(&[home(1), join(4)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, joined)), Ok(()));
+                mesh.group.borrow_mut().unapplied.clear();
+                let at = |index| Position {
+                    term: common::TERM,
+                    index,
+                };
+                let next = Body::Append {
+                    prev: at(2),
+                    entries: vec![Entry {
+                        at: at(3),
+                        data: changes(&[home(1)]).remove(0),
+                    }],
+                    commit: 0,
+                };
+                assert_eq!(mesh.receive(public(2), proven(2, 1, next)), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_step_that_replaces_an_unwritten_join_above_an_unwritten_entry_removes_its_key()
+         {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let joined = append(common::TERM, changes(&[home(1), join(4)]));
+                assert_eq!(mesh.receive(public(2), proven(2, 1, joined)), Ok(()));
+                let replace = Body::Append {
+                    prev: Position {
+                        term: common::TERM,
+                        index: 1,
+                    },
+                    entries: vec![Entry {
+                        at: Position {
+                            term: later(),
+                            index: 2,
+                        },
+                        data: changes(&[home(1)]).remove(0),
+                    }],
+                    commit: 0,
+                };
+                let replace = proven_at(3, 1, later(), &[(2, 2), (3, 3)], replace);
+                assert_eq!(mesh.receive(public(3), replace), Ok(()));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Error::Spoofed { from: key(4) };
+                assert_eq!(mesh.receive(public(4), reply), Err(spoofed));
+            });
+        }
+
+        #[test]
+        fn a_join_that_this_leader_proposes_gives_a_key_before_the_write() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1]).await.unwrap();
+                lead(&mesh, &node.clock(), home(1)).await;
+                assert!(started(&mesh, join(4)).await.is_pending());
+                let reply = message(4, 1, Body::HeartbeatReply);
+                assert_eq!(mesh.receive(public(4), reply), Ok(()));
+            });
+        }
+
+        #[test]
+        fn propose_voters_refuses_a_node_that_is_not_a_member() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+                let at = lead(&mesh, &node.clock(), home(1)).await;
+                let refused = mesh.propose_voters([key(1), key(3)].into()).await;
+                assert_eq!(refused, Err(Error::NotMember(key(3))));
+                let text = format!("node {} is not a member of the region", key(3));
+                assert_eq!(refused.unwrap_err().to_string(), text);
+                let proposed = mesh.propose_voters([key(1), key(2)].into()).await;
+                assert_eq!(proposed, Ok(after(at, 1)));
+            });
+        }
+
+        #[test]
+        fn propose_voters_refuses_a_node_whose_join_is_not_applied() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
+                write(&mesh, changes(&[join(3)])).await;
+                let refused = mesh.propose_voters([key(2), key(3)].into()).await;
+                assert_eq!(refused, Err(Error::NotMember(key(3))));
+                let follower = raft::Error::NotLeader {
+                    leader: Some(key(2)),
+                };
+                let proposed = mesh.propose_voters([key(2)].into()).await;
+                assert_eq!(proposed, Err(Error::Raft(follower)));
             });
         }
     }
@@ -3372,6 +4569,46 @@ mod tests {
     }
 
     #[test]
+    fn key_gives_this_node_while_another_node_leads() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            let leader = Some(key(2));
+            let follows = Error::Raft(raft::Error::NotLeader { leader });
+            assert_eq!(mesh.propose(home(3)).await, Err(follows));
+            assert_eq!(mesh.key(), key(1));
+        });
+    }
+
+    #[test]
+    fn key_gives_this_node_after_it_votes_for_another_node() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let grant = common::signature(3, Grant::PreVote, 2);
+            let proof = Proof {
+                grant: Grant::PreVote,
+                candidate: key(2),
+                voters: [(key(2), None), (key(3), Some(grant))].into(),
+            };
+            let last = Position::default();
+            let mut ready = Ready {
+                messages: vec![raft::Message {
+                    proof: Some(proof),
+                    ..message(2, 1, Body::Vote { last })
+                }],
+                ..Ready::default()
+            };
+            common::signer(2).sign(&mut ready);
+            let vote = ready.messages.remove(0);
+            assert_eq!(mesh.receive(public(2), vote), Ok(()));
+            let granted = common::granted(1, Grant::Vote, 2);
+            assert_eq!(mesh.outgoing(key(2)).await, Ok(granted));
+            assert_eq!(mesh.key(), key(1));
+        });
+    }
+
+    #[test]
     fn member_gives_the_record_of_a_member_and_none_for_another_node() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
@@ -3650,5 +4887,437 @@ mod tests {
             .for_each(|message| queue.push(message));
         let expected: Vec<_> = (1..=64).map(heartbeat).collect();
         assert_eq!(Vec::from(queue.messages), expected);
+    }
+
+    /// A chain with a vote or a leader of a node that has no key at this node.
+    mod chain {
+        use super::*;
+        use crate::common::proven_at;
+
+        pub(super) const FOUNDERS: [u8; 3] = [1, 2, 3];
+        pub(super) const ALL: [u8; 4] = [1, 2, 3, 4];
+
+        fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+            Voters {
+                incoming: incoming.iter().map(|&id| key(id)).collect(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            }
+        }
+
+        // The configuration entry `voters` that `leader` wrote at `index` of `term`
+        // with the votes of `voted`, as a link.
+        fn link(
+            leader: u8,
+            term: u64,
+            index: u64,
+            voters: Voters,
+            voted: &[u8],
+        ) -> raft::Link {
+            let at = Position {
+                term: Term(term),
+                index,
+            };
+            let entry = common::change_voted(leader, at, voters, voted);
+            let Data::Voters(change) = entry.data else {
+                unreachable!("a change is a voters entry");
+            };
+            raft::Link { at, change }
+        }
+
+        // The chain of a region whose founders are 1, 2 and 3. Leader 2 of term 4,
+        // which 2 and 3 elected, made node 4 a voter. `leader` of term 5, which
+        // `voted` elected, then moved the voters to 3 alone.
+        pub(super) fn links(leader: u8, voted: &[u8]) -> Vec<raft::Link> {
+            vec![
+                link(2, 4, 1, voters(&ALL, &FOUNDERS), &[2, 3]),
+                link(2, 4, 2, voters(&ALL, &[]), &[2, 3]),
+                link(leader, 5, 3, voters(&[3], &ALL), voted),
+                link(leader, 5, 4, voters(&[3], &[]), voted),
+            ]
+        }
+
+        // A heartbeat of term 6 from leader 3, which elected itself alone, to node
+        // 1, with `chain`.
+        pub(super) fn heartbeat(chain: Vec<raft::Link>) -> raft::Message {
+            let body = Body::Heartbeat { commit: 0 };
+            let mut heartbeat = proven_at(3, 1, Term(6), &[(3, 3)], body);
+            heartbeat.chain = chain;
+            heartbeat
+        }
+
+        pub(super) fn unproven() -> Error {
+            Error::Raft(raft::Error::Unproven {
+                term: Term(6),
+                from: key(3),
+            })
+        }
+
+        // Node 1, a founder in term 0 with an empty log and the keys of `members`,
+        // takes `heartbeat` with `expected`. On `Ok` it is in term 6 and replies.
+        // On an error it stays in term 0 and sends nothing.
+        fn takes(
+            members: &'static [u8],
+            heartbeat: raft::Message,
+            expected: Result<(), Error>,
+        ) {
+            solo(move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, members, &FOUNDERS).await.unwrap();
+                assert_eq!(mesh.receive(public(3), heartbeat), expected);
+                if expected.is_ok() {
+                    assert_eq!(term(&mesh), Term(6));
+                    let reply = mesh.outgoing(key(3)).await.unwrap();
+                    let mut expected = message(1, 3, Body::HeartbeatReply);
+                    expected.term = Term(6);
+                    assert_eq!(reply, expected);
+                } else {
+                    assert_eq!(term(&mesh), Term(0));
+                    assert!(quiet(&mesh, 3).await);
+                }
+            });
+        }
+
+        #[test]
+        fn a_link_with_a_vote_of_no_key_and_a_quorum_of_known_votes_proves() {
+            takes(&FOUNDERS, heartbeat(links(2, &ALL)), Ok(()));
+        }
+
+        #[test]
+        fn a_link_with_no_quorum_of_known_votes_proves_nothing() {
+            takes(&ALL, heartbeat(links(2, &[2, 3, 4])), Ok(()));
+            takes(&FOUNDERS, heartbeat(links(2, &[2, 3, 4])), Err(unproven()));
+        }
+
+        // The founders' votes of term 6 for 3 prove nothing against the voters
+        // after the two links of 4, which a cut leaves out.
+        #[test]
+        fn a_chain_cut_leaves_out_each_link_after_the_cut() {
+            let mut chain = links(4, &ALL);
+            chain.push(link(3, 6, 5, voters(&[3], &[]), &FOUNDERS));
+            let body = Body::Heartbeat { commit: 0 };
+            let mut heartbeat = proven_at(3, 1, Term(7), &[(3, 3)], body);
+            heartbeat.chain = chain;
+            let unproven = raft::Error::Unproven {
+                term: Term(7),
+                from: key(3),
+            };
+            takes(&FOUNDERS, heartbeat, Err(Error::Raft(unproven)));
+        }
+
+        #[test]
+        fn a_chain_is_cut_before_a_link_whose_leader_has_no_key() {
+            takes(&ALL, heartbeat(links(4, &ALL)), Ok(()));
+            let mut cut = heartbeat(links(4, &ALL));
+            cut.chain[2].change.signature = Some(raft::Signature([0; 64]));
+            takes(&FOUNDERS, cut, Err(unproven()));
+        }
+
+        #[test]
+        fn a_forged_link_vote_of_a_known_node_refuses_the_message() {
+            let mut forged = heartbeat(links(2, &ALL));
+            let votes = &mut forged.chain[2].change.votes.voters;
+            votes.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+            let claim = Error::Claim(claim::Error::Forged { signer: key(3) });
+            takes(&FOUNDERS, forged, Err(claim));
+        }
+    }
+
+    /// An append that the check cuts before an entry with a claim of a node whose
+    /// join is in the same run.
+    mod cut {
+        use transport::stream::Incoming;
+
+        use super::*;
+        use crate::common::proven_at;
+
+        fn at(term: u64, index: u64) -> Position {
+            Position {
+                term: Term(term),
+                index,
+            }
+        }
+
+        fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+            Voters {
+                incoming: incoming.iter().map(|&id| key(id)).collect(),
+                outgoing: outgoing.iter().map(|&id| key(id)).collect(),
+            }
+        }
+
+        fn bytes(at: Position, change: &Change) -> Entry {
+            Entry {
+                at,
+                data: Data::Bytes(encoded(change)),
+            }
+        }
+
+        fn empty(at: Position) -> Entry {
+            Entry {
+                at,
+                data: Data::Empty,
+            }
+        }
+
+        /// The log of a region whose founders are 1, 2 and 3. Leader 2 of term 4
+        /// admits node 4 and makes it a voter. Leader 2 of term 5, which 2, 3 and 4
+        /// elected, removes it as a voter. Leader 3 of term 6 starts its term.
+        fn history() -> Vec<Entry> {
+            vec![
+                empty(at(4, 1)),
+                bytes(at(4, 2), &ticket()),
+                bytes(at(4, 3), &join(4)),
+                common::change_voted(
+                    2,
+                    at(4, 4),
+                    voters(&[1, 2, 3, 4], &[1, 2, 3]),
+                    &[2, 3],
+                ),
+                common::change_voted(2, at(4, 5), voters(&[1, 2, 3, 4], &[]), &[2, 3]),
+                empty(at(5, 6)),
+                common::change_voted(
+                    2,
+                    at(5, 7),
+                    voters(&[1, 2, 3], &[1, 2, 3, 4]),
+                    &[2, 3, 4],
+                ),
+                common::change_voted(2, at(5, 8), voters(&[1, 2, 3], &[]), &[2, 3, 4]),
+                empty(at(6, 9)),
+            ]
+        }
+
+        /// The append of `entries` after `prev` from leader 3 of term 6, which 2
+        /// and 3 elected, to node `to`.
+        fn append(
+            to: u8,
+            prev: Position,
+            entries: Vec<Entry>,
+            commit: u64,
+        ) -> raft::Message {
+            let body = Body::Append {
+                prev,
+                entries,
+                commit,
+            };
+            proven_at(3, to, Term(6), &[(2, 2), (3, 3)], body)
+        }
+
+        /// Gives `mesh` the append of `entries` after `prev` from leader 3, and the
+        /// body of the reply.
+        async fn take(
+            mesh: &Mesh,
+            prev: Position,
+            entries: Vec<Entry>,
+            commit: u64,
+        ) -> Body {
+            let append = append(1, prev, entries, commit);
+            assert_eq!(mesh.receive(public(3), append), Ok(()));
+            let reply = mesh.outgoing(key(3)).await.unwrap();
+            assert_eq!(
+                (reply.from, reply.to, reply.term),
+                (key(1), key(3), Term(6))
+            );
+            reply.body
+        }
+
+        // Node 1 was down from the start. It holds no entry, so its members are the
+        // founders. The leader sends it the log in one append, as `raft` does for a
+        // log of at most 64 entries. The node cuts the run before the first change
+        // with the vote of node 4, and takes the rest from there.
+        #[test]
+        fn a_founder_that_was_down_takes_the_log_of_a_leader_in_a_cut_and_the_rest() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let reply = take(&mesh, Position::default(), history(), 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 6 });
+                assert!(mesh.member(key(4)).is_some());
+                let rest = history().split_off(6);
+                let reply = take(&mesh, at(5, 6), rest, 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 9 });
+            });
+            assert_eq!(entries, history());
+        }
+
+        // The same log in two appends: the join of node 4 commits and applies before
+        // the append that holds the vote of node 4.
+        #[test]
+        fn a_founder_that_was_down_takes_the_same_log_in_two_appends() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut first = history();
+                let second = first.split_off(3);
+                let reply = take(&mesh, Position::default(), first, 3).await;
+                assert_eq!(reply, Body::AppendReply { last: 3 });
+                node.clock().sleep(TICK).await;
+                assert!(mesh.member(key(4)).is_some());
+                let reply = take(&mesh, at(4, 3), second, 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 9 });
+            });
+            assert_eq!(entries, history());
+        }
+
+        #[test]
+        fn a_forged_change_of_a_known_leader_before_the_cut_refuses_the_append() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut forged = history();
+                let Data::Voters(change) = &mut forged[3].data else {
+                    unreachable!()
+                };
+                change.signature.as_mut().unwrap().0[0] ^= 1;
+                let append = append(1, Position::default(), forged, 9);
+                let refused = Error::Claim(claim::Error::Forged { signer: key(2) });
+                assert_eq!(mesh.receive(public(3), append), Err(refused));
+                assert!(quiet(&mesh, 3).await);
+                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(mesh.member(key(4)), None);
+                let reply = take(&mesh, at(4, 3), Vec::new(), 0).await;
+                assert_eq!(reply, Body::AppendReject { hint: 0 });
+            });
+            assert_eq!(entries, []);
+        }
+
+        #[test]
+        fn a_cut_run_after_a_prev_the_node_does_not_hold_is_rejected() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let rest = history().split_off(3);
+                let reply = take(&mesh, at(4, 3), rest, 9).await;
+                assert_eq!(reply, Body::AppendReject { hint: 0 });
+                assert_eq!(mesh.member(key(4)), None);
+                let reply = take(&mesh, Position::default(), history(), 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 6 });
+                let rest = history().split_off(6);
+                let reply = take(&mesh, at(5, 6), rest, 9).await;
+                assert_eq!(reply, Body::AppendReply { last: 9 });
+            });
+            assert_eq!(entries, history());
+        }
+
+        #[test]
+        fn the_commit_after_a_cut_is_not_above_the_last_entry_kept() {
+            let mut whole = history();
+            whole.push(bytes(at(6, 10), &home(1)));
+            let expected = whole.clone();
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut watch = mesh.watch(INDEX);
+                assert_eq!(watch.next().await, Ok(None));
+                let reply = take(&mesh, Position::default(), whole.clone(), 10).await;
+                assert_eq!(reply, Body::AppendReply { last: 6 });
+                node.clock().sleep(TICK).await;
+                assert!(mesh.member(key(4)).is_some());
+                assert!(now(pin!(watch.next())).await.is_pending());
+                let rest = whole.split_off(6);
+                let reply = take(&mesh, at(5, 6), rest, 10).await;
+                assert_eq!(reply, Body::AppendReply { last: 10 });
+                assert_eq!(watch.next().await, Ok(Some(key(1))));
+            });
+            assert_eq!(entries, expected);
+        }
+
+        /// Serves each stream that node 1 opens to `transport` as `accept` does, and
+        /// records the body of each message before the mesh takes it.
+        async fn accept_recorded(
+            mesh: Mesh,
+            transport: Rc<Transport>,
+            tasks: Tasks,
+            bodies: Arc<Mutex<Vec<Body>>>,
+        ) -> ! {
+            loop {
+                let session = transport.accept().await.unwrap();
+                let (mesh, streams) = (mesh.clone(), tasks.clone());
+                let bodies = Arc::clone(&bodies);
+                tasks.spawn(async move {
+                    while let Ok(incoming) = session.accept().await {
+                        let (mesh, bodies) = (mesh.clone(), Arc::clone(&bodies));
+                        streams.spawn(async move {
+                            let Incoming { mut receiver, .. } = incoming;
+                            let Ok(Some(header)) = receiver.recv().await else {
+                                return;
+                            };
+                            let protocol = wire::header::decode(&header).unwrap();
+                            assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                            while let Ok(Some(bytes)) = receiver.recv().await {
+                                let Some(Message::Raft(message)) =
+                                    Message::decode(&bytes)
+                                else {
+                                    panic!("node 1 sent what is not a raft message");
+                                };
+                                bodies.lock().unwrap().push(message.body.clone());
+                                assert_eq!(mesh.receive(public(1), message), Ok(()));
+                            }
+                        });
+                    }
+                });
+            }
+        }
+
+        /// Node `id` of a pair. Node 2 first takes the history from leader 3, in two
+        /// appends, and records the body of each message node 1 sends it.
+        async fn peer(
+            node: sim::node::Node,
+            tasks: Tasks,
+            id: u8,
+            bodies: Arc<Mutex<Vec<Body>>>,
+        ) -> ! {
+            let config = Config {
+                members: IDS.map(create_voter).into(),
+                ..config_at(&node, &tasks, id, PORT, &IDS, &IDS)
+            };
+            let transport = Rc::clone(&config.transport);
+            let mesh = Mesh::open(config).await.unwrap();
+            if id == 1 {
+                accept(mesh, transport, tasks).await;
+            }
+            let mut first = history();
+            let second = first.split_off(3);
+            let head = append(2, Position::default(), first, 3);
+            assert_eq!(mesh.receive(public(3), head), Ok(()));
+            let tail = append(2, at(4, 3), second, 9);
+            assert_eq!(mesh.receive(public(3), tail), Ok(()));
+            accept_recorded(mesh, transport, tasks, bodies).await
+        }
+
+        // Node 2 holds the history and leads term 7 with the vote of node 1, which
+        // holds no entry. Its first append to node 1 is cut before index 7. With no
+        // proposal, node 1 holds the whole log of node 2 after the next heartbeat.
+        #[test]
+        fn a_follower_that_cut_a_run_holds_the_whole_log_after_the_next_heartbeat() {
+            let mut sim = Sim::new(sim::Config::default());
+            let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            for (node, id) in nodes.iter().zip([1, 2]) {
+                let (own, bodies) = (node.clone(), Arc::clone(&bodies));
+                let config = env::shards::Config {
+                    name: format!("peer-{id}"),
+                    core: None,
+                };
+                let main =
+                    move |tasks| async move { peer(own, tasks, id, bodies).await };
+                drop(node.shards().start(config, main).unwrap());
+            }
+            sim.run_for(seconds(10)).unwrap();
+            let answers: Vec<_> = mem::take(&mut *bodies.lock().unwrap())
+                .into_iter()
+                .filter(|body| {
+                    matches!(body, Body::AppendReply { .. } | Body::AppendReject { .. })
+                })
+                .collect();
+            let expected = [
+                Body::AppendReject { hint: 0 },
+                Body::AppendReply { last: 6 },
+                Body::AppendReply { last: 10 },
+            ];
+            assert_eq!(answers[..3], expected, "{answers:?}");
+            assert_eq!(answers.last(), Some(&Body::AppendReply { last: 10 }));
+            for node in &nodes {
+                sim.crash(node, Crash::Power);
+            }
+            let [one, two] = nodes;
+            let (one, two) = (stored(&mut sim, &one), stored(&mut sim, &two));
+            assert_eq!(two[..9], history());
+            assert_eq!(two.len(), 10, "{two:?}");
+            assert_eq!(two[9].at.term, Term(7));
+            assert_eq!(one, two);
+        }
     }
 }
