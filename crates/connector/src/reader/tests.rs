@@ -1,3 +1,5 @@
+use document::diagnostic::Note;
+use document::value::Kind;
 use document::{Attribute, Label, Map, Position, Source};
 use proptest::prelude::*;
 
@@ -63,6 +65,21 @@ fn selector(pattern: &str) -> Selector {
 
 fn refused(code: &'static str, at: u32, message: &str, fix: &str) -> Diagnostic {
     Diagnostic::new(Code::new(code), self::at(at), message.into(), fix.into())
+}
+
+/// The diagnostic for a second `reader` block at 95, after the one of `config`.
+fn second_reader() -> Diagnostic {
+    let mut second = refused(
+        "document.repeated-block",
+        95,
+        "the connector has a second `reader` block",
+        "Join the two into one",
+    );
+    second.notes.push(Note {
+        span: at(50).expect("a span"),
+        text: "the first `reader` block".into(),
+    });
+    second
 }
 
 #[test]
@@ -209,10 +226,10 @@ fn reads_a_hold_with_no_name() {
 fn refuses_a_negative_hold_at_its_value() {
     let config = config(&[(60, "name", string("influx")), (80, "hold", string("-1s"))]);
     let expected = refused(
-        "config.negative-span",
+        "document.negative-span",
         81,
-        "the reader holds -1s, which is below zero",
-        "Write a hold of zero or more",
+        "the span -1s is below zero",
+        "Write a span of zero or more",
     );
     assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
 }
@@ -328,15 +345,7 @@ fn refuses_a_second_reader_block_after_a_good_one() {
         span: at(96),
     });
     config.blocks.push(second);
-    assert_eq!(
-        read(&config, &[], &[]),
-        Err(vec![refused(
-            "config.repeated-block",
-            95,
-            "the connector has a second `reader` block",
-            "Join the two into one",
-        )])
-    );
+    assert_eq!(read(&config, &[], &[]), Err(vec![second_reader()]));
 }
 
 #[test]
@@ -356,16 +365,11 @@ fn refuses_what_the_reader_block_does_not_take() {
     assert_eq!(
         read(&config, &[], &[]),
         Err(vec![
+            second_reader(),
             refused(
-                "config.repeated-block",
-                95,
-                "the connector has a second `reader` block",
-                "Join the two into one",
-            ),
-            refused(
-                "config.label-count",
+                "document.label-count",
                 55,
-                "the `reader` block takes no label",
+                "the `reader` block has 1 label, and it takes none",
                 "Remove each label, and name the reader with a `name` attribute",
             ),
             refused(

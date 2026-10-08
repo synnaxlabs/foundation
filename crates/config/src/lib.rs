@@ -18,7 +18,6 @@ use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-const LABEL_COUNT: Code = Code::new("config.label-count");
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
@@ -156,7 +155,8 @@ impl<'a> Found<'a> {
     /// unique in any case, and the label's span.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
         let keyword = kind.as_str();
-        let label = self.label(block)?;
+        let fix = "Give the block one label, its name, such as \"site_a.budget\"";
+        let [label] = self.report(read::labels::<1>(block, fix.into())).ok()?;
         let key = match kind.key(&label.text) {
             Ok(key) => key,
             Err(key::Error::Long { most }) => {
@@ -219,28 +219,6 @@ impl<'a> Found<'a> {
         }));
         self.diagnostics.push(diagnostic);
         None
-    }
-
-    /// The one label of a block.
-    fn label(&mut self, block: &'a Block) -> Option<&'a Label> {
-        let [label] = block.labels.as_slice() else {
-            let at = block
-                .labels
-                .get(1)
-                .map_or(block.keyword_span, |label| label.span);
-            self.diagnostics.push(Diagnostic::new(
-                LABEL_COUNT,
-                at,
-                format!(
-                    "the `{}` block has {} labels, and it needs one, its name",
-                    block.keyword,
-                    block.labels.len()
-                ),
-                "Give the block one label, its name, such as \"site_a.budget\"".into(),
-            ));
-            return None;
-        };
-        Some(label)
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -579,17 +557,15 @@ mod tests {
             check(&documents),
             Err(vec![
                 refused(
-                    "config.label-count",
+                    "document.label-count",
                     at(0, 0),
-                    "the `node_settings` block has 0 labels, and it needs one, its \
-                     name",
+                    "the `node_settings` block has no labels, and it takes 1",
                     fix,
                 ),
                 refused(
-                    "config.label-count",
+                    "document.label-count",
                     at(0, 102),
-                    "the `node_settings` block has 3 labels, and it needs one, its \
-                     name",
+                    "the `node_settings` block has 3 labels, and it takes 1",
                     fix,
                 ),
             ])
@@ -1467,10 +1443,10 @@ mod tests {
             assert_eq!(
                 check(&documents),
                 Err(vec![refused(
-                    "config.negative-span",
+                    "document.negative-span",
                     at(0, 13),
-                    "a retention keeps -1s, which is below zero",
-                    "Write a keep time of zero or more",
+                    "the span -1s is below zero",
+                    "Write a span of zero or more",
                 )])
             );
         }
@@ -1510,7 +1486,7 @@ mod tests {
         }
 
         #[test]
-        fn refuses_only_the_unknown_attribute_of_a_retention_with_a_negative_keep() {
+        fn refuses_the_unknown_attribute_and_the_negative_keep_of_a_retention() {
             let documents = retention(&[
                 ("select", string("edge.**")),
                 ("keep", string("-1s")),
@@ -1518,12 +1494,20 @@ mod tests {
             ]);
             assert_eq!(
                 check(&documents),
-                Err(vec![refused(
-                    "document.unknown-attribute",
-                    at(0, 14),
-                    "`hold` is not an attribute of the `retention` block",
-                    "Use `select` or `keep`, or remove it",
-                )])
+                Err(vec![
+                    refused(
+                        "document.negative-span",
+                        at(0, 13),
+                        "the span -1s is below zero",
+                        "Write a span of zero or more",
+                    ),
+                    refused(
+                        "document.unknown-attribute",
+                        at(0, 14),
+                        "`hold` is not an attribute of the `retention` block",
+                        "Use `select` or `keep`, or remove it",
+                    ),
+                ])
             );
         }
 
@@ -1539,10 +1523,10 @@ mod tests {
                 check(&[documents]),
                 Err(vec![
                     refused(
-                        "config.negative-span",
+                        "document.negative-span",
                         at(0, 13),
-                        "a retention keeps -1s, which is below zero",
-                        "Write a keep time of zero or more",
+                        "the span -1s is below zero",
+                        "Write a span of zero or more",
                     ),
                     refused(
                         "document.unknown-block",
@@ -2593,9 +2577,9 @@ mod tests {
                 check(&documents),
                 Err(vec![
                     refused(
-                        "config.label-count",
+                        "document.label-count",
                         at(0, 2),
-                        "the `channel` block has 2 labels, and it needs one, its name",
+                        "the `channel` block has 2 labels, and it takes 1",
                         "Give the block one label, its name, such as \"site_a.budget\"",
                     ),
                     unknown(

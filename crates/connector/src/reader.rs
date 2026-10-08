@@ -9,11 +9,8 @@ use types::time::Span;
 
 use crate::kind;
 
-const LABEL_COUNT: Code = Code::new("config.label-count");
-const REPEATED_BLOCK: Code = Code::new("config.repeated-block");
 const BAD_MODE: Code = Code::new("connector.bad-mode");
 const LATEST_HOLD: Code = Code::new("connector.latest-hold");
-const NEGATIVE_SPAN: Code = Code::new("config.negative-span");
 
 const READER_KEYS: [&str; 3] = ["name", "mode", "hold"];
 
@@ -81,19 +78,11 @@ pub fn read(
         ),
         &mut diagnostics,
     );
-    let mut readers = config
+    diagnostics.extend(document::read::repeated(config, kind::NOUN, "reader"));
+    let first = config
         .blocks
         .iter()
-        .filter(|block| &*block.keyword == "reader");
-    let first = readers.next();
-    for repeated in readers {
-        diagnostics.push(Diagnostic::new(
-            REPEATED_BLOCK,
-            repeated.keyword_span,
-            "the connector has a second `reader` block".into(),
-            "Join the two into one".into(),
-        ));
-    }
+        .find(|block| &*block.keyword == "reader");
     let (name, mode, hold) = match first {
         Some(first) => block(first, &mut diagnostics),
         None => (None, Mode::Complete, Span::ZERO),
@@ -115,14 +104,8 @@ fn block(
     block: &Block,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (Option<Name>, Mode, Span) {
-    if let Some(label) = block.labels.first() {
-        diagnostics.push(Diagnostic::new(
-            LABEL_COUNT,
-            label.span,
-            "the `reader` block takes no label".into(),
-            "Remove each label, and name the reader with a `name` attribute".into(),
-        ));
-    }
+    let fix = "Remove each label, and name the reader with a `name` attribute";
+    keep(document::read::labels::<0>(block, fix.into()), diagnostics);
     diagnostics.extend(document::read::unknown(
         &block.body,
         "the `reader` block",
@@ -134,7 +117,8 @@ fn block(
         .map(|name| keep(document::read::name(&name.value), diagnostics));
     let mode = attribute("mode").map(|mode| keep(self::mode(&mode.value), diagnostics));
     let hold = attribute("hold");
-    let span = hold.map(|hold| keep(self::hold(&hold.value), diagnostics));
+    let span =
+        hold.map(|hold| keep(document::read::duration(&hold.value), diagnostics));
     if let (Some(hold), Some(Some(Mode::Latest))) = (hold, mode) {
         diagnostics.push(Diagnostic::new(
             LATEST_HOLD,
@@ -150,20 +134,6 @@ fn block(
         mode.flatten().unwrap_or(Mode::Complete),
         span.flatten().unwrap_or(Span::ZERO),
     )
-}
-
-/// Reads a span of zero or more.
-fn hold(value: &Value) -> Result<Span, Diagnostic> {
-    let span = document::read::span(value)?;
-    if span < Span::ZERO {
-        return Err(Diagnostic::new(
-            NEGATIVE_SPAN,
-            value.span,
-            format!("the reader holds {span}, which is below zero"),
-            "Write a hold of zero or more".into(),
-        ));
-    }
-    Ok(span)
 }
 
 /// Reads `"complete"` or `"latest"`, as a string or a reference.
