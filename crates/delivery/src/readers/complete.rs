@@ -39,8 +39,9 @@ pub enum Charge {
     /// The frame's [`Frame::charge`]: the session gets the home's frame.
     Whole,
     /// The charge of a frame of one series for each slot, in this order, that the
-    /// frame holds: the frame that a remote reader builds. A slot after its first
-    /// listing, or one the frame's key set lacks, adds no series.
+    /// frame holds: the frame that a remote reader builds, as
+    /// [`types::frame::Places::charge`] gives it. A slot after its first listing, or
+    /// one the frame's key set lacks, adds no series.
     Places(Box<[Slot]>),
 }
 

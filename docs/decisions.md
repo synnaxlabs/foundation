@@ -1522,8 +1522,9 @@ How to read this record:
   name each entry of the key set, in any order: each block payload is a multiple of 8
   bytes, so the padding of the last series does not change the footprint (the
   architect, 2026-10-08T00:25:50Z,
-  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049589885; it
-  supersedes "in entry order" in 6048992122). Lost: a free function that lays one
+  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049589885.
+  Supersedes "in entry order" in
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122). Lost: a free function that lays one
   frame, with each caller keeping its own state for each key set, so `delivery` and
   `serve` each repeat it. Also lost: one `Places` for each remote session, whose layout
   `release` keeps with each frame for `serve`: each frame in the queue would hold its

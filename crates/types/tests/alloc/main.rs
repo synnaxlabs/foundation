@@ -199,4 +199,37 @@ fn lay_places(pool: &block::Pool, set: &KeySet, other: &KeySet) {
     });
     assert_eq!(allocations, 0, "the places allocated");
     assert_eq!(laid, (3, charged), "key 3 and key 1, then key 1");
+    lay_sparse_and_dense_frames(pool);
+}
+
+/// Laying a sparse frame, then a dense one of the same key set, allocates only for
+/// the first of each.
+fn lay_sparse_and_dense_frames(pool: &block::Pool) {
+    let data: Vec<(Key, Type)> = (2..42).map(|n| (Key::from_u128(n), F64)).collect();
+    let mut interner = Interner::new();
+    let set = interner.intern(&[Group {
+        index: Key::from_u128(1),
+        data: &data,
+    }]);
+    let frames = [
+        vec![(0, 8), (30, 8)],
+        (0..8).map(|entry| (entry, 8)).collect(),
+    ]
+    .map(|lens| {
+        let draft = Draft::new(pool, &set, Form::Raw, &lens);
+        draft.expect("the pool holds it").freeze(Path::Live)
+    });
+    let mut places = Places::new(set.entries().iter().rev().map(|e| e.slot).collect());
+    for frame in &frames {
+        places.lay(frame, &set);
+    }
+    let (laid, allocations) = ALLOCATOR.count(|| {
+        let mut laid = 0;
+        for frame in frames.iter().chain(&frames) {
+            laid += places.lay(frame, &set).len();
+        }
+        laid
+    });
+    assert_eq!(allocations, 0, "the places allocated");
+    assert_eq!(laid, 2 * (2 + 8), "both series, then each of 8");
 }

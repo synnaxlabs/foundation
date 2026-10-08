@@ -11,11 +11,11 @@ use crate::hash;
 /// The frame that a remote reader builds from each frame of its index: one series for
 /// each place, in place order, at the ends of [`ends`] (HUB WIRE). A place is one
 /// listing of a slot. A slot after its first listing, or one that a frame's key set
-/// lacks, holds no series. Keeps what it learns of each key set it lays, until it is
-/// dropped, so only the first frame of a key set allocates, about 16 bytes for each
-/// place in that key set, and a frame that gives more series than any before it, 32
-/// bytes for each, and 24 bytes for each place of its key set when it is dense. A
-/// node builds key sets only from the spec, which bounds them.
+/// lacks, holds no series. Keeps what it learns of each key set it lays until it is
+/// dropped, about 16 bytes for each place in that key set, and two buffers that grow
+/// to the most entries of a dense frame laid (24 bytes each) and the most series given
+/// (32 bytes each). Only these allocate. A node builds key sets only from the spec,
+/// which bounds them.
 #[derive(Debug)]
 pub struct Places {
     slots: Box<[Slot]>,
@@ -66,7 +66,7 @@ impl Places {
     /// The series of `frame`, of key set `set`, at the places, in place order. Time
     /// is O(j log(n/j)) for the lesser j and the greater n of the m places in `set`
     /// and the series in `frame`, plus O(k log k) for the k series it gives, or O(m)
-    /// when `frame` holds a series for at least one in 16 of the places.
+    /// when `frame` holds at least one series for each 16 entries that places name.
     ///
     /// # Panics
     ///
@@ -132,7 +132,7 @@ fn each(held: &Held, frame: &Frame, mut f: impl FnMut(usize, Range<usize>)) {
     }
 }
 
-/// A frame with fewer than one series for each `SPARSE` places of its key set is
+/// A frame with fewer than one series for each `SPARSE` entries that places name is
 /// sparse: [`lay`] sorts its series by place, as a walk of each place costs more.
 const SPARSE: usize = 16;
 
@@ -149,24 +149,27 @@ fn lay(
         bounds.clear();
         bounds.resize(held.entries.len(), None);
         each(held, frame, |at, range| bounds[at] = Some(range));
-        placed.extend(held.order.iter().filter_map(|&at| {
+        let present = held.order.iter().filter_map(|&at| {
             let at = to_usize(at);
-            Some(Placed {
-                place: to_usize(held.entries[at].1),
-                bounds: bounds[at].clone()?,
-                end: 0,
-            })
-        }));
-    } else {
-        each(held, frame, |at, bounds| {
-            placed.push(Placed {
-                place: to_usize(held.entries[at].1),
-                bounds,
-                end: 0,
-            });
+            let range = bounds[at].clone()?;
+            let len = range.len();
+            Some(((to_usize(held.entries[at].1), range), len))
         });
-        placed.sort_unstable_by_key(|placed| placed.place);
+        placed.extend(ends(present).map(|((place, bounds), end)| Placed {
+            place,
+            bounds,
+            end,
+        }));
+        return;
     }
+    each(held, frame, |at, bounds| {
+        placed.push(Placed {
+            place: to_usize(held.entries[at].1),
+            bounds,
+            end: 0,
+        });
+    });
+    placed.sort_unstable_by_key(|placed| placed.place);
     let lens = placed.iter_mut().map(|placed| {
         let len = placed.bounds.len();
         (placed, len)
@@ -432,6 +435,40 @@ mod tests {
                     assert_eq!(charge(3, padded(len)), charge(3, len), "{len} bytes");
                 }
             }
+        }
+    }
+
+    /// A frame of 3 series is dense for places of up to `3 * SPARSE` entries. Each
+    /// side lays the series in place order, which is not entry order here.
+    #[test]
+    fn lays_frames_on_each_side_of_the_sparse_bound() {
+        let data: Vec<(crate::channel::Key, Type)> = (2..61)
+            .map(|n| (key(n), Type::Scalar(Scalar::F64)))
+            .collect();
+        let set = interner().intern(&[Group {
+            index: key(1),
+            data: &data,
+        }]);
+        let frame = filled(&set, &[(0, 3), (20, 10), (40, 5)]);
+        for (entries, dense) in [(47, true), (48, true), (49, false)] {
+            let slots: Box<[Slot]> = set.entries()[60 - entries..]
+                .iter()
+                .rev()
+                .map(|e| e.slot)
+                .collect();
+            let expected = model(&set, &frame, &slots);
+            let mut reader = Places::new(slots);
+            let placed = reader.lay(&frame, &set).to_vec();
+            let laid: Vec<(usize, usize)> = placed
+                .iter()
+                .map(|placed| (placed.place, placed.end))
+                .collect();
+            assert_eq!(laid, [(19, 5), (39, 18)], "{entries} entries");
+            let body = build(&frame, &placed);
+            let read: Vec<(usize, &[u8])> = split(&body, laid).collect();
+            assert_eq!(read, expected, "{entries} entries");
+            let walked = if dense { entries } else { 0 };
+            assert_eq!(reader.bounds.len(), walked, "{entries} entries");
         }
     }
 
