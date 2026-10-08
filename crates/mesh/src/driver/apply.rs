@@ -82,10 +82,11 @@ impl Mesh {
                 _ => return Err(Error::NotIndex(index)),
             }
         }
-        indexes.retain(|&(index, _)| self.group.borrow().state.home(index).is_none());
-        if indexes.len() > HOMES_MAX {
+        // No entry removes a home, so `keyed` keeps at most this many.
+        let unhomed = unhomed(&self.group.borrow().state, &indexes).count();
+        if unhomed > HOMES_MAX {
             return Err(Error::Homes {
-                homes: indexes.len(),
+                homes: unhomed,
                 most: HOMES_MAX,
             });
         }
@@ -101,7 +102,7 @@ impl Mesh {
         }
         // A try opens only after the puts, since its floor keeps `Applied` from a trim.
         self.check_proposer()?;
-        let homes = self.keyed(indexes)?;
+        let homes = self.keyed(&indexes)?;
         let holders = BTreeSet::from([self.group.borrow().raft.key()]);
         region::quorum(self.group.borrow().raft.voters(), &holders).map_err(refused)?;
         // Each chunk, not only the listed ones: the store can lack a chunk that the
@@ -111,16 +112,19 @@ impl Mesh {
         self.settle_spec(base, root, listed, holders, homes).await
     }
 
-    // The home of each index of `indexes` by the key of its node, as this node
-    // applied the members.
+    // The home of each index of `indexes` that has no home, by the key of its node,
+    // as this node applied.
     fn keyed(
         &self,
-        indexes: Vec<(channel::Key, Name)>,
+        indexes: &[(channel::Key, Name)],
     ) -> Result<BTreeMap<channel::Key, node::Key>, Error> {
         let group = self.group.borrow();
-        let keyed = indexes.into_iter().map(|(index, home)| {
-            let key = group.state.named(&home).ok_or(Error::UnknownNode(home))?;
-            Ok((index, key))
+        let keyed = unhomed(&group.state, indexes).map(|(index, home)| {
+            let key = group
+                .state
+                .named(home)
+                .ok_or_else(|| Error::UnknownNode(home.clone()))?;
+            Ok((*index, key))
         });
         keyed.collect()
     }
@@ -186,6 +190,16 @@ impl Mesh {
             };
         }
     }
+}
+
+// Each index of `indexes` that has no home in `state`.
+fn unhomed<'a>(
+    state: &'a region::State,
+    indexes: &'a [(channel::Key, Name)],
+) -> impl Iterator<Item = &'a (channel::Key, Name)> {
+    indexes
+        .iter()
+        .filter(|&&(index, _)| state.home(index).is_none())
 }
 
 // The error of a refused spec change.

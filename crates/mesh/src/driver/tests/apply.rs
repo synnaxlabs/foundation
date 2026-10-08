@@ -1222,3 +1222,31 @@ fn each_member_reads_the_homes_of_a_spec_change_and_a_later_change_keeps_them() 
         assert_eq!(board.pointers[&id], next, "node {id}");
     }
 }
+
+// The call is still reading the base tree when `SECOND` gets its home.
+#[test]
+fn an_index_that_gets_a_home_while_the_call_reads_the_base_tree_needs_no_known_node() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home(1)).await;
+        let a = create_subjects(&["plant.a"], 1);
+        let moved = pointer(1, &a);
+        assert_eq!(
+            mesh.apply(base(), a.clone(), BTreeMap::new()).await,
+            Ok(moved)
+        );
+        let mut b = create_indexes(2);
+        b.extend(a);
+        let homes = BTreeMap::from([(
+            Kind::Channel.key("plant.i1").unwrap(),
+            name("plant.node9"),
+        )]);
+        let next = pointer(2, &b);
+        let mut call = pin!(mesh.apply(moved, b, homes));
+        assert!(now(call.as_mut()).await.is_pending());
+        assert_eq!(mesh.set_home(SECOND, key(2)).await, Ok(()));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+        assert_eq!(call.await, Ok(next));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+    });
+}
