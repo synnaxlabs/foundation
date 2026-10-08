@@ -27,7 +27,7 @@
   byte of it or after a `try_send` of it was given back. A class that competes alone
   makes no debt and no credit, and pays off what it owes or is owed. While both
   classes wait, a class is owed at most one peer window of `Latest` bytes, so the
-  credit of a whole message is never lost. A class that does not wait gains no credit
+  credit of a whole message is never lost. A class that does not wait keeps no credit
   past one peer window of its own bytes, so a class that starts again goes ahead of
   the other by at most about one window. A class that holds less than its share when
   QUIC gives room sends what it holds first, and the core holds no QUIC room for its
@@ -52,8 +52,10 @@
   Supersedes the cap of
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069398776. Decided
   by architect-2 (#1998, 2026-10-08 21:44 UTC):
-  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069633568. Who writes
-  the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069633568. The cut
+  of the credit of a class that does not wait: architect-2 (#1998, 2026-10-08 22:18
+  UTC): https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070164489. Who
+  writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
   admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC, and #1998,
   2026-10-08 21:12 UTC):
