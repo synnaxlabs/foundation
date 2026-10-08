@@ -147,7 +147,8 @@ fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
         crate::child::run(name, None);
         return;
     }
-    let text = include_str!("shim.c");
+    // The compiler joins a line that ends in a backslash to the next one.
+    let text = include_str!("shim.c").replace("\\\n", "");
     let lines = text.lines().map(str::trim);
     let pragmas: Vec<_> = lines
         .filter(|l| l.to_lowercase().contains("pragma"))
@@ -186,12 +187,10 @@ fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
 #[test]
 fn the_shim_check_ignores_the_environment_of_cc() {
     let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
-    let target = env!("CONNECTOR_OPCUA_TARGET").replace(['-', '.'], "_");
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name])
         .env("CC", "cc -w")
         .env("CFLAGS", "-w")
-        .env(format!("CFLAGS_{target}"), "-w")
         .env("CRATE_CC_NO_DEFAULTS", "1")
         .output()
         .unwrap();
