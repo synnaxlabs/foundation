@@ -89,11 +89,17 @@ fn peer(stream: &std::net::TcpStream, remote: SocketAddr) -> Result<SocketAddr, 
     match stream.peer_addr() {
         Ok(peer) => Ok(canonical(peer)),
         Err(e) => match errno(&e) {
-            Errno::NOTCONN => Ok(remote),
+            RESET => Ok(remote),
             code => Err(io_error(code)),
         },
     }
 }
+
+/// What `getpeername` gives on a socket after a reset.
+#[cfg(target_os = "macos")]
+const RESET: Errno = Errno::INVAL;
+#[cfg(not(target_os = "macos"))]
+const RESET: Errno = Errno::NOTCONN;
 
 /// `address` as `sim` names it: an IPv4 address on an IPv6 socket is an IPv4 address.
 /// Any other address keeps its scope and flow label.
@@ -245,10 +251,7 @@ mod tests {
                 .unwrap();
             let read = client.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
             assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
-            assert_eq!(
-                client.peer_addr().map_err(|e| errno(&e)),
-                Err(Errno::NOTCONN)
-            );
+            assert_eq!(client.peer_addr().map_err(|e| errno(&e)), Err(RESET));
             assert_eq!(peer(&client, remote), Ok(remote));
         }
 

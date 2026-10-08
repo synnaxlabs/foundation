@@ -136,15 +136,15 @@ impl tcp::Driver for Stream {
             });
         }
         // The linger goes first: macOS refuses an option on a socket shut both ways.
-        let shut = match sockopt::set_socket_linger(&*stream, None) {
-            Ok(()) => match rustix::net::shutdown(&*stream, Shutdown::Write) {
-                // The connection ended with no poll that reported why.
-                Err(Errno::NOTCONN) => {
-                    Err(Self::pending(&stream).unwrap_or(Errno::NOTCONN))
-                }
-                outcome => outcome,
-            },
-            Err(e) => Err(e),
+        let shut = sockopt::set_socket_linger(&*stream, None)
+            .and_then(|()| rustix::net::shutdown(&*stream, Shutdown::Write));
+        let shut = match shut {
+            // The connection ended with no poll that reported why. After a reset,
+            // macOS refuses the linger with `EINVAL`.
+            Err(code @ (Errno::NOTCONN | Errno::INVAL)) => {
+                Err(Self::pending(&stream).unwrap_or(code))
+            }
+            outcome => outcome,
         };
         match shut {
             Ok(()) => {
