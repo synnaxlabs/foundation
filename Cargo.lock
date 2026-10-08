@@ -984,6 +984,7 @@ dependencies = [
  "proptest",
  "raft",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",

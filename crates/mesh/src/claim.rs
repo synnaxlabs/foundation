@@ -29,11 +29,6 @@ impl Signer {
         }
     }
 
-    /// Whether `public` checks the claims that this signer signs.
-    pub(crate) fn owns(&self, public: PublicKey) -> bool {
-        self.pair.public() == public
-    }
-
     /// Signs each grant and change in `ready` that has no signature, before the
     /// write and the sends.
     ///
