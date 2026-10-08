@@ -754,6 +754,58 @@ mod tests {
     }
 
     #[test]
+    fn a_recv_into_gets_the_ranges_and_zeros_of_send_parts() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let frame: Vec<u8> = (0..=255).collect();
+                let parts = [
+                    Part {
+                        range: 0..8,
+                        zeros: 0,
+                    },
+                    Part {
+                        range: 64..69,
+                        zeros: 3,
+                    },
+                    Part {
+                        range: 250..256,
+                        zeros: 255,
+                    },
+                ];
+                let sent = sender.send_parts(side.block(&frame), &parts).await;
+                sent.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut buffer = [9; 300];
+                let read = receiver.recv_into(&mut buffer).await;
+                let expected = [
+                    (0..8).collect::<Vec<u8>>(),
+                    (64..69).collect(),
+                    vec![0; 3],
+                    (250..=255).collect(),
+                    vec![0; 255],
+                ]
+                .concat();
+                assert_eq!(read, Ok(Some(expected.len())));
+                assert_eq!(buffer[..expected.len()], expected);
+                assert_eq!(buffer[expected.len()..], [9; 300 - 277]);
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_reset_after_too_large_ends_the_stream() {
         let (mut sim, ..) = testing::sessions(
             0,
