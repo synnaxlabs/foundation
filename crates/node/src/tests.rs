@@ -2452,4 +2452,24 @@ mod port {
         });
         assert_eq!(node.join(), Err(Error::Buffer { core: 1, error }));
     }
+
+    /// A transport that stops stops the node, and `join` gives why.
+    #[test]
+    fn a_transport_that_stops_stops_the_node() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        host.fail_udp(listen(&host));
+        assert_eq!(sim.run(), Ok(()));
+        let error = transport::Error::Network {
+            error: env::net::Error::Io { code: 5 },
+        };
+        assert_eq!(node.join(), Err(Error::Transport(error.clone())));
+        assert_eq!(
+            Error::Transport(error).to_string(),
+            "the node's transport stopped: the socket broke: network call failed with OS \
+             error 5"
+        );
+    }
 }

@@ -18,18 +18,20 @@ mod task;
 mod tests;
 
 use std::fmt;
+use std::future::poll_fn;
 use std::iter;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+use std::task::Poll;
 
 use env::thread::Handle;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
 
 use crate::handoff::{Give, Take};
-use crate::scope::Scope;
 use crate::stop::{Guard, Stop};
 
 /// The seams a node runs on. `node`'s entry point builds the real ones from `os`;
@@ -300,8 +302,9 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, else [`Error::Panicked`] for the first shard by core
-    /// that panicked. Any failed shard stops the node.
+    /// whose buffer did not open or [`Error::Transport`] for a transport that stopped,
+    /// else [`Error::Panicked`] for the first shard by core that panicked. Any failed
+    /// shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -445,8 +448,10 @@ impl Open {
                 let lock = self.claim(&files, closed.len() + 1, give).await;
                 let (shard, pool) = (tasks.clone(), Rc::new(pool));
                 let own = Rc::clone(&pool);
-                let hold =
-                    async move |home, guard| serve.run(home, own, shard, guard).await;
+                let failed = Arc::clone(&self.failed);
+                let hold = async move |home, guard| {
+                    serve.run(home, own, shard, guard, &failed).await;
+                };
                 self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
                     shard.await;
@@ -605,8 +610,9 @@ impl Endpoint {
 
 impl Serve {
     /// Runs each task given with a hub over `home`, and serves the node's port with
-    /// a transport on `pool`, until `guard` completes. Then drops the tasks, the
-    /// hub, `home`, each session, and the transport. Runs no task and takes no
+    /// a transport on `pool`, until `guard` completes or the transport stops. A
+    /// transport that stops goes into `failed`. Then drops the tasks, the hub,
+    /// `home`, `guard`, each session, and the transport. Runs no task and takes no
     /// session when a shard did not open.
     async fn run(
         self,
@@ -614,6 +620,7 @@ impl Serve {
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
+        failed: &OnceLock<Error>,
     ) {
         let Some(interner) = self.interner.await else {
             return;
@@ -624,10 +631,19 @@ impl Serve {
             tasks: tasks.clone(),
         });
         let transport = self.endpoint.open(pool, tasks.clone());
-        let mut port = Scope::new(tasks.clone());
-        port.spawn(Box::pin(route::accept(transport, tasks.clone())));
-        self.inbox.serve(hub, tasks, guard).await;
-        drop(port);
+        let mut port = pin!(route::accept(transport, tasks.clone()));
+        let mut guard = pin!(guard);
+        let stop = poll_fn(|cx| {
+            if guard.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            port.as_mut().poll(cx).map(|error| {
+                failed.set(Error::Transport(error)).expect(
+                    "invariant: shard 0 serves only once its claim and open succeed",
+                );
+            })
+        });
+        self.inbox.serve(hub, tasks, stop).await;
     }
 }
 
@@ -674,6 +690,9 @@ pub enum Error {
         /// `Size`.
         min: types::byte::Size,
     },
+    /// The transport of the node's port stopped, as when the OS breaks its socket.
+    /// The node stops.
+    Transport(transport::Error),
     /// The node's port did not bind. No shard started.
     Port {
         /// The address of the bind.
@@ -707,6 +726,9 @@ impl fmt::Display for Error {
                 "the disk budget {disk} holds no ring on each of {cores} shards; it \
                  needs at least {min}"
             ),
+            Self::Transport(error) => {
+                write!(f, "the node's transport stopped: {error}")
+            }
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }
