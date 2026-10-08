@@ -102,7 +102,10 @@ pub struct Readers {
 struct Session {
     key: complete::Key,
     /// The named reader, or `None` when unnamed. Boxed so that a session fits 64 bytes.
-    named: Option<Box<Hold>>,
+    named: Option<Box<Named>>,
+    /// How long a named reader holds its data after the session closes. Zero when
+    /// unnamed.
+    hold: Span,
     position: Position,
     /// The position moved since the last record.
     changed: bool,
@@ -112,16 +115,9 @@ const _: () = assert!(size_of::<Session>() == 64, "a `Session` is not 64 bytes")
 
 /// A named reader. A takeover, a resume, and a hold match on its subject and its name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Named {
+struct Named {
     subject: Name,
     name: Name,
-}
-
-/// A named reader and how long it holds its data after its session closes.
-#[derive(Debug)]
-struct Hold {
-    reader: Named,
-    span: Span,
 }
 
 /// The frames a new complete session can wait on before its list grows: as many as
@@ -169,7 +165,8 @@ struct Credit {
 
 #[derive(Debug)]
 struct Closed {
-    hold: Hold,
+    reader: Named,
+    hold: Span,
     position: Position,
     at: Stamp,
 }
@@ -221,8 +218,9 @@ impl Readers {
         }
         let closed = last
             .into_iter()
-            .map(|(reader, (position, span, closed))| Closed {
-                hold: Hold { reader, span },
+            .map(|(reader, (position, hold, closed))| Closed {
+                reader,
+                hold,
                 position,
                 at: closed.unwrap_or(now),
             })
@@ -252,21 +250,20 @@ impl Readers {
         limit_bytes: u64,
         charge: complete::Charge,
     ) -> complete::Opened {
-        let named = match reader {
-            Reader::Unnamed => None,
+        let (named, hold) = match reader {
+            Reader::Unnamed => (None, Span::ZERO),
             Reader::Named {
                 subject,
                 name,
                 hold,
             } => {
                 check(hold);
-                let reader = Named { subject, name };
-                Some(Box::new(Hold { reader, span: hold }))
+                (Some(Box::new(Named { subject, name })), hold)
             }
         };
         let (stored, replaced) = match &named {
             None => (None, None),
-            Some(hold) => self.take_over(&hold.reader),
+            Some(reader) => self.take_over(reader),
         };
         let position = match start {
             Start::At(position) => position,
@@ -280,6 +277,7 @@ impl Readers {
         let session = Session {
             key,
             named,
+            hold,
             position,
             changed: false,
         };
@@ -603,14 +601,15 @@ impl Readers {
     /// Ends the named complete session at `i` at `now`. Its reader holds from `now`.
     fn end_named(&mut self, i: usize, now: Stamp) {
         let session = self.end(i);
-        let Some(hold) = session.named else {
+        let Some(reader) = session.named else {
             panic!(
                 "complete session {} is unnamed: `close` ends it",
                 session.key
             );
         };
         let closed = Closed {
-            hold: *hold,
+            reader: *reader,
+            hold: session.hold,
             position: session.position,
             at: now,
         };
@@ -682,7 +681,7 @@ impl Readers {
             return (Some(session.position), Some(session.key.into()));
         }
         let replaced = self.remove_latest(reader).map(Key::from);
-        let closed = self.closed.iter().position(|c| c.hold.reader == *reader);
+        let closed = self.closed.iter().position(|c| c.reader == *reader);
         (closed.map(|i| self.closed.remove(i).position), replaced)
     }
 
@@ -700,7 +699,7 @@ impl Readers {
     fn named(&self, reader: &Named) -> Option<usize> {
         self.complete
             .iter()
-            .position(|s| s.named.as_ref().is_some_and(|h| h.reader == *reader))
+            .position(|s| s.named.as_deref() == Some(reader))
     }
 
     /// The open complete session `key`, or `None` when it closed. Panics on a key
@@ -792,18 +791,18 @@ impl Credit {
 
 impl Session {
     fn record(&self) -> Option<Record> {
-        let hold = self.named.as_ref()?;
-        Some(hold.record(self.position, None))
+        let reader = self.named.as_ref()?;
+        Some(reader.record(self.position, self.hold, None))
     }
 }
 
-impl Hold {
-    fn record(&self, position: Position, closed: Option<Stamp>) -> Record {
+impl Named {
+    fn record(&self, position: Position, hold: Span, closed: Option<Stamp>) -> Record {
         Record {
-            subject: self.reader.subject.clone(),
-            reader: self.reader.name.clone(),
+            subject: self.subject.clone(),
+            reader: self.name.clone(),
             position,
-            hold: self.span,
+            hold,
             closed,
         }
     }
@@ -813,12 +812,12 @@ impl Closed {
     /// A hold that would end past the last stamp ends at it.
     fn end(&self) -> Stamp {
         self.at
-            .checked_add(self.hold.span)
+            .checked_add(self.hold)
             .unwrap_or(Stamp::from_nanos(i64::MAX))
     }
 
     fn record(&self) -> Record {
-        self.hold.record(self.position, Some(self.at))
+        self.reader.record(self.position, self.hold, Some(self.at))
     }
 }
 
@@ -2968,7 +2967,15 @@ pub(super) mod tests {
 
         use super::*;
 
-        const NAMES: [&str; 3] = ["a", "b", "c"];
+        /// Named readers by subject and name. Two subjects share a name, so the model,
+        /// which keys a reader by its index here, checks that they share nothing.
+        const READERS: [(&str, &str); 4] =
+            [("s", "a"), ("s", "b"), ("t", "a"), ("u", "c")];
+
+        fn reader(n: usize, hold: i64) -> Reader {
+            let (subject, name) = READERS[n];
+            of(subject, name, hold)
+        }
 
         #[derive(Clone, Copy, Debug)]
         enum Input {
@@ -3097,7 +3104,7 @@ pub(super) mod tests {
             let presented = proptest::option::of(position());
             prop_oneof![
                 (
-                    proptest::option::of(0..NAMES.len()),
+                    proptest::option::of(0..READERS.len()),
                     0..30_i64,
                     position(),
                     any::<bool>(),
@@ -3192,8 +3199,7 @@ pub(super) mod tests {
                     resumed,
                     presented,
                 } => {
-                    let reader =
-                        name.map_or(Reader::Unnamed, |n| named(NAMES[n], hold));
+                    let reader = name.map_or(Reader::Unnamed, |n| reader(n, hold));
                     let start = if resumed {
                         Start::Resume {
                             presented,
@@ -3503,7 +3509,7 @@ pub(super) mod tests {
             limit: u64,
         ) {
             let (reader, from) = match name {
-                Some(name) => (named(NAMES[name], 10), resume(live(start))),
+                Some(name) => (reader(name, 10), resume(live(start))),
                 None => (Reader::Unnamed, Start::At(live(start))),
             };
             let opened = readers.open(reader, from, limit, Charge::Whole);
