@@ -3361,12 +3361,9 @@ How to read this record:
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
-  `Watch::next`, and `Mesh::member` (#562). Approved by `laptop.architect`,
-  2026-10-07T23:31:29Z:
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `mesh`
-  gives no `Mesh::key`: a crate that holds a `Mesh` reads this node's key from its own
-  config, as the hub reads `hub::Config::node` (`laptop.architect`,
-  2026-10-08T18:42:42Z:
+  `Watch::next`, and `Mesh::member` (#562). `mesh` gives no `Mesh::key`: a crate that
+  holds a `Mesh` reads this node's key from its own config, as the hub reads
+  `hub::Config::node` (`laptop.architect`, 2026-10-08T18:42:42Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
   Supersedes the approval of `Mesh::key` in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `next`
@@ -3417,8 +3414,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6067470813). A
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
-  stays its one check, of the members and voters. It checks no definition or home: the
-  founding node checks them. `Start` lost, because `driver.rs` holds `raft::Start`,
+  stays its one check, of the members and voters. It checks no definition or home. The
+  node that founds the region checks the definitions (SPEC APPLY). Nothing checks the
+  homes (`laptop.architect`, 2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). `Start`
+  lost, because `driver.rs` holds `raft::Start`,
   which changes at each open (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
   `Founding::definitions` adds
@@ -3895,7 +3895,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6040051975), and
   its plan review, 2026-10-08T17:01:08Z
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210).
-  `Founding::homes` gives the home of each founding index that it holds (#1931).
+  `Founding::homes` gives the home of each founding index that it holds (#1931;
+  `laptop.architect`, 2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
