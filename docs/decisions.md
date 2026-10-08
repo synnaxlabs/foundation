@@ -2180,43 +2180,43 @@ How to read this record:
   holders, the refusal at apply, the quorum rule, and the trigger for `CHUNKS_MAX`,
   2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
-- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by
-  tree key, the region's spec through the leader, as `set_home` does, and gives the new
+- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by tree
+  key, the region's spec through the leader, as `set_home` does, and gives the new
   pointer. It first runs `spec::region::check` (REGION CHECK) at the region's prefix: a
   problem gives `Error::Problems`, which holds each problem as `check` gives it, and
   proposes nothing. `mesh` defines no problem of its own. It then builds the tree with
-  `spec::region::tree`. The change lists each chunk of the new tree that the tree of
-  the base lacks, or each chunk of the new tree when `Config::chunks`, the node's
+  `spec::region::tree`. The change lists each chunk of the new tree that the tree of the
+  base lacks, or each chunk of the new tree when `Config::chunks`, the node's
   `blob::Store`, cannot give the tree of the base. A change that lists more than
-  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A
-  base root whose chunk is not a tree node is a base tree that the store cannot give.
-  The node counts itself as the one holder. When the holders are not a majority of
-  each half of the voters, before the propose or at the apply, the call gives
-  `Error::Quorum { held, voters }` for the first half that lacks one, the incoming
-  half first. The count before the propose costs no entry and no put. The node then
-  puts each chunk of the new tree in its store, not only the listed ones, because
-  `diff` never reads a chunk that the two trees share, so a chunk that the store lost
-  is found only by a put. A put gives `Error::Pool` or `Error::Blob` on a failure.
-  `Mesh::open` puts each chunk of the founding tree in the store. The store writes
-  again each chunk that it found at its open, so the first put of a chunk after each
-  open costs one durable write. A change that the state refuses
-  as stale gives `Error::Stale { base, pointer }`. A call learns the refusal of its own
-  entry from `Applied`, which keeps the refusal of each applied entry above the lowest
-  open floor of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
-  A refusal at the pointer that the call makes, after a lost answer, gives that
-  pointer; a later pointer gives `Stale`. Decided by `laptop.architect`,
-  2026-10-08T10:19:54Z
-  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427).
-  The build with `spec::region::tree`, and the build of the root of
-  `Config::founding` with it in `Mesh::open`, decided by `laptop.architect`,
-  2026-10-08T08:41:43Z
+  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A base
+  root whose chunk is not a tree node is a base tree that the store cannot give. The
+  node counts itself as the one holder. When the holders are not a majority of each half
+  of the voters, before the propose or at the apply, the call gives `Error::Quorum {
+  held, voters }` for the first half that lacks one, the incoming half first. The count
+  before the propose costs no entry and no put. The node then puts each chunk of the new
+  tree in its store, not only the listed ones, because `diff` never reads a chunk that
+  the two trees share, so a chunk that the store lost is found only by a put. A put
+  gives `Error::Pool` or `Error::Blob` on a failure. `Mesh::open` puts each chunk of the
+  founding tree in the store. The store writes again each chunk that it found at its
+  open, so the first put of a chunk after each open costs one durable write. A change
+  that the state refuses as stale gives `Error::Stale { base, pointer }`. A call learns
+  the refusal of its own entry from `Applied`, which keeps the refusal of each applied
+  entry above the lowest open floor of a try. Decided by `laptop.architect`,
+  2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A
+  refusal at the pointer that the call makes, after a lost answer, gives that pointer; a
+  later pointer gives `Stale`. Decided by `laptop.architect`, 2026-10-08T10:19:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
+  build with `spec::region::tree`, and the build of the root of `Config::founding` with
+  it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771).
-  The listed chunks, the store, the put, the founding put, and `Quorum`, decided by
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771). The
+  listed chunks, the store, the put, the founding put, and `Quorum`, decided by
   `laptop.architect`, 2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
+  Supersedes the list of each chunk of the new tree and `Large` on its count
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
@@ -5370,10 +5370,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. One
   shard writes each name in the data directory: shard `i` writes `shard-<i>` and each
   name in it, and shard 0 also writes `lock`, `shards-<n>`, and, with a region, `mesh`
-  and `blob` and each name in them (#585, by `laptop.architect`, 2026-10-08 03:37 UTC:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). A change
-  that gives a name a second writer first changes the check of FILE RENAME, which relies
-  on this (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:
+  and each name in it (#585, by `laptop.architect`, 2026-10-08 03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475), and
+  `blob` and each name in it (#1741). A change that gives a name a second writer first
+  changes the check of FILE RENAME, which relies on this (#1503, decided by
+  `laptop.architect-2`, 2026-10-07 19:12 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory. Before
   the claim reads a name, shard 0 opens the file `lock` in the data directory to write
