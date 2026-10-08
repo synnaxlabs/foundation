@@ -114,6 +114,34 @@ impl Rules {
         Ok(Admitted { hello })
     }
 
+    /// Checks `hello`, signed with `signature`, which renews `admitted` on its
+    /// connection, as [`admit`](Self::admit) checks a first hello. Keep the result in
+    /// place of `admitted`.
+    ///
+    /// # Errors
+    ///
+    /// The first that applies, in order: [`Error::Changed`] when `hello` names another
+    /// subject, key, `via`, or connection than `admitted`, then [`Error::Unsynced`],
+    /// [`Error::Unknown`], [`Error::Unlisted`], [`Error::Signature`],
+    /// [`Error::Expired`], [`Error::Capped`].
+    pub fn renew(
+        &self,
+        admitted: &Admitted,
+        now: Option<Interval>,
+        hello: Hello,
+        signature: &[u8; 64],
+    ) -> Result<Admitted, Error> {
+        let first = &admitted.hello;
+        if hello.subject != first.subject
+            || hello.key != first.key
+            || hello.via != first.via
+            || hello.connection != first.connection
+        {
+            return Err(Error::Changed);
+        }
+        self.admit(now, first.via, hello, signature)
+    }
+
     /// Checks that `body`, signed with `signature`, is a request of the connection of
     /// `admitted`, at mesh time `now`: its subject still lists its key, the hello has
     /// not expired, and the key signed [`request`] of the hello's connection and
@@ -213,6 +241,9 @@ pub enum Error {
         /// The latest expiry that the node takes: [`CAP`] past the earliest mesh time.
         cap: Stamp,
     },
+    /// A renewal names another subject, key, `via`, or connection than the hello it
+    /// renews.
+    Changed,
 }
 
 impl Error {
@@ -231,6 +262,9 @@ impl Error {
             Self::Via { .. } => "Name the node that the program connects to as `via`",
             Self::Expired { .. } => "Send a new hello with a later expiry",
             Self::Capped { .. } => "Send a hello that expires within 15 minutes",
+            Self::Changed => {
+                "Renew with the subject, key, `via`, and connection of the hello it renews"
+            }
         }
     }
 }
@@ -256,6 +290,10 @@ impl fmt::Display for Error {
             Self::Capped { expires, cap } => {
                 write!(f, "the hello expires at {expires}, after the cap {cap}")
             }
+            Self::Changed => f.write_str(
+                "the renewal names another subject, key, node, or connection than \
+                 the hello it renews",
+            ),
         }
     }
 }

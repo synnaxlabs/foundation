@@ -475,6 +475,130 @@ mod admit {
     }
 }
 
+mod renew {
+    use super::*;
+
+    /// The golden hello with a new nonce and an expiry a minute later.
+    fn renewal() -> Hello {
+        Hello {
+            nonce: [0xb5; 16],
+            expires: EXPIRES + Span::MINUTE,
+            ..create_hello()
+        }
+    }
+
+    /// Signs `hello` with `private`, renews [`admitted`] with it at `now`, and gives
+    /// the hello that the result holds.
+    fn renew(
+        rules: &Rules,
+        now: Option<Interval>,
+        private: &str,
+        hello: Hello,
+    ) -> Result<Hello, Error> {
+        let signature = sign(&pair(private), &super::hello(&hello));
+        rules
+            .renew(&admitted(), now, hello, &signature)
+            .map(|renewed| renewed.hello().clone())
+    }
+
+    #[test]
+    fn gives_the_renewal_in_place_of_the_hello() {
+        assert_eq!(renew(&listed(), NOW, TEST_1, renewal()), Ok(renewal()));
+    }
+
+    #[test]
+    fn refuses_a_renewal_that_changes_the_subject_key_via_or_connection() {
+        let rules = rules(&[
+            ("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))]),
+            ("ops.bob", &[public(&pair(TEST_1))]),
+        ]);
+        let subject = Hello {
+            subject: name("ops.bob"),
+            ..renewal()
+        };
+        let connection = Hello {
+            connection: connection::Key([0xc5; 16]),
+            ..renewal()
+        };
+        let key = Hello {
+            key: public(&pair(TEST_2)),
+            ..renewal()
+        };
+        let via = Hello {
+            via: node::Key::from_u128(7),
+            ..renewal()
+        };
+
+        assert_eq!(renew(&rules, NOW, TEST_1, via), Err(Error::Changed));
+        assert_eq!(renew(&rules, NOW, TEST_1, subject), Err(Error::Changed));
+        assert_eq!(renew(&rules, NOW, TEST_1, connection), Err(Error::Changed));
+        assert_eq!(renew(&rules, NOW, TEST_2, key), Err(Error::Changed));
+    }
+
+    #[test]
+    fn checks_the_change_before_the_mesh_time() {
+        let changed = Hello {
+            subject: name("ops.bob"),
+            ..renewal()
+        };
+
+        assert_eq!(renew(&listed(), None, TEST_1, changed), Err(Error::Changed));
+    }
+
+    #[test]
+    fn checks_a_renewal_as_a_first_hello() {
+        let late = Some(at(EXPIRES + Span::MINUTE));
+        let capped = Some(Interval {
+            earliest: EXPIRES - CAP,
+            latest: EXPIRES - CAP + Span::SECOND,
+        });
+
+        assert_eq!(
+            renew(&listed(), None, TEST_1, renewal()),
+            Err(Error::Unsynced)
+        );
+        assert_eq!(
+            renew(&listed(), NOW, TEST_2, renewal()),
+            Err(Error::Signature)
+        );
+        assert_eq!(
+            renew(&rules(&[]), NOW, TEST_1, renewal()),
+            Err(Error::Unknown {
+                subject: name("ops.ana")
+            })
+        );
+        assert_eq!(
+            renew(&listed(), late, TEST_1, renewal()),
+            Err(Error::Expired {
+                expires: EXPIRES + Span::MINUTE,
+                now: EXPIRES + Span::MINUTE,
+            })
+        );
+        assert_eq!(
+            renew(&listed(), capped, TEST_1, renewal()),
+            Err(Error::Capped {
+                expires: EXPIRES + Span::MINUTE,
+                cap: EXPIRES,
+            })
+        );
+    }
+
+    /// A spec that no longer lists the key refuses the renewal of a hello that it
+    /// admitted.
+    #[test]
+    fn refuses_a_renewal_once_the_spec_drops_the_key() {
+        let moved = rules(&[("ops.ana", &[public(&pair(TEST_2))])]);
+
+        assert_eq!(
+            renew(&moved, NOW, TEST_1, renewal()),
+            Err(Error::Unlisted {
+                subject: name("ops.ana"),
+                key: public(&pair(TEST_1)),
+            })
+        );
+    }
+}
+
 mod verify {
     use super::*;
 
@@ -671,6 +795,12 @@ fn names_each_refusal_and_its_fix() {
             "the hello expires at 1970-01-01T00:00:02.000000000Z, after the cap \
              1970-01-01T00:00:01.000000000Z",
             "Send a hello that expires within 15 minutes",
+        ),
+        (
+            Error::Changed,
+            "the renewal names another subject, key, node, or connection than the \
+             hello it renews",
+            "Renew with the subject, key, `via`, and connection of the hello it renews",
         ),
     ];
     for (error, message, fix) in cases {
