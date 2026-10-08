@@ -275,6 +275,10 @@ mod tests {
 
     #[test]
     fn refuses_a_head_before_opened_whatever_its_series() {
+        assert_eq!(
+            Reader::new(&open(1)).decode(&head(1)).err(),
+            Some(Error::Unopened { kind: 2 })
+        );
         let mut reader = Reader::new(&open(1));
         assert_eq!(
             reader.decode(&head(3)).err(),
