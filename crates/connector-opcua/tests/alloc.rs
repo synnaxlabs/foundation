@@ -1,6 +1,7 @@
 //! One run of the open62541 event loop with due timers allocates nothing, in C or in
-//! Rust, and the fuzz round trip makes a fixed count of allocations. The count covers
-//! each thread, so this binary has no test harness.
+//! Rust, and the fuzz round trip makes a fixed count of allocations, or one when the
+//! input does not decode. The count covers each thread, so this binary has no test
+//! harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -16,6 +17,7 @@ fn main() {
     a_run_allocates_nothing();
     the_drop_frees_the_client();
     the_fuzz_round_trip_allocates_for_each_step();
+    a_failed_decode_stops_the_round_trip();
 }
 
 fn sim() -> (Sim, env::clock::Clock) {
@@ -69,4 +71,11 @@ fn the_fuzz_round_trip_allocates_for_each_step() {
     data.resize(data.len() + 7 * 4, 0);
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&data));
     assert_eq!(count, 10, "the round trip of a Variant");
+}
+
+/// A `Boolean` (0) with no byte does not decode, so only the memory of the value is
+/// allocated.
+fn a_failed_decode_stops_the_round_trip() {
+    let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&[0, 0]));
+    assert_eq!(count, 1, "a failed decode");
 }
