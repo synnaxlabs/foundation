@@ -1012,6 +1012,11 @@ How to read this record:
   costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet host), which
   adds 0.3% to the write of one frame. Accepted by laptop.architect:
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
+  A doc states what is true at its commit: `Reader` states no credit window, as a
+  latest reader has none, and `Session` names only `Reader` as its driver. #1636 adds
+  each stream of a remote reader when it adds that driver (laptop.architect,
+  2026-10-08T01:01:26Z,
+  https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049988923).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
   it on drop, and the task ends at its first poll after that. Lost:
