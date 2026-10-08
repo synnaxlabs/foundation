@@ -608,8 +608,7 @@ struct Serve {
     time: clock::Reader,
 }
 
-/// What shard 0 opens the node's transport, mesh, and hub from, but its files, pool,
-/// and tasks.
+/// What shard 0 opens the node's transport, mesh, and hub from.
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,

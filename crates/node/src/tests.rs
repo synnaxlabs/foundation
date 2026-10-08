@@ -2260,8 +2260,8 @@ mod port {
         Program,
     }
 
-    /// A pool of 1 MiB, and a part of a port at a free address of `host`.
-    fn bind(host: &sim::node::Node) -> (Rc<block::Pool>, transport::port::Part) {
+    /// A part of a port at a free address of `host`, and a pool of 1 MiB to send on.
+    fn port(host: &sim::node::Node) -> (Rc<block::Pool>, transport::port::Part) {
         let pool = block::Config { budget: 1 << 20 };
         let memory = block::Heap::new(pool.reservation());
         let pool = Rc::new(block::Pool::new(pool, memory));
@@ -2277,7 +2277,7 @@ mod port {
         tasks: env::tasks::Tasks,
         key: PrivateKey,
     ) -> (Transport, Rc<block::Pool>) {
-        let (pool, part) = bind(host);
+        let (pool, part) = port(host);
         let config = transport::Config {
             private_key: key,
             message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
@@ -2297,7 +2297,7 @@ mod port {
         host: &sim::node::Node,
         tasks: env::tasks::Tasks,
     ) -> (transport::Client, Rc<block::Pool>) {
-        let (pool, part) = bind(host);
+        let (pool, part) = port(host);
         let config = transport::client::Config {
             clock: host.clock(),
             entropy: host.entropy(),
@@ -2311,10 +2311,10 @@ mod port {
     }
 
     /// Starts a peer on a new host of `sim` that dials the node at `listen` of `host`
-    /// as `dialer`, opens a two-way stream,
-    /// sends each of `first`, then sends until a send fails, and reads the reply half.
-    /// Gives what the peer saw once the run reaches it, or the error of the dial. The
-    /// peer holds its session until the session closes.
+    /// as `dialer`, opens a two-way stream, sends each of `first`, then sends until a
+    /// send fails, and reads the reply half. Gives what the peer saw once the run
+    /// reaches it, or the error of the dial. The peer holds its session until the
+    /// session closes.
     fn dial(
         sim: &mut sim::Sim,
         host: &sim::node::Node,
