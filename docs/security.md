@@ -155,7 +155,9 @@ state on `main`.
   answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
-  placement. Not built (`spec`).
+  placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature and
+  each member applies it, so a voter that leads can move the spec pointer to any
+  root.
 - `raft` does not check the sender of a request, by decision: the caller authenticates
   the sender and decides which nodes may send (RAFT SURFACE). `Mesh::receive` refuses a
   message whose sender is not the peer that holds the stream (`Error::Spoofed`). `node`
