@@ -236,11 +236,9 @@ impl From<header::Error> for Error {
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
 /// `tasks`. The task idles while nothing is queued. A drop ends the task at once
-/// when it idles, else at its next deadline, after it wrote the entries queued at
-/// the drop. A [`Commit`] held past the drop resolves once the task ended: with
-/// `Ok` when the entries appended before its call are on disk, else with the error
-/// that ended the task. Await it before a reopen, and before the shard ends, which
-/// cancels the task.
+/// when it idles, else at the first file call that fails, or at its next deadline
+/// after it wrote the entries queued at the drop. Await a [`Commit`] held past the
+/// drop before a reopen, and before the shard ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -567,9 +565,7 @@ impl Buffer {
     /// Resolves when every entry appended before the call is durable: at once when
     /// none waits, else at the end of the group commit that holds the last of them.
     /// Gives the file error that ended the buffer when it ended before they were
-    /// durable. Held past the drop, it resolves once the task ended: with `Ok` when
-    /// the entries appended before the call are on disk, else with the error that
-    /// ended the task.
+    /// durable. [`Commit`] says what one held past the drop gives.
     #[must_use]
     pub fn committed(&self) -> Commit {
         Commit {
@@ -892,7 +888,9 @@ async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
 }
 
 /// The future of [`Buffer::committed`]. It does not borrow the buffer, and it holds
-/// the ring open until it drops.
+/// the ring open until it drops. Held past the drop of the buffer, it resolves once
+/// the task ended: with `Ok` when the entries appended before its call are durable,
+/// else with the error that ended the task.
 #[derive(Debug)]
 pub struct Commit {
     shared: Rc<Shared>,

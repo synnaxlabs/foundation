@@ -776,8 +776,8 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036483605 and
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036799415.
   A `Commit` answers for the entries appended before its call, and nothing else. Held
-  past the drop, it resolves once the task ended: with `Ok` when those entries are on
-  disk, else with the error that ended the task. A caller that needs each entry on disk
+  past the drop, it resolves once the task ended: with `Ok` when those entries are
+  durable, else with the error that ended the task. A caller that needs each entry on disk
   before the drop calls `committed` after its last append. Lost: the error of the task
   to each `Commit` held past the drop, a second meaning only after the drop. Decided by
   `laptop.architect` (#1234, 2026-10-07T07:06:07Z):

@@ -4163,6 +4163,42 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
     });
 }
 
+/// A drop while a commit runs ends the task when that commit fails: it never writes
+/// the entries queued at the drop, nor waits for its next deadline.
+#[test]
+fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
+    run(161, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let opened = shard.memory.syncs();
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues while the first sync runs");
+        let commit = buffer.committed();
+        drop(buffer);
+        let dropped = shard.clock.now();
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(commit.await, Err(failed));
+        assert_eq!(shard.clock.now() - dropped, tenths(2), "at the failed sync");
+        assert_eq!(shard.memory.syncs() - opened, 1, "no write after the drop");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+    });
+}
+
 /// A `Commit` on an entry queued at the drop resolves with the error of the write
 /// after the drop.
 #[test]
