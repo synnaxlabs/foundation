@@ -586,16 +586,17 @@ impl Shard {
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
-    /// order and with the latest readers of an index first. Complete readers first get
-    /// the live frames now on disk. A key is a hint: take from each until
-    /// [`take`](Self::take) gives `None`, then check [`behind`](Self::behind) of a
-    /// complete reader before it waits: one named only for a miss
-    /// ([`open_complete`](Self::open_complete)) has no frame to take. When a commit
-    /// ended since the last call, it reads each index with live frames queued for
-    /// complete readers; else it reads none. Called after each write and each commit,
-    /// with the same `keys` each time, a call allocates only when it gives more keys
-    /// than each call before, or when more frames wait for one complete reader than
-    /// have waited for that reader before.
+    /// order and with the latest readers of an index first. Call it after each write,
+    /// since a latest reader gets a frame before its commit, and after each commit.
+    /// Complete readers first get the live frames now on disk. A key is a hint: take
+    /// from each until [`take`](Self::take) gives `None`, then check
+    /// [`behind`](Self::behind) of a complete reader before it waits: one named only
+    /// for a miss ([`open_complete`](Self::open_complete)) has no frame to take. When a
+    /// commit ended since the last call, it reads each index with live frames queued
+    /// for complete readers; else it reads none. Called so, with the same `keys` each
+    /// time, a call allocates only when it gives more keys than each call before, or
+    /// when more frames wait for one complete reader than have waited for that reader
+    /// before.
     pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
