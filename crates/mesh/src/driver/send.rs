@@ -8,12 +8,11 @@ use std::rc::{Rc, Weak};
 use std::task::Poll;
 
 use block::Pool;
-use env::tasks::Tasks;
 use transport::stream::Sender;
 use transport::{Class, Session, Transport};
 use types::node;
 
-use super::{Group, Live, header};
+use super::{Group, Spawner, header};
 use crate::bytes::block;
 use crate::message::Message;
 
@@ -25,9 +24,7 @@ pub(super) struct Senders {
     pub(super) group: Weak<RefCell<Group>>,
     pub(super) transport: Rc<Transport>,
     pub(super) pool: Rc<Pool>,
-    pub(super) tasks: Tasks,
-    // Counts each task that holds this, until it ends.
-    pub(super) _live: Live,
+    pub(super) spawner: Spawner,
 }
 
 // Why a message did not go.
@@ -68,7 +65,7 @@ impl Senders {
             });
             let Some(fresh) = fresh.await else { return };
             for to in fresh {
-                self.tasks.spawn(self.clone().send(to));
+                self.spawner.spawn(self.clone().send(to));
             }
         }
     }

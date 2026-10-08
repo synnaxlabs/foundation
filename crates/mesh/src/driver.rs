@@ -35,7 +35,7 @@ use crate::message::Message;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
 pub use end::Ended;
-use end::{Live, Running};
+use end::Spawner;
 use send::Senders;
 
 mod end;
@@ -106,7 +106,7 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
-    running: Rc<Running>,
+    spawner: Spawner,
     pool: Rc<Pool>,
     clock: Clock,
     #[cfg_attr(
@@ -153,16 +153,15 @@ impl Mesh {
             "invariant: the transport of a mesh proves the public half of its private \
              key: it proves {proved}, not {own}"
         );
-        let (transport, tasks) = (Rc::clone(&config.transport), config.tasks.clone());
+        let transport = Rc::clone(&config.transport);
         let mesh = Self::start(config).await?;
         let senders = Senders {
             group: Rc::downgrade(&mesh.group),
             transport,
             pool: Rc::clone(&mesh.pool),
-            tasks: tasks.clone(),
-            _live: Live::new(&mesh.running),
+            spawner: mesh.spawner.clone(),
         };
-        tasks.spawn(senders.run());
+        mesh.spawner.spawn(senders.run());
         Ok(mesh)
     }
 
@@ -218,10 +217,9 @@ impl Mesh {
             calls: BTreeMap::new(),
         }));
         let weak = Rc::downgrade(&group);
-        let running = Rc::default();
-        config.tasks.spawn(run(
+        let spawner = Spawner::new(config.tasks);
+        spawner.spawn(run(
             weak,
-            Live::new(&running),
             log,
             signer,
             config.clock.clone(),
@@ -229,7 +227,7 @@ impl Mesh {
         ));
         Ok(Self {
             group,
-            running,
+            spawner,
             pool,
             clock: config.clock,
             entropy: config.entropy,
@@ -248,7 +246,7 @@ impl Mesh {
     /// its directory can take the log.
     #[must_use]
     pub fn ended(&self) -> Ended {
-        Ended(Rc::clone(&self.running))
+        self.spawner.ended()
     }
 
     /// A watch of the home of `index`.
@@ -935,7 +933,7 @@ fn request(body: &Body) -> bool {
     }
 }
 
-// Opens the log in `dir`, and makes `dir` when it is not there.
+// Makes `dir`, durable in its parent, and opens the log in `LOG` in it.
 async fn open_log(
     files: Files,
     dir: &Path,
@@ -953,7 +951,6 @@ async fn open_log(
 // It is the only caller of `Raft::ready`, so the writes keep their order.
 async fn run(
     group: Weak<RefCell<Group>>,
-    _live: Live,
     mut log: Log,
     signer: Signer,
     clock: Clock,
@@ -4939,6 +4936,22 @@ mod tests {
     #[expect(clippy::manual_noop_waker, reason = "a test counts its clones")]
     impl Wake for Idle {
         fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn a_dropped_ended_leaves_no_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut ended = mesh.ended();
+            assert!(Pin::new(&mut ended).poll(&mut cx).is_pending());
+            drop(ended);
+            drop(waker);
+            assert_eq!(Arc::strong_count(&held), 1);
+            drop(mesh);
+        });
     }
 
     #[test]
