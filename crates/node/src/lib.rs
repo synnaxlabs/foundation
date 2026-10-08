@@ -327,9 +327,8 @@ impl Node {
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
     /// whose buffer did not open, [`Error::Blob`] for a chunk store or [`Error::Mesh`]
     /// for a mesh that did not open, or [`Error::Transport`] or [`Error::Group`],
-    /// whichever stopped first, and the transport's when both stopped at once, else
-    /// [`Error::Panicked`] for the first shard by core that panicked. Any failed shard
-    /// stops the node.
+    /// whichever the node sees stop first, else [`Error::Panicked`] for the first
+    /// shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.

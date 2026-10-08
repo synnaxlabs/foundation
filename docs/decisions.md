@@ -6066,8 +6066,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943. A
   mesh whose group stops stops the node, and `Node::join` gives `Error::Group` with
-  the cause. Of a transport that stops and a group that stops, `join` gives the first,
-  and the transport's when both stop at once (#1780). Supersedes the deferral of
+  the cause. Of a transport that stops and a group that stops, `join` gives the one
+  that the node sees first; of two that stop at one instant, either can be first
+  (#1780). Supersedes the deferral of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452. Lost:
   `Mesh::stopped()`, because `Watch::next` gives the stop as its contract and one
   caller does not justify a new `mesh` item; add `Mesh::stopped` when a second caller
@@ -6077,7 +6078,11 @@ How to read this record:
   changed by `laptop.architect-2` at 17:32:00Z
   (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136): the
   stop has its own variant. Lost: `Error::Mesh` with `mesh::Error::Stopped`, which
-  gives one variant two meanings.
+  gives one variant two meanings. The rank by what the node sees first was changed by
+  `laptop.architect-2` at 17:49:13Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217), since
+  the transport sees its own fault one poll after a group that stops at the same
+  instant. Lost: "the transport's when both stop at once", which the node cannot keep.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

@@ -2613,6 +2613,7 @@ mod port {
 
     mod mesh {
         use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         use ::mesh::card::addresses::Addresses;
         use ::mesh::card::{self, Card};
@@ -2968,6 +2969,52 @@ mod port {
             );
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
+        }
+
+        /// Breaks the node's UDP socket from a task on shard 0 at `OPEN + after`, with
+        /// each write of the log failing from `OPEN`. Gives whether the task ran, and
+        /// the node's `join`.
+        fn udp_fault_at(after: Span) -> (bool, Result<(), Error>) {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let at = sim::node::Config::default().monotonic + OPEN + after;
+            let ran = Arc::new(AtomicBool::new(false));
+            let (own, done) = (host.clone(), Arc::clone(&ran));
+            node.spawn(move |_| async move {
+                own.clock().sleep_until(at).await;
+                own.fail_udp(listen(&own));
+                done.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run(), Ok(()));
+            (ran.load(Ordering::SeqCst), node.join())
+        }
+
+        /// Of a transport and a group that stop, `join` gives the one that the node
+        /// sees first. At one instant, the sim's transport sees its fault one poll
+        /// after the group's write fails, so the group's stop is first.
+        #[test]
+        fn join_gives_the_stop_that_shard_0_sees_first() {
+            // The write of the log fails at `OPEN + WRITE`.
+            const WRITE: i64 = 1_792_298_042;
+            let error = transport::Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(
+                udp_fault_at(Span::from_nanos(WRITE - 1)),
+                (true, Err(Error::Transport(error)))
+            );
+            assert_eq!(
+                udp_fault_at(Span::from_nanos(WRITE)),
+                (true, Err(Error::Group(write_failed())))
+            );
+            assert_eq!(
+                udp_fault_at(Span::from_nanos(WRITE + 1)),
+                (false, Err(Error::Group(write_failed())))
+            );
         }
 
         /// A private call: the sim cannot make two causes ready at one poll, as a
