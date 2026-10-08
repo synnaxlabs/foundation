@@ -4638,13 +4638,22 @@ How to read this record:
   4, 2026-10-08T14:35:32Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090). The
   problems come in `Source` order, then in source order, as the problems of `check` do.
-  `config.connector-home` (X22) and `config.split-placement` (BQ10) follow in a second
-  PR of #1082. The region check and the region of each key (REGION CHECK) come with
-  #1029. Lost: a `Planned` with keys (A4), a home on each change, a `config::Error` for
-  a lazy fetch of chunks, a provisional tree and `tree::diff`, which writes chunks that
-  the plan drops, and the chunks of the applied tree as an input, with which `ops` reads
-  the tree a second time and a missing chunk panics in `config`, though #1741 names that
-  case (`Cause::Tree`). Supersedes the `chunks` input and its panic of
+  `place` also runs for each connector, with the connector's `node` as `writer`, and its
+  `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
+  (X22) is at the `home` of a placement that wins for a connector and names a node other
+  than the connector's `node`. `config.split-placement` (BQ10) is at each index under
+  the name of a connector (`Name::starts_with`) when the placement that wins for the
+  index is not the one that wins for the connector: at the label of the index's
+  placement, or of the connector's when no placement selects the index. A tie for the
+  index or the connector gives no `config.split-placement`. The region check and the
+  region of each key (REGION CHECK) come with #1029. Lost: a `Planned` with keys (A4), a
+  home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
+  and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
+  applied tree as an input, with which `ops` reads the tree a second time and a missing
+  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
+  checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
+  `config`, and no report for the `Unplaced` of a connector. Supersedes the `chunks`
+  input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
@@ -4657,7 +4666,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053976538).
   `applied` in place of chunks, the key that no stored channel holds, and one sort:
   `laptop.architect` (2026-10-08T13:26:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734). Checks 2
+  and 3: `laptop.architect-2` (2026-10-08T14:47:21Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087),
+  approved by `laptop.architect` (2026-10-08T14:50:25Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561).
 
 ### 1.12 Access, identity, and secrets
 
