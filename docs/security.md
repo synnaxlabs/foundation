@@ -304,7 +304,7 @@ state on `main`.
 
 ## Secrets
 
-- `types::node::PrivateKey` writes `PrivateKey(..)` in `Debug`, and has no `Display`
+- `types::ed25519::PrivateKey` writes `PrivateKey(..)` in `Debug`, and has no `Display`
   and no equality. The TLS configs do not write key bytes in `Debug`.
 - Open hardening: `PrivateKey` is `Clone` with a public field, and neither it nor the
   PKCS#8 copy in `tls` is cleared when dropped.
