@@ -4,11 +4,11 @@
 
 use std::cell::OnceCell;
 use std::collections::VecDeque;
-use std::mem;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
 use std::slice;
 use std::task::Poll;
+use std::{iter, mem};
 
 use block::{Block, Unique};
 use bytes::Bytes;
@@ -564,43 +564,45 @@ impl<'a> Left<'a> {
             return (Piece::Copied(&block[range]), after);
         }
         buffer.clear();
-        let mut left = self.clone();
-        // Where the run in hand starts in `buffer`, what was left at its start, and
+        // Where the run in hand starts in `buffer`, the index of its first part, and
         // where its last range ends in the block.
-        let mut run = (0, self.clone());
+        let mut run = (0, 0);
         let mut end = None;
-        loop {
-            let range = left.head.range.clone();
+        let mut parts = iter::once(&self.head).chain(self.tail).enumerate();
+        let ended = parts.try_for_each(|(index, part)| {
+            let range = part.range.clone();
             if !range.is_empty() {
                 if end != Some(range.start) {
-                    run = (buffer.len(), left.clone());
+                    run = (buffer.len(), index);
                 }
                 if buffer.len() - run.0 + range.len() > COPIED_MAX {
-                    if run.0 == 0 {
-                        let (range, after) = run.1.run();
-                        return (Piece::Slice(block.slice(range)), after);
-                    }
-                    buffer.truncate(run.0);
-                    left = run.1;
-                    break;
+                    return ControlFlow::Break(());
                 }
                 buffer.extend_from_slice(&block[range.clone()]);
                 end = Some(range.end);
             }
-            if left.head.zeros > 0 {
-                buffer.extend_from_slice(&ZEROS[..usize::from(left.head.zeros)]);
+            if part.zeros > 0 {
+                buffer.extend_from_slice(&ZEROS[..usize::from(part.zeros)]);
                 end = None;
             }
-            if !left.pop() {
-                left.head = Part {
-                    range: range.end..range.end,
-                    zeros: 0,
-                };
-                break;
+            ControlFlow::Continue(())
+        });
+        let after = if ended.is_continue() {
+            Self::new(&[])
+        } else {
+            let after = match run.1.checked_sub(1) {
+                Some(at) => Self::new(&self.tail[at..]),
+                None => self.clone(),
+            };
+            if run.0 == 0 {
+                let (range, after) = after.run();
+                return (Piece::Slice(block.slice(range)), after);
             }
-        }
+            buffer.truncate(run.0);
+            after
+        };
         let buffer: &'b Vec<u8> = buffer;
-        (Piece::Copied(buffer), left)
+        (Piece::Copied(buffer), after)
     }
 }
 
@@ -610,6 +612,26 @@ impl<'a> Left<'a> {
 ///
 /// When a range starts after its end or ends past the block.
 pub(super) fn size(parts: &[Part], bytes: usize) -> usize {
+    // When no sum can overflow, one pass with no branch per part. A range in the
+    // block that starts after its end wraps its length past `bytes`.
+    let bound = bytes.checked_add(usize::from(u8::MAX));
+    if bound
+        .and_then(|bound| bound.checked_mul(parts.len()))
+        .is_some()
+    {
+        let (size, most) =
+            parts.iter().fold((0, 0), |(size, most): (usize, _), part| {
+                let len = part.range.end.wrapping_sub(part.range.start);
+                let size = size.wrapping_add(len).wrapping_add(usize::from(part.zeros));
+                (
+                    size,
+                    most.max(len).max(part.range.start).max(part.range.end),
+                )
+            });
+        if most <= bytes {
+            return size;
+        }
+    }
     parts.iter().fold(0, |size: usize, part| {
         let Range { start, end } = part.range;
         assert!(
@@ -4679,6 +4701,43 @@ mod tests {
         assert_eq!(one(&parts[8..9]), [("slice", long)]);
         assert_eq!(one(&parts[10..]), [("copied", vec![0; 3])]);
         assert_eq!(pieces(&block, &[]), []);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_size_of_parts_is_the_sum_of_their_bytes_or_names_the_first_outside(
+            drawn in proptest::collection::vec(
+                (0..20_usize, 0..20_usize, proptest::bool::ANY, 0..4_u8),
+                0..6,
+            ),
+        ) {
+            let parts: Vec<_> = drawn
+                .into_iter()
+                .map(|(start, end, huge, zeros)| {
+                    let start = if huge { usize::MAX - start } else { start };
+                    Part { range: start..end, zeros }
+                })
+                .collect();
+            let outside = parts
+                .iter()
+                .find(|part| part.range.start > part.range.end || part.range.end > 16);
+            let sized = std::panic::catch_unwind(|| size(&parts, 16));
+            match outside {
+                None => {
+                    let sum = parts.iter().map(|part| part.range.len()).sum::<usize>();
+                    let zeros = parts.iter().map(|part| usize::from(part.zeros));
+                    proptest::prop_assert_eq!(sized.ok(), Some(sum + zeros.sum::<usize>()));
+                }
+                Some(part) => {
+                    let Range { start, end } = part.range;
+                    let message = format!(
+                        "the range {start}..{end} of a part is not in a block of 16 bytes"
+                    );
+                    let given = sized.expect_err("a panic");
+                    proptest::prop_assert_eq!(given.downcast_ref::<String>(), Some(&message));
+                }
+            }
+        }
     }
 
     mod resume {
