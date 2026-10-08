@@ -13,7 +13,7 @@ fn assert_aligned(ptr: *mut c_void) {
     assert_eq!(ptr.addr() % 16, 0, "{:#x}", ptr.addr() % 16);
 }
 
-/// Sizes that pass the checks of these functions but that no allocator gives.
+/// A size that passes the checks of these functions but that no allocator gives.
 const HUGE: usize = isize::MAX.unsigned_abs() - 64;
 
 #[test]
