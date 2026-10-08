@@ -3932,7 +3932,13 @@ How to read this record:
   and cancels it. `ctx` gives hub sessions, status, run commands, secrets, and cancel.
   `hub` and `home` enforce the rules. `connector` is a library of components plus
   ready-made compositions built only from public parts. Supersedes: r8 Q5 actor with
-  device hooks.
+  device hooks. `kind::Context` gives a run its name, config, cancel, clock,
+  randomness, network (`net`), and tasks, and `writer`, `reader`, and `status` come
+  with #1731 (`laptop.architect-2`, 2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677). It is
+  not `Send`: a kind's own thread takes clones of the parts it needs
+  (`laptop.architect-2`, 2026-10-08T18:07:05Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6066078510).
 - **C5 + KINDS OWN THEIR CONFIG** Each kind owns parse, check, discover, and run, built
   on shared components. `config` never knows a kind's fields. A kind returns diagnostics
   with positions plus the channels it reads and writes. Calculations are a kind. The
@@ -3941,7 +3947,13 @@ How to read this record:
   check, resource isolation (own threads with a budget, or another node), determinism
   (time only from samples and ctx), and outputs on the calculation's own index.
   Supersedes: r3 single-expression language, r3 first-input index, r8 JSON Schema
-  check in `config`.
+  check in `config`. The channels of a kind's `check` are from the mesh's side:
+  `reads` are the channels it reads from the mesh (commands for the device, or samples
+  it sends out), and `writes` the channels it writes to the mesh (samples from the
+  device) (`laptop.architect-2`, 2026-10-07T15:17:11Z:
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688; item on
+  #1731, 2026-10-08T06:24:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6053789750).
 - **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
   methods. `kind::Table` erases it inside `connector` with a private trait that takes
   the `Document` and parses again, so callers see one concrete type with no `Any` and
@@ -4008,9 +4020,22 @@ How to read this record:
   7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
-  the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
-  (1 s first, 60 s cap, constants). The waits start again from 1 s after a run that
-  lasted at least 60 s. `Ok` from `run` ends the connector.
+  the caller's token, which the supervisor cancels once the run returns or its future
+  drops, so each task that the run spawned to wait on it ends with the run
+  (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
+  supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
+  entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
+  2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
+  `hub` field lands after #1941 (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789, item 4),
+  as the tests that need a hub wait on #1941 (`laptop.architect`,
+  2026-10-08T17:50:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
+  `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
+  constants). The waits start again from 1 s after a run that lasted at least 60 s.
+  `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
   changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
   `connector` builder in the plan on #338, after `/eb-review`; approved by the
@@ -4156,11 +4181,12 @@ How to read this record:
   and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
-  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and each thread with none draws the same fixed values. So
-  `connector-opcua` (PR 4 of #435) sets the start value with
-  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
-  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  2026-10-08 12:03 UTC). A draw on a thread with no start value aborts
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Nothing in the library sets a start value, also in
+  production. So `connector-opcua` (PR 4 of #435) sets the start value
+  with `UA_random_seed_deterministic`, taken from the randomness of `env`, and never
+  calls `UA_random_seed`, which reads the clock. It does so on each thread before that
   thread calls open62541, and runs each server and each client on one thread. Its
   test server sets the start value of the test at start, and its end-to-end check
   asserts the same run for the same value. A state for each `UA_Server` and
@@ -4169,6 +4195,21 @@ How to read this record:
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  A second change of `src/util/ua_util.c` keeps a flag for each thread, which
+  `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
+  `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
+  calls each of the two draws on a thread with none, and the test asserts the abort
+  and its exact output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Supersedes the record text "each thread with none draws the
+  same fixed values", which cited
+  https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. The
+  line of `UA_random_seed` that sets the flag has no test: no path of our build
+  reaches it, and a test needs a driver whose clock does not abort. Approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC). This change and its driver test ship in a PR of their own,
+  apart from the connector code (same comment).
   The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
   with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
   clock functions give 0, and the 5 POSIX constructors print their name and abort,
@@ -4879,11 +4920,16 @@ How to read this record:
   stored key at its name, and a new name gets `Key::from_u128(n)`, a key that no stored
   channel holds. A definition changes when its encoded bytes differ from the stored
   bytes. A stored definition that no file holds is removed (A2), except one whose label
-  is reserved (FIRST ADMIN). An edge that `check` cannot resolve stays
-  `config.unknown-channel` (CHANNEL BLOCK). An edge to a channel of the wrong kind is
-  `config.wrong-channel`. `place` runs for each index, with the node of its first
-  writer: a connector whose `writes` holds the index or a channel on it. Its `Unplaced`
-  is `config.unplaced` at the label of the index, with each placement by its label.
+  is reserved (FIRST ADMIN), or whose kind no block of a file defines, such as `Time`
+  and `Compression` until their blocks come: the files cannot state such a kind, so
+  they ask for no removal. Lost: remove it, and refuse the plan, which stops each apply
+  with no fix in the files (`laptop.architect`, #1886, 2026-10-08T15:22:47Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An
+  edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
+  edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
+  index, with the node of its first writer: a connector whose `writes` holds the index
+  or a channel on it. Its `Unplaced` is `config.unplaced` at the label of the index,
+  with each placement by its label.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
   `config.writer-nodes` is at the `node` of the first connector on a second node that
@@ -4893,15 +4939,139 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). A tie,
   with no span or with one `Source` in two Documents, has no defined choice (#1886 round
   4, 2026-10-08T14:35:32Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090). The
-  problems come in `Source` order, then in source order, as the problems of `check` do.
-  `config.connector-home` (X22) and `config.split-placement` (BQ10) follow in a second
-  PR of #1082. The region check and the region of each key (REGION CHECK) come with
-  #1029. Lost: a `Planned` with keys (A4), a home on each change, a `config::Error` for
-  a lazy fetch of chunks, a provisional tree and `tree::diff`, which writes chunks that
-  the plan drops, and the chunks of the applied tree as an input, with which `ops` reads
-  the tree a second time and a missing chunk panics in `config`, though #1741 names that
-  case (`Cause::Tree`). Supersedes the `chunks` input and its panic of
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090), approved
+  as merged (`laptop.architect`, 2026-10-08T15:21:08Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063133042), which
+  changes the text of
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062122870. Trigger:
+  before a path makes Documents with no spans, such as an SDK that builds a spec in
+  code, PLAN SURFACE states the order on a tie (the order of `documents`), with a test
+  for the writer, for the connector of a name, and for the name of a key. The problems
+  come in `Source` order, then in source order, as the problems of `check` do.
+  `place` also runs for each connector, with the connector's `node` as `writer`, and its
+  `Unplaced` is `config.unplaced` at the label of the connector. The fix of
+  `Unplaced::Overlap` is "Move the node to `home` when it is the one node of the
+  placement, else remove it from the placement": `Overlap` occurs only when the
+  placement names no `home`, and a removal that leaves no node gives
+  `config.empty-placement`. Two inputs need two edits. In the first, the node is the
+  one node of `p`, and `p` wins for a connector on another node. The move then gives
+  `config.connector-home`, whose fix plans. `Unplaced::fix` is static and cannot name
+  that connector (`laptop.architect`, 2026-10-08T16:51:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 2,
+  changed by `laptop.architect`, 2026-10-08T17:23:56Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065346716, and at
+  2026-10-08T17:30:22Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065460014).
+  In the second, `p` names two or more nodes, and each is the node of an `Overlap` of
+  `p`. The removals then give `config.empty-placement`, whose fix names a node
+  (`laptop.architect`, 2026-10-08T17:11:23Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065131594, changed
+  by `laptop.architect`, 2026-10-08T17:22:53Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065329233).
+  `config.connector-home` (X22) is at the `home` of a placement `p` that wins for a
+  connector `a` on the node `n` and names another node. Its fix is "Name `n` as the
+  `home`, and keep `n` out of `standby` and `copies`" when `p` wins for no connector on
+  another node, and for no index whose nearest connector is on another node, because a
+  new `home` moves each index that `p` wins (`laptop.architect`, 2026-10-08T16:22:59Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064298961). Else it
+  is "Exclude the connector `a` and its indexes from the `select` of `p`, and select
+  them with another placement whose `home` is `n`", which changes no other connector of
+  `p`, and which lists after `p` each placement that wins for an index of `a`. The
+  indexes of a connector are those whose nearest connector it is, as
+  `config.split-placement` reads them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
+  2026-10-08T15:21:54Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126,
+  2026-10-08T15:31:52Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171, and
+  2026-10-08T16:04:09Z, for "another" and the placements of the indexes,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123).
+  `config.split-placement` (BQ10) is at each index when the placement that wins for it
+  is not the one that wins for its nearest connector, the connector with the longest
+  name above the index (`Name::starts_with`): at the label of the index's placement, or
+  of the connector's when no placement selects the index. So the index `d.e.time`
+  follows the connector `d.e`, not `d`: the indexes of BQ10 are the connector's own, the
+  unit of failover (`laptop.director`, #1901, 2026-10-08T15:20:28Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459). Its fix
+  is "Make the placement `p` win for the connector `c` and its indexes", where `p` wins
+  for `c`, or for the index when no placement selects `c` (same comment of 15:21:54Z,
+  and `laptop.architect`, 2026-10-08T16:22:59Z). It is the target state that each other
+  fix names, so each split diagnostic of `c` gives one edit. When no placement can win
+  for `c` and each of its indexes at the node `n` of `c`, each diagnostic of `c` gives
+  one fix that names each winner, so one edit applies it. When `t` wins for `c` and gets
+  case 2 of `config.connector-home`, the fix is that of case 2: "Exclude the connector
+  `c` and its indexes from the `select` of `t` and `r`, and select them with another
+  placement whose `home` is `n`", where `t` and `r` are each placement that wins for `c`
+  or an index of `c`. When no placement selects `c`, and more than one placement wins
+  for the indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the
+  indexes of the connector `c` from the `select` of `p`, and select the connector and
+  its indexes with another placement whose `home` is `n`", where `p` is each placement
+  that wins for an index of `c`. When `p`, the placement that the fix names (the winner
+  of `c`, else the one placement that wins for its indexes), names no `home` and an
+  index of `c` has no writer, the fix is "Name `n` as the `home` of `p`, keep `n` out of
+  its `standby` and `copies`, and make `p` win for the connector `c` and its indexes"
+  when `p` wins for no connector on another node, and for no index whose nearest
+  connector is on another node, because a placement with no `home` cannot hold an index
+  that no connector writes. Else it is the case 2 text, or the text for no placement
+  that selects `c` (`laptop.architect`, 2026-10-08T16:51:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 1). A
+  list of winners is "`p`", "`p` and `q`", or "`p`, `q`, and `r`": the winner of `c`
+  first, then the others in tree key order. "Another" keeps a listed placement from
+  being the new one, which its exclusion would empty (`laptop.architect`,
+  2026-10-08T15:46:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
+  2026-10-08T16:04:09Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123). A tie for
+  the index or the connector gives no `config.split-placement`. The region check and the
+  region of each key (REGION CHECK) come with #1029. Lost: a `Planned` with keys (A4), a
+  home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
+  and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
+  applied tree as an input, with which `ops` reads the tree a second time and a missing
+  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
+  checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
+  `config`, no report for the `Unplaced` of a connector, a check against each connector
+  above the index, with which two nested connectors on two nodes share one placement,
+  the `config.connector-home` fixes "Leave out `home`", which can leave an empty
+  placement or an index with no home, and "Name `n` as the `home`" in each case, which
+  moves the problem between two connectors of one placement, and "Select the connector
+  `a` and each index under its name with a more specific placement", which no placement
+  can follow when `p` names `a` by its exact name, and the `config.split-placement` fix
+  "and each name under it", which also moves the indexes of a nested connector, and,
+  when no placement can win for `c` and each of its indexes at `n`, a fix that names one
+  placement, which moves the index `i` alone or conflicts with the fix of another
+  diagnostic of `c`, case 1 when `p` wins for an index whose nearest connector is on
+  another node, which moves that index away from its connector, and the
+  `config.split-placement` fix "and the index `i`", which gives each split diagnostic of
+  `c` another edit, the node of the nearest connector as the home of an index with no
+  writer, which guesses a home for data that no connector on that node makes, the
+  `Overlap` fix "Move the node to `home`, or remove it from the placement", which offers
+  a removal that leaves no node, an `Overlap` fix computed in `config` for each name,
+  which gives one variant a second source of text, and a fix computed in `config` from
+  each `Overlap` of `p`.
+  Supersedes the fix texts of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, the
+  case 1 condition of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556, the
+  `config.split-placement` fix "and the index `i`" of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
+  check of an index against each connector above it of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, case 2 of
+  the `config.connector-home` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556 and
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
+  `config.split-placement` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126 when no
+  placement can win for `c` and each of its indexes at `n`, the
+  `config.split-placement` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064298961 (item 2)
+  when `p` names no `home` and an index of `c` has no writer, the `Overlap` fix of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561, the
+  case 2 text of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171 and the
+  text of https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980,
+  which name one placement and "a placement", the `chunks` input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
@@ -4914,7 +5084,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053976538).
   `applied` in place of chunks, the key that no stored channel holds, and one sort:
   `laptop.architect` (2026-10-08T13:26:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734). Checks 2
+  and 3: `laptop.architect-2` (2026-10-08T14:47:21Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087),
+  approved by `laptop.architect` (2026-10-08T14:50:25Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561).
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
