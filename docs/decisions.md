@@ -346,7 +346,10 @@ How to read this record:
   `keep` reads with `document::read::span`, which refuses a negative span with
   `document.negative-span` at the `keep` value, as it does a reader `hold` (S10,
   DOCUMENT KEYS; `laptop.architect-2`, 2026-10-08T07:04:36Z,
-  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145). Supersedes: `config.negative-span` of #895.
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes the `config.negative-span` code and the clause "A negative span reads, and
+  each caller owns its bound" of the ruling at 2026-10-07T11:44:51Z,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
@@ -3389,8 +3392,11 @@ How to read this record:
   block is `document.repeated-block`, and `read` reads only the first, where a label is
   `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
   #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
-  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145). Supersedes: `config.repeated-block`, `config.label-count`, and
-  `config.negative-span` for the reader.
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes `config.repeated-block` and `config.label-count` of
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967
+  (2026-10-08T03:59:47Z), and `config.negative-span` for a `hold` of
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
   A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
   holds.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
@@ -3909,6 +3915,8 @@ How to read this record:
   changes each caller of `unknown` for one caller of `repeated`. Decided by
   `laptop.architect-2` at 2026-10-08T07:04:36Z
   (https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes the clause "A negative span reads, and each caller owns its bound" of
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
