@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -1326,8 +1327,9 @@ mod directory {
         }
     }
 
-    /// A crash at the sync of the record: a power cut loses the record, and a
-    /// process crash keeps it. The next start syncs the record before `shard-0`.
+    /// A crash at the sync of the record: a power cut keeps a prefix of the creates
+    /// of the lock and the record, and a process crash keeps both. The next start
+    /// syncs the record before `shard-0`.
     #[test]
     fn a_crash_at_the_sync_of_the_record_leaves_it_whole_or_absent() {
         use env::files::Operation::SyncDir;
@@ -1336,23 +1338,30 @@ mod directory {
             operation: SyncDir,
             code: 5,
         };
+        let made = ["lock", "shards-2"].map(PathBuf::from);
+        let prefixes = BTreeSet::from([vec![], made[..1].to_vec(), made.to_vec()]);
         for (crash, kept) in [
-            (sim::Crash::Power, &[][..]),
-            (sim::Crash::Process, &["lock", "shards-2"][..]),
+            (sim::Crash::Power, prefixes),
+            (sim::Crash::Process, BTreeSet::from([made.to_vec()])),
         ] {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            host.fail_file(Path::new(""), SyncDir);
-            let e = run_on(&mut sim, &host);
-            assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
-            sim.crash(&host, crash);
-            let kept: Vec<PathBuf> = kept.iter().map(PathBuf::from).collect();
-            assert_eq!(listed(&mut sim, &host, ""), kept, "{crash:?}");
-            host.fail_file(Path::new(""), SyncDir);
-            let e = run_on(&mut sim, &host);
-            assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
-            let made = ["lock", "shards-2"].map(PathBuf::from);
-            assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
+            let mut listings = BTreeSet::new();
+            for seed in 0..32 {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                host.fail_file(Path::new(""), SyncDir);
+                let e = run_on(&mut sim, &host);
+                assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
+                sim.crash(&host, crash);
+                listings.insert(listed(&mut sim, &host, ""));
+                host.fail_file(Path::new(""), SyncDir);
+                let e = run_on(&mut sim, &host);
+                assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
+                assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
+            }
+            assert_eq!(listings, kept, "{crash:?}");
         }
     }
 
@@ -2296,7 +2305,7 @@ mod port {
     }
 
     /// The node's key, as a peer sees it.
-    fn node_key(sim: &mut sim::Sim) -> types::node::PublicKey {
+    fn node_key(sim: &mut sim::Sim) -> types::ed25519::PublicKey {
         let host = sim.node(sim::node::Config::default());
         let key = sim.run_on(&host, |host, tasks| async move {
             transport(&host, tasks, KEY).0.public_key()
@@ -2451,5 +2460,75 @@ mod port {
             code: 5,
         });
         assert_eq!(node.join(), Err(Error::Buffer { core: 1, error }));
+    }
+
+    /// A transport that stops stops the node, and `join` gives why.
+    #[test]
+    fn a_transport_that_stops_stops_the_node() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        host.fail_udp(listen(&host));
+        assert_eq!(sim.run(), Ok(()));
+        let error = transport::Error::Network {
+            error: env::net::Error::Io { code: 5 },
+        };
+        assert_eq!(node.join(), Err(Error::Transport(error.clone())));
+        assert_eq!(
+            Error::Transport(error).to_string(),
+            "the node's transport stopped: the socket broke: network call failed \
+             with OS error 5"
+        );
+    }
+
+    /// A stop of the node at the instant its transport stops is not a failure.
+    #[test]
+    fn a_stop_as_the_transport_stops_gives_no_error() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        host.fail_udp(listen(&host));
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    /// A task whose drop panics as the transport stops: `join` ranks the transport's
+    /// error above the panic.
+    #[test]
+    fn a_panic_as_the_transport_stops_gives_the_transport_error() {
+        struct Panics;
+        impl Drop for Panics {
+            fn drop(&mut self) {
+                panic!("a task's drop panics");
+            }
+        }
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        node.spawn(|_| {
+            let panics = Panics;
+            async move {
+                std::future::pending::<()>().await;
+                drop(panics);
+            }
+        });
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        host.fail_udp(listen(&host));
+        assert_eq!(
+            sim.run(),
+            Err(sim::Error::Panicked {
+                thread: "shard-0".into(),
+                message: "a task's drop panics".into(),
+                seed: 0,
+            })
+        );
+        assert_eq!(sim.run(), Ok(()));
+        let error = transport::Error::Network {
+            error: env::net::Error::Io { code: 5 },
+        };
+        assert_eq!(node.join(), Err(Error::Transport(error)));
     }
 }

@@ -70,9 +70,9 @@ state on `main`.
   holds the streams of each session of a carrier, so that bound does not hold for it). A
   map whose keys a peer picks is a `BTreeMap`, unless the node limits those keys to a
   small count, as `streams_max` does for the streams of one session (R16-7).
-- A key of small order needs no private key. `types::node::PublicKey::new` refuses
-  each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
-  `types`; the TLS check uses it.
+- A key of small order needs no private key. `types::ed25519::PublicKey::new`
+  refuses each one, so each check that takes a `PublicKey` has it (NODE KEY TLS).
+  Landed in `types`; the TLS check uses it.
 - Each shard signs stateless resets with one key for the node, and a connection ID
   names its shard in the first byte (ONE PORT PER NODE). A shard that gets a
   datagram with a short header for a connection of another shard signs a valid
@@ -375,8 +375,11 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
-No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`),
-`mesh::Member::decode` (the join answer of #336 adds its target), `spec` tree chunks
-(#64), `types::time::Rate`, `mesh::log::scan`, the record order and torn end of the
-mesh log files (#1746), and each connector's protocol parser.
+No target yet, because the decoder is private, not built, or not reached from a file:
+`transport::message` and `tls` (#55), the QUIC hello
+(`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
+#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
+mesh log files and the names of their directory (`mesh::log::scan` and
+`mesh::log::sequence`, #1746), each connector's protocol parser, and
+`connector::reader::read`, which no file reaches until `config::check` takes a kind
+table (#1153).

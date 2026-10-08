@@ -2,17 +2,20 @@
 //! names.
 
 use transport::stream::Incoming;
-use transport::{Code, Session, Transport};
+use transport::{Code, Error, Session, Transport};
 use wire::Protocol;
 
 use crate::scope::Scope;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
-/// transport stops. Admits every peer.
-pub(crate) async fn accept(transport: Transport, tasks: env::tasks::Tasks) {
+/// transport stops, and gives the error that stopped it. Admits every peer.
+pub(crate) async fn accept(transport: Transport, tasks: env::tasks::Tasks) -> Error {
     let mut sessions = Scope::new(tasks.clone());
-    while let Ok(session) = transport.accept().await {
-        sessions.spawn(Box::pin(serve(session, tasks.clone())));
+    loop {
+        match transport.accept().await {
+            Ok(session) => sessions.spawn(Box::pin(serve(session, tasks.clone()))),
+            Err(error) => return error,
+        }
     }
 }
 

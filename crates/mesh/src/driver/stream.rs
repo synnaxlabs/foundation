@@ -2,7 +2,7 @@
 
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
 use super::Mesh;
 use crate::bytes::block;
