@@ -560,6 +560,26 @@ mod tests {
             });
         }
 
+        #[test]
+        fn sends_one_reset_for_initials_from_many_ports_of_one_ip_at_once() {
+            let resets = testing::run(1, |shard| {
+                let (now, mut buffer) =
+                    (pair::at(Duration::from_millis(1)), Vec::new());
+                let mut dialer = program(shard);
+                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
+                let initial = initial.contents.to_vec();
+                let mut endpoint = program(shard);
+                (0..1_000u16)
+                    .filter(|port| {
+                        let victim = SocketAddr::new(pair::CLIENT.ip(), 1_000 + port);
+                        reply(&mut endpoint, now, victim, &initial).is_some()
+                    })
+                    .count()
+            });
+            assert_eq!(resets, 1);
+        }
+
         /// A program's endpoint on `shard`.
         fn program(shard: &testing::Shard) -> Endpoint {
             let setup = shard.client().setup().expect("a setup");
