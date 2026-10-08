@@ -1837,7 +1837,7 @@ mod hub {
             .iter()
             .map(|(n, c)| (name(n), Definition::Channel(c.clone())))
             .collect();
-        hub.define(
+        hub.set_definitions(
             definitions
                 .iter()
                 .map(|(name, definition)| (name, definition)),

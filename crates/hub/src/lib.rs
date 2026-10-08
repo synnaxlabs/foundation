@@ -130,7 +130,7 @@ impl Hub {
     /// When a channel has the key or name of a known channel or of another channel of
     /// `definitions`, or the index of a data channel is neither known nor an index of
     /// `definitions`.
-    pub fn define<'d>(
+    pub fn set_definitions<'d>(
         &self,
         definitions: impl IntoIterator<Item = (&'d Name, &'d Definition)>,
     ) {
@@ -208,7 +208,7 @@ impl Hub {
 
 impl State {
     /// Makes `channel` known to sessions as `name`, with the panics of
-    /// [`Hub::define`].
+    /// [`Hub::set_definitions`].
     fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
         let key = channel.key;
         assert!(

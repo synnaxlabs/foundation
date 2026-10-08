@@ -692,7 +692,7 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
     let home = |test: Test, link: Link, incoming| async move {
         let names: Vec<_> = KEYS.map(|key| format!("v{key}")).collect();
         for (key, name) in KEYS.zip(&names) {
-            test.hub.define([(
+            test.hub.set_definitions([(
                 &super::name(name),
                 &super::definition(key, DataType::Sample(I64), 1),
             )]);
@@ -742,7 +742,7 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
     let written = raw.clone();
     let home = |test: Test, link: Link, incoming| async move {
-        test.hub.define([(
+        test.hub.set_definitions([(
             &super::name("text"),
             &super::definition(6, DataType::Sample(Type::String), 1),
         )]);
@@ -810,7 +810,7 @@ fn sends_no_message_for_a_last_series_of_no_bytes() {
         };
         let types = KEYS.map(|_| I64).chain([empty]);
         for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
-            test.hub.define([(
+            test.hub.set_definitions([(
                 &super::name(name),
                 &super::definition(key, DataType::Sample(data_type), 1),
             )]);
@@ -1040,7 +1040,7 @@ fn stops_a_session_whose_ends_find_the_pool_empty_with_busy() {
     let home = move |test: Test, link: Link, incoming| async move {
         let names: Vec<_> = WIDE[1..].iter().map(|key| format!("v{key}")).collect();
         for (&key, name) in WIDE[3..].iter().zip(&names[2..]) {
-            test.hub.define([(
+            test.hub.set_definitions([(
                 &super::name(name),
                 &super::definition(key, DataType::Sample(I64), 1),
             )]);

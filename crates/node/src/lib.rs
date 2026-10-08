@@ -708,7 +708,7 @@ impl Serve {
             entropy: self.endpoint.entropy.clone(),
         });
         if let Some(region) = &self.endpoint.region {
-            hub.define(&region.definitions);
+            hub.set_definitions(&region.definitions);
         }
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
