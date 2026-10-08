@@ -11,8 +11,7 @@
   2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy. Each file from
   the release is byte for byte the file at the tag. Every other file (`src_generated/`,
   `sources.txt`, `flags.txt`, `VERSION`) is the output of that command alone, never
-  edited by hand, but for the thread-local block of `config.h` (below). Our other
-  changes edit only release files. `cargo xtask open62541` is the
+  edited by hand. Our change edits only release files. `cargo xtask open62541` is the
   clock check. It builds the copy from its own files with `-g -O0` and reads the call
   relocations against the closed list. It fails on a call outside the list, a listed
   pair with no call, a clock address in any section that is not code, each
@@ -161,5 +160,9 @@
   2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
   0 is the fix, as its own change" of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211.
-  Narrows, for this block, the condition "never edited by hand" of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572.
+  It is the one file outside the release that we edit by hand. Supersedes, for this
+  block, "never edited by hand. Our change edits only release files" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572 (approved
+  by `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6068593976,
+  2026-10-08 20:37 UTC).
