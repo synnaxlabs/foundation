@@ -1780,7 +1780,8 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. Lost: a
   connection per class, because four handshakes and four congestion controllers
   compete on one path (#55). Settled by the advisor and the coordinator under the
-  person's delegation (#789). A node resets a stream with the stop's code when the stop arrives, and frees
+  person's delegation (#789).
+  A node resets a stream with the stop's code when the stop arrives, and frees
   the stream's room in the send budget and its turn (#1308). A stop that arrives after
   the peer acknowledged all the data of a finished stream, or this side's reset of the
   stream, has no effect, and the node does not check its code, because the carrier has
