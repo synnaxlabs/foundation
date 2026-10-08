@@ -8,9 +8,22 @@
 mod common;
 mod held;
 
+use block::{Pool, Unique};
+
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
 fn main() {
     held::main();
+}
+
+/// Takes every block of `pool` that could hold a message of `len` bytes.
+fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
+    let mut full = Vec::new();
+    for len in [pool.largest(), len] {
+        while let Ok(block) = pool.alloc(len) {
+            full.push(block);
+        }
+    }
+    full
 }
