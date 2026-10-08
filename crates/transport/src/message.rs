@@ -385,6 +385,14 @@ mod tests {
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
+    /// Each cut of a real prefix of 2, 4, and 8 bytes.
+    fn cut_prefixes() -> impl Iterator<Item = Vec<u8>> {
+        [64, 16_384, 1 << 30].into_iter().flat_map(|len| {
+            let whole = prefix(len).to_vec();
+            (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
+        })
+    }
+
     /// Every message `reader` reads from `source`, until the stream ends.
     fn read_all(
         reader: &mut Reader,
@@ -506,8 +514,8 @@ mod tests {
             // full one.
             for (len, split) in (0..=70).map(|len| (len, 1)).chain([(200, 2), (200, 7)])
             {
-                for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
-                    let bytes = [encode(&[vec![1; len]]).as_slice(), cut].concat();
+                for cut in cut_prefixes() {
+                    let bytes = [encode(&[vec![1; len]]), cut.clone()].concat();
                     let mut source = Source::new(bytes, split);
                     let mut reader = Reader::new(usize::MAX);
                     assert_eq!(
@@ -532,8 +540,8 @@ mod tests {
             let pool = pool(1 << 16);
             for (admits, gives) in [(false, true), (true, false), (false, false)] {
                 for split in 1..=7 {
-                    for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
-                        let mut source = Source::new(cut.to_vec(), split);
+                    for cut in cut_prefixes() {
+                        let mut source = Source::new(cut.clone(), split);
                         let mut reader = Reader::new(usize::MAX);
                         let read = reader.read(
                             |_| admits,

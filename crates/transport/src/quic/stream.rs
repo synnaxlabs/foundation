@@ -4139,17 +4139,16 @@ mod tests {
 
     #[test]
     fn that_end_inside_a_message_break_the_connection() {
-        // Inside a body, then inside a prefix of 2, 4, and 8 bytes.
-        let ends: [&[u8]; 4] = [
-            &[2, 3, b'a'],
-            &[2, 0x40],
-            &[2, 0x80, 0, 0],
-            &[2, 0xC0, 0, 0, 0, 0, 0, 0],
-        ];
-        for bytes in ends {
-            testing::run(1, |shard| {
+        // Inside a body, then at each byte inside a prefix of 2, 4, and 8 bytes.
+        let cuts = [64, 16_384, 1 << 30].into_iter().flat_map(|len| {
+            let whole = message::prefix(len).to_vec();
+            (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
+        });
+        for cut in iter::once(vec![3, b'a']).chain(cuts) {
+            let bytes = [&[2], cut.as_slice()].concat();
+            testing::run(1, move |shard| {
                 let mut pair = connected(shard);
-                misframe(&mut pair, bytes, "the stream ended inside a message");
+                misframe(&mut pair, &bytes, "the stream ended inside a message");
             });
         }
     }
