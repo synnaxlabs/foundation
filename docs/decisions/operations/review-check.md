@@ -14,10 +14,12 @@
   period, or semicolon removed, is the word that is checked. Decided by the director at
   2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
-  check reads the comment as GitHub does: as CommonMark with each GitHub extension
-  (tables, footnotes, strikethrough, task lists, and quote kinds), by `pulldown-cmark`,
-  with the spaces and tabs at the end of each line removed. A line ends at `\n`,
-  `\r\n`, or a lone `\r` (decided by the director at 2026-10-08T04:42:33Z,
+  check reads the comment as GitHub does, by `pulldown-cmark`, with the spaces and
+  tabs at the end of each line removed: as CommonMark with the GitHub extensions that
+  `pulldown-cmark` has (tables, footnotes, strikethrough, task lists, and quote kinds).
+  The others change no line of text: an extended autolink keeps its text, and the tag
+  filter acts only on raw HTML, which fails. A line ends at `\n`, `\r\n`, or a lone `\r`
+  (decided by the director at 2026-10-08T04:42:33Z,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
   round heading is the first top-level `## Review round <n>` heading. The fields are
   the first top-level block after it, and the end lines are the last one, each when it
