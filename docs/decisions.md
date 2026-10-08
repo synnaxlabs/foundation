@@ -1774,8 +1774,11 @@ How to read this record:
   has not taken counts for neither class, and a message that `try_send` gave back is not
   held. The send budget gives room in the order of the turn. Room that a message of the
   owed class frees waits for that class's next message while the other class holds room,
-  so neither class can take the share through the budget (#819). Lost: a connection per
-  class, because four handshakes and four congestion controllers compete on one path
+  so neither class can take the share through the budget (#819). A PR that changes
+  this share (`LATEST_COST`) changes the share bound of `transport/benches/send.rs` in
+  the same PR, and runs that bench. Decided by architect-2 (#977, 2026-10-07 17:15
+  UTC): https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190.
+  Lost: a connection per class, because four handshakes and four congestion controllers compete on one path
   (#55). Settled by the advisor and the coordinator under the person's delegation
   (#789). A node resets a stream with the stop's code when the stop arrives, and frees
   the stream's room in the send budget and its turn (#1308). A stop that arrives after
