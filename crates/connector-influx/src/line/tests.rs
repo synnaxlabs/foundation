@@ -291,18 +291,21 @@ fn refuses_a_tab_or_nul_in_any_part() {
 
 /// Characters that InfluxDB 1 and 2 with `validate-keys` drop: each is outside the
 /// general categories L, M, N, P, and S, or is U+FFFD.
-const DROPPED: [char; 11] = [
-    '\u{1}',    // Cc
-    '\u{7f}',   // Cc
-    '\u{85}',   // Cc
-    '\u{a0}',   // Zs
-    '\u{3000}', // Zs
-    '\u{2028}', // Zl
-    '\u{2029}', // Zp
-    '\u{200b}', // Cf
-    '\u{e000}', // Co
-    '\u{378}',  // Cn
-    '\u{fffd}', // So, which InfluxDB refuses by name
+const DROPPED: [char; 14] = [
+    '\u{1}',      // Cc
+    '\u{7f}',     // Cc
+    '\u{85}',     // Cc
+    '\u{a0}',     // Zs
+    '\u{3000}',   // Zs
+    '\u{2028}',   // Zl
+    '\u{2029}',   // Zp
+    '\u{200b}',   // Cf
+    '\u{e000}',   // Co
+    '\u{378}',    // Cn
+    '\u{e0001}',  // Cf
+    '\u{f0000}',  // Co
+    '\u{10ffff}', // Cn
+    '\u{fffd}',   // So, which InfluxDB refuses by name
 ];
 
 #[test]
@@ -338,6 +341,16 @@ fn refuses_a_character_influxdb_drops() {
              which a line cannot hold",
         ),
         (
+            Measurement::new("m", &[("k", "a\u{e0001}")], &["f"]),
+            Error::Character {
+                part: Part::TagValue("k".into()),
+                text: "a\u{e0001}".into(),
+                character: '\u{e0001}',
+            },
+            "the value \"a\\u{e0001}\" of the tag \"k\" holds '\\u{e0001}', \
+             which a line cannot hold",
+        ),
+        (
             Measurement::new("m", &[], &["f\u{378}"]),
             Error::Character {
                 part: Part::FieldKey,
@@ -356,8 +369,8 @@ fn accepts_each_general_category_influxdb_prints() {
         '\u{301}', '\u{903}', '\u{20dd}', // Mn, Mc, Me
         '7', 'Ⅻ', '½', // Nd, Nl, No
         '_', '-', '(', ')', '«', '»', '!', ',', '=', // Pc, Pd, Ps, Pe, Pi, Pf, Po
-        '+', '$', '^', '°', // Sm, Sc, Sk, So
-        ' ', // U+0020, the one Zs that InfluxDB prints
+        '+', '$', '^', '°', '😀', // Sm, Sc, Sk, So, So outside the BMP
+        ' ',  // U+0020, the one Zs that InfluxDB prints
     ];
     for c in printed {
         let text = format!("a{c}");
