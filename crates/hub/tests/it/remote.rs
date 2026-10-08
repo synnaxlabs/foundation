@@ -23,15 +23,15 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::{OTHER, TIME};
 use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
+use super::{
+    AREA, BODY_MAX, I64, POOL, Test, fill, name, samples, spec_channel, write,
+    write_series, write_wide,
+};
 
 /// The fewest bytes that a transport takes in one message.
 const MESSAGE_MIN: usize = 1472;
 /// The window of a transport of a test, in bytes.
 const WINDOW: usize = 1 << 20;
-use super::{
-    AREA, BODY_MAX, I64, POOL, Test, fill, name, samples, spec_channel, write,
-    write_series, write_wide,
-};
 
 /// What the two nodes of [`remote`] wait on.
 #[derive(Default)]
@@ -40,6 +40,8 @@ struct Steps {
     opened: AtomicBool,
     /// The home saw the code that the reader stopped the stream with.
     stopped: AtomicBool,
+    /// The reader's pool has no room.
+    full: AtomicBool,
     /// The reader's node is done.
     done: AtomicBool,
     /// The sessions that the home's node accepted.
@@ -431,13 +433,13 @@ fn a_reader_whose_pool_has_no_room_for_its_open_gets_pool() {
                 .reader(&names, Mode::Latest)
                 .await
                 .expect_err("the pool has no room");
+            let header = wire::header::encode(Protocol::Hub).len();
+            let expected = test.pool.alloc(header).expect_err("the pool is full");
             drop(blocks);
-            let reader::Error::Pool(pool) = &error else {
-                panic!("not a pool error: {error:?}");
-            };
+            assert_eq!(error, reader::Error::Pool(expected.clone()));
             assert_eq!(
                 error.to_string(),
-                format!("the pool had no block for the open: {pool}")
+                format!("the pool had no block for the open: {expected}")
             );
         },
     );
@@ -886,6 +888,262 @@ fn a_complete_reader_whose_credit_finds_no_room_gets_each_frame() {
             let deadline = test.clock.sleep(Span::from_nanos(3_000_000_000));
             let next = race(reader.next(), deadline).await;
             assert!(matches!(next, Ok(Ok(_))), "the frame after the credit came");
+        },
+    );
+}
+
+// The home never sees the code of this stop: #2014.
+#[test]
+fn a_reader_whose_pool_has_room_for_its_open_and_not_its_keys_gets_pool() {
+    remote(
+        14,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            drop(transport.accept().await.expect("a session"));
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let names = define_many(&test, 200);
+            let mut blocks = fill(&test.pool);
+            let small = blocks
+                .iter()
+                .rposition(|block| (256..1024).contains(&block.len()))
+                .expect("a small block");
+            drop(blocks.swap_remove(small));
+            let error = test
+                .hub
+                .reader(&names, Mode::Latest)
+                .await
+                .expect_err("the pool has no room for the keys");
+            let keys = 201 * wire::hub::keys::LEN;
+            let expected = test.pool.alloc(keys).expect_err("the pool is full");
+            drop(blocks);
+            assert_eq!(error, reader::Error::Pool(expected));
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_home_replies_with_a_head_before_opened_stops_the_stream_as_malformed()
+{
+    remote(
+        15,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let session = transport.accept().await.expect("a session");
+            let mut incoming = session.accept().await.expect("a stream");
+            let mut sender = incoming.sender.take().expect("a two-way stream");
+            for _ in 0..3 {
+                incoming.receiver.recv().await.expect("a message");
+            }
+            send_head(&mut sender, 1, &[(0, 8), (1, 16)]).await;
+            let error = loop {
+                if let Err(error) = incoming.receiver.recv().await {
+                    break error;
+                }
+            };
+            let malformed = Code(MALFORMED);
+            assert_eq!(error, transport::Error::Reset { code: malformed });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let names = [name("value")];
+            let error = test
+                .hub
+                .reader(&names, Mode::Latest)
+                .await
+                .expect_err("the home did not open the session");
+            let expected = wire::hub::Error::Unopened { kind: 2 };
+            assert_eq!(error, reader::Error::Message(expected));
+            assert_eq!(
+                error.to_string(),
+                format!("the reply of the home broke the hub protocol: {expected}")
+            );
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_reader_gets_the_seq_and_path_of_each_frame_from_the_home() {
+    remote(
+        16,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (mut sender, _receiver) = fake_open(&transport).await;
+            let head = Reply::Head(Head {
+                path: Path::Backfill,
+                range: Range { seq: 41, count: 2 },
+                series: 2,
+            });
+            send(&mut sender, head.encoded_len(), |out| head.encode(out)).await;
+            send(&mut sender, 2 * ends::LEN, |out| {
+                ends::encode([(0, 16), (1, 32)], out);
+            })
+            .await;
+            send(&mut sender, 32, |out| out.fill(1)).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            let frame = reader.next().await.expect("a frame");
+            assert_eq!(frame.view.path(), Path::Backfill);
+            assert_eq!(frame.view.range(0), Some(Range { seq: 41, count: 2 }));
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_that_the_home_ends_with_behind_gets_behind_at_each_next() {
+    remote(
+        17,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (mut sender, _receiver) = fake_open(&transport).await;
+            send(&mut sender, Reply::Behind.encoded_len(), |out| {
+                Reply::Behind.encode(out);
+            })
+            .await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let ended = reader.next().await.expect_err("the home ended the session");
+            assert_eq!(ended, Ended::Behind);
+            assert_eq!(
+                ended.to_string(),
+                "the reader missed a frame and gets no later one: open a new reader"
+            );
+            assert_eq!(reader.next().await.expect_err("ended"), Ended::Behind);
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_home_resets_the_open_stream_with_failed_gets_refused() {
+    remote(
+        18,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (sender, _receiver) = fake_open(&transport).await;
+            until(&node.clock(), &steps.opened).await;
+            sender.reset(Code(Refusal::Failed.code()));
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            steps.open();
+            let ended = reader.next().await.expect_err("the home ended the session");
+            assert_eq!(ended, Ended::Refused(Refusal::Failed));
+            assert_eq!(
+                ended.to_string(),
+                "the home ended the session with code 18: the home's buffer failed, or \
+                 its mesh stopped"
+            );
+            assert_eq!(reader.next().await.expect_err("ended"), ended);
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_home_resets_the_open_stream_with_a_code_outside_hub_wire_gets_stream()
+{
+    remote(
+        19,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (sender, _receiver) = fake_open(&transport).await;
+            until(&node.clock(), &steps.opened).await;
+            sender.reset(Code(7));
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            steps.open();
+            let ended = reader.next().await.expect_err("the home reset the stream");
+            let reset = transport::Error::Reset { code: Code(7) };
+            assert_eq!(ended, Ended::Stream(reset));
+            assert_eq!(
+                ended.to_string(),
+                "the stream to the home broke: the peer reset the stream (7)"
+            );
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_home_finishes_the_stream_between_frames_stops_it_as_malformed() {
+    remote(
+        20,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (mut sender, mut receiver) = fake_open(&transport).await;
+            sender.finish().expect("finishes");
+            let error = loop {
+                if let Err(error) = receiver.recv().await {
+                    break error;
+                }
+            };
+            assert_eq!(
+                error,
+                transport::Error::Reset {
+                    code: Code(MALFORMED)
+                }
+            );
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            let ended = reader.next().await.expect_err("the home finished");
+            assert_eq!(ended, Ended::Message(wire::hub::Error::Finished));
+            assert_eq!(
+                ended.to_string(),
+                "a message from the home broke the hub protocol: the home finished the \
+                 stream before it ended the session"
+            );
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_pool_has_no_room_for_a_frame_stops_the_stream_with_busy() {
+    remote(
+        21,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (mut sender, mut receiver) = fake_open(&transport).await;
+            until(&node.clock(), &steps.full).await;
+            send_head(&mut sender, 1, &[(0, 8), (1, 16)]).await;
+            let error = loop {
+                if let Err(error) = receiver.recv().await {
+                    break error;
+                }
+            };
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(error, transport::Error::Reset { code: busy });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            let blocks = fill(&test.pool);
+            steps.full.store(true, Ordering::Relaxed);
+            let ended = reader.next().await.expect_err("the pool is full");
+            let Ended::Pool(block::Error::Exhausted { requested, .. }) = ended else {
+                panic!("not an exhausted pool: {ended:?}");
+            };
+            let expected = test.pool.alloc(requested).expect_err("the pool is full");
+            drop(blocks);
+            assert_eq!(ended, Ended::Pool(expected.clone()));
+            assert_eq!(
+                ended.to_string(),
+                format!("the pool had no block for the reader: {expected}")
+            );
+            assert_eq!(reader.next().await.expect_err("ended"), ended);
+            until(&test.clock, &steps.stopped).await;
         },
     );
 }
