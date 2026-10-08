@@ -3078,9 +3078,9 @@ How to read this record:
   keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
   https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
   check of the key form accepts a reserved label only for a subject and an access
-  policy, the kinds of the founding definitions (FIRST ADMIN), so they have no
-  problem. Each other kind at a reserved label is `Misplaced`, so a region there
-  makes no child region. A file still cannot hold a reserved label (`Kind::key`).
+  policy, the kinds of the founding definitions (FIRST ADMIN). Each other kind at a
+  reserved label is `Misplaced`, so a region there makes no child region. A file
+  still cannot hold a reserved label (`Kind::key`).
   Lost: a check that skips each reserved key, as a channel at `@admin.@subject` is
   then no problem and the check needs `spec::key::reserved`. Decided by
   `laptop.architect-2`, 2026-10-08T09:15:07Z
