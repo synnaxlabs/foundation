@@ -37,8 +37,8 @@ pub struct Founding {
     /// The definitions of the region before the first change of its spec, by tree key.
     pub definitions: BTreeMap<Name, Definition>,
     /// The home of each index of `definitions` before the first entry of the log, by
-    /// channel key to the key of a member. A founding node gives a home to each index
-    /// of `definitions`; a later spec change never moves one.
+    /// channel key to the key of a member. An index with no entry has no home until a
+    /// spec change gives one.
     pub homes: BTreeMap<channel::Key, node::Key>,
 }
 

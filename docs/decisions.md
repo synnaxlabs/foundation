@@ -3399,12 +3399,14 @@ How to read this record:
   `transport` in its line of the crate map. `Config::founding` is a `region::Founding`:
   the prefix, the founding members and voters, the founding definitions, and the home of
   each founding index by channel key and node key, the same at each member and at each
-  open. `State::new` takes the homes, so the first state holds them, and a later spec
-  change never moves one (#1931). A founding node builds it from its config, and a node
-  that joins takes it whole from its join answer. It derives `PartialEq` and `Eq` and
-  has no constructor: `Mesh::open` stays its one check. `Start` lost, because
-  `driver.rs` holds `raft::Start`, which changes at each open (`laptop.architect`,
-  2026-10-08T10:34:37Z:
+  open. `State::new` takes the homes, so the first state holds them. An index with no
+  entry has no home until a spec change gives one (#1931; `laptop.architect`,
+  2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A
+  founding node builds it from its config, and a node that joins takes it whole from its
+  join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
+  stays its one check. `Start` lost, because `driver.rs` holds `raft::Start`, which
+  changes at each open (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
   `Founding::definitions` adds
   `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
