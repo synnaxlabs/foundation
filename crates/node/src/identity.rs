@@ -19,6 +19,9 @@ pub(crate) const FILE: &str = "node.key";
 const TAG: &[u8; 16] = b"foundation/key/1";
 /// The length of the file.
 pub(crate) const LEN: usize = 68;
+/// The pool of the file's two blocks. The load holds them while the shard's buffer
+/// holds blocks of the shard's pool, so that pool can lack room for them.
+const POOL: block::Config = block::Config { budget: 4096 };
 
 /// The node's key and the private key that its transport proves.
 #[derive(Clone, Debug)]
@@ -27,12 +30,11 @@ pub(crate) struct Identity {
     pub(crate) private_key: PrivateKey,
 }
 
-/// The identity in `node.key` of `files`, with blocks from `pool`. When the file is
-/// not there, or holds only zero bytes, makes a new one at mesh time from `clock`,
-/// once it has mesh time, and from `entropy`. Writes the identity back and makes it
-/// durable before it returns, also one it read: a failed sync of an earlier start can
-/// leave a key that a read sees but a crash loses. Never writes another key over a
-/// file that holds one.
+/// The identity in `node.key` of `files`. When the file is not there, or holds only
+/// zero bytes, makes a new one at mesh time from `clock`, once it has mesh time, and
+/// from `entropy`. Writes the identity back and makes it durable before it returns,
+/// also one it read: a failed sync of an earlier start can leave a key that a read
+/// sees but a crash loses. Never writes another key over a file that holds one.
 ///
 /// # Errors
 ///
@@ -40,7 +42,6 @@ pub(crate) struct Identity {
 /// [`Error::Directory`] for a file call that fails.
 pub(crate) async fn load(
     files: &Files,
-    pool: &block::Pool,
     clock: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> Result<Identity, Error> {
@@ -51,9 +52,8 @@ pub(crate) async fn load(
             env::files::Error::Length { .. } => Error::Key,
             error => Error::Directory(error),
         })?;
-    let into = pool
-        .alloc(LEN)
-        .expect("invariant: a shard's pool holds a key");
+    let pool = block::Pool::heap(POOL);
+    let into = pool.alloc(LEN).expect("invariant: the pool holds a key");
     let read = file.read_at(0, into).await.map_err(Error::Directory)?;
     let bytes: &[u8; LEN] = (&*read).try_into().expect("invariant: a read fills it");
     let identity = if *bytes == [0; LEN] {
@@ -68,7 +68,7 @@ pub(crate) async fn load(
     };
     let block = pool
         .copy(&encode(&identity))
-        .expect("invariant: a shard's pool holds a key");
+        .expect("invariant: the pool holds a key");
     file.write_at(0, &[block]).await.map_err(Error::Directory)?;
     file.sync().await.map_err(Error::Directory)?;
     files

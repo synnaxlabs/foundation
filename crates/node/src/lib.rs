@@ -697,9 +697,7 @@ impl Serve {
             );
         };
         let identity =
-            match identity::load(&files, &pool, &self.time, &self.endpoint.entropy)
-                .await
-            {
+            match identity::load(&files, &self.time, &self.endpoint.entropy).await {
                 Ok(identity) => identity,
                 Err(error) => return fail(error),
             };
