@@ -271,9 +271,9 @@ fn an_any_v6_socket_talks_plain_ipv4() {
     });
 }
 
-/// Linux holds all of 127.0.0.0/8 on the loopback, and macOS holds only 127.0.0.1.
+/// Linux holds all of 127.0.0.0/8 on the loopback. macOS holds only 127.0.0.1, and
+/// sends from it for a source that is not local.
 #[test]
-#[cfg(target_os = "linux")]
 fn a_source_address_picks_the_local_address() {
     on_thread("udp-source", || async {
         let net = net();
@@ -288,7 +288,12 @@ fn a_source_address_picks_the_local_address() {
         assert_eq!(send(&mut sender, &to).await, Ok(()));
         let datagrams = receive(&mut receiver, 1).await;
         let port = sender.local().port();
-        assert_eq!(datagrams[0].source, SocketAddr::new(other.into(), port));
+        let picked = if cfg!(target_os = "linux") {
+            other
+        } else {
+            LOCALHOST
+        };
+        assert_eq!(datagrams[0].source, SocketAddr::new(picked.into(), port));
     });
 }
 
@@ -436,8 +441,8 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
 
 /// The OS drops each datagram that the receive buffer has no room for. A receiver
 /// with the default buffer of Linux holds about 90 of these. macOS delivers on the
-/// loopback from a queue, so the receive waits until the queue is empty: a receive
-/// before that makes room for more.
+/// loopback from a queue, and a receive during delivery makes room for more, so the
+/// test sleeps before it receives.
 #[test]
 fn a_small_receive_buffer_holds_few_datagrams() {
     on_thread("udp-buffer", || async {
