@@ -3838,12 +3838,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967,
   2026-10-08 03:59 UTC).
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
-  an out connector: the `select` attribute and one `reader` block with `name`, `mode`
-  (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
-  reader is complete, has the connector's name, and holds nothing. A second `reader`
-  block is `document.repeated-block`, and `read` reads only the first, where a label is
-  `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
-  #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  an out connector: the `select` attribute and one `reader` block with `mode`
+  (`hub::reader::Mode`, as a string or a reference) and `hold`. With no block the reader
+  is complete and holds nothing. A second `reader` block is `document.repeated-block`,
+  and `read` reads only the first, where a label is `document.label-count`. A negative
+  `hold` is `document.negative-span` (READER RULES, #94; `laptop.architect-2`,
+  2026-10-08T07:04:36Z,
   https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
   Supersedes `config.repeated-block` and `config.label-count` of
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967
@@ -3867,15 +3867,20 @@ How to read this record:
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
   03:59 UTC).
-  `Settings::name` is `None` for a reader with no `name`, and `None` is the
-  connector's name. `kind::Context::reader` (#1731) gives that name when it opens the
-  reader, and no other place does. Lost: `name: Name`, with the connector's name
-  passed through `Kind::parse` of every kind for one value that only the reader needs.
-  Proposed by `connector` on #1794
-  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089), and
-  approved by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653,
-  2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  A reader always has its connector's name, and the `reader` block has no `name`: a
+  `name` in it is `document.unknown-attribute`. Connector names are unique (CONNECTOR
+  BLOCK), so two connectors never share a reader, and plan needs no check for it.
+  `kind::Context::reader` (#1731) opens the reader under the connector's name. Lost:
+  keep `name` and refuse a repeated reader name at plan, a new surface for a choice that
+  nobody uses (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444,
+  2026-10-08T09:49:27Z). Supersedes `name: Option<Name>` of `reader::Settings` in
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152, and the
+  `Settings::name` of `None` for a reader with no `name` of
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653, 2026-10-08
+  05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
