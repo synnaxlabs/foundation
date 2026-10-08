@@ -1,8 +1,9 @@
 //! The decode of one mesh log record, as a log file holds it, never panics, and a
 //! record it reads encodes to the same bytes.
 //!
-//! The target seals each input with the log's own checks before the decode, so a
-//! change to a field still reaches the decode of the fields after the checks.
+//! The target seals each input before the decode: it writes the length and both
+//! checks, so a change to a field, or a byte put in or taken out of the body, still
+//! reaches the decode of the hard state and the entries.
 
 #![no_main]
 

@@ -738,17 +738,21 @@ fn record(bytes: &[u8]) -> Option<Record<'_>> {
     }
 }
 
-/// Makes both checks of `record` match its bytes. Does nothing to fewer bytes than a
-/// header.
+/// Makes the length and both checks of `record` match its bytes, with each byte after
+/// the header in the body. Does nothing to fewer bytes than a header.
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn seal(record: &mut [u8]) {
     let Some((head, body)) = record.split_first_chunk_mut::<HEADER>() else {
         return;
     };
-    let (_, claimed) = head
+    let (fields, claimed) = head
         .split_last_chunk_mut::<CHECK>()
         .expect("invariant: a header ends with the body check");
     *claimed = check(body);
+    let (_, len) = fields
+        .split_last_chunk_mut::<8>()
+        .expect("invariant: the length comes before the body check");
+    *len = wide(body.len()).to_le_bytes();
     let (claimed, rest) = head
         .split_first_chunk_mut::<CHECK>()
         .expect("invariant: a header starts with its check");

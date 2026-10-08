@@ -44,9 +44,10 @@ pub fn round_trip_log_record(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(log::encode(number, hard, &entries))
 }
 
-/// Writes into `bytes` the two checks of a mesh log record: the body check over the
-/// bytes after the header, then the header check over the rest of the header. Does
-/// nothing to `bytes` shorter than a record header.
+/// Writes into `bytes` the length and the two checks of a mesh log record: the body
+/// length as the count of bytes after the header, the body check over those bytes,
+/// then the header check over the rest of the header. Does nothing to `bytes` shorter
+/// than a record header.
 pub fn seal_log_record(bytes: &mut [u8]) {
     log::seal(bytes);
 }
@@ -380,8 +381,7 @@ mod tests {
         let mut record = vec![0; 8];
         record.extend(version.to_le_bytes());
         record.extend(number.to_le_bytes());
-        record.extend(u64::try_from(body.len()).unwrap().to_le_bytes());
-        record.extend([0; 8]);
+        record.extend([0; 16]);
         record.extend(body);
         seal_log_record(&mut record);
         record
@@ -430,12 +430,12 @@ mod tests {
         let mut tag = body.to_vec();
         tag[0] = 2;
         inputs.push(("hard_tag_2".into(), record(1, 3, &tag), false));
-        let mut past = full.split_last().unwrap().1.to_vec();
-        seal_log_record(&mut past);
-        inputs.push(("length_past_end".into(), past, false));
-        let mut trailing = [&full[..], &[0]].concat();
-        seal_log_record(&mut trailing);
-        inputs.push(("trailing_byte".into(), trailing, false));
+        let mut cut = full.split_last().unwrap().1.to_vec();
+        seal_log_record(&mut cut);
+        inputs.push(("body_cut_in_entries".into(), cut, false));
+        let mut after = [&full[..], &[0]].concat();
+        seal_log_record(&mut after);
+        inputs.push(("byte_after_entries".into(), after, false));
         inputs
     }
 
@@ -461,8 +461,8 @@ mod tests {
             "body_cut_in_proof",
             "version_2",
             "hard_tag_2",
-            "length_past_end",
-            "trailing_byte",
+            "body_cut_in_entries",
+            "byte_after_entries",
         );
         assert_eq!(count_files("mesh_log"), inputs.len());
         let built = log_inputs();
@@ -495,6 +495,15 @@ mod tests {
         let record = log::encode(0, Some(hard(true)), &entries());
         let two = [&record[..], &record[..]].concat();
         assert_eq!(round_trip_log_record(&two), None);
+    }
+
+    #[test]
+    fn seal_writes_the_length_of_the_body() {
+        let record = log::encode(0, Some(hard(true)), &entries());
+        let mut sealed = record.clone();
+        sealed[18..26].fill(0xFF);
+        seal_log_record(&mut sealed);
+        assert_eq!(sealed, record);
     }
 
     #[test]
