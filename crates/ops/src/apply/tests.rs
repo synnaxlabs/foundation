@@ -214,6 +214,69 @@ fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
 }
 
 #[test]
+fn counts_each_change_and_removal_of_an_apply() {
+    solo(|mesh| async move {
+        let channel = |name| {
+            format!(
+                "channel \"site.{name}\" {{\n  data_type = \"f64\"\n  \
+                 index = \"site.time\"\n}}\n"
+            )
+        };
+        let wide = format!("{}{}{}", placed_site(), channel("extra"), channel("more"));
+        let (_, planned) = plan_on(&mesh, &[("site.hcl", &wide)]).await;
+        apply(path(), &planned.encode(), &mesh, keys(0))
+            .await
+            .expect("an apply");
+        let narrow = placed_site().replace("f64", "f32");
+        let (_, planned) = plan_on(&mesh, &[("site.hcl", &narrow)]).await;
+        let applied = apply(path(), &planned.encode(), &mesh, keys(10))
+            .await
+            .expect("an apply");
+        assert_eq!(
+            applied.counts,
+            Counts {
+                added: 0,
+                changed: 1,
+                removed: 2,
+            }
+        );
+    });
+}
+
+#[test]
+fn refuses_a_stale_plan_with_a_founding_change_as_stale() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let founding = spec::founding::create(ADMIN.public());
+        let other =
+            Subject::new(vec![PrivateKey([8; 32]).public()]).expect("a subject");
+        let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let founding = one(
+            &planned,
+            "@admin.@subject",
+            Some(&founding[&name("@admin.@subject")]),
+            Some(Definition::Subject(other)),
+        );
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        apply(path(), &site.encode(), &mesh, keys(0))
+            .await
+            .expect("an apply");
+        let pointer = mesh.pointer();
+        let error = apply(path(), &founding.encode(), &mesh, keys(10))
+            .await
+            .expect_err("a stale plan");
+        assert_eq!(
+            error,
+            Error::Stale {
+                base,
+                pointer: Some(pointer),
+            }
+        );
+        assert_eq!(mesh.pointer(), pointer);
+    });
+}
+
+#[test]
 fn gives_a_stale_plan_when_another_apply_commits_first() {
     solo(|mesh| async move {
         let base = mesh.pointer();
