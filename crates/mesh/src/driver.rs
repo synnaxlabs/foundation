@@ -1553,12 +1553,7 @@ mod tests {
                 chunks,
                 holders,
             } = spec;
-            let result = match mesh.attempt() {
-                Ok(attempt) => {
-                    mesh.settle_spec(attempt, base, root, chunks, holders).await
-                }
-                Err(error) => Err(error),
-            };
+            let result = mesh.settle_spec(base, root, chunks, holders).await;
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
         }

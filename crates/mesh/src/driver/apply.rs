@@ -8,7 +8,6 @@ use types::digest::Digest;
 use types::name::Name;
 use types::node;
 
-use super::propose::Try;
 use super::{Mesh, put};
 use crate::change::{CHUNKS_MAX, Change};
 use crate::error::Error;
@@ -68,21 +67,21 @@ impl Mesh {
                 most: CHUNKS_MAX,
             });
         }
-        let attempt = self.attempt()?;
+        // A try opens only after the puts, since its floor keeps `Applied` from a trim.
+        self.check_proposer()?;
         let holders = BTreeSet::from([self.key()]);
         region::quorum(self.group.borrow().raft.voters(), &holders).map_err(refused)?;
         // Each chunk, not only the listed ones: the store can lack a chunk that the
         // base shares with the new tree, and `diff` never reads a shared chunk.
         put(&self.store, &self.pool, &chunks, &update.chunks).await?;
         let listed = listed.into_iter().collect();
-        self.settle_spec(attempt, base, root, listed, holders).await
+        self.settle_spec(base, root, listed, holders).await
     }
 
-    // Proposes the `Spec` change of `base`, `root`, `chunks`, and `holders` from
-    // `attempt` until it applies, and gives the pointer it makes.
+    // Proposes the `Spec` change of `base`, `root`, `chunks`, and `holders`, one try
+    // at a time, until it applies, and gives the pointer it makes.
     pub(super) async fn settle_spec(
         &self,
-        mut attempt: Try<'_>,
         base: Pointer,
         root: Digest,
         chunks: BTreeSet<Digest>,
@@ -95,7 +94,7 @@ impl Mesh {
             holders,
         };
         loop {
-            match attempt.settle(change.clone()).await? {
+            match self.attempt()?.settle(change.clone()).await? {
                 Some(Ok(())) => return Ok(base.next(root)),
                 Some(Err(Refused::Stale { pointer, .. }))
                     if pointer.root == root
@@ -104,7 +103,7 @@ impl Mesh {
                     return Ok(pointer);
                 }
                 Some(Err(rest)) => return Err(refused(rest)),
-                None => attempt = self.attempt()?,
+                None => {}
             }
         }
     }
