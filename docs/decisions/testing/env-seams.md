@@ -79,7 +79,10 @@
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
   Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
-  which refused only `0.0.0.0`. On `os`, a peer that resets after the handshake gives
+  which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1; the
+  loopback, with an MTU of 16,384 bytes, loses a larger datagram; and a source of
+  127.0.0.2, which is not local there, goes out from 127.0.0.1 with no error. On
+  `os`, a peer that resets after the handshake gives
   `Ok` from `Net::connect`, and the stream reads `Reset`. The kernel then holds no peer,
   so `Tcp::peer` is the remote of the connect, an IPv4-mapped address as plain IPv4, and
   any other address as given, with its scope and flow label. A caller that needs the
