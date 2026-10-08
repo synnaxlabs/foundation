@@ -186,6 +186,22 @@ impl Log {
         self.voters_through(self.committed)
     }
 
+    // Whether a committed configuration removed `key`: `base` or a configuration
+    // entry at or below `committed` held it, and the last of those lacks it. A
+    // founding set shows only through its first entry, which the walk covers.
+    pub(crate) fn removed(&self, key: node::Key) -> bool {
+        let through = self
+            .configs
+            .partition_point(|&config| config <= self.committed);
+        let mut held = self.base.contains(key);
+        let mut present = held;
+        for &index in &self.configs[..through] {
+            present = self.config(index).1.voters.contains(key);
+            held |= present;
+        }
+        held && !present
+    }
+
     // The configuration before `index`: the one before the entries with no
     // configuration entry before `index`.
     pub(crate) fn voters_before(&self, index: u64) -> Voters {
@@ -684,6 +700,82 @@ mod tests {
         assert_eq!(log.committed_voters(), voters(1));
         assert_eq!(log.append(run(position(1, 1), vec![entry(2, 2)])), Ok(2));
         assert_eq!(log.committed_voters(), Voters::default());
+    }
+
+    // The base holds 1, entry 2 holds 2, and entry 3 holds 3. A node is removed once
+    // a configuration at or below the commit held it and the last such lacks it.
+    #[test]
+    fn removed_needs_a_held_node_that_the_last_committed_configuration_lacks() {
+        let entries = [entry(1, 1), config(1, 2, 2), config(1, 3, 3)];
+        let cases = [
+            (0, [false, false, false, false]),
+            (1, [false, false, false, false]),
+            (2, [true, false, false, false]),
+            (3, [true, true, false, false]),
+        ];
+        for (applied, want) in cases {
+            let log = Log::new(voters(1), entries.to_vec(), applied).unwrap();
+            let got = [1, 2, 3, 9].map(|id| log.removed(node::Key::from_u128(id)));
+            assert_eq!(got, want, "committed {applied}");
+        }
+        let mut log = Log::new(voters(1), entries.to_vec(), 0).unwrap();
+        log.commit_to(3);
+        assert!(log.removed(node::Key::from_u128(2)));
+    }
+
+    // An entry past the commit that adds a removed node back makes it a voter of the
+    // configuration in force, and it stays removed until that entry commits.
+    #[test]
+    fn removed_holds_for_a_voter_that_an_uncommitted_entry_added_back() {
+        let entries = [config(1, 1, 2), config(1, 2, 1)];
+        let one = node::Key::from_u128(1);
+        let mut log = Log::new(voters(1), entries.to_vec(), 1).unwrap();
+        assert!(log.voters().1.contains(one));
+        assert!(log.removed(one));
+        log.commit_to(2);
+        assert!(!log.removed(one));
+    }
+
+    // With no voters at the start, a node that only the configuration entries held
+    // is removed once a committed entry lacks it.
+    #[test]
+    fn with_no_voters_removed_counts_the_configuration_entries() {
+        let set =
+            |ids: &[u128]| ids.iter().map(|&id| node::Key::from_u128(id)).collect();
+        let join = Voters {
+            incoming: set(&[1, 2]),
+            outgoing: set(&[1]),
+        };
+        let leave = Voters {
+            incoming: set(&[2]),
+            outgoing: set(&[1, 2]),
+        };
+        let entries = vec![
+            Entry {
+                at: position(1, 1),
+                data: change(join.clone()),
+            },
+            Entry {
+                at: position(1, 2),
+                data: change(join.leave()),
+            },
+            Entry {
+                at: position(1, 3),
+                data: change(leave.clone()),
+            },
+            Entry {
+                at: position(1, 4),
+                data: change(leave.leave()),
+            },
+        ];
+        let one = node::Key::from_u128(1);
+        let log = Log::new(Voters::default(), entries.clone(), 0).unwrap();
+        assert!(!log.removed(one));
+        let log = Log::new(Voters::default(), entries.clone(), 3).unwrap();
+        assert!(!log.removed(one));
+        let log = Log::new(Voters::default(), entries, 4).unwrap();
+        assert!(log.removed(one));
+        assert!(!log.removed(node::Key::from_u128(2)));
     }
 
     #[test]

@@ -2180,7 +2180,21 @@ How to read this record:
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
   caller must keep and that shows only at a restart. The person decided on 2026-10-05
-  ("I approve long term fix on 522"), #522.
+  ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
+  configuration removed a node: the configuration before the entries or a committed
+  `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
+  ask it at a refusal and keeps no copy of the configurations (#1105, #1762).
+  `Voters::contains` and `Voters::nodes` are public. Decided by `laptop.architect`,
+  2026-10-08T03:04:33Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777. After
+  compaction, a snapshot also carries the nodes that the configurations it replaces
+  held or removed, so the answer survives a trim (#253; `laptop.architect`,
+  2026-10-08T03:41:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1775#issuecomment-6051704590).
+  Supersedes the place of `held` in `mesh` in part 2 of
+  https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747 and
+  finding 2 of
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -2313,9 +2327,17 @@ How to read this record:
   configuration in force at its index, so the configuration before the last entry
   stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
-  files `log-0`, `log-1`, and so on of one directory; any other file there is
-  `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
-  is an 8-byte check of the rest of the header (the first bytes of
+  files `log-0`, `log-1`, and so on of one directory. A log also holds the file `lock`
+  of that directory open for writing, from its open until it drops. A file call of a
+  dropped write can end after the drop, and the lock does not cover it (#1375). The file
+  has no bytes, and one with bytes fails the open (`Files(Length)`). So a second open of
+  the directory gives `Error::Log` with `Busy` on the lock, at each time, whatever log
+  file the first log holds (#1360, decided by `laptop.architect`, 2026-10-07T12:07:03Z:
+  https://github.com/synnaxlabs/foundation/issues/1360#issuecomment-6037555764). Any
+  other file there is `Error::Stray`. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/549 in its clause that each file but
+  `log-<n>` is `Error::Stray`. One write of `raft` is one record: a header, then the
+  body. The header is an 8-byte check of the rest of the header (the first bytes of
   `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
   body length, and an 8-byte check of the body. The body holds the hard state, when it
   changed, and the entries, so one sync makes both durable; two slots for the hard state
@@ -3874,12 +3896,15 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
-- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
-  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+- **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
+  with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
+  picks out the policies and connectors itself. A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
-  applied in #1402.
+  applied in #1402. The trees in place of the policies: `laptop.architect`,
+  2026-10-08T03:01:36Z
+  ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -5605,10 +5630,13 @@ Rules:
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
 8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
-   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
-   `buffer`, so its tests build a real `home::Shard`. A crate may also take itself, so
-   its tests and benches build with its own `sim` feature (STORED BENCH;
-   `laptop.architect`, 2026-10-08T01:01:28Z:
+   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, `hub` may take
+   `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
+   so its tests build a `spec::connector::Connector` (`laptop.architect`,
+   2026-10-08T03:01:36Z:
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   may also take itself, so its tests and benches build with its own `sim` feature
+   (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
    `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
    code could call the ring), the hub tests in `node`, and a second way to build a shard
@@ -5635,7 +5663,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
-| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
+| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
