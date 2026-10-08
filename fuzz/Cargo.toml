@@ -115,6 +115,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mesh_log"
+path = "fuzz_targets/mesh_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mesh_message"
 path = "fuzz_targets/mesh_message.rs"
 test = false

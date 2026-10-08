@@ -598,7 +598,7 @@ fn fields(head: &[u8]) -> Option<(u16, u64, usize, [u8; CHECK])> {
     Some((version, number, len, take(&mut rest)?))
 }
 
-fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
+pub(crate) fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
     let mut body = Vec::new();
     match hard {
         None => body.push(NO_HARD),
@@ -623,11 +623,29 @@ fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
 }
 
 // Applies the body of one record. `None` when the body is not one that `encode`
-// gives.
-fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
-    let body = &mut body;
-    match u8::from_le_bytes(take(body)?) {
-        NO_HARD => {}
+// gives, or its entries do not follow `stored`.
+fn apply(stored: &mut Stored, bytes: &[u8]) -> Option<()> {
+    let (hard, entries) = body(bytes)?;
+    if !follows(wide(stored.entries.len()), &entries) {
+        return None;
+    }
+    if let Some(hard) = hard {
+        stored.hard = hard;
+    }
+    if let Some(first) = entries.first() {
+        let keep = usize::try_from(first.at.index.checked_sub(1)?).ok()?;
+        stored.entries.truncate(keep);
+    }
+    stored.entries.extend(entries);
+    Some(())
+}
+
+// The hard state and the entries of a record body. `None` when the body is not one
+// that `encode` gives.
+fn body(mut bytes: &[u8]) -> Option<(Option<Hard>, Vec<Entry>)> {
+    let body = &mut bytes;
+    let hard = match u8::from_le_bytes(take(body)?) {
+        NO_HARD => None,
         HARD => {
             let term = Term(u64::from_le_bytes(take(body)?));
             let vote = if take_bool(body)? {
@@ -645,25 +663,49 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
             } else {
                 None
             };
-            stored.hard = Hard {
+            Some(Hard {
                 term,
                 vote,
                 leader,
                 proof,
-            };
+            })
         }
         _ => return None,
-    }
-    let entries = entry::decode(std::mem::take(body))?;
-    if !follows(wide(stored.entries.len()), &entries) {
+    };
+    Some((hard, entry::decode(std::mem::take(body))?))
+}
+
+/// The record that `record` encodes to, or `None` when it is not one valid record of
+/// the format version this build writes. The number of the record and whether its
+/// entries follow a log are not checked.
+#[cfg(feature = "sim")]
+pub(crate) fn round_trip(record: &[u8]) -> Option<Vec<u8>> {
+    let At::Header(head) = header(record) else {
+        return None;
+    };
+    let (bytes, after) = head.body()?;
+    if head.version != VERSION || !after.is_empty() || check(bytes) != head.check {
         return None;
     }
-    if let Some(first) = entries.first() {
-        let keep = usize::try_from(first.at.index.checked_sub(1)?).ok()?;
-        stored.entries.truncate(keep);
-    }
-    stored.entries.extend(entries);
-    Some(())
+    let (hard, entries) = body(bytes)?;
+    Some(encode(head.number, hard, &entries))
+}
+
+/// Makes both checks of `record` match its bytes. Does nothing to fewer bytes than a
+/// header.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn seal(record: &mut [u8]) {
+    let Some((head, body)) = record.split_first_chunk_mut::<HEADER>() else {
+        return;
+    };
+    let (_, claimed) = head
+        .split_last_chunk_mut::<CHECK>()
+        .expect("invariant: a header ends with the body check");
+    *claimed = check(body);
+    let (claimed, rest) = head
+        .split_first_chunk_mut::<CHECK>()
+        .expect("invariant: a header starts with its check");
+    *claimed = check(rest);
 }
 
 // Whether `entries` can follow a log whose last entry has index `last`: the first at
@@ -1720,14 +1762,6 @@ mod tests {
         );
     }
 
-    /// Makes both checks of `record` match its bytes again.
-    fn sign(record: &mut [u8]) {
-        let body = check(&record[HEADER..]);
-        record[HEADER - CHECK..HEADER].copy_from_slice(&body);
-        let head = check(&record[CHECK..HEADER]);
-        record[..CHECK].copy_from_slice(&head);
-    }
-
     #[test]
     fn refuses_a_record_that_passes_its_check_with_a_body_it_cannot_read() {
         let (mut sim, node) = create_node(0);
@@ -1736,7 +1770,7 @@ mod tests {
             let mut record = encode(0, None, &[bytes(1, 4)]);
             // The kind of the entry.
             record[HEADER + 17] = 9;
-            sign(&mut record);
+            seal(&mut record);
             put(&node, "log-0", 0, &record).await;
         })
         .unwrap();
@@ -1761,7 +1795,7 @@ mod tests {
                 };
                 let mut record = encode(0, Some(hard), &[]);
                 record[at] = 2;
-                sign(&mut record);
+                seal(&mut record);
                 put(&node, "log-0", 0, &record).await;
             })
             .unwrap();
@@ -1812,7 +1846,7 @@ mod tests {
             drop(open(&node).await.unwrap());
             let mut record = encode(0, Some(hard(1, None)), &[]);
             record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-            sign(&mut record);
+            seal(&mut record);
             put(&node, "log-0", 0, &record).await;
         })
         .unwrap();
