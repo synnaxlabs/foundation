@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use types::ed25519::PublicKey;
+use types::ed25519::{BadSignature, PublicKey};
 use types::name::Name;
 use types::node::{self, PrivateKey, SealKey};
 
@@ -183,9 +183,9 @@ impl Unchecked {
     /// [`Forged`] when it does not hold for `card.public_key`.
     pub(crate) fn check(self) -> Result<Signed, Forged> {
         let statement = statement(TAG, self.key, &self.card);
-        if !ed25519::holds(self.card.public_key, &statement, &self.signature) {
-            return Err(Forged { node: self.key });
-        }
+        let key = self.card.public_key;
+        key.verify(&statement, &self.signature)
+            .map_err(|_bad: BadSignature| Forged { node: self.key })?;
         Ok(Signed(self))
     }
 }

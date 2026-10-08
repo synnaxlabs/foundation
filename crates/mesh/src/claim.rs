@@ -179,7 +179,7 @@ fn verify(
 fn holds(public: PublicKey, claim: &Claim<'_>, signature: Option<Signature>) -> bool {
     let Signature(bytes) =
         signature.expect("invariant: decode gives each claim a signature");
-    ed25519::holds(public, &statement(claim), &bytes)
+    public.verify(&statement(claim), &bytes).is_ok()
 }
 
 /// Why a claim in a message does not hold.
