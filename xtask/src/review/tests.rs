@@ -203,15 +203,25 @@ fn an_old_round_keeps_the_check_before_the_end_lines() {
     let free = old("## Review round 1\n\nConfirmed findings, most severe first.");
     let unended = old(&ROUND.replace(END, ""));
     assert_eq!(check(&record(vec![free, unended])), Vec::<String>::new());
-    let fixed = old("## Review round 1\n\nReviewers: reviewer");
-    assert_eq!(
-        check(&record(vec![fixed, bot(ROUND)])),
-        vec![
-            "review round 1 has no `Range:` line. Write the round in the format of \
+    let missing = |n, name| {
+        format!(
+            "review round {n} has no `{name}:` line. Write the round in the format of \
              .claude/skills/review/SKILL.md, \"Round comment\"."
-                .to_string()
-        ]
-    );
+        )
+    };
+    for (fields, name) in [
+        ("Reviewers: reviewer", "Range"),
+        ("Findings: none", "Range"),
+    ] {
+        let fixed = old(&format!("## Review round 1\n\n{fields}"));
+        assert_eq!(
+            check(&record(vec![fixed, bot(ROUND)])),
+            vec![missing(1, name)],
+            "{fields}"
+        );
+    }
+    let last = old("## Review round 4\n\nNo findings.");
+    assert_eq!(check(&record(vec![last])), vec![missing(4, "Range")]);
 }
 
 #[test]
@@ -321,6 +331,8 @@ fn reads_an_end_line_that_wraps() {
         "Hot path:\nnone, the change is in tests only",
     );
     assert_eq!(check(&record(vec![bot(&next)])), Vec::<String>::new());
+    let block = ROUND.replace("weakening.", "weakening:\n\n```\nHot path: `send`\n```");
+    assert_eq!(check(&record(vec![bot(&block)])), Vec::<String>::new());
     let earlier = ROUND.replace(
         "No bug",
         "Deferred: none\nPublic surface: none\nHot path: `send`\n\nNo bug",
