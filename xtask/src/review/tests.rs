@@ -303,6 +303,10 @@ fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
         check(&record(vec![bot(&closed)])),
         vec![unended("Deferred")]
     );
+}
+
+#[test]
+fn fails_end_lines_in_a_code_block_that_is_not_closed() {
     for fence in ["```", "~~~", "````"] {
         let unclosed =
             ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{fence}\n\n"));
@@ -315,14 +319,25 @@ fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
     }
     let indented = ROUND.replace(
         "weakening.\n\nDeferred: none\nPublic surface: none\nHot path: none",
-        "weakening.\n\n  ```\n\nDeferred: none\nPublic surface: none\n\
-         Hot path: none\n  ```",
+        "weakening.\n\n   ```\n\nDeferred: none\nPublic surface: none\n\
+         Hot path: none\n   ```",
     );
     assert_ne!(indented, ROUND);
     assert_eq!(
         check(&record(vec![bot(&indented)])),
         vec![unended("Deferred")]
     );
+    for indent in ["    ", "\t", "\u{a0}"] {
+        let unclosed = ROUND.replace(
+            "weakening.\n\n",
+            &format!("weakening.\n\n```\n{indent}```\n\n"),
+        );
+        assert_eq!(
+            check(&record(vec![bot(&unclosed)])),
+            vec![unended("Deferred")],
+            "{indent:?}"
+        );
+    }
     let short = ROUND.replace("weakening.\n\n", "weakening.\n\n````\n```\n\n");
     assert_eq!(check(&record(vec![bot(&short)])), vec![unended("Deferred")]);
     let other = ROUND.replace("weakening.\n\n", "weakening.\n\n```\n~~~\n\n");
@@ -348,6 +363,15 @@ fn reads_inline_code_at_the_start_of_a_line_as_text() {
     let inline = ROUND.replace("No bug,", "```cargo xtask review``` passes. No bug,");
     assert_ne!(inline, ROUND);
     assert_eq!(check(&record(vec![bot(&inline)])), Vec::<String>::new());
+    for indent in ["    ", "\t", "\u{a0}"] {
+        let text =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{indent}```\n\n"));
+        assert_eq!(
+            check(&record(vec![bot(&text)])),
+            Vec::<String>::new(),
+            "{indent:?}"
+        );
+    }
     let fenced = ROUND.replace(
         "weakening.\n\n",
         "weakening.\n\n``` rust\nlet a = 1;\n```\n\n",

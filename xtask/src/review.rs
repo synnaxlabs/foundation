@@ -344,11 +344,16 @@ fn paragraphs<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<&'a str>> {
 }
 
 /// The mark, length, and info text of the code fence that `line` is, if any: three or
-/// more backticks or tildes after its indent. A backtick fence has no backtick in its
-/// info text, so a line that starts with inline code is not one. A fence closes the
-/// block that a fence of its mark and no greater length opened, when it has no info.
+/// more backticks or tildes after at most three spaces. A backtick fence has no
+/// backtick in its info text, so a line that starts with inline code is not one. A
+/// fence closes the block that a fence of its mark and no greater length opened, when
+/// it has no info.
 fn fence(line: &str) -> Option<(char, usize, &str)> {
-    let line = line.trim_start();
+    let indented = line.trim_start_matches(' ');
+    if line.len() - indented.len() > 3 {
+        return None;
+    }
+    let line = indented;
     let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let info = line.trim_start_matches(mark);
     let length = line.len() - info.len();
