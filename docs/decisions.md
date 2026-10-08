@@ -6061,7 +6061,12 @@ How to read this record:
   Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
   of #336. A mesh whose group stops stops the node, and `Node::join` gives
   `Error::Mesh` with `mesh::Error::Stopped`. Of a transport that stops and a group
-  that stops, `join` gives the first; at one poll, the transport's (#1780, APPROVAL).
+  that stops, `join` gives the first; at one poll, the transport's (#1780). Lost:
+  `Mesh::stopped()`, because `Watch::next` gives the stop as its contract and one
+  caller does not justify a new `mesh` item; add `Mesh::stopped` when a second caller
+  needs the stop of the group and reads no home, and ask `laptop.architect` for it.
+  Decided by `laptop.architect-2` at 2026-10-08T17:27:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1780#issuecomment-6065408760).
   Lost: `Node::found(region)` at run time, which needs a second open path and a node
   that runs with no region before it; the key in `node::Region`, because a node's
   identity is not region data, and PR 4 needs it with no region.

@@ -704,7 +704,7 @@ impl Serve {
             tasks: tasks.clone(),
         });
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        // A watch of any index gives the stop of the group.
+        // `next` gives the stop of the group on a watch of any index.
         let watch = mesh
             .as_ref()
             .map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
