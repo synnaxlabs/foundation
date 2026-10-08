@@ -3077,7 +3077,6 @@ How to read this record:
   2026-10-08T06:29:55Z):
   https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053784863 and
   https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053878785.
-
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
