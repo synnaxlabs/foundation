@@ -56,7 +56,9 @@
   member (`Error::NotMember`). It checks no definition. The node that founds the region
   checks the definitions (SPEC CHANGE). Changed by `laptop.architect`
   (2026-10-08T21:26:46Z:
-  https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6069370914). `Start`
+  https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6069370914), which
+  changes "Nothing checks the homes" of
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633. `Start`
   lost, because `driver.rs` holds `raft::Start`, which changes at each open
   (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).

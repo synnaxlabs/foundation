@@ -11,9 +11,14 @@
   a change only because its new bytes equal the stored bytes: with a true `old`, at a
   planned name and kind, such a change states nothing false and changes nothing. #337 PR
   2b, which applies the homes, does no check of its own: `Mesh::apply` refuses a name
-  that is not an index (`NotIndex`) and a home that is no member (`UnknownNode`), and
-  gives no home to an index that has one (`laptop.architect`, 2026-10-08T18:35:16Z:
-  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633).
+  that is not an index (`NotIndex`) and a home that is no member for an index with no
+  home (`UnknownNode`), and gives no home to an index that has one (`laptop.architect`,
+  2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). No
+  check of its own decided by `laptop.architect-2`, 2026-10-08T21:30:44Z
+  (https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069434343), which
+  changes "PR 2b checks the homes" of
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742.
   `config::plan::Plan::definitions(applied, key)` gives those definitions with the key
   rule of PLAN SURFACE, and an edge to no channel gets a key from `key`, which the check
   refuses as dangling. Each call of `key` must give a key that no channel holds and that
@@ -43,7 +48,7 @@
   `definitions` (2026-10-08T19:27:39Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067449819);
   `Mismatch` refuses only a false `old`, a reserved label, a blockless kind, or a name
-  that is not the tree key of its kind, and `Mesh::apply` checks the homes
+  that is not the tree key of its kind, and the check of the homes
   (2026-10-08T19:40:40Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742); `changes`
   keyed by name (2026-10-08T19:54:45Z,

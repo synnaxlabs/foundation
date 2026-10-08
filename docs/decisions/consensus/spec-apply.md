@@ -10,7 +10,11 @@
   nodes of the listed indexes with no home when the call checks the node names, which
   are among those, and the change takes only those indexes (`laptop.architect`,
   2026-10-08T18:35:16Z:
-  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A node
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). The two
+  reads decided by `laptop.architect`, 2026-10-08T21:37:03Z
+  (https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069527551), which
+  changes the one read in `Homes` of 6066553633 and the SPEC APPLY text of
+  https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069454501. A node
   name that no member has gives `Error::UnknownNode`, after `Error::NoVote` and before
   the first put. None of them proposes anything. `Homes` right after `NotIndex` decided
   by `laptop.architect`, 2026-10-08T17:01:08Z
@@ -55,8 +59,10 @@
   returns it when each listed index has a home then, and else gives `Stale`. No entry
   removes a home, so the path on which the call's entry applies needs no check, and both
   paths give the same result. Trigger: when an entry can remove a home, that path checks
-  too, and so does the count of `Homes` at the name check. Decided by
-  `laptop.architect`, 2026-10-08T17:20:54Z
+  too, and so does the count of `Homes` at the name check (that count,
+  2026-10-08T21:37:03Z:
+  https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069527551). Decided
+  by `laptop.architect`, 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
   changed by `laptop.architect` at 2026-10-08T17:34:20Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915), which
