@@ -5017,7 +5017,9 @@ How to read this record:
   each through `home::reader`, not at its home (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
-  Supersedes the clause "Only `hub` re-exports" of #340 for those values.
+  Supersedes the clause "Only `hub` re-exports" of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6030532788 for
+  those values.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
