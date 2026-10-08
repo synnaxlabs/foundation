@@ -2197,6 +2197,15 @@ mod tests {
         }
 
         #[test]
+        fn refuses_an_end_inside_a_char_in_the_second_vector_of_ends() {
+            let elements = "\u{e9}".repeat(1_100);
+            let mut ends: Vec<u32> = (1..=1_100).map(|i| 2 * i).collect();
+            ends[1_050] -= 1;
+            let expected = Error::Utf8 { sample: 1_050 };
+            refuses(Type::String, &ends, elements.as_bytes(), &expected);
+        }
+
+        #[test]
         fn refuses_utf8_before_trailing_bytes() {
             let values = raw(&[1, 2], 1, b"a\xff");
             let mut encoded = [
