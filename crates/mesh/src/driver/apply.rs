@@ -38,7 +38,7 @@ impl Mesh {
         definitions: BTreeMap<Name, Definition>,
     ) -> Result<Pointer, Error> {
         let problems =
-            spec::region::check(self.group.borrow().state.region(), &definitions);
+            spec::region::check(self.group.borrow().state.prefix(), &definitions);
         if !problems.is_empty() {
             return Err(Error::Problems(problems));
         }
@@ -57,13 +57,7 @@ impl Mesh {
         };
         loop {
             match self.attempt()?.settle(change.clone()).await? {
-                Some(Ok(())) => {
-                    let version = base
-                        .version
-                        .checked_add(1)
-                        .expect("invariant: fewer than 2^64 spec changes apply");
-                    return Ok(Pointer { version, root });
-                }
+                Some(Ok(())) => return Ok(base.next(root)),
                 Some(Err(Refused::Stale { base, pointer })) => {
                     return Err(Error::Stale { base, pointer });
                 }

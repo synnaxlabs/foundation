@@ -66,7 +66,7 @@ impl State {
     }
 
     /// The prefix of the region.
-    pub(crate) fn region(&self) -> &Prefix {
+    pub(crate) fn prefix(&self) -> &Prefix {
         &self.region
     }
 
@@ -128,11 +128,7 @@ impl State {
                 pointer: self.pointer,
             });
         }
-        let version = base
-            .version
-            .checked_add(1)
-            .expect("invariant: fewer than 2^64 spec changes apply");
-        self.pointer = Pointer { version, root };
+        self.pointer = base.next(root);
         Ok(())
     }
 
