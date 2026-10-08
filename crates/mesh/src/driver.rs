@@ -1182,16 +1182,18 @@ mod tests {
         requests: BTreeMap<u8, Request>,
         /// The join that each node stamped.
         stamped: BTreeMap<u8, Change>,
-        /// The node that is not a voter.
-        learner: Option<u8>,
+        /// The members that are not founding voters.
+        learners: BTreeSet<u8>,
         /// The home that each node sets next.
         sets: BTreeMap<u8, u8>,
         /// Each call of `set_home` that returned, in order: its node, the home on
         /// that node at the return, and what the call gave.
         set: Vec<(u8, Option<node::Key>, Result<(), Error>)>,
-        /// The base and the definitions of the spec change that each node proposes
-        /// next. Each node of `IDS` holds its chunks.
-        applies: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
+        /// The voters that each node proposes next.
+        configurations: BTreeMap<u8, BTreeSet<u8>>,
+        /// The base, the definitions, and the holders of the spec change that each
+        /// node proposes next.
+        applies: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>, BTreeSet<u8>)>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1496,13 +1498,31 @@ mod tests {
         }
     }
 
+    /// Proposes the voters that the board gives node `id`, and waits for the write.
+    async fn configure(
+        mesh: Mesh,
+        clock: Clock,
+        id: u8,
+        board: Arc<Mutex<Board>>,
+    ) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let voters = board.lock().unwrap().configurations.remove(&id);
+            let Some(voters) = voters else {
+                continue;
+            };
+            let voters = voters.into_iter().map(key).collect();
+            mesh.propose_voters(voters).await.unwrap();
+        }
+    }
+
     /// Proposes the spec change that the board gives node `id`, as `Mesh::apply`
     /// does after its count of the holders, and puts the result on the board.
     async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
             let spec = board.lock().unwrap().applies.remove(&id);
-            let Some((base, definitions)) = spec else {
+            let Some((base, definitions, holders)) = spec else {
                 continue;
             };
             let update = spec::region::tree(&mut Chunks::default(), &definitions);
@@ -1510,7 +1530,7 @@ mod tests {
                 base,
                 root: update.root,
                 chunks: update.chunks.into_iter().collect(),
-                holders: IDS.map(key).into(),
+                holders: holders.into_iter().map(key).collect(),
             };
             let result = match mesh.attempt() {
                 Ok(attempt) => mesh.settle_spec(attempt, change).await,
@@ -1611,12 +1631,14 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let (hidden, learner, founding) = {
+        let (hidden, learners, founding) = {
             let board = board.lock().unwrap();
-            (board.hidden, board.learner, board.founding.clone())
+            (board.hidden, board.learners.clone(), board.founding.clone())
         };
-        let voters: Vec<u8> =
-            IDS.into_iter().filter(|&of| Some(of) != learner).collect();
+        let voters: Vec<u8> = IDS
+            .into_iter()
+            .filter(|of| !learners.contains(of))
+            .collect();
         let base = config_at(&node, &tasks, id, PORT, &IDS, &voters).await;
         let transport = Rc::clone(&base.transport);
         let member = |of| {
@@ -1659,6 +1681,11 @@ mod tests {
             (mesh.clone(), node.clock(), Arc::clone(&board));
         tasks.spawn(async move {
             apply(applying, clock, id, applies).await;
+        });
+        let (configuring, clock, configurations) =
+            (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            configure(configuring, clock, id, configurations).await;
         });
         let mut watch = mesh.watch(INDEX);
         loop {
@@ -5650,6 +5677,44 @@ mod tests {
             let cause = log::Error::Files(files::Error::Busy { path });
             assert_eq!(busy, Some(Error::Log(cause)));
             assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
+        });
+    }
+
+    #[test]
+    fn open_puts_each_chunk_of_the_founding_tree_in_the_store() {
+        solo(|node, tasks| async move {
+            let founding = apply::create_large(200);
+            let mut tree = Chunks::default();
+            let update = spec::region::tree(&mut tree, &founding);
+            assert!(update.chunks.len() > 1, "{} chunks", update.chunks.len());
+            let config = Config {
+                founding,
+                ..config(&node, &tasks, 1, &[1], &[1]).await
+            };
+            let mesh = Mesh::start(config).await.unwrap();
+            for digest in update.chunks {
+                let chunk = mesh.chunks.get(digest).await.unwrap().unwrap();
+                assert_eq!(Some(&*chunk), tree.get(digest), "{digest}");
+            }
+        });
+    }
+
+    #[test]
+    fn open_gives_a_failed_put_of_a_founding_chunk() {
+        solo(|node, tasks| async move {
+            let founding = apply::create_subjects(&["plant.a"], 1);
+            let config = Config {
+                founding,
+                ..config(&node, &tasks, 1, &[1], &[1]).await
+            };
+            node.fail_file(Path::new(BLOB), Operation::SyncDir);
+            let cause = files::Error::Io {
+                path: BLOB.into(),
+                operation: Operation::SyncDir,
+                code: 5,
+            };
+            let failed = Error::Blob(blob::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
         });
     }
 

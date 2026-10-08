@@ -528,6 +528,58 @@ mod tests {
         assert_eq!(state.pointer().version, 2);
     }
 
+    fn keys<'a>(ids: impl IntoIterator<Item = &'a u8>) -> BTreeSet<node::Key> {
+        ids.into_iter().map(|&id| node(id)).collect()
+    }
+
+    fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+        Voters {
+            incoming: keys(incoming),
+            outgoing: keys(outgoing),
+        }
+    }
+
+    #[test]
+    fn holders_are_a_quorum_only_as_a_majority_of_each_half() {
+        let short = |held, voters| Err(Refused::Quorum { held, voters });
+        let cases = [
+            (voters(&[1], &[]), keys(&[1]), Ok(())),
+            (voters(&[1], &[]), keys(&[]), short(0, 1)),
+            (voters(&[1, 2], &[]), keys(&[1]), short(1, 2)),
+            (voters(&[1, 2], &[]), keys(&[1, 2]), Ok(())),
+            (voters(&[1, 2, 3], &[]), keys(&[2, 3]), Ok(())),
+            (voters(&[1, 2, 3], &[]), keys(&[3, 4]), short(1, 3)),
+            (voters(&[1, 2, 3], &[1]), keys(&[2, 3]), short(0, 1)),
+            (voters(&[1, 2], &[1, 2, 3]), keys(&[1]), short(1, 2)),
+            (voters(&[1, 2, 3], &[1, 2]), keys(&[1, 2]), Ok(())),
+        ];
+        for (voters, holders, expected) in cases {
+            let quorum = quorum(&voters, &holders);
+            assert_eq!(quorum, expected, "{voters:?} {holders:?}");
+        }
+        assert_eq!(
+            Refused::Quorum { held: 1, voters: 2 }.to_string(),
+            "1 of 2 voters hold the chunks of a spec change, not a majority"
+        );
+    }
+
+    // The voters of the last `Voters` entry count for each change after it.
+    #[test]
+    fn a_spec_change_is_refused_when_its_holders_are_not_a_quorum_of_the_voters() {
+        let mut state = state();
+        state.set_voters(voters(&[1, 2], &[1]));
+        let short = Refused::Quorum { held: 1, voters: 2 };
+        assert_eq!(state.apply(spec(0, 1, 2, &[])), Err(short));
+        assert_eq!(state.pointer().version, 0);
+        let mut held = spec(0, 1, 2, &[]);
+        let Change::Spec { holders, .. } = &mut held else {
+            unreachable!()
+        };
+        *holders = keys(&[1, 2]);
+        assert_eq!(state.apply(held), Ok(None));
+        assert_eq!(state.pointer().version, 1);
+    }
+
     // Of two changes from one base, the first applies and the second is refused.
     #[test]
     fn a_spec_change_on_a_stale_base_is_refused() {
@@ -1160,8 +1212,9 @@ mod tests {
         fn a_refused_change_changes_nothing(
             steps in prop::collection::vec(steps(), 0..16),
         ) {
+            let members = create_members(&[1, 2]);
             let mut state =
-                State::new(name("plant").into(), create_members(&[1, 2]), FOUNDING, [node(1)].into()).unwrap();
+                State::new(name("plant").into(), members, FOUNDING, keys(&[1])).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());
@@ -1179,6 +1232,25 @@ mod tests {
                     (Ok(_), _) => {}
                 }
             }
+        }
+
+        // More holders never lose a quorum, and every voter is one.
+        #[test]
+        fn more_holders_keep_a_quorum(
+            incoming in prop::collection::btree_set(0..6_u8, 1..5),
+            outgoing in prop::collection::btree_set(0..6_u8, 0..5),
+            holders in prop::collection::btree_set(0..6_u8, 0..6),
+            more in prop::collection::btree_set(0..6_u8, 0..6),
+        ) {
+            let voters = Voters {
+                incoming: keys(&incoming),
+                outgoing: keys(&outgoing),
+            };
+            let all = keys(holders.union(&more));
+            if quorum(&voters, &keys(&holders)).is_ok() {
+                prop_assert_eq!(quorum(&voters, &all), Ok(()));
+            }
+            prop_assert_eq!(quorum(&voters, &keys(incoming.union(&outgoing))), Ok(()));
         }
 
         // The applied state is the last home that each index was given.

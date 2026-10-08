@@ -10,15 +10,35 @@ use super::*;
 
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
-    /// tick.
+    /// tick, with each node as a holder.
     fn apply(&self, node: u8, base: Pointer, definitions: BTreeMap<Name, Definition>) {
-        let spec = (base, definitions);
+        self.apply_held(node, base, definitions, IDS.into());
+    }
+
+    /// As [`Cluster::apply`], with `holders`.
+    fn apply_held(
+        &self,
+        node: u8,
+        base: Pointer,
+        definitions: BTreeMap<Name, Definition>,
+        holders: BTreeSet<u8>,
+    ) {
+        let spec = (base, definitions, holders);
         self.board.lock().unwrap().applies.insert(node, spec);
+    }
+
+    /// Node `node` proposes `voters` at its next tick.
+    fn configure(&self, node: u8, voters: BTreeSet<u8>) {
+        let mut board = self.board.lock().unwrap();
+        board.configurations.insert(node, voters);
     }
 }
 
 /// A subject of `keys` keys at the tree key of each of `labels`.
-fn create_subjects(labels: &[&str], keys: u16) -> BTreeMap<Name, Definition> {
+pub(super) fn create_subjects(
+    labels: &[&str],
+    keys: u16,
+) -> BTreeMap<Name, Definition> {
     let key = |at: u16| {
         let mut bytes = [1; 32];
         bytes[..2].copy_from_slice(&at.to_le_bytes());
@@ -47,7 +67,7 @@ fn pointer(version: u64, definitions: &BTreeMap<Name, Definition>) -> Pointer {
 
 /// `count` subjects of 64 keys, whose tree has 1024 chunks at 1950 and 1025 at
 /// 1951.
-fn create_large(count: usize) -> BTreeMap<Name, Definition> {
+pub(super) fn create_large(count: usize) -> BTreeMap<Name, Definition> {
     let labels: Vec<String> = (0..count).map(|at| format!("plant.s{at}")).collect();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     create_subjects(&labels, 64)
@@ -327,6 +347,162 @@ fn an_apply_on_a_base_at_the_last_version_gives_stale() {
         }
         assert_eq!(mesh.pointer(), base());
     });
+}
+
+#[test]
+fn a_lone_voter_puts_each_chunk_of_its_change_in_its_store_and_lists_it() {
+    let definitions = create_large(200);
+    let mut tree = Chunks::default();
+    let update = spec::region::tree(&mut tree, &definitions);
+    let (moved, applied) = (pointer(1, &definitions), definitions.clone());
+    let digests = update.chunks.clone();
+    let entries = solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert_eq!(mesh.apply(base(), applied).await, Ok(moved));
+        for digest in digests {
+            let chunk = mesh.chunks.get(digest).await.unwrap().unwrap();
+            assert_eq!(Some(&*chunk), tree.get(digest), "{digest}");
+        }
+    });
+    let [change] = specs(&entries).try_into().unwrap();
+    let Change::Spec {
+        chunks, holders, ..
+    } = change
+    else {
+        unreachable!()
+    };
+    assert_eq!(chunks, update.chunks.into_iter().collect());
+    assert_eq!(holders, [key(1)].into());
+}
+
+#[test]
+fn a_change_lists_only_the_chunks_that_the_tree_of_its_base_lacks() {
+    let first = create_large(200);
+    let mut second = first.clone();
+    second.extend(create_subjects(&["plant.added"], 1));
+    let mut tree = Chunks::default();
+    let old = spec::region::tree(&mut tree, &first).root;
+    let new = spec::region::tree(&mut tree, &second);
+    let lacked = tree::diff(&tree, old, new.root).unwrap().chunks;
+    assert!(
+        lacked.len() < new.chunks.len() / 10,
+        "{} chunks",
+        lacked.len()
+    );
+    let entries = solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let moved = mesh.apply(base(), first).await.unwrap();
+        mesh.apply(moved, second).await.unwrap();
+    });
+    let [_, change] = specs(&entries).try_into().unwrap();
+    let Change::Spec { chunks, .. } = change else {
+        unreachable!()
+    };
+    assert_eq!(chunks, lacked.into_iter().collect());
+}
+
+// The store lacks the root of the first base, and holds a chunk that is not a node of
+// a tree as the root of the second. Each change is stale, and lists the whole tree.
+#[test]
+fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
+    let definitions = create_subjects(&["plant.a", "plant.b"], 1);
+    let update = spec::region::tree(&mut Chunks::default(), &definitions);
+    let corrupt = Digest::of(b"x");
+    let bases = [Digest([7; 32]), corrupt].map(|root| Pointer { version: 0, root });
+    let entries = solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let chunk = mesh.pool.copy(b"x").unwrap();
+        mesh.chunks.put(corrupt, &chunk).await.unwrap();
+        for at in bases {
+            let stale = Error::Stale {
+                base: at,
+                pointer: base(),
+            };
+            assert_eq!(mesh.apply(at, definitions.clone()).await, Err(stale));
+        }
+    });
+    let all: BTreeSet<Digest> = update.chunks.into_iter().collect();
+    for change in specs(&entries) {
+        let Change::Spec { chunks, .. } = change else {
+            unreachable!()
+        };
+        assert_eq!(chunks, all);
+    }
+    assert_eq!(specs(&entries).len(), 2);
+}
+
+#[test]
+fn apply_in_a_region_of_three_voters_gives_quorum_and_proposes_nothing() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let quorum = Error::Quorum { held: 1, voters: 3 };
+        assert_eq!(mesh.apply(base(), definitions).await, Err(quorum.clone()));
+        assert_eq!(
+            quorum.to_string(),
+            "1 of 3 voters hold the chunks of the spec change, not a majority"
+        );
+        assert_eq!(mesh.pointer(), base());
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+// Voter 1 makes 2 a voter, then proposes a change that only it holds. Each voter
+// refuses it at the apply, since the holders are 1 of the 2 voters. The home after it
+// shows that each applied past it.
+#[test]
+fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [2, 3].into();
+    cluster.start();
+    cluster.run(seconds(5));
+    cluster.configure(1, [1, 2].into());
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.apply_held(1, base(), definitions, [1].into());
+    cluster.run(seconds(5));
+    cluster.script(|_| home(9));
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let quorum = Error::Quorum { held: 1, voters: 2 };
+    assert_eq!(board.applied, [(1, base(), Err(quorum))]);
+    // Node 3 is in no configuration, so it gets no entry.
+    for id in [1, 2] {
+        assert_eq!(board.homes[&id].last(), Some(&Some(key(9))), "node {id}");
+        assert_eq!(board.pointers[&id], base(), "node {id}");
+    }
+}
+
+#[test]
+fn a_failed_put_gives_the_error_of_the_store_and_proposes_nothing() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        node.fail_file(Path::new(BLOB), Operation::SyncDir);
+        let definitions = create_subjects(&["plant.a"], 1);
+        let cause = files::Error::Io {
+            path: BLOB.into(),
+            operation: Operation::SyncDir,
+            code: 5,
+        };
+        let failed = Error::Blob(blob::Error::Files(cause));
+        assert_eq!(mesh.apply(base(), definitions).await, Err(failed.clone()));
+        assert_eq!(
+            failed.to_string(),
+            "the chunk store failed: sync_dir of blob failed with OS error 5"
+        );
+        assert_eq!(mesh.pointer(), base());
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+/// The spec changes of `entries`, in order.
+fn specs(entries: &[Entry]) -> Vec<Change> {
+    let change = |entry: &Entry| match &entry.data {
+        Data::Bytes(bytes) => Change::decode(bytes).ok(),
+        Data::Empty | Data::Voters(_) => None,
+    };
+    let spec = |change: &Change| matches!(change, Change::Spec { .. });
+    entries.iter().filter_map(change).filter(spec).collect()
 }
 
 fn name(text: &str) -> Name {

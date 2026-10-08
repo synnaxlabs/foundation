@@ -117,7 +117,7 @@ fn a_call_on_a_follower_that_is_cut_off_returns_after_the_links_heal() {
 #[test]
 fn a_member_that_is_not_a_voter_sets_no_home() {
     let mut cluster = Cluster::new(5);
-    cluster.board.lock().unwrap().learner = Some(3);
+    cluster.board.lock().unwrap().learners = [3].into();
     cluster.script(home);
     cluster.start();
     cluster.run(seconds(5));
