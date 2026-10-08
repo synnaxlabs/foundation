@@ -102,5 +102,6 @@ the commit you checked:
 4. File each finding as `docs/coordination.md`, "Small changes", says: a small one as
    an item of an open issue in its crate when one fits, and each other one as an issue
    with its `crate:` label, one per finding. Send the links to `laptop.coordinator`.
-5. When an agent finds a gap in its own rulebook (`.claude/agents/`), propose the rule
-   to the person (Records). People own the rulebooks.
+5. When an agent finds a gap in its own rulebook (`.claude/agents/`), file an issue that
+   states the gap and the rule you propose, and ask the person on it (Records). People
+   own the rulebooks.
