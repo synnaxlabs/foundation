@@ -65,6 +65,11 @@ impl State {
         Ok(state)
     }
 
+    /// The prefix of the region.
+    pub(crate) fn region(&self) -> &Prefix {
+        &self.region
+    }
+
     /// The member with `key`, or `None` when the region has no such member.
     pub(crate) fn member(&self, key: node::Key) -> Option<&Member> {
         self.members.get(&key)

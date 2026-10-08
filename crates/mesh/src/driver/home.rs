@@ -15,6 +15,7 @@ use crate::bytes::block;
 use crate::change::Change;
 use crate::error::Error;
 use crate::message::Message;
+use crate::region::Refused;
 
 impl Mesh {
     /// Makes `home` the home of `index`. A follower forwards it to the leader. It
@@ -49,14 +50,14 @@ impl Mesh {
                 self.clock.sleep(TICK).await;
                 continue;
             };
-            if attempt.applied(at).await? {
+            if attempt.applied(at).await?.is_some() {
                 return Ok(());
             }
         }
     }
 
     // Starts one try of a proposal, when the group runs and this node is a voter.
-    fn attempt(&self) -> Result<Try<'_>, Error> {
+    pub(super) fn attempt(&self) -> Result<Try<'_>, Error> {
         let mut group = self.group.borrow_mut();
         group.running()?;
         if !group.voter(group.raft.key()) {
@@ -92,7 +93,7 @@ async fn forward(session: &Session, pool: &Pool, change: Change) -> Option<Posit
 }
 
 // One try of a call. It holds its floor in the group until it drops.
-struct Try<'a> {
+pub(super) struct Try<'a> {
     mesh: &'a Mesh,
     // The key of the waker of the call in the group.
     slot: u64,
@@ -102,7 +103,10 @@ struct Try<'a> {
 impl Try<'_> {
     // Gives `change` to the leader, and gives the position of its entry there, or
     // `None` when no leader took it.
-    async fn place(&self, change: Change) -> Result<Option<Position>, Error> {
+    pub(super) async fn place(
+        &self,
+        change: Change,
+    ) -> Result<Option<Position>, Error> {
         let mesh = self.mesh;
         match mesh.propose(change.clone()).await {
             Ok(at) => return Ok(Some(at)),
@@ -141,14 +145,17 @@ impl Try<'_> {
         .await
     }
 
-    // Waits until this node knows what became of the entry at `at`, and gives
-    // whether it applied that entry.
-    async fn applied(&self, at: Position) -> Result<bool, Error> {
+    // Waits until this node knows what became of the entry at `at`. Gives what the
+    // apply of that entry gave, or `None` when a new leader replaced it.
+    pub(super) async fn applied(
+        &self,
+        at: Position,
+    ) -> Result<Option<Result<(), Refused>>, Error> {
         poll_fn(|cx| {
             let mut group = self.mesh.group.borrow_mut();
             match group.applied.outcome(&self.floor, at) {
-                Outcome::Applied => return Poll::Ready(Ok(true)),
-                Outcome::Replaced => return Poll::Ready(Ok(false)),
+                Outcome::Applied(applied) => return Poll::Ready(Ok(Some(applied))),
+                Outcome::Replaced => return Poll::Ready(Ok(None)),
                 Outcome::Pending => {}
             }
             group.running()?;

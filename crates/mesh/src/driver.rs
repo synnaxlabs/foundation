@@ -17,10 +17,9 @@ use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::definition::Definition;
-use spec::tree::{self, Chunks};
+use spec::tree::Chunks;
 use transport::{Code, Session, Transport};
 use types::channel;
-use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::{Name, Prefix};
 use types::node;
@@ -42,6 +41,7 @@ pub use end::Ended;
 use end::Spawner;
 use send::Senders;
 
+mod apply;
 mod end;
 mod home;
 mod send;
@@ -180,7 +180,8 @@ impl Mesh {
 
     // Opens the group with no task that sends: `outgoing` gives each message.
     async fn start(config: Config) -> Result<Self, Error> {
-        let founding = root(&config.founding);
+        let founding =
+            spec::region::tree(&mut Chunks::default(), &config.founding).root;
         let state = region::State::new(config.region, config.members, founding)
             .map_err(Error::Member)?;
         match state.member(config.key) {
@@ -563,17 +564,6 @@ impl fmt::Display for Unstamped {
 
 impl std::error::Error for Unstamped {}
 
-/// The root of the tree of `definitions`. Its chunks are dropped until the store of
-/// #1741 keeps them.
-fn root(definitions: &BTreeMap<Name, Definition>) -> Digest {
-    let sets = definitions
-        .iter()
-        .map(|(name, definition)| tree::Change::Set(name.clone(), definition.encode()));
-    tree::apply(&mut Chunks::default(), tree::empty(), sets)
-        .expect("invariant: a change of the empty tree reads no chunk")
-        .root
-}
-
 /// A watch of the home of one index.
 pub struct Watch {
     group: Weak<RefCell<Group>>,
@@ -816,26 +806,25 @@ impl Group {
             self.unapplied.retain(|&index, _| index > last);
         }
         for Entry { at, data } in committed {
-            self.applied.push(at);
-            self.wake_calls();
-            let bytes = match data {
-                Data::Bytes(bytes) => bytes,
-                Data::Empty | Data::Voters(_) => continue,
-            };
-            let applied = match Change::decode(&bytes) {
-                Ok(change) => self.state.apply(change),
-                // Every node of this build judges a body the same way.
-                Err(Malformed::Body { kind, length }) => {
-                    Err(Refused::Body { kind, length })
-                }
-                Err(Malformed::Unknown(cause)) => {
-                    return Err(Stopped::Change { at, cause });
-                }
+            let applied = match data {
+                Data::Bytes(bytes) => match Change::decode(&bytes) {
+                    Ok(change) => self.state.apply(change),
+                    // Every node of this build judges a body the same way.
+                    Err(Malformed::Body { kind, length }) => {
+                        Err(Refused::Body { kind, length })
+                    }
+                    Err(Malformed::Unknown(cause)) => {
+                        return Err(Stopped::Change { at, cause });
+                    }
+                },
+                Data::Empty | Data::Voters(_) => Ok(None),
             };
             // A refused change is a no-op on every node.
             if let Ok(Some(_)) = applied {
                 self.wake_watches();
             }
+            self.applied.push(at, applied.map(|_| ()));
+            self.wake_calls();
         }
         Ok(())
     }
@@ -1103,7 +1092,9 @@ mod tests {
     use env::files::{self, Operation};
     use raft::{Answer, Grant, Hard, Proof, Term};
     use sim::{Crash, Sim, link};
+    use spec::tree;
     use transport::{Address, Peer, Port};
+    use types::digest::Digest;
     use types::node::SealKey;
     use types::time::Monotonic;
     use wire::Protocol;
@@ -1163,6 +1154,11 @@ mod tests {
         /// Each call of `set_home` that returned, in order: its node, the home on
         /// that node at the return, and what the call gave.
         set: Vec<(u8, Option<node::Key>, Result<(), Error>)>,
+        /// The base and the definitions that each node applies next.
+        applies: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
+        /// Each call of `apply` that returned, in order: its node, the pointer on
+        /// that node at the return, and what the call gave.
+        applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -1456,6 +1452,21 @@ mod tests {
         }
     }
 
+    /// Applies the spec that the board gives node `id`, and puts the result on the
+    /// board.
+    async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let spec = board.lock().unwrap().applies.remove(&id);
+            let Some((base, definitions)) = spec else {
+                continue;
+            };
+            let result = mesh.apply(base, definitions).await;
+            let pointer = mesh.pointer();
+            board.lock().unwrap().applied.push((id, pointer, result));
+        }
+    }
+
     /// Three voters, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
@@ -1590,6 +1601,11 @@ mod tests {
         tasks.spawn(async move {
             set(setting, clock, id, sets).await;
         });
+        let (applying, clock, applies) =
+            (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            apply(applying, clock, id, applies).await;
+        });
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();
@@ -1723,7 +1739,7 @@ mod tests {
         let founding = create_founding();
         let base = Pointer {
             version: 0,
-            root: root(&founding),
+            root: spec::region::tree(&mut Chunks::default(), &founding).root,
         };
         cluster.board.lock().unwrap().founding = founding;
         let change = |byte| Change::Spec {
@@ -1759,7 +1775,7 @@ mod tests {
         let founding = create_founding();
         let base = Pointer {
             version: 0,
-            root: root(&founding),
+            root: spec::region::tree(&mut Chunks::default(), &founding).root,
         };
         cluster.board.lock().unwrap().founding = founding;
         let chunks = (0..CHUNKS_MAX)
@@ -2248,6 +2264,7 @@ mod tests {
         });
     }
 
+    mod apply;
     mod home;
     mod send;
     mod serve;
