@@ -162,7 +162,7 @@ async fn leader(
 ) -> (Mesh, Position) {
     let config = Config {
         pool,
-        ..config(node, tasks, 1, &[1, 2], &[1])
+        ..config(node, tasks, 1, &[1, 2], &[1]).await
     };
     let mesh = Mesh::start(config).await.unwrap();
     let first = lead(&mesh, &node.clock(), home(1)).await;
@@ -223,7 +223,7 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
     for (members, from, refused, error) in cases {
         let (served, finished) = run(
             move |node, tasks, incoming| async move {
-                let config = config(&node, &tasks, 1, members, &IDS);
+                let config = config(&node, &tasks, 1, members, &IDS).await;
                 let mesh = Mesh::start(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
                 // The group did not see the heartbeat after the refused message:
@@ -381,7 +381,7 @@ fn serve_drops_a_message_that_the_pool_has_no_block_for_and_goes_on() {
             let pool = small_pool();
             let config = Config {
                 pool: Rc::clone(&pool),
-                ..config(&node, &tasks, 1, &IDS, &IDS)
+                ..config(&node, &tasks, 1, &IDS, &IDS).await
             };
             let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
@@ -774,7 +774,7 @@ fn serve_gives_no_code_of_the_mesh_when_the_group_stops() {
                 fail_sync(&node);
                 let served = mesh.serve(public(1), incoming).await;
                 drop(mesh);
-                let config = config(&node, &tasks, 1, &[1, 2], &[1]);
+                let config = config(&node, &tasks, 1, &[1, 2], &[1]).await;
                 let mesh = Mesh::open(config).await.unwrap();
                 let mut watch = mesh.watch(INDEX);
                 assert_eq!(watch.next().await, Ok(None));
