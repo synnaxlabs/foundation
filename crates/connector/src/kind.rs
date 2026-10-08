@@ -56,7 +56,7 @@ pub trait Kind: Send + Sync + 'static {
 pub struct Channels {
     /// The channels it reads from the device, which it writes to the mesh.
     pub reads: Vec<Name>,
-    /// The channels it writes to the device, which it reads from the mesh.
+    /// The channels it writes to the device.
     pub writes: Vec<Name>,
 }
 
