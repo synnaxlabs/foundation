@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 use env::net::{Error, Tcp, tcp};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 #[global_allocator]
@@ -160,13 +161,20 @@ async fn count_udp() -> [u64; 2] {
 
 fn main() {
     let (sent, received) = mpsc::channel();
+    // `start` allocates on this thread after the body starts, so the body counts only
+    // after `start` returns.
+    let (started, begin) = oneshot::channel();
     let handle = os::threads()
         .expect("the OS gives the cores of this process")
         .start("net-alloc", move || async move {
+            begin.await.expect("main sends after `start` returns");
             let counts = (count().await, count_udp().await);
             sent.send(counts).expect("main waits for the counts");
         })
         .expect("the thread starts");
+    started
+        .send(())
+        .expect("the body waits for `start` to return");
     assert_eq!(handle.join(), Ok(()), "the thread ends with no panic");
     let counts = received.try_recv().expect("the thread sent its counts");
     let (tcp, udp) = counts;
