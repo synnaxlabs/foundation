@@ -152,9 +152,15 @@ fn round_trip_types() {
 }
 
 /// The raw bytes of `count` samples of `data_type`, an array or a variable type. A
-/// variable sample holds 0 to 4 elements, after the ends and their padding.
+/// variable sample holds 0 to 4 elements, after the ends and their padding. A
+/// `String` sample is ASCII.
 fn values(data_type: Type, count: usize) -> Vec<u8> {
-    let bytes = |len| (0..len).map(|i| mix(i).to_le_bytes()[0]);
+    let mask = if data_type == Type::String {
+        0x7f
+    } else {
+        0xff
+    };
+    let bytes = |len| (0..len).map(move |i| mix(i).to_le_bytes()[0] & mask);
     let width = match data_type {
         Type::List { element, .. } => element.width(),
         Type::String | Type::Bytes => 1,
@@ -292,7 +298,8 @@ fn refuse() {
     refuse_ends();
 }
 
-/// Refuses decreasing ends and a long list sample, raw and encoded.
+/// Refuses decreasing ends, a long list sample, and a string sample that is not
+/// UTF-8, raw and encoded.
 fn refuse_ends() {
     let list = Type::List {
         element: Scalar::U8,
@@ -318,6 +325,12 @@ fn refuse_ends() {
                 len: 2,
                 max: 1,
             },
+        ),
+        (
+            Type::String,
+            [1, 2],
+            &b"a\xff"[..],
+            Error::Utf8 { sample: 1 },
         ),
     ];
     for (data_type, ends, elements, error) in cases {

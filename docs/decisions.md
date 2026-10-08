@@ -669,8 +669,10 @@ How to read this record:
   form, zeros pad the ends to a multiple of the element width or 8, whichever is less
   (R9-D3). A frame series starts on 8 bytes, so the elements are then aligned. The
   encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
-  and a view of a raw variable series relies on it. `codec` does not check UTF-8 (the
-  owner is #556). Vector numbers in errors count across the ends and the elements.
+  and a view of a raw variable series relies on it. `encode`, `validate`, and `decode`
+  refuse a `String` sample that is not UTF-8 (`Error::Utf8`, #556), so a reader trusts
+  each `String` from `codec`. Vector numbers in errors count across the ends and the
+  elements.
   `Decoder` decodes a scalar series one vector at a time, so a reader of a series from
   a peer needs room for only 1024 samples, whatever the count (#416).
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
@@ -1022,8 +1024,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
 - **HOME EVERY TYPE (#1145)** `Shard::open_writer` takes a key set with series of any
   `sample::Type`, and the home writes and reads a series of each: `codec` checks and
-  encodes it as S3 says, and STORED BODY stores its type. `codec` does not check that
-  a `String` sample is UTF-8 (#556). Neither `home` nor `hub` has a
+  encodes it as S3 says, and STORED BODY stores its type. `codec` refuses a `String`
+  sample that is not UTF-8 (#556). Neither `home` nor `hub` has a
   `writer::Error::Type`. Supersedes HOME TYPE REFUSAL (#963,
   https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785), the
   patch that refused a series of a type other than a scalar until this change. Lost:

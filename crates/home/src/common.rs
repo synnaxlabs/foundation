@@ -47,11 +47,16 @@ pub(crate) fn data_type(
 }
 
 /// The raw values of one series: `count` samples of `data_type` from `state`. A
-/// variable sample holds at most 5 elements.
+/// variable sample holds at most 5 elements. A `String` sample is ASCII.
 pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
     let count = usize::try_from(count).expect("a small count");
     match data_type {
-        Type::String | Type::Bytes => variable(state, count, Scalar::U8, 5),
+        Type::String => {
+            let mut values = variable(state, count, Scalar::U8, 5);
+            values[4 * count..].iter_mut().for_each(|byte| *byte &= 0x7f);
+            values
+        }
+        Type::Bytes => variable(state, count, Scalar::U8, 5),
         Type::List { element, max } => variable(state, count, element, max.min(5)),
         fixed => {
             let width = fixed.width().expect("a fixed width");
