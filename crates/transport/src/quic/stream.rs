@@ -584,7 +584,7 @@ impl<'a> Left<'a> {
     /// The next write of `block`, and what is left after it: a run over
     /// [`COPIED_MAX`] bytes, else the stretch of shorter runs and zeros up to the
     /// next long run, copied into `buffer`. A stretch of at most [`COPIED_MAX`]
-    /// bytes is one range of `block` when it is one part with no zeros, else
+    /// bytes is one range of `block` when it is the last part, with no zeros, else
     /// `buffer`. A longer one is a copy of `buffer` of its length.
     fn piece<'b>(
         &self,
