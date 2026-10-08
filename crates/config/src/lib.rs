@@ -2088,6 +2088,9 @@ mod tests {
                 ("kind", string("stream")),
                 ("other", string("x")),
                 ("index", string("edge.tim")),
+                ("quality", string("edge.q")),
+                ("error", string("edge.e")),
+                ("control", string("edge.c")),
             ]);
             assert_eq!(
                 check(&documents),
@@ -2101,6 +2104,18 @@ mod tests {
                     unknown(
                         at(0, 115),
                         "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                    unknown(
+                        at(0, 117),
+                        "no `channel` block defines the quality channel `edge.q`",
+                    ),
+                    unknown(
+                        at(0, 119),
+                        "no `channel` block defines the error channel `edge.e`",
+                    ),
+                    unknown(
+                        at(0, 121),
+                        "no `channel` block defines the control channel `edge.c`",
                     ),
                 ])
             );
