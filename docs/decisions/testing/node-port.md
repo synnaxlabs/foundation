@@ -56,6 +56,10 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. This
   holds also when the mesh's group stops before the node, which then stops the node
   (NODE MESH):
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456. So the
+  port is free once `lock` is, which a test pins. No test sees the drop of the
+  transport itself: the end of shard 0 drops the carrier's task, which frees the socket
+  also when a clone of the transport leaks:
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. Supersedes
   the drop of the transport of
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
