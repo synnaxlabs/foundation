@@ -6,6 +6,7 @@ use spec::definition::Definition;
 use spec::tree::{self, Chunks, Update};
 use types::digest::Digest;
 use types::name::Name;
+use types::node;
 
 use super::propose::Try;
 use super::{Mesh, put};
@@ -16,10 +17,11 @@ use crate::region::{self, Refused};
 
 impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
-    /// `base`. It puts each chunk of the new tree that the tree of `base` lacks in
-    /// [`Config::chunks`](super::Config::chunks), or each chunk of the new tree when
-    /// the store cannot give the tree of `base`. A follower forwards the change to
-    /// the leader. Returns the new pointer once its entry has committed and this node
+    /// `base`. It puts each chunk of the new tree in
+    /// [`Config::chunks`](super::Config::chunks). The change lists each chunk of the
+    /// new tree that the tree of `base` lacks, or each chunk of the new tree when the
+    /// store cannot give the tree of `base`. A follower forwards the change to the
+    /// leader. Returns the new pointer once its entry has committed and this node
     /// applied it. It tries again when a new leader replaces the entry, and after
     /// each tick while no leader takes it, as [`Mesh::set_home`] does. A retry that
     /// finds the pointer it makes, from an entry whose answer was lost, also returns
@@ -28,9 +30,8 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// `Problems` and `Large` come first, and `NoVote` and `Stopped` before the first
-    /// put. None of these four, `Pool`, `Blob`, and a `Quorum` before the proposal
-    /// propose anything.
+    /// `Problems` and `Large` come first, then `NoVote`, `Stopped`, and a `Quorum`
+    /// before the first put. None of these, `Pool`, and `Blob` propose anything.
     ///
     /// - [`Error::Problems`] when the spec has problems.
     /// - [`Error::Large`] when the change lists more chunks than one change lists.
@@ -59,7 +60,7 @@ impl Mesh {
         let mut chunks = Chunks::default();
         let update = spec::region::tree(&mut chunks, &definitions);
         let root = update.root;
-        let listed = self.listed(&mut chunks, base.root, update).await?;
+        let listed = self.listed(&mut chunks, base.root, &update).await?;
         if listed.len() > CHUNKS_MAX {
             return Err(Error::Large {
                 chunks: listed.len(),
@@ -67,27 +68,30 @@ impl Mesh {
             });
         }
         let attempt = self.attempt()?;
-        put(&self.chunks, &self.pool, &chunks, &listed).await?;
         let holders = BTreeSet::from([self.key()]);
         region::quorum(self.group.borrow().raft.voters(), &holders).map_err(refused)?;
-        let change = Change::Spec {
-            base,
-            root,
-            chunks: listed.into_iter().collect(),
-            holders,
-        };
-        self.settle_spec(attempt, change).await
+        // Each chunk, not only the listed ones: the store can lack a chunk that the
+        // base shares with the new tree, and `diff` never reads a shared chunk.
+        put(&self.chunks, &self.pool, &chunks, &update.chunks).await?;
+        let listed = listed.into_iter().collect();
+        self.settle_spec(attempt, base, root, listed, holders).await
     }
 
-    // Proposes `change`, a `Spec` change, from `attempt` until it applies, and gives
-    // the pointer it makes.
+    // Proposes the `Spec` change of `base`, `root`, `chunks`, and `holders` from
+    // `attempt` until it applies, and gives the pointer it makes.
     pub(super) async fn settle_spec(
         &self,
         mut attempt: Try<'_>,
-        change: Change,
+        base: Pointer,
+        root: Digest,
+        chunks: BTreeSet<Digest>,
+        holders: BTreeSet<node::Key>,
     ) -> Result<Pointer, Error> {
-        let &Change::Spec { base, root, .. } = &change else {
-            unreachable!("settle_spec takes only a spec change: {change:?}")
+        let change = Change::Spec {
+            base,
+            root,
+            chunks,
+            holders,
         };
         loop {
             match attempt.settle(change.clone()).await? {
@@ -112,17 +116,17 @@ impl Mesh {
         &self,
         chunks: &mut Chunks,
         base: Digest,
-        update: Update,
+        update: &Update,
     ) -> Result<Vec<Digest>, Error> {
         loop {
             let missing = match tree::diff(chunks, base, update.root) {
                 Ok(diff) => return Ok(diff.chunks),
                 Err(tree::Error::Missing(digest)) => digest,
-                Err(tree::Error::Corrupt(_)) => return Ok(update.chunks),
+                Err(tree::Error::Corrupt(_)) => return Ok(update.chunks.clone()),
             };
             match self.chunks.get(missing).await.map_err(Error::Blob)? {
                 Some(chunk) => chunks.insert(chunk.to_vec()),
-                None => return Ok(update.chunks),
+                None => return Ok(update.chunks.clone()),
             };
         }
     }

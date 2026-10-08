@@ -1163,6 +1163,14 @@ mod tests {
     /// What each node's watch gave, in order.
     type Homes = BTreeMap<u8, Vec<Option<node::Key>>>;
 
+    /// The parts of a spec change that a node of a cluster proposes.
+    struct Proposal {
+        base: Pointer,
+        root: Digest,
+        chunks: BTreeSet<Digest>,
+        holders: BTreeSet<node::Key>,
+    }
+
     /// What the voters of a cluster did and what they do next.
     #[derive(Default)]
     struct Board {
@@ -1204,7 +1212,7 @@ mod tests {
         /// The voters that each node proposes next.
         configurations: BTreeMap<u8, BTreeSet<u8>>,
         /// The spec change that each node proposes next.
-        applies: BTreeMap<u8, Change>,
+        applies: BTreeMap<u8, Proposal>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1532,11 +1540,19 @@ mod tests {
     async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
-            let Some(change) = board.lock().unwrap().applies.remove(&id) else {
+            let Some(spec) = board.lock().unwrap().applies.remove(&id) else {
                 continue;
             };
+            let Proposal {
+                base,
+                root,
+                chunks,
+                holders,
+            } = spec;
             let result = match mesh.attempt() {
-                Ok(attempt) => mesh.settle_spec(attempt, change).await,
+                Ok(attempt) => {
+                    mesh.settle_spec(attempt, base, root, chunks, holders).await
+                }
                 Err(error) => Err(error),
             };
             let pointer = mesh.pointer();

@@ -24,13 +24,13 @@ impl Cluster {
         holders: BTreeSet<u8>,
     ) {
         let update = spec::region::tree(&mut Chunks::default(), definitions);
-        let change = Change::Spec {
+        let spec = Proposal {
             base,
             root: update.root,
             chunks: update.chunks.into_iter().collect(),
             holders: holders.into_iter().map(key).collect(),
         };
-        self.board.lock().unwrap().applies.insert(node, change);
+        self.board.lock().unwrap().applies.insert(node, spec);
     }
 
     /// Node `node` proposes `voters` at its next tick.
@@ -409,6 +409,74 @@ fn a_change_lists_only_the_chunks_that_the_tree_of_its_base_lacks() {
 
 // The store lacks the root of the first base, and holds a chunk that is not a node of
 // a tree as the root of the second. Each change is stale, and lists the whole tree.
+
+/// A store that lost a chunk which the base shares with the new tree gets it again,
+/// though the change lists only the chunks that the base lacks: `diff` never reads a
+/// shared chunk.
+#[test]
+fn a_change_puts_a_lost_chunk_that_its_base_shares_with_the_new_tree() {
+    let first = create_large(200);
+    let mut second = first.clone();
+    second.extend(create_subjects(&["plant.added"], 1));
+    let mut tree = Chunks::default();
+    let old = spec::region::tree(&mut tree, &first).root;
+    let new = spec::region::tree(&mut tree, &second);
+    let lacked: BTreeSet<Digest> = tree::diff(&tree, old, new.root)
+        .unwrap()
+        .chunks
+        .into_iter()
+        .collect();
+    let shared = *new.chunks.iter().find(|at| !lacked.contains(at)).unwrap();
+    let listed = lacked.clone();
+    let entries = solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let moved = mesh.apply(base(), first).await.unwrap();
+        drop(mesh);
+        node.clock().sleep(Span::MILLISECOND).await;
+        let path = Path::new(BLOB).join(shared.to_string());
+        node.files().remove(&path).await.unwrap();
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert!(mesh.chunks.get(shared).await.unwrap().is_none());
+        mesh.apply(moved, second).await.unwrap();
+        let held = mesh.chunks.get(shared).await.unwrap();
+        assert_eq!(held.as_deref(), tree.get(shared));
+    });
+    let [_, Change::Spec { chunks, .. }] =
+        <[Change; 2]>::try_from(specs(&entries)).unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(chunks, listed);
+}
+
+/// A change to the tree of its base lists no chunk, and puts again the root that the
+/// store lost.
+#[test]
+fn a_change_to_the_tree_of_its_base_puts_a_lost_root() {
+    let definitions = create_subjects(&["plant.a", "plant.b"], 1);
+    let mut tree = Chunks::default();
+    let root = spec::region::tree(&mut tree, &definitions).root;
+    let entries = solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let moved = mesh.apply(base(), definitions.clone()).await.unwrap();
+        drop(mesh);
+        node.clock().sleep(Span::MILLISECOND).await;
+        let path = Path::new(BLOB).join(root.to_string());
+        node.files().remove(&path).await.unwrap();
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert!(mesh.chunks.get(root).await.unwrap().is_none());
+        mesh.apply(moved, definitions).await.unwrap();
+        let held = mesh.chunks.get(root).await.unwrap();
+        assert_eq!(held.as_deref(), tree.get(root));
+    });
+    let [_, Change::Spec { chunks, .. }] =
+        <[Change; 2]>::try_from(specs(&entries)).unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(chunks, BTreeSet::new());
+}
+
 #[test]
 fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
     let definitions = create_subjects(&["plant.a", "plant.b"], 1);
@@ -438,12 +506,14 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
 }
 
 #[test]
-fn apply_in_a_region_of_three_voters_gives_quorum_and_proposes_nothing() {
+fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
         let definitions = create_subjects(&["plant.a"], 1);
+        let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
         let quorum = Error::Quorum { held: 1, voters: 3 };
         assert_eq!(mesh.apply(base(), definitions).await, Err(quorum.clone()));
+        assert!(mesh.chunks.get(root).await.unwrap().is_none());
         assert_eq!(
             quorum.to_string(),
             "1 of 3 voters hold the chunks of the spec change, not a majority"
