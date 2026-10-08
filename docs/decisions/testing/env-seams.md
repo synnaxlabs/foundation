@@ -79,11 +79,14 @@
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
   Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
-  which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1; the
-  loopback, with an MTU of 16,384 bytes, loses a larger datagram; and a source of
-  127.0.0.2, which is not local there, goes out from 127.0.0.1 with no error. Decided by
+  which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
+  loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
   `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). On `os`,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). Until
+  #1972 patches noq-udp to send an IPv4 source as `IP_PKTINFO` on Apple, macOS ignores
+  each IPv4 source and sends from an address of its choice, with no error. Decided by
+  `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958). On `os`,
   a peer that resets after the handshake gives `Ok` from `Net::connect`, and the stream
   reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the
   connect, an IPv4-mapped address as plain IPv4, and any other address as given, with
