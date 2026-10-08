@@ -7,26 +7,35 @@
   `none`. Stated by the issue that the director's audits filed,
   https://github.com/synnaxlabs/foundation/issues/1467 (2026-10-07T15:20:38Z).
   The end lines are the last paragraph of the comment, in that order, as `/review`,
-  "Round comment", writes them, each at the start of its line, so an indented quote of
-  them or a line in a code block is not them. Each end line may wrap onto the lines
-  after it, and a paragraph after them fails. The first word of a value, with its
-  backticks and one final comma, period, or semicolon removed, is the word that is
-  checked. Decided by the director at 2026-10-08T02:57:36Z
+  "Round comment", writes them, each at the start of a line as GitHub shows it. So a
+  line in a code block is not one, and a line that continues the paragraph with an
+  indent is. Each end line may wrap onto the lines after it, and a paragraph after
+  them fails. The first word of a value, with its backticks and one final comma,
+  period, or semicolon removed, is the word that is checked. Decided by the director at
+  2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
-  check reads the comment as GitHub does: as CommonMark with the GitHub extensions, by
-  `pulldown-cmark`, with the spaces and tabs at the end of each line removed. A line
-  ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at
-  2026-10-08T04:42:33Z,
+  check reads the comment as GitHub does: as CommonMark with each GitHub extension
+  (tables, footnotes, strikethrough, task lists, and quote kinds), by `pulldown-cmark`,
+  with the spaces and tabs at the end of each line removed. A line ends at `\n`,
+  `\r\n`, or a lone `\r` (decided by the director at 2026-10-08T04:42:33Z,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
   round heading is the first top-level `## Review round <n>` heading. The fields are
   the first top-level block after it, and the end lines are the last one, each when it
-  is a paragraph. A code block, an HTML block or comment, a list, a quote, or a table
-  is not a paragraph, so a list after the `Hot path:` line fails. In an old round, a
-  `Hot path:` line, or a `Reviewers:` line of a round that does not parse, counts where
-  GitHub shows it as a line of text of a paragraph, at any depth and any indent. A
-  line of a code block or an HTML block does not count. Changed by
-  https://github.com/synnaxlabs/foundation/issues/1783, approved by the director at
-  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6068979665.
+  is a paragraph. A code block, an HTML block, a list, a quote, or a table is not a
+  paragraph, so a list after the `Hot path:` line fails. A round comment posted after
+  the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
+  block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source
+  starts with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. The
+  message names the line. GitHub reads some of these lines in a different way, and an
+  open `<!--` or `<details>` hides the text after it. A round comment that fails by
+  this rule gets an edit that puts the line in a code span, and the cutoff stays. In
+  an old round, a `Hot path:` line, or a `Reviewers:` line of a round that does not
+  parse, counts where GitHub shows it as a line of text of a paragraph, at any depth
+  and any indent. A line of a code block or an HTML block does not count. Changed by
+  https://github.com/synnaxlabs/foundation/issues/1783, with the rulings of the
+  director at 2026-10-08T21:47:24Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
+  approved by the director at DIRECTOR.
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
