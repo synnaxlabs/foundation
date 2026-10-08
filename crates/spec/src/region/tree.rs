@@ -30,8 +30,10 @@ pub fn tree(chunks: &mut Chunks, definitions: &BTreeMap<Name, Definition>) -> Up
 ///
 /// # Errors
 ///
-/// [`Error::Tree`] when `chunks` lacks a chunk of the tree, or a chunk does not fit
-/// in a tree. [`Error::Definition`] when the value at a tree key is not a definition.
+/// [`Error::Tree`] when `chunks` lacks a chunk of the tree, a chunk does not fit in a
+/// tree or has a key that is not a name, or the tree is not the tree of its
+/// definitions. [`Error::Definition`] when the value at a tree key is not a
+/// definition.
 #[expect(
     clippy::missing_panics_doc,
     reason = "each entry of a diff from the empty tree is new"
@@ -41,7 +43,8 @@ pub fn definitions(
     root: Digest,
 ) -> Result<BTreeMap<Name, Definition>, Error> {
     let diff = tree::diff(chunks, tree::empty(), root).map_err(Error::Tree)?;
-    diff.changes
+    let definitions = diff
+        .changes
         .into_iter()
         .map(|changed| {
             let bytes = changed
@@ -55,7 +58,11 @@ pub fn definitions(
                 }),
             }
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    if tree(&mut Chunks::default(), &definitions).root != root {
+        return Err(Error::Tree(tree::Error::Corrupt(root)));
+    }
+    Ok(definitions)
 }
 
 /// Why [`definitions`] cannot read a tree.

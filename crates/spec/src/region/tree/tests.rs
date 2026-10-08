@@ -141,3 +141,30 @@ fn definitions_give_definitions_with_a_problem() {
     let update = tree(&mut chunks, &defined);
     assert_eq!(definitions(&chunks, update.root), Ok(defined));
 }
+
+#[test]
+fn definitions_of_a_tree_cut_at_other_boundaries_give_its_root() {
+    let leaf = |key: &str, value: Vec<u8>| {
+        let mut bytes = vec![0, u8::try_from(key.len()).unwrap()];
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.push(u8::try_from(value.len()).unwrap());
+        bytes.extend(value);
+        bytes
+    };
+    let mut chunks = Chunks::default();
+    let a = chunks.insert(leaf("p.a", index(1).encode()));
+    let b = chunks.insert(leaf("p.b", index(2).encode()));
+    let mut root = vec![1, 3];
+    root.extend_from_slice(b"p.a");
+    root.extend_from_slice(&a.0);
+    root.push(3);
+    root.extend_from_slice(b"p.b");
+    root.extend_from_slice(&b.0);
+    let root = chunks.insert(root);
+    let corrupt = Error::Tree(tree::Error::Corrupt(root));
+    assert_eq!(definitions(&chunks, root), Err(corrupt.clone()));
+    assert_eq!(
+        corrupt.to_string(),
+        format!("chunk {root} is not a chunk of a spec tree")
+    );
+}
