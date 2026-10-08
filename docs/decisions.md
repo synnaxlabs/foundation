@@ -1211,7 +1211,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273), and one
   carry rule (2026-10-08T19:18:09Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
-  supersedes item 2 of
+  supersedes "`define` carries at once" in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
