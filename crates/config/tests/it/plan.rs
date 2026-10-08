@@ -1754,6 +1754,60 @@ placement \"p\" {{
     plans_after(&text(""), &empty, &named);
 }
 
+#[test]
+fn plans_after_the_overlap_move_and_its_connector_home_fix() {
+    let standby = |select: &str| {
+        format!("placement \"p\" {{\n  select = [{select}]\n  standby = \"k\"\n}}\n")
+    };
+    let index = "\
+channel \"c.time\" {
+  kind = \"index\"
+}
+connector \"c\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+connector \"w\" {
+  kind = \"writer\"
+  node = \"k\"
+  writes = [\"c.time\"]
+}
+";
+    let connectors = "\
+connector \"c\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+connector \"d\" {
+  kind = \"writer\"
+  node = \"k\"
+  writes = []
+}
+";
+    let index_fixed = index.to_owned() + &placement("p", "\"c\", \"c.time\"", "n");
+    let connectors_fixed = connectors.to_owned()
+        + &placement("p", "\"d\"", "k")
+        + &placement("q", "\"c\"", "n");
+    // `k` is the one node of `p`, and `p` wins for `c` on `n`. In the first case, each
+    // name that `p` wins is on `n`.
+    let excluded = exclude("c", "`p`", "n");
+    let cases = [
+        (index, "\"c\", \"c.time\"", RENAMED.to_owned(), index_fixed),
+        (connectors, "\"c\", \"d\"", excluded, connectors_fixed),
+    ];
+    let overlap = [("config.unplaced", OVERLAP.to_owned())];
+    for (common, select, fix, fixed) in cases {
+        let refused = common.to_owned() + &standby(select);
+        let found = problems(Spec::create_empty().plan(&[&refused], &["k", "m", "n"]));
+        let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+        assert_eq!(found, overlap, "{refused}");
+        let moved = common.to_owned() + &placement("p", select, "k");
+        plans_after_connector_home(&moved, &[fix], &fixed);
+    }
+}
+
 /// The fix of each diagnostic of `connector` on `node` when its placement to win,
 /// `winner`, names no `home` and an index of `connector` has no writer.
 fn homed(winner: &str, connector: &str, node: &str) -> String {
