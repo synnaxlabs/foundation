@@ -456,7 +456,8 @@ fn allows_what_is_reserved_only_elsewhere() {
     assert_eq!(text(&out), "time,k=_v,t=# #f=0i 0\n");
 }
 
-fn name() -> impl Strategy<Value = String> {
+/// A name, key, or tag value that a line accepts in each part.
+pub(crate) fn name() -> impl Strategy<Value = String> {
     concat!(
         r"[[\pL\pM\pN\pP\pS ]--[_#\\\x{fffd}]]",
         r"[[\pL\pM\pN\pP\pS ]--[\\\x{fffd}]]{0,8}",

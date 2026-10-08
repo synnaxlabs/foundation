@@ -262,17 +262,17 @@ fn escape(
     Ok(())
 }
 
-/// Whether a line refuses `c`: a backslash, or what InfluxDB 1 and 2 with
-/// `validate-keys` drop, which is U+FFFD and each character outside L, M, N, P, and S
-/// but U+0020. The newline, carriage return, tab, and NUL are in `Other`.
+/// Past the backslash, this is what InfluxDB 1 and 2 with `validate-keys` drop. The
+/// newline, carriage return, tab, and NUL are in `Other`.
 fn refused(c: char) -> bool {
-    let printed = c == ' '
-        || !matches!(
-            c.general_category_group(),
-            GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other
-        );
-    c == '\\' || c == char::REPLACEMENT_CHARACTER || !printed
+    c == '\\'
+        || c == char::REPLACEMENT_CHARACTER
+        || (c != ' '
+            && matches!(
+                c.general_category_group(),
+                GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other
+            ))
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

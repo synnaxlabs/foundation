@@ -478,13 +478,7 @@ fn gives_the_error_of_the_first_line_that_is_not_valid() {
 }
 
 fn name() -> impl Strategy<Value = String> {
-    prop_oneof![
-        Just("time".to_owned()),
-        concat!(
-            r"[[\pL\pM\pN\pP\pS ]--[_#\\\x{fffd}]]",
-            r"[[\pL\pM\pN\pP\pS ]--[\\\x{fffd}]]{0,8}",
-        ),
-    ]
+    prop_oneof![Just("time".to_owned()), line::tests::name(),]
 }
 
 fn key() -> impl Strategy<Value = String> {
