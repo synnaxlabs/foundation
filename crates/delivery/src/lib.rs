@@ -70,8 +70,8 @@ pub enum Start {
     },
 }
 
-/// A named reader's state, for the index log. The last record of a reader replaces the
-/// ones before it.
+/// A named reader's state, for the index log. The last record of a reader, by its
+/// subject and name, replaces the ones before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     /// The subject whose reader it is.

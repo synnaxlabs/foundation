@@ -322,9 +322,9 @@ How to read this record:
   the buffer. Group commit every few ms. Complete readers get frames only after they are
   on disk. Amended: per S10 (architect, #895,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037251160).
-- **S10 (reader)** A reader is a session, not a definition: `Reader { name:
-  Option<String>, select: Selector, mode: complete or latest, from: now, oldest, seq,
-  time, or resume, max_age, hold: Duration (default 0) }`. Only complete mode holds.
+- **S10 (reader)** A reader is a session, not a definition: `Reader { subject: Name,
+  name: Option<String>, select: Selector, mode: complete or latest, from: now, oldest,
+  seq, time, or resume, max_age, hold: Duration (default 0) }`. Only complete mode holds.
   A hold is capped by the index's retention. One session per named reader; a new one
   takes over. Out connectors carry reader settings in their config. Current readers and
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
@@ -334,7 +334,8 @@ How to read this record:
   reader and takes over nothing. Lost: refuse a takeover by another subject (decided by
   `laptop.architect-2`, 2026-10-08T09:49:27Z,
   https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444, and
-  `laptop.architect` in https://github.com/synnaxlabs/foundation/issues/1851).
+  `laptop.architect`, 2026-10-08T10:15:04Z,
+  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053).
 - **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps by store
   time the holds on the indexes it selects (READER RULES), so `buffer` may trim a sample
   past the cap (STORE TRIM). Retention deletes nothing: a ring frees only at its tail,
