@@ -800,8 +800,7 @@ fn apply_gives_each_listed_index_the_member_of_its_name_as_its_home() {
         let applied = mesh.apply(base(), definitions, homes.into()).await;
         assert_eq!(applied, Ok(moved));
         assert_eq!(mesh.watch(INDEX).next().await, Ok(None));
-        let second = channel::Key::from_u128(8);
-        assert_eq!(mesh.watch(second).next().await, Ok(Some(key(2))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
     });
 }
 
@@ -822,23 +821,44 @@ fn an_equal_change_with_other_homes_gives_ok_and_the_first_homes_hold() {
     });
 }
 
+// The first call homes only `INDEX`, so `SECOND`, which the second lists, has none.
 #[test]
 fn an_equal_change_with_fewer_homes_gives_stale() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
-        let definitions = create_indexes(1);
+        let definitions = create_indexes(2);
         let moved = pointer(1, &definitions);
-        let applied = mesh
-            .apply(base(), definitions.clone(), BTreeMap::new())
-            .await;
+        let first = create_homes(1, "plant.node1");
+        let applied = mesh.apply(base(), definitions.clone(), first).await;
         assert_eq!(applied, Ok(moved));
-        let homes = create_homes(1, "plant.node1");
+        let both = create_homes(2, "plant.node1");
         let stale = Error::Stale {
             base: base(),
             pointer: moved,
         };
-        assert_eq!(mesh.apply(base(), definitions, homes).await, Err(stale));
-        assert_eq!(mesh.watch(INDEX).next().await, Ok(None));
+        assert_eq!(mesh.apply(base(), definitions, both).await, Err(stale));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(None));
+    });
+}
+
+// `INDEX` keeps its home from the first call, so both equal calls give `Ok`.
+#[test]
+fn two_equal_calls_with_a_kept_home_give_ok() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let a = create_indexes(1);
+        let moved = pointer(1, &a);
+        let first = create_homes(1, "plant.node1");
+        assert_eq!(mesh.apply(base(), a, first).await, Ok(moved));
+        let b = create_indexes(2);
+        let next = pointer(2, &b);
+        let both = create_homes(2, "plant.node2");
+        let one = mesh.apply(moved, b.clone(), both.clone()).await;
+        let two = mesh.apply(moved, b, both).await;
+        assert_eq!((one, two), (Ok(next), Ok(next)));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
     });
 }
 
@@ -1041,9 +1061,8 @@ fn each_member_reads_the_homes_of_a_spec_change_and_a_later_change_keeps_them() 
     cluster.run(seconds(5));
     let (a, b) = (create_indexes(1), create_indexes(2));
     let (moved, next) = (pointer(1, &a), pointer(2, &b));
-    let second = channel::Key::from_u128(8);
     let first = BTreeMap::from([(INDEX, key(2))]);
-    let both = BTreeMap::from([(INDEX, key(3)), (second, key(3))]);
+    let both = BTreeMap::from([(INDEX, key(3)), (SECOND, key(3))]);
     cluster.apply_held(1, base(), &a, IDS.into(), first);
     cluster.run(seconds(5));
     cluster.apply_held(3, base(), &b, IDS.into(), both.clone());
@@ -1066,7 +1085,7 @@ fn each_member_reads_the_homes_of_a_spec_change_and_a_later_change_keeps_them() 
     for id in IDS {
         let homes = [None, Some(key(2)), Some(key(9))];
         assert_eq!(board.homes[&id], homes, "node {id}");
-        assert_eq!(board.states[&id].home(second), Some(key(3)), "node {id}");
+        assert_eq!(board.seconds[&id], Some(key(3)), "node {id}");
         assert_eq!(board.pointers[&id], next, "node {id}");
     }
 }

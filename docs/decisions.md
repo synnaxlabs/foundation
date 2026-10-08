@@ -2370,7 +2370,10 @@ How to read this record:
   hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
   give `Error::Homes`, both before the read of the base tree. A node name that no
   member has gives `Error::UnknownNode`, after `Error::NoVote` and before the first
-  put. None of them proposes anything. It then builds the tree with
+  put. None of them proposes anything. This order decided by `laptop.architect`,
+  2026-10-08T17:01:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210). It
+  then builds the tree with
   `spec::region::tree`. The change lists each chunk of the new tree that the tree of the
   base lacks, or each chunk of the new tree when `Config::store`, the node's
   `blob::Store`, cannot give the tree of the base. A change that lists more than
@@ -2411,7 +2414,9 @@ How to read this record:
   `laptop.architect`, 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
   changed by `laptop.architect` at 2026-10-08T17:34:20Z
-  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915). The
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915), which
+  supersedes item 2 of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958. The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
@@ -3152,7 +3157,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. The
   start of the rule was changed by `laptop.architect` at 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958): before
-  it, a format keeps version 1, so the homes of a spec change go in kind 4. Each later
+  it, a format keeps version 1, so the homes of a spec change go in kind 4. It
+  supersedes the start of the rule of
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
   call gives `Error::Stopped` with the first cause. A watch gives the `Stopped` itself,
   also after each `Mesh` drops (MESH SURFACE). `member` has no error (#562): it gives
   the record that the node holds, also after a stop (approved by the architect,
