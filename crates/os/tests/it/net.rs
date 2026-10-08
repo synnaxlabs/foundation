@@ -320,6 +320,35 @@ fn a_write_takes_at_most_the_unsent_bound() {
     });
 }
 
+/// On macOS, a write takes only the rest of the unsent bound that earlier writes left.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_write_after_a_small_write_takes_the_rest_of_the_unsent_bound() {
+    on_thread("net-rest", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        let max = options().unsent_bytes_max;
+        assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
+        assert_eq!(write(&mut client, &[&vec![7; 1 << 20]]).await, Ok(max - 64));
+    });
+}
+
+/// On macOS, a vectored write whose last part crosses the unsent bound takes the
+/// whole parts before it, in order.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_vectored_write_across_the_unsent_bound_takes_the_whole_parts() {
+    on_thread("net-parts", || async {
+        let net = net();
+        let (_listener, mut client, mut server) = create_pair(&net).await;
+        let parts: [&[u8]; 3] = [&[1; 100], &[2; 100], &vec![3; 1 << 20]];
+        assert_eq!(write(&mut client, &parts).await, Ok(200));
+        let mut read = [0; 200];
+        read_exact(&mut server, &mut read).await;
+        assert_eq!(read, [[1; 100], [2; 100]].concat()[..]);
+    });
+}
+
 /// Writes of 64 bytes that total less than the unsent bound each go at once, with no
 /// read on the peer: macOS waits for the write event only once the bound is reached.
 #[test]
