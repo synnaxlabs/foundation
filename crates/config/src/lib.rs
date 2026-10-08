@@ -2083,7 +2083,7 @@ mod tests {
         }
 
         #[test]
-        fn stops_at_a_kind_that_is_not_a_kind_of_channel() {
+        fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
             let documents = value(&[
                 ("kind", string("stream")),
                 ("other", string("x")),
@@ -2091,12 +2091,18 @@ mod tests {
             ]);
             assert_eq!(
                 check(&documents),
-                Err(vec![refused(
-                    "config.bad-channel-kind",
-                    at(0, 111),
-                    "\"stream\" is not a kind of channel",
-                    "Write \"index\" or \"data\"",
-                )])
+                Err(vec![
+                    refused(
+                        "config.bad-channel-kind",
+                        at(0, 111),
+                        "\"stream\" is not a kind of channel",
+                        "Write \"index\" or \"data\"",
+                    ),
+                    unknown(
+                        at(0, 115),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                ])
             );
         }
 
@@ -2310,6 +2316,31 @@ mod tests {
                         at(0, 14),
                         "`unit` is not an attribute of the `channel` block",
                         "Use `kind`, `error`, or `control`, or remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_of_a_data_channel_beside_an_unknown_attribute() {
+            let documents = value(&[
+                ("data_type", string("f64")),
+                ("index", string("edge.tim")),
+                ("unit2", string("x")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 114),
+                        "`unit2` is not an attribute of the `channel` block",
+                        "Use `kind`, `data_type`, `index`, `quality`, or `unit`, or \
+                         remove it",
                     ),
                 ])
             );
