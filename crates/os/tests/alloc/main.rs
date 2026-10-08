@@ -100,15 +100,16 @@ async fn count() -> [u64; 4] {
     ]
 }
 
-/// Sends `MESSAGE` to `receiver` as a batch of two datagrams, with the allocations
-/// the polls made.
+/// Sends `MESSAGE` to `receiver` as a batch of two datagrams, or one where the OS
+/// has no GSO, with the allocations the polls made.
 async fn send(sender: &mut Sender, receiver: &Receiver) -> u64 {
+    let datagrams = sender.batch_max().get().min(2);
     let transmit = Transmit {
         destination: receiver.local(),
         source: None,
         ecn: None,
         contents: MESSAGE,
-        segment: NonZeroUsize::new(MESSAGE.len() / 2 + 1),
+        segment: NonZeroUsize::new(MESSAGE.len().div_ceil(datagrams)),
     };
     let (sent, allocations) =
         timeout(BOUND, ready(|cx| sender.poll_send(cx, &transmit)))
