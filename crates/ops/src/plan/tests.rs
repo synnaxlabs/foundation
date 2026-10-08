@@ -677,6 +677,23 @@ fn gives_the_fingerprints_of_a_subject_after_the_apply_or_before_a_removal() {
 }
 
 #[test]
+fn gives_the_fingerprints_of_a_change_after_the_apply() {
+    let alice = format!("subject \"alice\" {{\n  keys = [\"{ALICE}\"]\n}}\n");
+    let planned =
+        run(&[("people.hcl", &alice)], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        format!(
+            "\
+~ subject alice
+    key {ALICE_FINGERPRINT}
+0 to add, 1 to change, 0 to remove.
+"
+        )
+    );
+}
+
+#[test]
 fn gives_no_fingerprints_for_another_kind() {
     let planned =
         run(&[("site.hcl", &placed_site())], &BTreeMap::new()).expect("a plan");
@@ -686,11 +703,5 @@ fn gives_no_fingerprints_for_another_kind() {
         changes
             .iter()
             .all(|change| change.get("fingerprints").is_none())
-    );
-    assert!(
-        planned
-            .changes
-            .iter()
-            .all(|change| change.fingerprints.is_empty())
     );
 }
