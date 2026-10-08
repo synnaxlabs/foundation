@@ -3511,6 +3511,21 @@ How to read this record:
   not depend on the order that a tool reads them. The problems can differ. Decided by
   architect-2 (#1444, 2026-10-07T17:08:05Z,
   https://github.com/synnaxlabs/foundation/pull/1444#issuecomment-6042832407).
+- **CHANNEL BLOCK (2026-10-08)** `channel "<name>" { kind, ... }` defines one channel
+  (S5) at its own name. `kind` is `"index"` or `"data"`, and `"data"` is the default.
+  An index takes `error` and `control`. A data channel takes `index` and `data_type`,
+  which it needs, and `quality` and `unit`. Each value is a string or a reference.
+  `config::check` gives `config::Definition::Channel`, a `spec::channel::Kind<Name>`
+  whose edges are names until `plan` gives each channel its key. `Definition::Spec`
+  holds each other definition. Each edge must name a channel that a `channel` block of
+  the Documents defines, or `check` gives `config.unknown-channel`, at the span of the
+  edge, in source order. An edge to a channel that only the stored spec has (X28) gives
+  it too, until #1082. Lost: `spec::definition::Definition<C = Channel>`, because `plan`
+  would then wrap each of the eight variants again to change one. Decided by
+  `laptop.architect-2` (#1152, 2026-10-07T11:17:44Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
+  2026-10-08T00:51:39Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
 
 ### 1.12 Access, identity, and secrets
 
