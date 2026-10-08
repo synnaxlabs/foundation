@@ -5962,7 +5962,6 @@ impl Connection {
             // Self::peer_competed_handshake_address_validation.
             if let Some(path) = self.paths.get_mut(&path_id) {
                 path.data.pto_count = 0;
-                path.data.pto_fired = None;
             }
             self.set_loss_detection_timer(now, path_id);
 
