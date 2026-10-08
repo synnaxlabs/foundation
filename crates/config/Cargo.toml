@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+connector = { path = "../connector" }
 document = { path = "../document" }
 spec = { path = "../spec" }
 types = { path = "../types" }
@@ -14,4 +15,6 @@ types = { path = "../types" }
 workspace = true
 
 [dev-dependencies]
+config-hcl = { path = "../config-hcl" }
+connector-influx = { path = "../connector-influx" }
 proptest = { workspace = true }
