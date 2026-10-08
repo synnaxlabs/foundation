@@ -1005,11 +1005,12 @@ How to read this record:
   crosses a thread. Decided by `laptop.architect` (2026-10-07T06:36:57Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901).
   `take` gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind`
-  and `Shard::behind` go. This supersedes the lost design "an error from `take`": a
-  third case is not an error, each caller of `take` uses one path for both modes, and
-  #274 may give a gap from `take`. Lost: `woken` names a reader that is behind in a
-  second list, which keeps the two steps and moves the state into the hub. Decided by
-  `laptop.architect` (2026-10-08T01:43:19Z:
+  and `Shard::behind` go. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901 in its lost
+  design "an error from `take`": a third case is not an error, each caller of `take`
+  uses one path for both modes, and #274 may give a gap from `take`. Lost: `woken` names
+  a reader that is behind in a second list, which keeps the two steps and moves the
+  state into the hub. Decided by `laptop.architect` (2026-10-08T01:43:19Z:
   https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671).
   A waiting hub reader has given back every frame, as it grants at each `next` call,
   so no hub test reaches the wake of a session that missed a frame with none waiting.
