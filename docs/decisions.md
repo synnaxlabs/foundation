@@ -5240,6 +5240,7 @@ How to read this record:
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
+| FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 
 ---
 
@@ -6158,22 +6159,16 @@ decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fi
 the system is solid.
 
 Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps priority.
-ONE NODE is a milestone: one real node reads an OPC UA server through `connector-opcua`
-and pushes the samples to InfluxDB through `connector-influx`. The `foundation` binary
-starts the node from a config, on a real disk and network. Its acceptance runs a
-simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
-with no OPC UA security, so the open choice of the OPC UA crypto plugin (5.1) does not
-block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
-2026-10-08T01:52:14Z:
-https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
-approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order. FIRST
-SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
-Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
-2026-10-05, which has no link). For ONE NODE work, features, access, and config files do
-not wait until the acceptance scenario of FIRST SLICE passes (#462). The person decided
-("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
-the internals while ONE NODE work should be focused on developer APIs and connectors."),
-relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+The ONE NODE entry states its scope. FIRST SLICE focuses on the internals, and ONE NODE
+on the developer APIs and connectors. Supersedes, for ONE NODE work only, the order of
+this entry (the person's decision of 2026-10-05, which has no link), and the order
+"after FIRST SLICE" of the person's approval of ONE NODE
+(https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089). For
+ONE NODE work, features, access, and config files do not wait until the acceptance
+scenario of FIRST SLICE passes (#462). The person decided ("Yes, that's fine. I really
+think that first slice should try to focus on the 'guts' the internals while ONE NODE
+work should be focused on developer APIs and connectors."), relayed by `laptop.monitor`
+at 2026-10-08T02:45:18Z:
 https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
@@ -6197,3 +6192,24 @@ after the heal in place of `OUTAGE`: two times the sum of the delay before the d
 starts and the time to send `WRITTEN` at the drain rate measured in the lab.
 `laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
+
+**ONE NODE (2026-10-08)** A milestone beside FIRST SLICE, which keeps priority: one real
+node moves OPC UA samples to InfluxDB. The `foundation` binary starts a node from a
+config, on a real disk and network, reads an OPC UA server through `connector-opcua`,
+and pushes the samples to InfluxDB through `connector-influx`. Its acceptance is a
+simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
+with no OPC UA security, so the crypto plugin (5.1 item 2) does not block it. The
+developer experience on one node is part of the goal, and #1737 breaks it into tests.
+When it and STORE AND FORWARD both have ready issues, ONE NODE goes first. The FIRST
+SLICE amendment of 2026-10-08 gives the split of the work and its "Supersedes". The plan
+is on #1737. The person decided, relayed by `laptop.monitor`: the milestone ("Yes",
+2026-10-08T01:52:14Z,
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089), the order
+("Yes, let's do one node first. We should really prioritize a working devx that feels
+relatively good with one node. and an influxdb to opc ua connector is prime for that",
+2026-10-08T01:55:05Z,
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050570677), and the
+work beside FIRST SLICE ("Yes, that's fine. I really think that first slice should try
+to focus on the 'guts' the internals while ONE NODE work should be focused on developer
+APIs and connectors.", 2026-10-08T02:45:18Z,
+https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411).
