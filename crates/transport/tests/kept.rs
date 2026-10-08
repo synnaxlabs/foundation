@@ -1,8 +1,8 @@
-//! After a read that gives a whole long message, in one poll or over many, also one
-//! that waits for a block, the receiver keeps a list of at most 64 chunks, not one
-//! sized by the message, both before and after it reads the end of the stream. The
-//! count covers each thread, so this binary has no test harness. The sim runs on one
-//! thread, so the count is exact.
+//! After a read that gives a whole message of many packets, in one poll or over
+//! many, also one that waits for a block, the receiver keeps a list of at most 64
+//! chunks, not one sized by the message, both before and after it reads the end of
+//! the stream. The count covers each thread, so this binary has no test harness. The
+//! sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -50,8 +50,9 @@ enum Reading {
     Whole,
     /// Each millisecond from when the stream comes, until the message is in.
     Parts,
-    /// Each millisecond once the message is in, with a full pool, until the read
-    /// waits for a block. The pool then frees its blocks, and the read goes on.
+    /// Each millisecond once the message is in, with a full pool. Once the transport's
+    /// status says that a read waited for a block, the server drops the blocks that it
+    /// took, and the read goes on.
     Waited,
 }
 
@@ -83,7 +84,7 @@ struct Out {
 
 fn main() {
     for reading in [Reading::Whole, Reading::Parts, Reading::Waited] {
-        for (len, end) in [100_000, 240_000, 1 << 18]
+        for (len, end) in [60_000, 100_000, 240_000, 1 << 18]
             .into_iter()
             .flat_map(|len| [(len, End::Finish), (len, End::Reset)])
         {
