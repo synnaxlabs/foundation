@@ -2,8 +2,9 @@
 //! After the header, the requester sends [`get`] and [`Put`] messages, and the server
 //! sends [`Reply`] messages. The server answers requests in order: the digests of a
 //! get in message order, and a put after its body. Each reply names its digest, and a
-//! reply that does not answer the oldest open request breaks the session. The caller
-//! keeps the open requests and checks this; the decoders do not.
+//! reply that does not answer the oldest open request stops the session with
+//! [`MALFORMED`](crate::header::MALFORMED). The caller keeps the open requests and
+//! checks this; the decoders do not.
 //!
 //! A body follows a [`Put`] and a [`Reply::Chunk`]: the bytes of the chunk, as stream
 //! messages back to back, with no prefix, each at most the peer's `message_bytes_max`.
@@ -15,8 +16,7 @@
 //! chunk at its head, and checks that a body holds exactly the bytes of its head. The
 //! receiver checks the digest over the whole chunk.
 //!
-//! A message that does not decode, comes from the wrong side, or breaks a rule of this
-//! module stops the stream with the code of its error ([`Error::code`]).
+//! A message that a decoder refuses stops the stream with [`Error::code`] of its error.
 //!
 //! Fields are little-endian.
 //!
@@ -57,8 +57,8 @@ pub const TOO_LARGE: u32 = 17;
 pub const FULL: u32 = 18;
 
 /// A get from the requester: the digests it wants. The server answers each, in message
-/// order, with a [`Reply::Chunk`] or a [`Reply::Absent`]. A get is one message, so a requester with
-/// more digests than one message holds sends more gets.
+/// order, with a [`Reply::Chunk`] or a [`Reply::Absent`]. A get is one message, so a
+/// requester with more digests than one message holds sends more gets.
 pub mod get {
     use std::slice;
 
