@@ -2,7 +2,8 @@
   node. `Client::connect` dials on a `transport::Client`, sends the subject's hello, and
   gives the client once the node admits it, so a refused hello is an error of `connect`.
   A hello expires at the latest mesh time of its challenge, plus the time since the
-  challenge came on the monotonic clock, plus `client::LIFE` (10 minutes). A task renews
+  challenge came on the monotonic clock, plus `client::LIFE` (10 minutes), or at the
+  end of mesh time when the sum passes it, as mesh time is the node's. A task renews
   the hello at half of `LIFE` after each admission, on the hello stream, until the
   session ends. A renewal waits for a block as each message does, and the node closes
   the session if the hello expires first. A challenge that `wire` refuses ends the
