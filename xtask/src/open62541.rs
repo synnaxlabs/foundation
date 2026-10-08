@@ -1620,8 +1620,13 @@ End of search list.
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
     fn check_passes_on_the_committed_copy() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        assert_eq!(check(root), Ok(()));
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        // A root of its own: `cargo xtask open62541 <tag>` removes `target/open62541/`.
+        let root = temp("committed");
+        std::os::unix::fs::symlink(workspace.join("patches"), root.join("patches"))
+            .unwrap();
+        assert_eq!(check(&root), Ok(()));
+        remove(&root).unwrap();
     }
 
     #[test]
