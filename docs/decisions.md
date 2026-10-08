@@ -4651,12 +4651,20 @@ How to read this record:
   for the writer, for the connector of a name, and for the name of a key. The problems
   come in `Source` order, then in source order, as the problems of `check` do.
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
-  `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
-  (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
-  `n` and names another node. Its fix is "Name `n` as the `home`, and keep `n` out of
-  `standby` and `copies`" when `p` wins for no connector on another node, and for no
-  index whose nearest connector is on another node, since a new `home` moves each index
-  that `p` wins (`laptop.architect`, 2026-10-08T16:22:59Z,
+  `Unplaced` is `config.unplaced` at the label of the connector. The fix of
+  `Unplaced::Overlap` is "Move the node to `home` when it is the one node of the
+  placement, else remove it from the placement": `Overlap` occurs only when the
+  placement names no `home`, and a removal that leaves no node gives
+  `config.empty-placement`. One input needs two edits: the node is the one node of `p`,
+  and `p` wins for a connector on another node, or for an index of one. The move then
+  gives `config.connector-home`, whose case 2 fix plans. `Unplaced::fix` is static and
+  cannot name that connector (`laptop.architect`, 2026-10-08T16:51:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 2).
+  `config.connector-home` (X22) is at the `home` of a placement `p` that wins for a
+  connector `a` on the node `n` and names another node. Its fix is "Name `n` as the
+  `home`, and keep `n` out of `standby` and `copies`" when `p` wins for no connector on
+  another node, and for no index whose nearest connector is on another node, because a
+  new `home` moves each index that `p` wins (`laptop.architect`, 2026-10-08T16:22:59Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064298961). Else it
   is "Exclude the connector `a` and its indexes from the `select` of `p`, and select
   them with another placement whose `home` is `n`", which changes no other connector of
@@ -4690,34 +4698,47 @@ How to read this record:
   for the indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the
   indexes of the connector `c` from the `select` of `p`, and select the connector and
   its indexes with another placement whose `home` is `n`", where `p` is each placement
-  that wins for an index of `c`. A list of winners is "`p`", "`p` and `q`", or "`p`,
-  `q`, and `r`": the winner of `c` first, then the others in tree key order. "Another"
-  keeps a listed placement from being the new one, which its exclusion would empty
-  (`laptop.architect`, 2026-10-08T15:46:46Z,
+  that wins for an index of `c`. When `p`, the placement that the fix names (the winner
+  of `c`, else the one placement that wins for its indexes), names no `home` and an
+  index of `c` has no writer, the fix is "Name `n` as the `home` of `p`, keep `n` out of
+  its `standby` and `copies`, and make `p` win for the connector `c` and its indexes"
+  when `p` wins for no connector on another node, and for no index whose nearest
+  connector is on another node, because a placement with no `home` cannot hold an index
+  that no connector writes. Else it is the case 2 text, or the text for no placement
+  that selects `c` (`laptop.architect`, 2026-10-08T16:51:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 1). A
+  list of winners is "`p`", "`p` and `q`", or "`p`, `q`, and `r`": the winner of `c`
+  first, then the others in tree key order. "Another" keeps a listed placement from
+  being the new one, which its exclusion would empty (`laptop.architect`,
+  2026-10-08T15:46:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
   2026-10-08T16:04:09Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123). A tie
-  for the index or the connector gives no `config.split-placement`. The region check
-  and the region of each key (REGION CHECK) come with #1029. Lost: a
-  `Planned` with keys (A4), a home on each change, a `config::Error` for a lazy fetch of
-  chunks, a provisional tree and `tree::diff`, which writes chunks that the plan drops,
-  and the chunks of the applied tree as an input, with which `ops` reads the tree a
-  second time and a missing chunk panics in `config`, though #1741 names that case
-  (`Cause::Tree`), and, for checks 2 and 3, a `spec::placement::check` over the whole
-  spec, a second text in `config`, no report for the `Unplaced` of a connector, a
-  check against each connector above the index, with which two nested connectors on
-  two nodes share one placement, the `config.connector-home` fixes "Leave out `home`",
-  which can leave an empty placement or an index with no home, and "Name `n` as the
-  `home`" in each case, which moves the problem between two connectors of one
-  placement, and "Select the connector `a` and each index under its name with a more
-  specific placement", which no placement can follow when `p` names `a` by its exact
-  name, and the `config.split-placement` fix "and each name under it", which also
-  moves the indexes of a nested connector, and, when no placement can win for `c` and
-  each of its indexes at `n`, a fix that names one placement, which moves the index `i`
-  alone or conflicts with the fix of another diagnostic of `c`, case 1 when `p` wins
-  for an index whose nearest connector is on another node, which moves that index away
-  from its connector, and the `config.split-placement` fix "and the index `i`", which
-  gives each split diagnostic of `c` another edit.
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123). A tie for
+  the index or the connector gives no `config.split-placement`. The region check and the
+  region of each key (REGION CHECK) come with #1029. Lost: a `Planned` with keys (A4), a
+  home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
+  and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
+  applied tree as an input, with which `ops` reads the tree a second time and a missing
+  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
+  checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
+  `config`, no report for the `Unplaced` of a connector, a check against each connector
+  above the index, with which two nested connectors on two nodes share one placement,
+  the `config.connector-home` fixes "Leave out `home`", which can leave an empty
+  placement or an index with no home, and "Name `n` as the `home`" in each case, which
+  moves the problem between two connectors of one placement, and "Select the connector
+  `a` and each index under its name with a more specific placement", which no placement
+  can follow when `p` names `a` by its exact name, and the `config.split-placement` fix
+  "and each name under it", which also moves the indexes of a nested connector, and,
+  when no placement can win for `c` and each of its indexes at `n`, a fix that names one
+  placement, which moves the index `i` alone or conflicts with the fix of another
+  diagnostic of `c`, case 1 when `p` wins for an index whose nearest connector is on
+  another node, which moves that index away from its connector, and the
+  `config.split-placement` fix "and the index `i`", which gives each split diagnostic of
+  `c` another edit, the node of the nearest connector as the home of an index with no
+  writer, which guesses a home for data that no connector on that node makes, the
+  `Overlap` fix "Move the node to `home`, or remove it from the placement", which offers
+  a removal that leaves no node, and an `Overlap` fix computed in `config` for each
+  name, which gives one variant a second source of text.
   Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
