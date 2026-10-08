@@ -2207,8 +2207,8 @@ How to read this record:
   `fuzzing` feature, give the fuzz target `transport_certificate` the server's
   reading of a dialer's chain and a node's certificate. The protocol is fixed at
   `foundation/1`: rustls picks it from the server's own list, so no dialer's bytes
-  reach the compare. Approved by `laptop.architect-2` at 2026-10-08TPENDING
-  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-PENDING).
+  reach the compare. Approved by `laptop.architect-2` at 2026-10-08T15:11:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892).
 
 ### 1.8 Consensus, regions, and the spec
 
