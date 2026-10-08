@@ -19,8 +19,8 @@ const DATA_KEYS: [&str; 5] = ["kind", "data_type", "index", "quality", "unit"];
 type Attributes = fn(&mut Found<'_>, &Block) -> Option<Kind<Name>>;
 
 /// Checks a `channel` block and gives its channel, with each edge as a name. After a
-/// bad `kind`, it checks the edges and reports each attribute that no kind knows, but
-/// leaves each other attribute, since its problem depends on the kind.
+/// bad `kind`, it reports each attribute that no kind knows, and leaves each other
+/// attribute, since its problem depends on the kind.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let attributes = found.attribute(block, "kind", |value| -> Result<Attributes, _> {
         match text(value, BAD_CHANNEL_KIND, "the channel kind", "\"index\"")? {
@@ -39,9 +39,6 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         keys.sort_unstable();
         keys.dedup();
         drop(found.unknown(block, &keys));
-        for each in [Edge::Index, Edge::Quality, Edge::Error, Edge::Control] {
-            drop(edge(found, block, each));
-        }
         return None;
     };
     let attributes = attributes.unwrap_or(data);

@@ -67,8 +67,8 @@ pub struct Entry {
 /// whole (a policy's budgets, for example) only when each of its attributes is known
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
-/// A bad `kind` of channel hides the problems of each attribute that a kind of channel
-/// knows, except the edges (`index`, `quality`, `error`, and `control`).
+/// A bad `kind` of channel hides the problems of each other attribute that a kind of
+/// channel knows.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found {
         channels: channels(documents),
@@ -2422,7 +2422,7 @@ mod tests {
         }
 
         #[test]
-        fn checks_the_edges_and_unknown_attributes_after_a_bad_kind() {
+        fn leaves_the_edges_after_a_bad_kind() {
             let documents = value(&[
                 ("kind", string("stream")),
                 ("other", string("x")),
@@ -2447,22 +2447,6 @@ mod tests {
                         "Use `control`, `data_type`, `error`, `index`, `kind`, \
                          `quality`, or `unit`, or remove it",
                     ),
-                    unknown(
-                        at(0, 115),
-                        "no `channel` block defines the index channel `edge.tim`",
-                    ),
-                    unknown(
-                        at(0, 117),
-                        "no `channel` block defines the quality channel `edge.q`",
-                    ),
-                    unknown(
-                        at(0, 119),
-                        "no `channel` block defines the error channel `edge.e`",
-                    ),
-                    unknown(
-                        at(0, 121),
-                        "no `channel` block defines the control channel `edge.c`",
-                    ),
                 ])
             );
         }
@@ -2476,20 +2460,12 @@ mod tests {
             ]);
             assert_eq!(
                 check(&documents),
-                Err(vec![
-                    refused(
-                        "config.bad-channel-kind",
-                        at(0, 111),
-                        "\"stream\" is not a kind of channel",
-                        "Write \"index\" or \"data\"",
-                    ),
-                    refused(
-                        "document.bad-name",
-                        at(0, 115),
-                        "a name is a string or a reference, not an integer",
-                        "Write a name such as \"site_a.node_1\"",
-                    ),
-                ])
+                Err(vec![refused(
+                    "config.bad-channel-kind",
+                    at(0, 111),
+                    "\"stream\" is not a kind of channel",
+                    "Write \"index\" or \"data\"",
+                ),])
             );
         }
 
