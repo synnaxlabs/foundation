@@ -3748,8 +3748,9 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
-- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
-  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+- **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
+  with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
+  picks out the policies and connectors itself (#810). A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));

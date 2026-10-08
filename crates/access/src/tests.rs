@@ -1,4 +1,13 @@
+use std::collections::BTreeMap;
+
+use document::Document;
+use document::encoding::Checked;
 use proptest::prelude::*;
+use spec::channel::{Channel, Kind as ChannelKind};
+use spec::connector::Connector;
+use spec::definition::Kind;
+use spec::region::Delegation;
+use types::channel;
 use types::name::Selector;
 
 use super::*;
@@ -16,13 +25,31 @@ fn policy(subjects: &str, select: &str, allow: &[Action], authority: u8) -> Poli
     )
 }
 
+fn connector() -> Definition {
+    let config = Checked::new(Document::default()).unwrap();
+    Definition::Connector(Connector::new(name("modbus"), name("gw_1"), config))
+}
+
+type Tree = BTreeMap<Name, Definition>;
+
+/// One tree per region, with each policy under its region and each connector in the
+/// root tree.
 fn rules(policies: &[(&str, Policy)], connectors: &[&str]) -> Rules {
-    Rules::new(
-        policies
-            .iter()
-            .map(|(r, p)| (r.parse().unwrap(), p.clone())),
-        connectors.iter().copied().map(name),
-    )
+    let mut trees = BTreeMap::<&str, Tree>::new();
+    for (i, (region, policy)) in policies.iter().enumerate() {
+        let label = match *region {
+            "" => format!("p{i}"),
+            region => format!("{region}.p{i}"),
+        };
+        let key = Kind::Access.key(&label).unwrap();
+        let tree = trees.entry(region).or_default();
+        tree.insert(key, Definition::Access(policy.clone()));
+    }
+    let root = trees.entry("").or_default();
+    for at in connectors {
+        root.insert(name(at), connector());
+    }
+    Rules::new(trees.iter().map(|(r, tree)| (r.parse().unwrap(), tree)))
 }
 
 fn grant(rules: &Rules, subject: &str, on: &str) -> Grant {
@@ -155,13 +182,66 @@ fn matches_subjects_in_any_region() {
     assert_eq!(actions, [Action::Read].into_iter().collect());
 }
 
-fn arbitrary_policy() -> impl Strategy<Value = (Prefix, Policy)> {
+#[test]
+fn takes_a_connector_from_the_tree_of_any_region() {
+    let site_a = Tree::from([(name("site_a.daq"), connector())]);
+    let rules = Rules::new([
+        (Prefix::ROOT, &Tree::new()),
+        (name("site_a").into(), &site_a),
+    ]);
+    let under = grant(&rules, "site_a.daq", "site_a.daq.ai_0");
+    assert_eq!(under.actions(), [Action::Write].into_iter().collect());
+    assert_eq!(under.authority(), Some(Authority::ABSOLUTE));
+}
+
+#[test]
+fn gives_no_grant_from_a_channel_or_a_region_record() {
+    let index = ChannelKind::Index {
+        error: None,
+        control: None,
+    };
+    let channel = Channel {
+        key: channel::Key::from_u128(1),
+        kind: index,
+    };
+    let region = Delegation::new(1, [name("node_1")]).unwrap();
+    let region_key = Kind::Region.key("site_a").unwrap();
+    let tree = Tree::from([
+        (name("site_a.daq"), Definition::Channel(channel)),
+        (region_key.clone(), Definition::Region(region)),
+    ]);
+    let rules = Rules::new([(Prefix::ROOT, &tree)]);
+    for subject in [name("site_a.daq"), region_key] {
+        let on = format!("{subject}.pt_1");
+        let under = grant(&rules, subject.as_str(), &on);
+        assert_eq!(under.actions(), Actions::NONE, "{subject}");
+    }
+}
+
+#[test]
+fn keeps_each_policy_with_the_region_of_its_tree() {
+    let root = Tree::from([(
+        Kind::Access.key("ops").unwrap(),
+        Definition::Access(policy("ops.*", "**", &[Action::Plan], 0)),
+    )]);
+    let site_a = Tree::from([(
+        Kind::Access.key("site_a.ops").unwrap(),
+        Definition::Access(policy("ops.*", "**", &[Action::Read], 0)),
+    )]);
+    let rules = Rules::new([(Prefix::ROOT, &root), (name("site_a").into(), &site_a)]);
+    let both = [Action::Read, Action::Plan].into_iter().collect();
+    let plan = [Action::Plan].into_iter().collect();
+    assert_eq!(grant(&rules, "ops.ana", "site_a.pt_1").actions(), both);
+    assert_eq!(grant(&rules, "ops.ana", "site_b.pt_1").actions(), plan);
+}
+
+fn arbitrary_policy() -> impl Strategy<Value = (&'static str, Policy)> {
     let regions = prop::sample::select(vec!["", "a", "a.b", "b"]);
     let selects = prop::sample::select(vec!["**", "a.**", "b.*", "a.b.**", "*.x"]);
     let subjects = prop::sample::select(vec!["**", "s.*", "s.x", "t.*"]);
     let allow = prop::sample::subsequence(spec_actions(), 0..=6);
     (regions, subjects, selects, allow, any::<u8>())
-        .prop_map(|(r, s, sel, a, auth)| (r.parse().unwrap(), policy(s, sel, &a, auth)))
+        .prop_map(|(r, s, sel, a, auth)| (r, policy(s, sel, &a, auth)))
 }
 
 fn spec_actions() -> Vec<Action> {
@@ -175,7 +255,7 @@ fn spec_actions() -> Vec<Action> {
     ]
 }
 
-type Placed = Vec<(Prefix, Policy)>;
+type Placed = Vec<(&'static str, Policy)>;
 
 fn policies_and_shuffle() -> impl Strategy<Value = (Placed, Placed)> {
     prop::collection::vec(arbitrary_policy(), 0..8)
@@ -187,10 +267,7 @@ proptest! {
     fn decides_the_same_for_any_order_of_policies(
         (policies, shuffled) in policies_and_shuffle(),
     ) {
-        let build = |p: Placed| {
-            Rules::new(p, [name("s.x")])
-        };
-        let (one, two) = (build(policies), build(shuffled));
+        let (one, two) = (rules(&policies, &["s.x"]), rules(&shuffled, &["s.x"]));
         for subject in ["s.x", "s.y", "t.z"] {
             for on in ["a.x", "a.b.x", "b.x", "s.x.y", "c.x"] {
                 prop_assert_eq!(grant(&one, subject, on), grant(&two, subject, on));
