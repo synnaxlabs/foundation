@@ -11,6 +11,8 @@ mod entropy;
 mod files;
 #[cfg(target_os = "linux")]
 mod kept;
+#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
+mod net;
 mod shards;
 mod threads;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

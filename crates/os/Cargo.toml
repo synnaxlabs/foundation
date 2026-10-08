@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# `os::net()`, until the UDP and resolve drivers land (#119, #1095).
+net = []
+
 [dependencies]
 block = { path = "../block" }
 env = { path = "../env" }
 getrandom = { workspace = true }
-rustix = { workspace = true, features = ["fs"] }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+rustix = { workspace = true, features = ["fs", "net"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
 types = { path = "../types" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
@@ -20,10 +24,16 @@ libc = { workspace = true }
 rustix = { workspace = true, features = ["thread"] }
 
 [dev-dependencies]
+counting = { path = "../counting" }
 divan = { workspace = true }
 proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["net", "rt", "time"] }
+
+[[test]]
+name = "alloc"
+harness = false
+required-features = ["net"]
 
 # Needs `sudo`: only one CI step on a GitHub-hosted runner runs it.
 [[test]]

@@ -32,6 +32,7 @@ impl env::threads::Driver for Driver {
 fn build(cores: &Cores, name: &str) -> Result<Runtime, Error> {
     cores.place(name, None)?;
     Builder::new_current_thread()
+        .enable_io()
         .enable_time()
         .build()
         .map_err(|e| Error::Start {

@@ -1151,6 +1151,7 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "counting",
  "divan",
  "env",
  "getrandom 0.4.3",
