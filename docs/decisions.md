@@ -799,17 +799,17 @@ How to read this record:
   (2026-10-07T19:05:26Z):
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
 - **NODE BENCH (#1637, 2026-10-07)** The cargo feature `bench` of `node`, off by default
-  (`node`'s dev-dependency on itself turns it on for the bench), adds
-  `#[doc(hidden)] pub mod bench` with `Scope { new, spawn }` and its `Default` over
-  `scope::Scope`. Only the bench `benches/scope.rs` (`test = true`) uses it. Its
-  `env::tasks::Driver` keeps each task, `spawn` gives it, and the bench polls it by
-  hand, so a time holds only `Spawned::poll` and the future's poll. A `bare` line polls
-  the boxed future directly in the same binary, as the control. Lost: a time through
-  `Node::spawn` on `sim` or Tokio, which hides a 0.3 ns change in the executor's cost,
-  and a copy of the poll before `clone_from`, which #1627 decided and the `bare` control
-  replaces. The `same_waker` time is the check on `clone_from` until #715 gates it with
-  a baseline from the form with `clone_from`: an `Arc` waker clone allocates nothing, so
-  no allocation count can. Decided by `laptop.architect-2` (2026-10-07 23:56 UTC):
+  (`node`'s dev-dependency on itself turns it on for the bench), adds `#[doc(hidden)]
+  pub mod bench` with `Scope { new, spawn }` and its `Default` over `scope::Scope`. Only
+  the bench `benches/scope.rs` (`test = true`) uses it. Its `env::tasks::Driver` keeps
+  each task, `spawn` gives it, and the bench polls it by hand, so a time holds only
+  `Spawned::poll` and the future's poll. A `bare` line polls the boxed future directly
+  in the same binary, as the control. Lost: a time through `Node::spawn` on `sim` or
+  Tokio, which hides a 0.3 ns change in the executor's cost, and a copy of the poll
+  before `clone_from`, which #1627 decided and the `bare` control replaces. The
+  `same_waker` time is the check on `clone_from` until #715 gates it with a baseline
+  from the form with `clone_from`: an `Arc` waker clone allocates nothing, so no
+  allocation count can. Decided by `laptop.architect-2` (2026-10-07 23:56 UTC):
   https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976; the
   surface of `spawn`, in round 1 of #1666 (2026-10-08 00:11 UTC):
   https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049426380. The
