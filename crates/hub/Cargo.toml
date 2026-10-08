@@ -24,7 +24,7 @@ buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
-# Turns on `sim`, since the bench host runs no features.
+# Turns on `sim`, because the bench host runs no features.
 hub = { path = ".", features = ["sim"] }
 sim = { path = "../sim" }
 
