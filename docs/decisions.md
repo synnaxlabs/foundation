@@ -5029,7 +5029,10 @@ How to read this record:
   that holds `applied`; apply still checks `base` first. The codec copies the channel
   kind layout of `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`,
   at the next change to the channel kind format of `spec` or at a second user of the
-  bytes of `Kind<Name>`. Each item of a plan has one path, under `config::plan`. Plan:
+  bytes of `Kind<Name>`. Each item of a plan has one path, under `config::plan`.
+  `Plan::changes` is a `BTreeMap<Name, Change>`, and `Change` holds no name, so two
+  changes at one name cannot exist; `decode` still refuses a repeated name as
+  `Malformed`. Plan:
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221. Decided
   by `laptop.architect-2`: the three methods and the version byte (2026-10-08T16:00:18Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745); one
@@ -5046,7 +5049,9 @@ How to read this record:
   `Mismatch` refuses only a false `old`, a reserved label, a blockless kind, or a name
   that is not the tree key of its kind, and PR 2b checks the homes
   (2026-10-08T19:40:40Z,
-  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742).
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742); `changes`
+  keyed by name (2026-10-08T19:54:45Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067900033).
   Supersedes the `Mismatch` Display text and case list of
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684. Supersedes
   the rule "a change that `plan` cannot make from `applied`" of
