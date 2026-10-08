@@ -53,7 +53,10 @@ pub struct Config {
     /// Where the client spawns the task that renews the hello.
     pub tasks: env::tasks::Tasks,
     /// The pool that the client sends from. It can be the pool of the program's
-    /// transport. Each message that the client sends takes a block from it.
+    /// transport. Each message that the client sends takes a block from it, which the
+    /// stream holds until the node has it. So a request needs room for the part of
+    /// its body that the node's flow control lets the stream hold, and gives
+    /// [`Error::Pool`] when the pool has none.
     pub pool: Rc<block::Pool>,
 }
 
