@@ -334,6 +334,9 @@ name = "config"
 version = "0.0.0"
 dependencies = [
  "base64ct",
+ "config-hcl",
+ "connector",
+ "connector-influx",
  "document",
  "proptest",
  "spec",

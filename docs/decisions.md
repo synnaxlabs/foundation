@@ -3058,7 +3058,29 @@ How to read this record:
   `wire::blob::Error::code` gives the stop code of each decode error: `TOO_LARGE` for
   `TooLarge`, and `MALFORMED` for each other, so `blob` holds no copy of the map.
   Decided by `laptop.architect` (2026-10-08T00:54:19Z):
-  https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210.
+  https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210. A
+  requester that refuses a chunk over its own limit stops the stream with `TOO_LARGE`,
+  the true cause, and the server ends the open requests as after any stop. Supersedes,
+  for a get, the reason "the sender goes to another peer" of `TOO_LARGE` in
+  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057. A
+  `TooLarge` or a `MISMATCH` on a get is the failure of that peer for that digest. A get
+  of `blob` names one peer and gives back each digest that the peer did not give, with
+  its cause: absent, `TooLarge` with the length and the limit, or `MISMATCH`.
+  Supersedes, for a get, the words "the call gives the exact error" of the rules in
+  https://github.com/synnaxlabs/foundation/issues/1229: the get gives that digest back
+  with its exact error and goes on, the stream stops, and nothing is stored. `blob` asks
+  for the other open digests again on a new stream to the same peer. `mesh`, which picks
+  the peer, asks the next peer that holds the digest, each peer at most once for one
+  fetch. When no peer remains, `mesh` fails the fetch with an exact error that names the
+  digest and the last cause. The length in a chunk reply is a claim until the body
+  hashes, and a member node can lie (`docs/security.md`), so one peer cannot deny a
+  chunk. Lost: give up at the first `TooLarge` (one member decides it); a get of `blob`
+  over a list of peers (the choice of peer needs the membership, which `mesh` has); a
+  get that fails as a whole at the first refused chunk (`mesh` cannot tell which digests
+  the peer still owes). Decided by `laptop.architect` (2026-10-08T06:24:02Z and
+  2026-10-08T06:29:55Z):
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053784863 and
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053878785.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -3329,11 +3351,11 @@ How to read this record:
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
-  reader is ad hoc and complete. A second `reader` block is `config.repeated-block`, and
-  `read` reads only the first, where a label is `config.label-count`. A negative `hold`
-  is `config.negative-span` (READER RULES, #94). A `hold` with no `name` or in `latest`
-  mode is `connector.unnamed-hold` or `connector.latest-hold`, since only a named
-  complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
+  reader is complete, has the connector's name, and holds nothing. A second `reader`
+  block is `config.repeated-block`, and `read` reads only the first, where a label is
+  `config.label-count`. A negative `hold` is `config.negative-span` (READER RULES, #94).
+  A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
+  holds. #1785 moves the three `config.*` checks into `document::read`.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3350,6 +3372,19 @@ How to read this record:
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
   03:59 UTC).
+  `Settings::name` is `None` for a reader with no `name`, and `None` is the
+  connector's name. `kind::Context::reader` (#1731) gives that name when it opens the
+  reader, and no other place does. Lost: `name: Name`, with the connector's name
+  passed through `Kind::parse` of every kind for one value that only the reader needs.
+  Proposed by `connector` on #1794
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089), and
+  approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653,
+  2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
+  7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
@@ -4084,6 +4119,15 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6052187547).
   Supersedes the silent `authority` of
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+- **CONNECTOR BLOCK (2026-10-08)** `connector "<name>" { kind, node, ... }` (X22)
+  gives a `spec::connector::Connector` at its own name, which is unique in any case
+  among the keys of every block. `kind` and `node` are names, and each is required. The
+  config is the body without `kind` and `node`. `config::check` takes a
+  `connector::kind::Table`, and the kind that `kind` names checks the config through
+  `Table::check`, with `at` the span of the `kind` value. A kind that the table does
+  not have is `connector.unknown-kind` there. Decided by `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC).
 
 ### 1.12 Access, identity, and secrets
 
@@ -5080,6 +5124,12 @@ How to read this record:
   `charge_of` in `types` changes with that handle. Decided by `laptop.architect`
   (2026-10-07T18:30:48Z):
   https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6044276677
+- **POOL COPY (#1599)** `Pool::copy(&self, bytes: &[u8]) -> Result<Block, Error>` gives
+  a frozen block that holds a copy of `bytes`, with the errors of `alloc` for
+  `bytes.len()`. Callers repeated `alloc`, `copy_from_slice`, and `freeze`. Lost:
+  `alloc` with a closure that writes in place, because each caller already holds its
+  bytes as a slice. Decided by `laptop.architect` (2026-10-07T20:43:02Z):
+  https://github.com/synnaxlabs/foundation/issues/1599#issuecomment-6046480683
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -5256,6 +5306,7 @@ How to read this record:
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
+| FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 
 ---
 
@@ -5948,7 +5999,10 @@ Rules:
    `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
    so its tests build a `spec::connector::Connector` (`laptop.architect`,
    2026-10-08T03:01:36Z:
-   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927), and
+   `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
+   with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
+   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
@@ -5993,7 +6047,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
 | 3 | `daqmx-stub` | Stands in for NI's `libnidaqmx.so` in the tests of `connector-ni`, built as a shared library and as a Rust library. A dev-dependency of `connector-ni` only. | none |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
-| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
+| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector`; `config-hcl` and `connector-influx` as dev-dependencies only |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
@@ -6175,22 +6229,16 @@ decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fi
 the system is solid.
 
 Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps priority.
-ONE NODE is a milestone: one real node reads an OPC UA server through `connector-opcua`
-and pushes the samples to InfluxDB through `connector-influx`. The `foundation` binary
-starts the node from a config, on a real disk and network. Its acceptance runs a
-simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
-with no OPC UA security, so the open choice of the OPC UA crypto plugin (5.1) does not
-block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
-2026-10-08T01:52:14Z:
-https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
-approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order. FIRST
-SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
-Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
-2026-10-05, which has no link). For ONE NODE work, features, access, and config files do
-not wait until the acceptance scenario of FIRST SLICE passes (#462). The person decided
-("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
-the internals while ONE NODE work should be focused on developer APIs and connectors."),
-relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+The ONE NODE entry states its scope. FIRST SLICE focuses on the internals, and ONE NODE
+on the developer APIs and connectors. Supersedes, for ONE NODE work only, the order of
+this entry (the person's decision of 2026-10-05, which has no link), and the order
+"after FIRST SLICE" of the person's approval of ONE NODE
+(https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089). For
+ONE NODE work, features, access, and config files do not wait until the acceptance
+scenario of FIRST SLICE passes (#462). The person decided ("Yes, that's fine. I really
+think that first slice should try to focus on the 'guts' the internals while ONE NODE
+work should be focused on developer APIs and connectors."), relayed by `laptop.monitor`
+at 2026-10-08T02:45:18Z:
 https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
@@ -6214,3 +6262,24 @@ after the heal in place of `OUTAGE`: two times the sum of the delay before the d
 starts and the time to send `WRITTEN` at the drain rate measured in the lab.
 `laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
+
+**ONE NODE (2026-10-08)** A milestone beside FIRST SLICE, which keeps priority: one real
+node moves OPC UA samples to InfluxDB. The `foundation` binary starts a node from a
+config, on a real disk and network, reads an OPC UA server through `connector-opcua`,
+and pushes the samples to InfluxDB through `connector-influx`. Its acceptance is a
+simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
+with no OPC UA security, so the crypto plugin (5.1 item 2) does not block it. The
+developer experience on one node is part of the goal, and #1737 breaks it into tests.
+When it and STORE AND FORWARD both have ready issues, ONE NODE goes first. The FIRST
+SLICE amendment of 2026-10-08 gives the split of the work and its "Supersedes". The plan
+is on #1737. The person decided, relayed by `laptop.monitor`: the milestone ("Yes",
+2026-10-08T01:52:14Z,
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089), the order
+("Yes, let's do one node first. We should really prioritize a working devx that feels
+relatively good with one node. and an influxdb to opc ua connector is prime for that",
+2026-10-08T01:55:05Z,
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050570677), and the
+work beside FIRST SLICE ("Yes, that's fine. I really think that first slice should try
+to focus on the 'guts' the internals while ONE NODE work should be focused on developer
+APIs and connectors.", 2026-10-08T02:45:18Z,
+https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411).

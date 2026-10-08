@@ -16,6 +16,8 @@ buffer = { path = "../crates/buffer" }
 codec = { path = "../crates/codec" }
 config = { path = "../crates/config" }
 config-hcl = { path = "../crates/config-hcl" }
+connector = { path = "../crates/connector" }
+connector-influx = { path = "../crates/connector-influx" }
 connector-modbus = { path = "../crates/connector-modbus" }
 crc32c = "0.6.8"
 document = { path = "../crates/document" }

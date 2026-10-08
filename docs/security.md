@@ -249,7 +249,9 @@ state on `main`.
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
   `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
   it must come before); the `block_before_kept` inputs hold it. `config::check`
-  reads the documents into definitions. Fuzzed: `config_check`.
+  reads the documents into definitions, and the influx kind reads the config of each
+  `connector` block of kind `influx`. Fuzzed: `config_check`, which no input yet
+  takes to the influx kind (#1817).
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -368,7 +370,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
-| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
@@ -384,12 +386,13 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
-No target yet, because the decoder is private, not built, or not reached from a file:
+No target yet, because the decoder is private, not built, not reached from a file, or
+not reached from the corpus:
 `transport::message` and `tls` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the header and
 hard state of a mesh log record (#1711), the names of a mesh log directory
 (`mesh::log::sequence`, #1746), each connector's protocol parser, and
 `connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
-which no file reaches until `config::check` takes a kind table (#1153) and `node` puts
-the influx kind in its table (#1734).
+which `config_check` reaches only from an input with a `connector` block of kind
+`influx`, and no input holds one yet (#1817).
