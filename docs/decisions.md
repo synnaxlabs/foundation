@@ -3799,10 +3799,13 @@ How to read this record:
   (BQ11a) joins a mesh that has a spec, so it creates none. BQ12 holds as written:
   each apply, the first one too, is checked against a key in the spec. Lost: the first
   apply from any local process (any local user could then take the node), and an
-  admin public key given before the first start (a step before the first use). The
-  #1744 plan names the subject, its access policy, and the key file. Decided by the
-  person ("Yes, I approve."), relayed by `laptop.monitor` at 2026-10-08T02:43:43Z:
+  admin public key given before the first start (a step before the first use). Decided
+  by the person ("Yes, I approve."), relayed by `laptop.monitor` at
+  2026-10-08T02:43:43Z:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
+  #1744 plan names the subject, its access policy, and the key file, as
+  `laptop.architect-2` and `laptop.architect` decided (2026-10-08T02:46:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026). The
   question was about a node whose spec is empty. So `laptop.architect` decided the
   limit to a node that starts a new mesh, and the sentence on a node that joins
   (2026-10-08T02:57:01Z,
