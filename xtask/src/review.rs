@@ -73,6 +73,9 @@ struct Malformed {
     /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form.
     fixed: bool,
     problem: String,
+    /// The problem of an old round that names a hot path ([`named`]): it requires
+    /// `performance`, which a round that does not parse cannot name.
+    hot: Option<String>,
 }
 
 /// Checks that the review of PR `pr` is done at commit `head`: its last round
@@ -143,36 +146,17 @@ fn problems(
         ));
     }
     for (i, (old, round)) in rounds.iter().enumerate() {
-        let round = match round {
-            Ok(round) => round,
-            Err(e) if *old && i + 1 < rounds.len() && !e.fixed => continue,
+        let last = i + 1 == rounds.len();
+        match round {
+            Ok(round) => {
+                problems.extend(unnamed(round, &record.files, last, code_change)?);
+            }
             Err(e) => {
-                problems.push(e.problem.clone());
-                continue;
+                if !*old || last || e.fixed {
+                    problems.push(e.problem.clone());
+                }
+                problems.extend(e.hot.clone());
             }
-        };
-        let mut missing: Vec<&str> = required(round, &record.files)
-            .into_iter()
-            .filter(|name| !round.reviewers.contains(*name))
-            .collect();
-        if round.number > 1 && round.breakerless && missing.contains(&"breaker") {
-            missing.retain(|name| *name != "breaker");
-            // A rebase can drop the range of an earlier round from the clone. The last
-            // round's range is in it, since its end must reach the head.
-            let last = i + 1 == rounds.len();
-            if last && let Some(change) = code_change(&round.from, &round.end)? {
-                problems.push(format!(
-                    "review round {} skips `breaker`, but its range {change}.",
-                    round.number
-                ));
-            }
-        }
-        if !missing.is_empty() {
-            problems.push(format!(
-                "review round {} names no {}, which this round requires.",
-                round.number,
-                missing.join(", ")
-            ));
         }
     }
     if let Some((_, Ok(round))) = rounds.last() {
@@ -196,6 +180,40 @@ fn problems(
         && record.labels.iter().any(|l| l == "oracle")
     {
         problems.extend(approval(record, head));
+    }
+    Ok(problems)
+}
+
+/// The problems with the reviewers that `round` names for a PR that changes `files`.
+/// A later round may skip `breaker` when its range changes no code, which only the
+/// `last` round checks with `code_change`: a rebase can drop the range of an earlier
+/// round from the clone, but the last round's end must reach the head.
+fn unnamed(
+    round: &Round,
+    files: &[String],
+    last: bool,
+    code_change: CodeChange<'_>,
+) -> Result<Vec<String>, String> {
+    let mut problems = Vec::new();
+    let mut missing: Vec<&str> = required(round, files)
+        .into_iter()
+        .filter(|name| !round.reviewers.contains(*name))
+        .collect();
+    if round.number > 1 && round.breakerless && missing.contains(&"breaker") {
+        missing.retain(|name| *name != "breaker");
+        if last && let Some(change) = code_change(&round.from, &round.end)? {
+            problems.push(format!(
+                "review round {} skips `breaker`, but its range {change}.",
+                round.number
+            ));
+        }
+    }
+    if !missing.is_empty() {
+        problems.push(format!(
+            "review round {} names no {}, which this round requires.",
+            round.number,
+            missing.join(", ")
+        ));
     }
     Ok(problems)
 }
@@ -248,28 +266,27 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
     let mut lines = body.lines().map(str::trim_end);
     let number = lines.find_map(|l| l.trim_start().strip_prefix("## Review round "))?;
     let paragraphs = paragraphs(lines);
-    let (mut reviewers, mut range, mut findings) = (None, None, None);
-    let mut breakerless = false;
-    for line in paragraphs
+    let named = old && named(&paragraphs);
+    let performance = named.then(|| {
+        format!(
+            "review round {number} names no performance, which this round requires."
+        )
+    });
+    let lines = paragraphs
         .first()
         .into_iter()
         .flatten()
-        .map(|l| l.trim_start())
-    {
-        breakerless |= line.starts_with("Breaker: skipped");
-        if let Some(value) = line.strip_prefix("Reviewers: ") {
-            reviewers.get_or_insert(value);
-        } else if let Some(value) = line.strip_prefix("Range: ") {
-            range.get_or_insert(value);
-        } else if let Some(value) = line.strip_prefix("Findings: ") {
-            findings.get_or_insert(value);
-        }
-    }
+        .map(|l| l.trim_start());
+    let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
+    let (reviewers, range) = (field("Reviewers: "), field("Range: "));
+    let findings = field("Findings: ");
+    let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     let Ok(number) = number.parse::<u32>() else {
         return Some(Err(Malformed {
             fixed,
             problem: format!("`## Review round {number}` has no round number"),
+            hot: performance,
         }));
     };
     let missing = |name| {
@@ -292,7 +309,7 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
             })?,
         };
         let hot = if old {
-            named(&paragraphs)
+            named
         } else {
             let rest = paragraphs.get(1..).unwrap_or_default();
             hot(rest.last().map_or(&[][..], Vec::as_slice), number)?
@@ -311,7 +328,11 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
             hot,
         })
     };
-    Some(fields().map_err(|problem| Malformed { fixed, problem }))
+    Some(fields().map_err(|problem| Malformed {
+        fixed,
+        problem,
+        hot: performance,
+    }))
 }
 
 /// The paragraphs of `lines`, split at blank lines. Each line of a code block, blank
@@ -357,7 +378,6 @@ fn fence(line: &str) -> Option<(char, usize, &str)> {
     let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let info = line.trim_start_matches(mark);
     let length = line.len() - info.len();
-    let info = info.trim();
     (length >= 3 && !(mark == '`' && info.contains('`')))
         .then_some((mark, length, info))
 }

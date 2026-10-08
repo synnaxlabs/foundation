@@ -347,6 +347,75 @@ fn fails_end_lines_in_a_code_block_that_is_not_closed() {
 }
 
 #[test]
+fn reads_a_fence_with_four_spaces_as_text() {
+    let shown = later("reviewer, breaker").replace(
+        "Hot path: none",
+        "Hot path: `send`\n\n```\n\n    ```\n\nDeferred: none\nPublic surface: none\n\
+         Hot path: none",
+    );
+    assert_eq!(check(&record(vec![bot(&shown)])), vec![unended("Deferred")]);
+    let quoted = ROUND.replace(
+        "weakening.\n\nDeferred",
+        "weakening.\n\n```\n\n    ```\n\nDeferred",
+    );
+    assert_eq!(
+        check(&record(vec![bot(&quoted)])),
+        vec![unended("Deferred")]
+    );
+    let hidden = ROUND.replace(
+        "Hot path: none",
+        "Hot path: none\n\n    ```\n\nHot path: `send`",
+    );
+    assert_eq!(
+        check(&record(vec![old(&hidden)])),
+        vec![
+            "review round 3 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn reads_a_tilde_fence_by_its_length_and_any_info() {
+    let struck = ROUND.replace("No bug,", "~~a~~ b. No bug,");
+    assert_ne!(struck, ROUND);
+    assert_eq!(check(&record(vec![bot(&struck)])), Vec::<String>::new());
+    let quoted = ROUND.replace(
+        "weakening.\n\nDeferred",
+        "weakening.\n\n~~~ `a`\n\nDeferred",
+    );
+    assert_eq!(
+        check(&record(vec![bot(&quoted)])),
+        vec![unended("Deferred")]
+    );
+}
+
+#[test]
+fn an_old_free_form_earlier_round_that_names_a_hot_path_needs_performance() {
+    let free = old("## Review round 1\n\nConfirmed findings.\n\nHot path: `send`");
+    assert_eq!(
+        check(&record(vec![free, bot(ROUND)])),
+        vec![
+            "review round 1 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+    let quiet = old("## Review round 1\n\nConfirmed findings.\n\nHot path: none");
+    assert_eq!(
+        check(&record(vec![quiet, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+    let unnumbered = old("## Review round one\n\nHot path: `send`");
+    assert_eq!(
+        check(&record(vec![unnumbered, bot(ROUND)])),
+        vec![
+            "review round one names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn reads_an_indented_heading_and_indented_fields() {
     let indented = ROUND
         .replace("## Review", "  ## Review")
@@ -459,6 +528,15 @@ fn a_round_that_names_a_hot_path_needs_performance() {
         assert_eq!(
             check(&record(vec![bot(&punctuated)])),
             check(&record(vec![bot(&hot)])),
+            "{value}"
+        );
+    }
+    for value in ["none.", "none;", "`none`.", "`none`;"] {
+        let quiet = later("reviewer, breaker")
+            .replace("Hot path: none", &format!("Hot path: {value}"));
+        assert_eq!(
+            check(&record(vec![bot(&quiet)])),
+            Vec::<String>::new(),
             "{value}"
         );
     }
