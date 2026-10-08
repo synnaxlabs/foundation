@@ -79,9 +79,10 @@ pub struct Entry {
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there. A block inside a policy or a subject
-/// does not stop that check: neither holds a block, so each block inside one is a
-/// separate problem.
+/// and reads, and the ones it needs are there. A block directly inside a definition
+/// other than a `connector` does not stop that check: only a connector's kind reads
+/// blocks, so each such block is one problem, and nothing inside it but a private key
+/// is checked.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
 /// channel knows. A `kind` of connector that is missing, is not a name, or is not in
 /// `kinds` hides each problem of the connector's config, and so does a config nested
@@ -477,14 +478,19 @@ mod tests {
     }
 
     /// Asserts that each of two blocks inside a `keyword` block with `attributes` adds
-    /// one `document.unknown-block` diagnostic to what `check` gives without them.
+    /// one `document.unknown-block` diagnostic to what `check` gives without them, and
+    /// that an attribute or a block inside each adds none.
     fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
         let mut policy = block(0, 0, keyword, &["edge"], attributes);
         let mut expected = check(&[document(vec![policy.clone()])])
             .err()
             .unwrap_or_default();
         for (offset, inner) in [(90, "inner"), (95, "other")] {
-            policy.body.blocks.push(block(0, offset, inner, &[], &[]));
+            let mut inner_block =
+                block(0, offset, inner, &[], &[("size", string("1"))]);
+            let deeper = block(0, offset + 1, "deeper", &[], &[]);
+            inner_block.body.blocks.push(deeper);
+            policy.body.blocks.push(inner_block);
             expected.push(refused(
                 "document.unknown-block",
                 at(0, offset),
@@ -821,26 +827,12 @@ mod tests {
     }
 
     #[test]
-    fn checks_the_budgets_of_a_policy_that_holds_a_block() {
-        let mut policy = settings(0, 0, "a", &[("select", string("site_a.*"))]);
-        policy.body.blocks.push(block(0, 50, "inner", &[], &[]));
-        assert_eq!(
-            check(&[document(vec![policy])]),
-            Err(vec![
-                refused(
-                    "document.missing-attribute",
-                    at(0, 0),
-                    "the `node_settings` block has no `disk` or `pool`",
-                    NO_BUDGET_FIX,
-                ),
-                refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `node_settings` block cannot hold the `inner` block",
-                    "Remove it",
-                ),
-            ])
-        );
+    fn refuses_a_block_inside_each_kind_but_a_connector() {
+        for (kind, _) in KINDS {
+            if kind != definition::Kind::Connector {
+                assert_inner_blocks_refused(kind.as_str(), &[]);
+            }
+        }
     }
 
     #[test]
@@ -856,6 +848,7 @@ mod tests {
             vec![select(), ("disk", string("nope"))],
             vec![select(), ("pool", Kind::Integer(7))],
             vec![select(), ("disk", string("0B"))],
+            vec![select(), ("disk", string("1GiB")), ("size", string("1GiB"))],
         ];
         for attributes in cases {
             assert_inner_blocks_refused("node_settings", &attributes);
@@ -1394,51 +1387,6 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_placement() {
-            let [mut documents] =
-                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `placement` block cannot hold the `inner` block",
-                    "Remove it",
-                )])
-            );
-        }
-
-        #[test]
-        fn checks_a_placement_that_holds_a_block_as_a_whole() {
-            let [mut documents] = placement(&[("select", string("edge.*"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "config.empty-placement",
-                        at(0, 0),
-                        "the `placement` block names no home, no standby, and no copy",
-                        "Name a `home`, a `standby`, or a node in `copies`",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_an_attribute_that_a_placement_does_not_have() {
             let attributes = [
                 ("select", string("edge.*")),
@@ -1453,36 +1401,6 @@ mod tests {
                     "`node` is not an attribute of the `placement` block",
                     "Use `select`, `home`, `standby`, or `copies`, or remove it",
                 )])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_placement_with_an_unknown_attribute() {
-            let [mut documents] = placement(&[
-                ("select", string("edge.*")),
-                ("home", string("edge")),
-                ("node", string("edge")),
-            ]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.unknown-attribute",
-                        at(0, 14),
-                        "`node` is not an attribute of the `placement` block",
-                        "Use `select`, `home`, `standby`, or `copies`, or remove it",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
             );
         }
 
@@ -1503,6 +1421,7 @@ mod tests {
                     ("home", string("n_1")),
                     ("standby", string("n_1")),
                 ],
+                vec![select(), ("home", string("edge")), ("node", string("edge"))],
             ];
             for attributes in cases {
                 assert_inner_blocks_refused("placement", &attributes);
@@ -1652,82 +1571,6 @@ mod tests {
         }
 
         #[test]
-        fn checks_a_retention_that_holds_a_block_as_a_whole() {
-            let [mut documents] =
-                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.negative-span",
-                        at(0, 13),
-                        "the span -1s is below zero",
-                        "Write a span of zero or more",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_retention() {
-            let [mut documents] =
-                retention(&[("select", string("edge.**")), ("keep", string("3d"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `retention` block cannot hold the `inner` block",
-                    "Remove it",
-                )])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_retention_with_an_unknown_attribute() {
-            let [mut documents] = retention(&[
-                ("select", string("edge.**")),
-                ("keep", string("3d")),
-                ("hold", string("1d")),
-            ]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.unknown-attribute",
-                        at(0, 14),
-                        "`hold` is not an attribute of the `retention` block",
-                        "Use `select` or `keep`, or remove it",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_a_block_inside_a_retention_with_any_attributes() {
             let select = || ("select", string("edge.**"));
             let cases = [
@@ -1739,6 +1582,7 @@ mod tests {
                 vec![select(), ("keep", Kind::Integer(3))],
                 vec![select(), ("keep", string("nope"))],
                 vec![select(), ("keep", string("-3d"))],
+                vec![select(), ("keep", string("3d")), ("hold", string("1d"))],
             ];
             for attributes in cases {
                 assert_inner_blocks_refused("retention", &attributes);
@@ -2072,6 +1916,10 @@ mod tests {
             assert_inner_blocks_refused(
                 "access",
                 &self::attributes(string("read"), None),
+            );
+            assert_inner_blocks_refused(
+                "access",
+                &self::attributes(string("read"), Some(5)),
             );
         }
 
@@ -2675,6 +2523,14 @@ mod tests {
             assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
             assert_inner_blocks_refused("channel", &[("kind", string("stream"))]);
             assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
+            assert_inner_blocks_refused(
+                "channel",
+                &[
+                    ("data_type", string("bool")),
+                    ("index", string("edge")),
+                    ("unit", string("V")),
+                ],
+            );
         }
 
         #[test]
@@ -3085,6 +2941,29 @@ mod tests {
                     "{keys:?}"
                 );
             }
+        }
+
+        #[test]
+        fn refuses_a_private_key_in_a_block_inside_a_definition() {
+            let mut policy = settings(
+                0,
+                0,
+                "edge",
+                &[("select", string("edge")), ("disk", string("1GiB"))],
+            );
+            let private = string("-----BEGIN OPENSSH PRIVATE KEY-----");
+            let inner = block(0, 90, "inner", &[], &[("note", private)]);
+            policy.body.blocks.push(inner);
+            assert_eq!(
+                check(&[document(vec![policy])]),
+                Err(vec![refused(
+                    "config.private-key",
+                    at(0, 101),
+                    "the value is a private key, which must never be in a file",
+                    "Remove the private key from this file now, and use the one line \
+                     of its `.pub` file",
+                )])
+            );
         }
 
         #[test]
