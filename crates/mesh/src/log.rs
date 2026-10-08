@@ -454,21 +454,24 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
         let first = segments
             .get(segment.saturating_add(1))
             .map(|bytes| header(bytes));
+        // The number of a header of another version has no meaning here. `records`
+        // gives the error of that file.
+        let known = match first {
+            Some(At::Header(ref head)) if head.version == VERSION => Some(head.number),
+            _ => None,
+        };
         // A record after a torn one, in its file or the next, was written after the
         // torn one was durable: the torn one is damaged. A write fills each file
-        // before the next one, so a file with no record before a record of this
-        // version is damaged. `records` gives the error of another version.
+        // before the next one, so a file with no record before a record is damaged.
         let follows = |claimed: usize| {
             bytes
                 .get(start(claimed)..)
                 .is_some_and(|rest| matches!(header(rest), At::Header(_)))
         };
-        let known =
-            matches!(first, Some(At::Header(ref head)) if head.version == VERSION);
         if torn.is_some_and(follows)
             || (torn.is_some() && matches!(first, Some(At::Header(_))))
-            || (end == 0 && known)
-            || matches!(first, Some(At::Header(ref head)) if head.number > next)
+            || (end == 0 && known.is_some())
+            || known.is_some_and(|number| number > next)
         {
             let offset = wide(start(end));
             return Err(Error::Corrupt { path: file, offset });
@@ -478,9 +481,10 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             // garbage.
             Some(At::Header(_) | At::Garbage) => segment = segment.saturating_add(1),
             // A next file with no record that is not the last file, or this file
-            // when it has no record either.
+            // when it has no record either. A torn record is the end of the log.
             Some(At::End) if segments.len() > segment.saturating_add(2) => {
-                let empty = segment.saturating_add(usize::from(end != 0));
+                let held = end != 0 || torn.is_some();
+                let empty = segment.saturating_add(usize::from(held));
                 let path = path(dir, wide(empty));
                 return Err(Error::Corrupt { path, offset: 0 });
             }
@@ -2388,6 +2392,55 @@ mod tests {
         let expected = Error::Version {
             path: file("log-1"),
             found: 2,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    #[test]
+    fn gives_the_version_error_for_a_record_of_another_version_past_next() {
+        // `log-0` with no record, then with record 0.
+        for (records, number) in [(0, 1), (1, 5)] {
+            let (mut sim, node) = create_node(0);
+            sim.run_on(&node, move |node, _| async move {
+                drop(open(&node).await.unwrap());
+                if records == 1 {
+                    put(&node, "log-0", 0, &encode(0, None, &[bytes(1, 10)])).await;
+                }
+                let mode = Mode::Create { len: SEGMENT };
+                drop(node.files().open(&file("log-1"), mode).await.unwrap());
+                node.files().sync_dir(Path::new(DIR)).await.unwrap();
+                let mut record = encode(number, None, &[bytes(2, 10)]);
+                record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+                seal(&mut record);
+                put(&node, "log-1", 0, &record).await;
+            })
+            .unwrap();
+            let expected = Error::Version {
+                path: file("log-1"),
+                found: 2,
+            };
+            assert_eq!(stored(&mut sim, &node), Err(expected), "records {records}");
+        }
+    }
+
+    #[test]
+    fn refuses_an_empty_file_after_a_torn_end_before_another_file() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            let mut record = encode(0, None, &[bytes(1, 10)]);
+            *record.last_mut().unwrap() ^= 0xFF;
+            put(&node, "log-0", 0, &record).await;
+            for name in ["log-1", "log-2"] {
+                let mode = Mode::Create { len: SEGMENT };
+                drop(node.files().open(&file(name), mode).await.unwrap());
+            }
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+        })
+        .unwrap();
+        let expected = Error::Corrupt {
+            path: file("log-1"),
+            offset: 0,
         };
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
