@@ -3083,8 +3083,7 @@ mod tests {
             assert_eq!((raft.term(), raft.leader()), (Term(3), Some(key(2))));
         }
 
-        // Only a voter that led a term at or above the committed one can forge a
-        // link.
+        // Only a voter that led a term at or above the committed one can forge a link.
         #[test]
         fn a_link_of_a_term_below_the_committed_one_is_refused() {
             let start = Start {
