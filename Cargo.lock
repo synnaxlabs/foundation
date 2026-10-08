@@ -1044,6 +1044,7 @@ dependencies = [
  "os",
  "proptest",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",
