@@ -52,8 +52,10 @@
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235. Amended
   again (2026-10-08, #1962, by `laptop.architect-2`, 20:07 UTC): with a mesh, shard 0
   waits for each task of the mesh to end, and the transport drops with the last of the
-  port's future and the tasks of the mesh. This holds also when the mesh stops before
-  the node, which then keeps serving until #1780 stops it:
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Supersedes
+  port's future and the tasks of the mesh:
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. This
+  holds also when the mesh's group stops before the node, which then stops the node
+  (NODE MESH):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456. Supersedes
   the drop of the transport of
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
