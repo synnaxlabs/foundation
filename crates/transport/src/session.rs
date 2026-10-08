@@ -1,6 +1,6 @@
 use std::fmt;
 use std::future::poll_fn;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use types::ed25519::PublicKey;
 
@@ -36,6 +36,17 @@ pub struct Session(Rc<quic::Session>);
 impl Session {
     pub(crate) fn new(session: quic::Session) -> Self {
         Self(Rc::new(session))
+    }
+
+    /// A handle that does not keep the session from closing at its last drop.
+    pub(crate) fn downgrade(&self) -> Weak<quic::Session> {
+        Rc::downgrade(&self.0)
+    }
+
+    /// The session of `weak` while a handle holds it and it is open: no caller
+    /// closed it, and it has not ended.
+    pub(crate) fn upgrade(weak: &Weak<quic::Session>) -> Option<Self> {
+        weak.upgrade().filter(|session| session.live()).map(Self)
     }
 
     /// Who is on the other end.
@@ -148,7 +159,10 @@ impl Session {
     /// Closes the session with `code` now. Data not yet delivered drops, streams on
     /// it end, and the peer sees [`Error::PeerClosed`], or [`Error::Broken`] or
     /// [`Error::TimedOut`] when the close is lost. It does not wait. Closing an ended
-    /// session does nothing.
+    /// session does nothing. Every caller that [`Transport::dial`] gave this session
+    /// shares it, so closing it ends their streams too.
+    ///
+    /// [`Transport::dial`]: crate::Transport::dial
     ///
     /// ```
     /// fn leave(session: &transport::Session) {
@@ -628,11 +642,10 @@ mod tests {
     /// Waits for the server to close each session with code 4.
     async fn send_and_stall(config: Config, node: sim::node::Node, at: [Address; 1]) {
         let pool = Rc::clone(&config.pool);
-        let part = testing::part(&node.net(), testing::address(&node));
-        let transport = Transport::new(config, part).expect("a transport");
+        let transports = testing::transports(&config, &node, 2);
         let server = SERVER.public();
-        let first = transport.dial(server, &at).await.expect("a session");
-        let second = transport.dial(server, &at).await.expect("a session");
+        let first = transports[0].dial(server, &at).await.expect("a session");
+        let second = transports[1].dial(server, &at).await.expect("a session");
         for (session, byte) in [(&first, 1), (&second, 2)] {
             let opened = session.open_sender(Class::Complete).await;
             let mut sender = opened.expect("a stream");

@@ -68,19 +68,19 @@ impl Carrier {
     ///
     /// # Errors
     ///
-    /// As [`Carrier::dial`], or why the dial ended before the handshake finished, as
+    /// As [`Dialer::dial`], or why the dial ended before the handshake finished, as
     /// [`Session::closed`] gives it.
     ///
     /// # Panics
     ///
-    /// As [`Carrier::dial`].
+    /// As [`Dialer::dial`].
     #[cfg(test)]
     pub(crate) async fn connect(
         &self,
         peer: PublicKey,
         remote: SocketAddr,
     ) -> Result<Session, Error> {
-        let session = self.dial(peer, remote)?;
+        let session = self.dialer().dial(peer, remote)?;
         poll_fn(|cx| session.poll_connected(cx)).await?;
         Ok(session)
     }
@@ -102,6 +102,42 @@ impl Carrier {
         state.waits.status(state.clock.now())
     }
 
+    /// A handle that dials on this carrier, and that does not keep it from its drop.
+    pub(crate) fn dialer(&self) -> Dialer {
+        Dialer(Rc::clone(&self.0))
+    }
+
+    /// As [`Carrier::accept`].
+    pub(crate) fn poll_accept(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Session, Error>> {
+        let mut state = self.0.borrow_mut();
+        if let Some(key) = state.accepted.as_mut().and_then(VecDeque::pop_front) {
+            return Poll::Ready(Ok(self.session(key)));
+        }
+        if let Some(error) = &state.failed {
+            return Poll::Ready(Err(Error::Network {
+                error: error.clone(),
+            }));
+        }
+        register(&mut state.accepting, cx.waker());
+        Poll::Pending
+    }
+
+    fn session(&self, key: connection::Key) -> Session {
+        Session {
+            state: Rc::clone(&self.0),
+            key,
+        }
+    }
+}
+
+/// Dials on a [`Carrier`]. Clones share the carrier.
+#[derive(Clone)]
+pub(crate) struct Dialer(Rc<RefCell<State>>);
+
+impl Dialer {
     /// The clock of the carrier's endpoint.
     pub(crate) fn clock(&self) -> Clock {
         self.0.borrow().clock.clone()
@@ -127,7 +163,7 @@ impl Carrier {
     ///
     /// # Errors
     ///
-    /// As [`Carrier::check`].
+    /// As [`Dialer::check`].
     ///
     /// # Panics
     ///
@@ -143,28 +179,10 @@ impl Carrier {
         let key = state.endpoint.connect(now, peer, remote);
         state.sessions.insert(key, Slot::default());
         state.wake();
-        Ok(self.session(key))
-    }
-
-    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Result<Session, Error>> {
-        let mut state = self.0.borrow_mut();
-        if let Some(key) = state.accepted.as_mut().and_then(VecDeque::pop_front) {
-            return Poll::Ready(Ok(self.session(key)));
-        }
-        if let Some(error) = &state.failed {
-            return Poll::Ready(Err(Error::Network {
-                error: error.clone(),
-            }));
-        }
-        register(&mut state.accepting, cx.waker());
-        Poll::Pending
-    }
-
-    fn session(&self, key: connection::Key) -> Session {
-        Session {
+        Ok(Session {
             state: Rc::clone(&self.0),
             key,
-        }
+        })
     }
 }
 
@@ -303,6 +321,8 @@ struct Slot {
     connected: u64,
     /// Why the connection ended.
     end: Option<Error>,
+    /// A caller closed the session. Its end comes when the task next polls.
+    closing: bool,
     /// The wakers of the calls that wait for the handshake or the end.
     status: Vec<Waker>,
     /// The wakers of the opens that wait for the peer to allow a stream.
@@ -350,7 +370,16 @@ impl Session {
     /// Closes the session with `code`, which the peer gets as
     /// [`Error::PeerClosed`]. Does nothing when the session ended.
     pub(crate) fn close(&self, code: Code) {
-        self.state.borrow_mut().close(self.key, code);
+        let mut state = self.state.borrow_mut();
+        state.slot(self.key).closing = true;
+        state.close(self.key, code);
+    }
+
+    /// Whether the session is open: no caller closed it, and it has not ended.
+    pub(crate) fn live(&self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let slot = state.slot(self.key);
+        !slot.closing && slot.end.is_none()
     }
 
     /// Waits until the session ends, and gives why.

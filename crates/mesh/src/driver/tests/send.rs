@@ -504,12 +504,12 @@ fn a_message_that_is_too_large_for_the_peer_drops_and_its_stream_stays() {
     assert_eq!(large(1472), (false, [[false; 2]; 2]));
 }
 
-/// Asserts that node 2 gets a message, and that its stream and its session then end
-/// with code 0, when `mesh` runs on node 1.
+/// Asserts that node 2 gets a message, and that its stream then resets with code 0,
+/// when `mesh` runs on node 1.
 fn assert_ends<M: Future<Output = ()> + 'static>(
     mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
 ) {
-    let (sent, end, closed) = run(LIMIT, mesh, |peer| async move {
+    let (sent, end) = run(LIMIT, mesh, |peer| async move {
         let session = peer.session().await;
         let mut receiver = stream(&session).await;
         let mut sent = Vec::new();
@@ -519,12 +519,11 @@ fn assert_ends<M: Future<Output = ()> + 'static>(
                 end => break end,
             }
         };
-        (sent, end, session.closed().await)
+        (sent, end)
     });
     assert!(!sent.is_empty(), "no message came before the end");
     assert_eq!(sent, vec![pre_vote(); sent.len()]);
-    assert_eq!(end, Err(closed.clone()));
-    assert_eq!(closed, transport::Error::PeerClosed { code: Code(0) });
+    assert_eq!(end, Err(transport::Error::Reset { code: Code(0) }));
 }
 
 /// Asserts that each task that sends ended, also the task of node 3, which waits in
@@ -613,7 +612,10 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
         let clock = node.clock();
         {
             // Node 1 serves node 2 only until it leads: no task holds the mesh after.
-            let mut serving = pin!(accept(mesh.clone(), transport, tasks.clone()));
+            let mut serving = pin!(async {
+                serve_first(&mesh, &transport).await;
+                pending::<std::convert::Infallible>().await
+            });
             let mut leading = pin!(lead(&mesh, &clock, home(1)));
             poll_fn(|cx| {
                 let Poll::Pending = serving.as_mut().poll(cx);
@@ -648,6 +650,17 @@ fn a_task_that_waits_in_a_send_ends_when_the_group_stops() {
         stop(&node, &mesh);
         pending::<()>().await;
     });
+}
+
+/// Serves the first stream that node 2 opens to `mesh`, on the first session that
+/// `transport` accepts.
+async fn serve_first(mesh: &Mesh, transport: &Transport) {
+    let session = transport.accept().await.unwrap();
+    let mut incoming = session.accept().await.unwrap();
+    let Ok(Some(_)) = incoming.receiver.recv().await else {
+        return;
+    };
+    drop(mesh.serve(public(2), incoming).await);
 }
 
 // Serves each stream that node 2 opens to `mesh`.
