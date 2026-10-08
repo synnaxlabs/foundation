@@ -104,16 +104,23 @@
   `reader::Error::Remote` goes. `hub::Config::region: Option<hub::Region>` replaces
   `hub::Config::mesh`: a `Region` holds the mesh and the shard's transport, so a mesh
   with no transport is a state the type cannot hold. The hub keeps one
-  `transport::Session` for each home that it reads from, dials it at the first open,
-  keeps the first of two concurrent dials, and drops it when an open on it fails, so
-  the next open dials again. A complete reader sends `Credit` once its grant is half a
-  window (1 MiB) short of the frames given back plus a window. The new errors:
-  `reader::Error::{Transport, Refused, Message, Pool}` and
-  `reader::Ended::{Stream, Refused, Message, Frame, Pool}`. `Refused` takes each stop
-  or reset with a code of HUB WIRE; a failed dial is `Transport`. Decided by
-  `laptop.architect`: the reader's errors (2026-10-07T23:31:29Z:
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511), and
+  `transport::Session` for each home that it reads from. A complete reader sends
+  `Credit` once its grant is half a window (512 KiB) short of the frames given back
+  plus a window. The new errors: `reader::Error::{Transport, Refused, Message, Pool}`
+  and `reader::Ended::{Stream, Refused, Message, Frame, Pool}`. Each `Refused` holds a
+  `wire::hub::Refusal`, the code of HUB WIRE that stopped or reset the stream. A code
+  outside HUB WIRE and a failed dial are `Transport` or `Stream`. A stream that the
+  home finishes before it ends the session is `Message(wire::hub::Error::Finished)`,
+  which `wire::hub::Reader::end` gives. Decided by `laptop.architect`: the reader's
+  errors and one session for each home (2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511, which
+  approves the plan in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048861311),
   `Region` (2026-10-08T20:07:32Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), which
   supersedes `hub::Config::mesh` of
-  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821.
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821, and
+  `Refusal`, `Finished`, and `end` (2026-10-08T21:19:24Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471). The
+  removal of `reader::Error::Remote` supersedes it in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273.

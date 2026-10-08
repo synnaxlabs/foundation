@@ -35,5 +35,7 @@
   With PR 4d-b of #340, the state holds the region (the mesh and an `Rc` of the
   shard's transport) and the hub's session to each home it reads from. A remote
   reader holds the state, so it counts as a session of the hub. Decided by
-  `laptop.architect` (2026-10-08T20:07:32Z,
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715).
+  `laptop.architect`: the region (2026-10-08T20:07:32Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), and
+  the session to each home (2026-10-07T23:31:29Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
