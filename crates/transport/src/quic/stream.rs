@@ -2168,7 +2168,7 @@ mod tests {
                 let read = pair.server.endpoint.read(now, receiver, |_, _| None);
                 assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
                 // Private: the copy outside the pool shows in no public count.
-                // tests/bytes/held.rs counts the heap that a read frees.
+                // tests/memory/held.rs counts the heap that a read frees.
                 assert_eq!(receiver.reader.held(), (Some((1_000, 1_000)), 0));
             }
             let (now, client) = (pair.now(), key(&pair.client));
@@ -2178,13 +2178,13 @@ mod tests {
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut before, |_, _| None);
             assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
-            // Private: tests/bytes/held.rs checks this drop through the heap.
+            // Private: tests/memory/held.rs checks this drop through the heap.
             assert_eq!(before.reader.held(), (None, 0));
             pair.run(Duration::from_secs(3));
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut after, |_, _| None);
             assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
-            // Private: tests/bytes/held.rs checks this drop through the heap.
+            // Private: tests/memory/held.rs checks this drop through the heap.
             assert_eq!(after.reader.held(), (None, 0));
         });
     }

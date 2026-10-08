@@ -1,5 +1,5 @@
-//! Helpers for the transport test binaries: two nodes of a sim, a transport on each,
-//! and messages from its pool.
+//! The keys, transport config, port part, and messages that the transport test
+//! binaries share.
 
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -16,16 +16,15 @@ pub(crate) const CLIENT: PrivateKey = PrivateKey([1; 32]);
 pub(crate) const SERVER: PrivateKey = PrivateKey([2; 32]);
 /// The port that the server binds.
 pub(crate) const PORT: u16 = 4433;
-/// The longest message that a transport of [`config`] reads.
-pub(crate) const MESSAGE_BYTES_MAX: usize = 1 << 18;
 
-/// The config of a transport on `node` with `key`, and a pool of 1 MiB of its own.
+/// The config of a transport on `node` with `key`: messages of at most 256 KiB, and a
+/// pool of 1 MiB of its own.
 pub(crate) fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
     let pool = block::Config { budget: 1 << 20 };
     let memory = Heap::new(pool.reservation());
     Config {
         private_key: key,
-        message_bytes_max: NonZeroUsize::new(MESSAGE_BYTES_MAX).expect("not zero"),
+        message_bytes_max: NonZeroUsize::new(1 << 18).expect("not zero"),
         window_bytes: 1 << 20,
         streams_max: NonZeroU32::new(16).expect("not zero"),
         idle: Span::from_nanos(10 * Span::SECOND.nanos()),
