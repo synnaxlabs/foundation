@@ -31,7 +31,9 @@ impl Bound {
     /// Writes from `buffers` to `stream`, at most the bound less the bytes written
     /// since the last wait. When those reach the bound, it clears the write
     /// readiness, so the next write waits for the write event, which honors the
-    /// bound. The unsent bytes so stay below twice the bound.
+    /// bound. The unsent bytes so stay at most twice the bound. With `delayed`, XNU
+    /// also posts the event under one segment, so they stay at most the bound plus
+    /// the larger of the bound and one segment.
     pub(super) fn send(
         &mut self,
         stream: &TcpStream,

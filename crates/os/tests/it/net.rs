@@ -316,7 +316,7 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
         }
         if cfg!(target_os = "macos") {
             let max = config.options.unsent_bytes_max;
-            assert!(written < 2 * max, "a write waits for the event: {written}");
+            assert!(written <= 2 * max, "a write waits for the event: {written}");
         } else {
             assert!(
                 written > 1 << 16,

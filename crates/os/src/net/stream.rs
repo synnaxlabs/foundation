@@ -237,9 +237,17 @@ mod tests {
     }
 
     /// A connected pair on the loopback, with the blocking calls of std.
-    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
     fn create_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        create_pair_with(|_| {})
+    }
+
+    /// A connected pair whose listener `set` sets options on before the connect.
+    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+    fn create_pair_with(
+        set: impl FnOnce(&TcpListener),
+    ) -> (std::net::TcpStream, std::net::TcpStream) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        set(&listener);
         let client =
             std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
@@ -380,6 +388,70 @@ mod tests {
         assert_eq!(Stream::ended(&client, Errno::BADF), None);
         assert_eq!(Stream::ended(&client, Errno::AGAIN), None);
         assert_eq!(Stream::ended(&client, Errno::INVAL), Some(Errno::CONNRESET));
+    }
+
+    /// Writes blocks of `part` bytes to a stream with `options` whose peer reads
+    /// nothing, until a write waits. Gives the bytes the stream's socket holds, and
+    /// its segment size.
+    #[cfg(target_os = "macos")]
+    fn held_at_the_stall(options: &tcp::Options, part: usize) -> (usize, usize) {
+        let (client, server) = create_pair_with(|listener| {
+            sockopt::set_socket_recv_buffer_size(listener, 1 << 14).unwrap();
+        });
+        client.set_nonblocking(true).unwrap();
+        let (local, peer) = (client.local_addr().unwrap(), client.peer_addr().unwrap());
+        let mut stream = Stream::new(client, local, peer, options, None).unwrap();
+        let block = vec![7; part];
+        let bytes = [IoSlice::new(&block)];
+        let written = on_runtime(|| async {
+            let mut written = 0;
+            let bound = Duration::from_millis(250);
+            while let Ok(sent) =
+                tokio::time::timeout(bound, poll_fn(|cx| stream.poll_write(cx, &bytes)))
+                    .await
+            {
+                written += sent.unwrap();
+            }
+            written
+        });
+        let received = rustix::io::ioctl_fionread(&server).unwrap();
+        let fd = stream.socket.fd().unwrap();
+        let segment = super::super::lowat::segment(fd).unwrap();
+        (
+            written - usize::try_from(received).unwrap(),
+            usize::try_from(segment).unwrap(),
+        )
+    }
+
+    /// XNU posts the write event at the bound, so one more write of the bound fills
+    /// it twice.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_unsent_bytes_stay_at_most_twice_the_bound() {
+        let options = tcp::Options {
+            send_buffer_bytes: 1 << 20,
+            delayed: false,
+            ..options()
+        };
+        let (held, _) = held_at_the_stall(&options, 1 << 20);
+        assert!(held <= 2 * options.unsent_bytes_max, "{held}");
+    }
+
+    /// With `delayed`, XNU also posts the write event under one segment, whatever
+    /// the bound.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn delayed_unsent_bytes_stay_at_most_the_bound_plus_one_segment() {
+        let options = tcp::Options {
+            send_buffer_bytes: 1 << 20,
+            unsent_bytes_max: 1 << 13,
+            delayed: true,
+            ..options()
+        };
+        let (held, segment) = held_at_the_stall(&options, 64);
+        let max = options.unsent_bytes_max;
+        assert!(segment > max, "the bound is below one segment: {segment}");
+        assert!(held <= max + segment, "{held}, segment {segment}");
     }
 
     #[test]
