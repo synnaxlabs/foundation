@@ -17,8 +17,9 @@ use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use transport::{Session, Transport};
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Prefix;
-use types::node::{self, PrivateKey, PublicKey};
+use types::node::{self, PrivateKey};
 use types::time::{Span, Stamp};
 use wire::Protocol;
 

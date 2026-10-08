@@ -1999,9 +1999,12 @@ How to read this record:
   it as a contract on 2026-10-05 ("yes to both"). The golden certificate, the ALPN name,
   and the suite and group lists are an oracle in `oracles/conformance/transport/`. A key
   of small order is not a node key: a signature for it passes with no private key, so
-  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
-  when it is built, so no check site needs its own test. The person decided on
-  2026-10-05 ("Yeah that's fine"), #227, #277.
+  every Ed25519 check refuses it (BQ12). `types::ed25519::PublicKey` refuses such a
+  key when it is built, so no check site needs its own test. The person decided on
+  2026-10-05 ("Yeah that's fine"), #227, #277. `types::ed25519::PublicKey` holds the
+  Ed25519 public key of a node and of a subject. Decided by `laptop.architect` at
+  2026-10-08T04:03:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -2822,19 +2825,19 @@ How to read this record:
   cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
   A `Stopped` that holds a text for each cause lost, because a caller cannot match a
   text. The surface holds types of other crates, among them `raft::Position`,
-  `block::Error`, `env::files::Error`, and `types::node::PublicKey`, which the card of a
-  `Member` holds. A caller whose line of the crate map does not hold the crate of such a
-  type reads it only through `Display` and `Debug`. A caller that must match one gets
-  the crate in its line through an `interface` issue first. `mesh` does not re-export
-  such a type: a re-export makes each change to `raft` a change to the surface of
-  `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index
-  only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and gives
-  it each stream of a peer with `Mesh::serve`. The three are public since the senders
-  (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them, because
-  `open` and `serve` give them. `claim::Error` is the `grant::Error` of the rulings:
-  #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
-  to the types of other crates. `Config` and `serve` add types that the caller builds:
-  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  `block::Error`, `env::files::Error`, and `types::ed25519::PublicKey`, which the card
+  of a `Member` holds. A caller whose line of the crate map does not hold the crate of
+  such a type reads it only through `Display` and `Debug`. A caller that must match one
+  gets the crate in its line through an `interface` issue first. `mesh` does not
+  re-export such a type: a re-export makes each change to `raft` a change to the surface
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
+  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
+  gives it each stream of a peer with `Mesh::serve`. The three are public since the
+  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
+  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
+  rulings: #1460 gave the module its new name. `Error` adds `raft::Error` and
+  `transport::Error` to the types of other crates. `Config` and `serve` add types that
+  the caller builds: `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
@@ -5690,7 +5693,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |

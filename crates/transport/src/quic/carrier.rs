@@ -17,8 +17,8 @@ use env::clock::{Clock, Sleep};
 use env::net::Ecn;
 use env::net::udp::{self, Meta, Transmit};
 use noq_proto::StreamId;
+use types::ed25519::PublicKey;
 use types::hash::Map;
-use types::node::PublicKey;
 use types::time::Monotonic;
 
 use super::stream::{Incoming, Receiver, Sender};
