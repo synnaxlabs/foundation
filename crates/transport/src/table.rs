@@ -65,10 +65,15 @@ pub(crate) async fn dial(
         Found::Dialing(attempt) => attempt,
         Found::Start(attempt) => {
             let dialer = carrier.dialer();
-            let table = Rc::clone(table);
+            // A strong handle would keep the sessions for `accept` open after the
+            // transport drops.
+            let table = Rc::downgrade(table);
             let addresses = addresses.to_vec();
             tasks.spawn(async move {
                 let dial = dial::dial(&dialer, node, &addresses).await;
+                let Some(table) = table.upgrade() else {
+                    return;
+                };
                 let mut table = table.borrow_mut();
                 if dial.is_err() {
                     table.take(&dialer);
@@ -592,5 +597,51 @@ mod tests {
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// The client drops its transport at 200 ms while a dial to a dead address runs.
+    /// When `taken`, a failed dial first takes the server's session from the carrier.
+    fn drop_while_a_dial_runs(taken: bool) {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let other = PrivateKey([9; 32]).public();
+        let dead = dead(&server);
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let start = node.clock().now();
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(dialed.expect("a session").closed().await, closed);
+            let open = node.clock().now() - start;
+            assert!(
+                open < testing::spans(Span::MILLISECOND, 400),
+                "open {open:?}"
+            );
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            {
+                let long = pin!(transport.dial(other, &dead));
+                assert!(testing::poll_once(long).await.is_none());
+            }
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 200))
+                .await;
+            if taken {
+                let dialed = transport.dial(SERVER.public(), &[]).await;
+                drop(dialed.expect("the peer's session"));
+            }
+            drop(transport);
+            node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn dropping_the_transport_closes_the_peers_session_in_the_carrier() {
+        drop_while_a_dial_runs(false);
+    }
+
+    #[test]
+    fn dropping_the_transport_closes_the_peers_session_that_a_failed_dial_took() {
+        drop_while_a_dial_runs(true);
     }
 }
