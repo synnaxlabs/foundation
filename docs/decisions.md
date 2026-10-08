@@ -1163,8 +1163,7 @@ How to read this record:
   frame. The view borrows the reader, which releases the frame at the next call, not at
   its first poll, and grants credit for it there (CREDIT RULES): `next` is a plain `fn`
   that returns a future. A caller that keeps data copies it. A session that ends gives
-  `reader::Ended`. `Hub::define` stands.
-  Decided by `laptop.architect` (2026-10-07T05:53:24Z:
+  `reader::Ended`. Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
@@ -1182,6 +1181,16 @@ How to read this record:
   reader as its drivers, since #1636 adds the second (laptop.architect,
   2026-10-08T01:01:26Z,
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049988923).
+  Amended (2026-10-08T16:41:41Z, #1917): `Hub::define` takes each channel of a spec as
+  a name and a `spec::channel::Channel` in one call, and defines the indexes first, so a
+  data channel may come before its index. A known key or name panics. The hub keeps the
+  key, the sample type, and the index of each, and reads no quality, error, or control
+  edge: the issue that first serves one of these edges reads it in `define`. The PR
+  that defines channels at each new spec decides what a known, renamed, or removed
+  channel does. Decided by `laptop.architect` (2026-10-08T16:41:41Z:
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575
+  in `Hub::define` and `hub::Channel`.
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
   it on drop, and the task ends at its first poll after that. Lost:
