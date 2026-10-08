@@ -246,6 +246,87 @@ mod tests {
         dropped_wait(true);
     }
 
+    #[test]
+    fn a_too_large_message_keeps_its_room_until_a_read_or_a_reset_takes_it() {
+        // The receive budget is the window plus the largest message: 2^17 bytes. A
+        // message that never arrives holds 65,000 of it, so 50,000 more fit once.
+        const LEN: usize = 50_000;
+        let narrow = |config| Config {
+            window_bytes: 1 << 16,
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+                let complete = 2;
+                side.session
+                    .0
+                    .raw(&[[complete].as_slice(), &message::prefix(65_000)].concat());
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                let mut senders: Vec<crate::stream::Sender> = Vec::new();
+                for fill in 1..=4 {
+                    if fill == 3 {
+                        side.node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
+                    }
+                    if fill == 4 {
+                        side.node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
+                        senders.remove(2).reset(Code(16));
+                    }
+                    let opened = side.session.open_sender(Class::Complete).await;
+                    let mut sender = opened.expect("a stream");
+                    sender
+                        .send(side.block(&vec![fill; LEN]))
+                        .await
+                        .expect("sent");
+                    senders.push(sender);
+                }
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let (mut short, mut buffer) = ([0; 100], vec![0; LEN]);
+                let over = Error::TooLarge {
+                    bytes: LEN,
+                    bytes_max: 100,
+                };
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                let mut held = side.session.accept().await.expect("a stream").receiver;
+                assert!(poll_once(pin!(held.recv())).await.is_none());
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                let mut second =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(first.recv_into(&mut short).await, Err(over.clone()));
+                let mut waiting = Box::pin(second.recv_into(&mut buffer));
+                assert!(poll_once(waiting.as_mut()).await.is_none());
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                assert!(poll_once(waiting.as_mut()).await.is_none());
+                let mut whole = vec![0; LEN];
+                assert_eq!(first.recv_into(&mut whole).await, Ok(Some(LEN)));
+                assert_eq!(waiting.await, Ok(Some(LEN)));
+                assert_eq!(buffer, vec![2; LEN]);
+                let mut third = side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(third.recv_into(&mut short).await, Err(over.clone()));
+                let read = loop {
+                    match third.recv_into(&mut short).await {
+                        Err(error) if error == over => {
+                            side.node.clock().sleep(Span::MILLISECOND).await;
+                        }
+                        read => break read,
+                    }
+                };
+                assert_eq!(read, Err(Error::Reset { code: Code(16) }));
+                let mut fourth =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(fourth.recv_into(&mut buffer).await, Ok(Some(LEN)));
+                assert_eq!(buffer, vec![4; LEN]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
     fn dropped_wait(into: bool) {
         // The receive budget is the window plus the largest message: 2^17 bytes.
         let narrow = |config| Config {
