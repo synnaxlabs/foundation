@@ -24,7 +24,7 @@ pub struct FrontEnd {
     ///
     /// # Errors
     ///
-    /// Each problem in the text, with its span.
+    /// Each problem in the text, with its span: at least one.
     pub read: fn(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>>,
 }
 
@@ -35,7 +35,7 @@ pub(crate) struct File {
 }
 
 /// The change from the files to the spec at `base`. `Source(i)` is `files[i]`, and the
-/// extension of its path picks its front end.
+/// text after the last `.` of its file name picks its front end.
 ///
 /// # Errors
 ///
@@ -44,7 +44,7 @@ pub(crate) struct File {
 ///
 /// # Panics
 ///
-/// When `front_ends` is empty.
+/// When `front_ends` is empty, or a front end gives an error with no problem.
 pub(crate) fn plan(
     files: &[File],
     base: spec::Pointer,
@@ -63,15 +63,22 @@ pub(crate) fn plan(
     for (file, source) in files.iter().zip(0..) {
         let front_end = file
             .path
-            .extension()
-            .and_then(|extension| front_ends.get(extension.to_str()?));
+            .file_name()
+            .and_then(|name| name.to_str()?.rsplit_once('.'))
+            .and_then(|(_, extension)| front_ends.get(extension));
         let Some(front_end) = front_end else {
             diagnostics.push(unknown(&file.path, front_ends));
             continue;
         };
         match (front_end.read)(Source(source), &file.text) {
             Ok(document) => documents.push(document),
-            Err(problems) => diagnostics.extend(problems),
+            Err(problems) => {
+                assert!(
+                    !problems.is_empty(),
+                    "invariant: a front end gives a problem with each error"
+                );
+                diagnostics.extend(problems);
+            }
         }
     }
     if !diagnostics.is_empty() {

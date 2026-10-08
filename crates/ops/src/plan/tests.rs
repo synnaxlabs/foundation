@@ -113,6 +113,11 @@ fn channel(key: u128, kind: channel::Kind) -> Definition {
     })
 }
 
+/// `site.hcl` with a placement that homes its index on `edge`.
+fn placed_site() -> String {
+    format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
+}
+
 const INDEX: channel::Kind = channel::Kind::Index {
     error: None,
     control: None,
@@ -171,9 +176,7 @@ fn shows_a_change_then_a_removal() {
         (name("site.temp"), channel(2, channel::Kind::Data(i64))),
         (name("gone.time"), channel(3, INDEX)),
     ]);
-    let placed = format!(
-        "{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n"
-    );
+    let placed = placed_site();
     let planned = run(&[("site.hcl", &placed)], &applied).expect("a plan");
     assert_eq!(
         planned.to_string(),
@@ -188,9 +191,7 @@ fn shows_a_change_then_a_removal() {
 
 #[test]
 fn gives_the_json_of_the_site_plan() {
-    let placed = format!(
-        "{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n"
-    );
+    let placed = placed_site();
     let planned = run(&[("site.hcl", &placed)], &BTreeMap::new()).expect("a plan");
     let json = serde_json::to_string_pretty(&planned.json()).expect("JSON");
     assert_eq!(format!("{json}\n"), include_str!("site.golden.json"));
@@ -292,4 +293,39 @@ note: the earlier name
             }],
         }]})
     );
+}
+
+#[test]
+fn reads_a_file_named_only_by_its_extension() {
+    let placed = placed_site();
+    let planned = run(&[("configs/.hcl", &placed)], &BTreeMap::new()).expect("a plan");
+    assert_eq!(
+        planned.to_string(),
+        "\
++ channel site.time
++ channel site.temp
++ placement p
+3 to add, 0 to change, 0 to remove.
+"
+    );
+}
+
+#[test]
+#[should_panic(expected = "invariant: a front end gives a problem with each error")]
+fn refuses_a_front_end_error_with_no_problem() {
+    let front_ends = BTreeMap::from([(
+        "hcl",
+        FrontEnd {
+            read: |_, _| Err(Vec::new()),
+        },
+    )]);
+    let applied = BTreeMap::from([(name("a.time"), channel(1, INDEX))]);
+    drop(plan(
+        &files(&[("a.hcl", "")]),
+        empty(),
+        &applied,
+        &BTreeSet::new(),
+        &front_ends,
+        &Table::new(),
+    ));
 }
