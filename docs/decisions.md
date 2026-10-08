@@ -5899,10 +5899,14 @@ How to read this record:
   the region; the error of `serve` ends only its stream. A mesh stream of a client, or
   of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
   4 of #585). Shard 0 opens the mesh with `Config::region` unchanged, and no caller
-  gives definitions yet. From PR 1b of #1744, the code that builds `Config::region`
-  gives the root region the definitions that `spec::founding::create` gives, and each
-  other region an empty map. Decided by `laptop.architect` at 2026-10-08T06:11:30Z
-  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
+  gives definitions yet. From PR 1b of #1744, the code that builds the `Config::region`
+  of a founding node gives the root region the definitions that
+  `spec::founding::create` gives, and each other region an empty map. A node that joins
+  gives the definitions of its join answer (#336). Decided by `laptop.architect` at
+  2026-10-08T06:11:30Z
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101), with
+  the text for a founding node at 15:44:46Z
+  (https://github.com/synnaxlabs/foundation/pull/1904#issuecomment-6063609356).
   `mesh::region::Founding` replaced `node::Region`, which copied three fields of
   `mesh::Config`, so `node` maps no `mesh` value by hand (#1859). Decided by
   `laptop.architect` at 2026-10-08T10:23:48Z
@@ -5916,9 +5920,9 @@ How to read this record:
   Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
   of #336. A mesh that stops does not stop the node until #1780, before PR 4 gives the
   mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second open
-  path and a node that runs with no region before it; the key in `Region`, because a
-  node's identity is not region data, and PR 4 needs it with no region. Decided by
-  `laptop.architect-2` (2026-10-08 03:37 UTC):
+  path and a node that runs with no region before it; the key in `node::Region`,
+  because a node's identity is not region data, and PR 4 needs it with no region.
+  Decided by `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
