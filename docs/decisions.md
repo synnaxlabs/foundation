@@ -3217,11 +3217,10 @@ How to read this record:
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
-  reader is ad hoc and complete. A second `reader` block is `config.repeated-block`, and
-  `read` reads only the first, where a label is `config.label-count`. A negative `hold`
-  is `config.negative-span` (READER RULES, #94). A `hold` with no `name` or in `latest`
-  mode is `connector.unnamed-hold` or `connector.latest-hold`, since only a named
-  complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
+  reader is complete. A second `reader` block is `config.repeated-block`, and `read`
+  reads only the first, where a label is `config.label-count`. A negative `hold` is
+  `config.negative-span` (READER RULES, #94). A `hold` in `latest` mode is
+  `connector.latest-hold`, since only a complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3238,6 +3237,20 @@ How to read this record:
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
   03:59 UTC).
+  A reader with no `name`, also with no `reader` block, has the connector's name, so no
+  out connector has an ad hoc reader, and a restart resumes where it stopped. Decided
+  by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
+  7, and https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052669744,
+  2026-10-08 05:02 UTC). `Settings::name` is `None` for it, and
+  `kind::Context::reader` (#1731) gives the connector's name when it opens the reader,
+  since `Kind::parse` does not get the name. A `hold` with no `name` holds under that
+  name. Lost: `name: Name`, with the connector's name passed to `read`, which changes
+  `Kind::parse` for every kind to carry one value that only the reader needs. Proposed
+  by `connector` on #1794
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089).
+  Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152.
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
