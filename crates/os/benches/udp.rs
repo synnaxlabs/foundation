@@ -4,7 +4,7 @@
 
 use std::future::poll_fn;
 use std::io::IoSliceMut;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 
@@ -75,8 +75,15 @@ async fn receive(
     }
 }
 
-/// Sends `contents` `calls` times, and receives all the bytes, once per sample.
-fn bench_os(bencher: Bencher<'_, '_>, contents: &[u8], segment: usize, calls: usize) {
+/// Sends `contents` `calls` times from `source`, and receives all the bytes, once per
+/// sample.
+fn bench_os(
+    bencher: Bencher<'_, '_>,
+    contents: &[u8],
+    segment: usize,
+    calls: usize,
+    source: Option<IpAddr>,
+) {
     let runtime = runtime();
     let (mut sender, mut receiver) = pair();
     let mut storage = vec![vec![0; SEGMENT * receiver.batch_max().get()]; 4];
@@ -85,7 +92,10 @@ fn bench_os(bencher: Bencher<'_, '_>, contents: &[u8], segment: usize, calls: us
     let bytes = contents.len() * calls;
     bencher.bench_local(|| {
         runtime.block_on(async {
-            let transmit = transmit(receiver.local(), contents, segment);
+            let transmit = Transmit {
+                source,
+                ..transmit(receiver.local(), contents, segment)
+            };
             for _ in 0..calls {
                 send(&mut sender, &transmit).await;
             }
@@ -97,7 +107,13 @@ fn bench_os(bencher: Bencher<'_, '_>, contents: &[u8], segment: usize, calls: us
 /// One 64-byte datagram through `os::net`.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_datagram(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; 64], 0, 1);
+    bench_os(bencher, &[7; 64], 0, 1, None);
+}
+
+/// The same datagram from a given source address.
+#[divan::bench(sample_count = SAMPLES)]
+fn os_datagram_source(bencher: Bencher<'_, '_>) {
+    bench_os(bencher, &[7; 64], 0, 1, Some(Ipv4Addr::LOCALHOST.into()));
 }
 
 /// The same datagram through a plain Tokio socket, for comparison.
@@ -125,13 +141,13 @@ fn tokio_datagram(bencher: Bencher<'_, '_>) {
 /// A batch of `DATAGRAMS` datagrams of `SEGMENT` bytes, sent in one call.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_batch(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &vec![7; SEGMENT * DATAGRAMS], SEGMENT, 1);
+    bench_os(bencher, &vec![7; SEGMENT * DATAGRAMS], SEGMENT, 1, None);
 }
 
 /// The datagrams of [`os_batch`], sent one per call.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_one_by_one(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; SEGMENT], 0, DATAGRAMS);
+    bench_os(bencher, &[7; SEGMENT], 0, DATAGRAMS, None);
 }
 
 /// The registration that a sender makes at each `EAGAIN`: a write interest on its
