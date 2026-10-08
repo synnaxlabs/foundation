@@ -141,11 +141,14 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
         Shape::Variable { element, max, utf8 } => {
             let front = element.front(count)?;
             // One vector of ends decodes here, so that the UTF-8 check reads it again.
-            let mut first = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
-            let first = first
-                .split_at_mut(Layout::END.raw_len(count.min(VECTOR_LEN))?)
-                .0;
             let decoded = count <= VECTOR_LEN;
+            let mut storage;
+            let first: &mut [u8] = if decoded {
+                storage = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
+                storage.split_at_mut(Layout::END.raw_len(count)?).0
+            } else {
+                &mut []
+            };
             let (elements, rest) =
                 ends(count, bytes, max, decoded.then_some(&mut *first))?;
             let len = front.raw_len(elements)?;
