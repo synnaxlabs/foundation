@@ -4710,8 +4710,10 @@ How to read this record:
   item as `error[<code>]: <message>`, its place, `fix: <fix>`, and each note, with an
   empty line between two items. Lost: a second shape for diagnostics, with which a
   client parses two shapes and must know which operation gives which. Decided by
-  `laptop.architect-2` (2026-10-08,
-  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064364728).
+  `laptop.architect-2` (2026-10-08T16:26:42Z,
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064364728). The
+  place and notes details: `laptop.architect-2` (2026-10-08T16:40:27Z,
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064603605).
 
 ### 1.12 Access, identity, and secrets
 
