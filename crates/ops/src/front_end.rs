@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Source};
 
+use crate::error;
+
 const UNKNOWN_EXTENSION: Code = Code::new("ops.unknown-extension");
+const PATH_NOT_UTF8: Code = Code::new("ops.path-not-utf8");
 
 /// One syntax of config files.
 #[derive(Clone, Copy, Debug)]
@@ -30,8 +33,9 @@ pub(crate) struct File {
 ///
 /// # Errors
 ///
-/// `ops.unknown-extension` for each file that no front end reads, and each problem of a
-/// front end, in file order.
+/// `ops.path-not-utf8` for each file whose path is not UTF-8, `ops.unknown-extension`
+/// for each other file that no front end reads, and each problem of a front end, in
+/// file order.
 ///
 /// # Panics
 ///
@@ -47,17 +51,16 @@ pub(crate) fn read(
     let mut documents = Vec::new();
     let mut diagnostics = Vec::new();
     for (file, source) in files.iter().zip(0..) {
-        let front_end = file
-            .path
+        let Some(path) = file.path.to_str() else {
+            diagnostics.push(not_utf8(&file.path));
+            continue;
+        };
+        let front_end = Path::new(path)
             .file_name()
-            .and_then(|name| {
-                let name = name.as_encoded_bytes();
-                let dot = name.iter().rposition(|&byte| byte == b'.')?;
-                std::str::from_utf8(&name[dot + 1..]).ok()
-            })
-            .and_then(|extension| front_ends.get(extension));
+            .and_then(|name| name.to_str()?.rsplit_once('.'))
+            .and_then(|(_, extension)| front_ends.get(extension));
         let Some(front_end) = front_end else {
-            diagnostics.push(unknown(&file.path, front_ends));
+            diagnostics.push(unknown(path, front_ends));
             continue;
         };
         match (front_end.read)(Source(source), &file.text) {
@@ -78,13 +81,25 @@ pub(crate) fn read(
     }
 }
 
-/// The `ops.unknown-extension` diagnostic of `path`.
+/// The `ops.path-not-utf8` diagnostic of `path`.
 #[expect(
     clippy::unnecessary_debug_formatting,
     reason = "`Debug` quotes the path and escapes each byte that is not UTF-8"
 )]
+pub(crate) fn not_utf8(path: &Path) -> Diagnostic {
+    Diagnostic::new(
+        PATH_NOT_UTF8,
+        None,
+        format!("the path {path:?} is not UTF-8"),
+        "Rename the file to a UTF-8 name".to_owned(),
+    )
+}
+
+/// The `ops.unknown-extension` diagnostic of `path`. Its message writes the path as
+/// the text of a place does, escaped, so a bidirectional control in a file name does
+/// not reach the terminal.
 pub(crate) fn unknown(
-    path: &Path,
+    path: &str,
     front_ends: &BTreeMap<&'static str, FrontEnd>,
 ) -> Diagnostic {
     let extensions: Vec<String> = front_ends
@@ -100,7 +115,7 @@ pub(crate) fn unknown(
     Diagnostic::new(
         UNKNOWN_EXTENSION,
         None,
-        format!("no config syntax reads {path:?}"),
+        format!("no config syntax reads `{}`", error::escape(path)),
         format!("Use a file that ends in {extensions}"),
     )
 }

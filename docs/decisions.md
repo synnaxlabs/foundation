@@ -4880,6 +4880,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064364728). The
   place and notes details: `laptop.architect-2` (2026-10-08T16:40:27Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064603605).
+  `plan` refuses a path that is not UTF-8 with `ops.path-not-utf8`, before its
+  extension, so `Place::file` is the exact path. `ops.unknown-extension` writes the
+  path as the text of a place does. Lost: the lossy text, with which two files give one
+  place; and the `Debug` form in `Place::file`, which each JSON reader must decode.
+  Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
 
 ### 1.12 Access, identity, and secrets
 

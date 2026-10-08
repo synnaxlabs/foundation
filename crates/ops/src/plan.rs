@@ -204,7 +204,12 @@ fn place(span: Span, paths: &[PathBuf]) -> Place {
         .expect("invariant: a span is in a file of the plan");
     let start = span.start();
     Place {
-        file: path.display().to_string(),
+        file: path
+            .to_str()
+            .unwrap_or_else(|| {
+                unreachable!("invariant: `read` refuses a path that is not UTF-8")
+            })
+            .to_owned(),
         line: start.line + 1,
         column: start.column + 1,
     }
