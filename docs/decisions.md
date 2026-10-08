@@ -74,6 +74,19 @@ How to read this record:
 - **Root CLAUDE.md principles** apply to every crate: injected dependencies, no mutable
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
+- **DEVX (2026-10-08)** Design each user surface for the person, agent, or program that
+  uses it. A user surface is any surface that a user reaches. These are the CLI, MCP,
+  the config language, the client protocol and each SDK, and each file that a user reads
+  or writes. Each plan for one compares its options by the steps of each common task,
+  the first use after a new install among them. It also compares them by the error and
+  fix that each wrong step gives (C7). A step that Foundation can do itself is not a
+  step for the user (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when we're
+  designing public APIs like this, we really need to think about devx"
+  (2026-10-08T02:43:43Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981). The
+  plan rule is decided by `laptop.architect-2` and `laptop.architect` from those words
+  (2026-10-08T02:46:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026).
 - **Process** Each data structure and key decision is proposed with a sketch and
   locked only on agreement. RESCOPE: delivery and wire internals are tuned by
   benchmarks, not interviewed.
@@ -1022,17 +1035,25 @@ How to read this record:
   error (2026-10-07T06:01:39Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
   `delivery::Readers::release` also names a session that missed a frame and has none
-  waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
-  forwards it until #274 removes it. `next` gives a waiting frame, then `Ended::Behind`,
-  then `Ended::Buffer`. Lost: an error from `take`, which every caller, latest readers
-  too, then handles; a `behind` list beside the woken keys, a second list to drain for
-  an event that happens once per session. A `delivery` model property test and a 32-seed
-  `sim` test stand in for loom and shuttle: the wake never crosses a thread. Decided by
-  `laptop.architect` (2026-10-07T06:36:57Z:
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). A waiting
-  hub reader has given back every frame, as it grants at each `next` call, so no hub
-  test reaches the wake of a session that missed a frame with none waiting. The
-  `delivery` tests and the home `sim` test
+  waiting, and `Readers::take` gives `Next::Behind` after the frames before the miss.
+  `home::Shard::take` gives `Next::Behind` until #274. `next` gives a waiting frame,
+  then `Ended::Behind`, then `Ended::Buffer`. Lost: an error from `take`, which every
+  caller, latest readers too, then handles; a `behind` list beside the woken keys, a
+  second list to drain for an event that happens once per session. A `delivery` model
+  property test and a 32-run `sim` test stand in for loom and shuttle: the wake never
+  crosses a thread. Decided by `laptop.architect` (2026-10-07T06:36:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901).
+  `take` gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind`
+  and `Shard::behind` go. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901 in its lost
+  design "an error from `take`": a third case is not an error, each caller of `take`
+  uses one path for both modes, and #274 may give a gap from `take`. Lost: `woken` names
+  a reader that is behind in a second list, which keeps the two steps and moves the
+  state into the hub. Decided by `laptop.architect` (2026-10-08T01:43:19Z:
+  https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671).
+  A waiting hub reader has given back every frame, as it grants at each `next` call,
+  so no hub test reaches the wake of a session that missed a frame with none waiting.
+  The `delivery` tests and the home `sim` test
   `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
   `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
   miss while a frame waits gives no wake. The hub `sim` test is
@@ -1774,10 +1795,14 @@ How to read this record:
   has not taken counts for neither class, and a message that `try_send` gave back is not
   held. The send budget gives room in the order of the turn. Room that a message of the
   owed class frees waits for that class's next message while the other class holds room,
-  so neither class can take the share through the budget (#819). Lost: a connection per
-  class, because four handshakes and four congestion controllers compete on one path
-  (#55). Settled by the advisor and the coordinator under the person's delegation
-  (#789). A node resets a stream with the stop's code when the stop arrives, and frees
+  so neither class can take the share through the budget (#819). A change of this
+  share changes the share bound of `transport/benches/send.rs` in the same PR. Decided
+  by architect-2 (#977, 2026-10-07 17:15 UTC):
+  https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. Lost: a
+  connection per class, because four handshakes and four congestion controllers
+  compete on one path (#55). Settled by the advisor and the coordinator under the
+  person's delegation (#789).
+  A node resets a stream with the stop's code when the stop arrives, and frees
   the stream's room in the send budget and its turn (#1308). A stop that arrives after
   the peer acknowledged all the data of a finished stream, or this side's reset of the
   stream, has no effect, and the node does not check its code, because the carrier has
@@ -1999,9 +2024,12 @@ How to read this record:
   it as a contract on 2026-10-05 ("yes to both"). The golden certificate, the ALPN name,
   and the suite and group lists are an oracle in `oracles/conformance/transport/`. A key
   of small order is not a node key: a signature for it passes with no private key, so
-  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
-  when it is built, so no check site needs its own test. The person decided on
-  2026-10-05 ("Yeah that's fine"), #227, #277.
+  every Ed25519 check refuses it (BQ12). `types::ed25519::PublicKey` refuses such a
+  key when it is built, so no check site needs its own test. The person decided on
+  2026-10-05 ("Yeah that's fine"), #227, #277. `types::ed25519::PublicKey` holds the
+  Ed25519 public key of a node and of a subject. Decided by `laptop.architect` at
+  2026-10-08T04:03:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -2216,8 +2244,16 @@ How to read this record:
   approved it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
   A voter that does not lead cannot make a node follow it: a leader claim needs a
   quorum of grants (RAFT SURFACE, #750), except a voter that led a term at or above
-  the node's committed one, which can forge a link until #882 (RAFT SURFACE). A
-  false `AppendReply` still counts as held (#882). Lost: a lease that drops a
+  the node's committed one, which can forge a link until #882 (RAFT SURFACE). After a
+  restart, the committed term is the term at the applied index, because `Hard` holds no
+  commit index. That term can be lower than the term at the commit index before the
+  restart, so more past leaders can forge a link. Lost: the commit index in `Hard`. It
+  costs one more durable write each time the commit index moves, for a gap that #882
+  closes. Also lost: a bound of the highest term in the stable log. It refuses a real
+  leader whose link has a lower term than an entry of the node that is not committed.
+  Decided by `laptop.architect` (#1682, 2026-10-08T01:03:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758.
+  A false `AppendReply` still counts as held (#882). Lost: a lease that drops a
   heartbeat or an `Append` of a higher term from a node that is not the leader. A
   reply of a higher term ends any node's lease, and a leader must step down on one;
   the lease also changed three etcd oracle tests. The
@@ -2244,27 +2280,25 @@ How to read this record:
   #352 item 3), and the coordinator chose this. Later, at low priority: the leader
   learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
-  the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
-  set a joint phase replaces, else empty. An election, a commit, and a leader's
-  quorum check need a majority of each non-empty set. Each set is a `BTreeSet`, so
-  a duplicate cannot exist and the order is fixed. An empty `incoming` with an
-  `outgoing` is `Error::EmptyIncoming`; both empty is a node that only follows.
-  etcd's quorum tables are the oracle for the quorum math
-  (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
-  a leader keeps its lead through its own removal. A configuration travels in the
-  log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
-  term), `Bytes` (a proposal), or `Voters(Change)`. A `Change` is the `voters`, the
-  `votes` of the leader that wrote the entry (its election proof as it held it at
-  the write: a vote that arrives later joins the leader's proof, not an entry it
-  already wrote), and the leader's `signature` of the entry (`None` until
-  `Ready::sign`). A node that missed the change checks the entry with them as a link
-  of a chain before it counts a later proof against it, and refuses a link whose
+  the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the set a
+  joint phase replaces, else empty. An election, a commit, and a leader's quorum check
+  need a majority of each non-empty set. Each set is a `BTreeSet`, so a duplicate cannot
+  exist and the order is fixed. An empty `incoming` with an `outgoing` is
+  `Error::EmptyIncoming`; both empty is a node that only follows. etcd's quorum tables
+  are the oracle for the quorum math (`oracles/conformance/raft/quorum/`). A node only
+  in `outgoing` still campaigns, so a leader keeps its lead through its own removal. A
+  configuration travels in the log: `Entry.data` is a `raft::Data`, one of `Empty` (a
+  leader's first entry of its term), `Bytes` (a proposal), or `Voters(Change)`. A
+  `Change` is the `voters`, the `votes` of the leader that wrote the entry (its election
+  proof as it held it at the write: a vote that arrives later joins the leader's proof,
+  not an entry it already wrote), and the leader's `signature` of the entry (`None`
+  until `Ready::sign`). A node that missed the change checks the entry with them as a
+  link of a chain before it counts a later proof against it, and refuses a link whose
   votes are not `Vote` (RAFT SURFACE; architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
-  2026-10-07T04:31:40Z).
-  A node uses the latest `Voters` entry in its log from the time it writes it;
-  `Start.voters` is the configuration before `Start.entries`. A node that joins
-  starts with the founding voters from the answer to its join (decided by the
+  2026-10-07T04:31:40Z). A node uses the latest `Voters` entry in its log from the time
+  it writes it; `Start.voters` is the configuration before `Start.entries`. A node that
+  joins starts with the founding voters from the answer to its join (decided by the
   architect, #242:
   https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). An empty
   `Start.voters` is a voter that an operator wiped. It takes any proof until it holds a
@@ -2279,53 +2313,83 @@ How to read this record:
   wiped voter); the founding configuration as entry 1, as in etcd (a wider change that
   alone leaves the node open until it holds that entry). A `Voters` entry with an empty
   `incoming` set, in `Start.entries` or in an `Append`, is `Error::NoVoters`: a group
-  with no voter can never commit or elect.
-  A leader changes the voters with `Raft::propose_voters(set)`: it writes the
-  joint configuration (`incoming` the new set, `outgoing` the current one) and, when
-  that entry commits, the leave (`incoming` alone). One change at a time: while the
-  last configuration entry is not committed, a proposal is `Error::ChangePending`.
-  A node the change removed stays a peer of the leader, and gets appends up to the
-  leave, or up to the leader's first entry when that is later, until it holds them and
-  the leave is committed: then the leader sends it the commit in a heartbeat and
-  releases it, so the node learns it is out and never campaigns. The leader's first
-  entry replaces each entry that an older leader left past the leave on the node, such
-  as a configuration that makes it a voter again. A removed node that answered nothing
-  over a whole quorum check period is released at that check instead, and the next
-  configuration releases any that is still a peer.
-  A follower releases the removed nodes when the leave commits. A removed node that
-  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request
-  only from a voter of the newest configuration in this node's log, and a node whose
-  committed configuration lacks the sender answers `removed`. A request is a PreVote, a
-  Vote, a heartbeat, or an append. The rule covers requests only, and `raft` decides
-  which replies count (RAFT SURFACE). The person approved this on 2026-10-06, and the
-  coordinator gives the person's words in its comment on #647. The removed node takes
-  that answer only from a voter of its own region, and stops its `raft` group for that
-  region. `raft` sends such a node no entries, only answers. A voter with a lease drops
-  its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's
-  term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
-  this has no effect. Once no voter has a lease, as after the leader fails, the voters
-  can elect the node: it commits an entry of its term, which commits the leave, and
-  steps down, and the voters follow it until their election timeout (#483). This gap
-  stays, pinned by a test, until #483; keeping readmit until then lost. The person
-  decided on 2026-10-05 ("(a)"), #482. Readmit in
-  `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
-  decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
-  sends the commit and steps down. A node may campaign when it is a voter, incoming or
+  with no voter can never commit or elect. A leader changes the voters with
+  `Raft::propose_voters(set)`: it writes the joint configuration (`incoming` the new
+  set, `outgoing` the current one) and, when that entry commits, the leave (`incoming`
+  alone). One change at a time: while the last configuration entry is not committed, a
+  proposal is `Error::ChangePending`. A node the change removed stays a peer of the
+  leader, and gets appends up to the leave, or up to the leader's first entry when that
+  is later, until it holds them and the leave is committed: then the leader sends it the
+  commit in a heartbeat and releases it, so the node learns it is out and never
+  campaigns. The leader's first entry replaces each entry that an older leader left past
+  the leave on the node, such as a configuration that makes it a voter again. A removed
+  node that answered nothing over a whole quorum check period is released at that check
+  instead, and the next configuration releases any that is still a peer. A follower
+  releases the removed nodes when the leave commits. A removed node that missed its
+  release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request only from a
+  voter of the newest configuration that the node knows: the newest in its log, or a
+  newer one that a link of the request's chain proves. A link proves a configuration
+  when the votes it carries elected its leader under a configuration the node already
+  knows, and the leader's signature holds (#881). A configuration entry binds the public
+  key of each voter it adds, under the signature of the leader that writes it. A node
+  answers `removed` only to a sender that a configuration in its own log held, when its
+  committed configuration lacks the sender and the request proves no newer configuration
+  that holds it. Each other sender that is not a voter gets `Error::NotVoter`, and does
+  not stop. The person chose A, 2026-10-07T04:49:33Z
+  (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
+  text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
+  Supersedes the first version, which the person approved on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638). #1105
+  builds the `removed` answer and the held rule, #1106 the key binding, and #1107 the
+  configuration that a chain proves. Until #1107, a request proves no newer
+  configuration. A node answers `removed` only to a sender that `Start.voters` or a
+  committed `Voters` entry held, when the last committed configuration lacks it. A
+  sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
+  truncated, and a node whose commit lags would stop a voter that no committed
+  configuration removed, the failure of #1054 (decided by the architect,
+  2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747). `mesh`
+  asks `Raft::removed`, so the log that holds the configurations answers it (decided by
+  `laptop.architect`, 2026-10-08T03:04:33Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777).
+  `Raft::removed` counts a configuration entry only once the commit index covers it, so
+  a node that opened again answers `NotVoter` until a leader gives it the commit index.
+  A request is a PreVote, a Vote, a heartbeat, or an append. The rule covers requests
+  only, and `raft` decides which replies count (RAFT SURFACE). The coordinator gives the
+  person's words on the first version in its comment on #647, linked above. The removed
+  node takes that answer only from a voter of its own region, and stops its `raft` group
+  for that region. A voter of its region is a voter of the newest configuration in its
+  log, and an answer from any other node drops the stream, as any refusal does (decided
+  by `laptop.architect`, 2026-10-08T02:59:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). `raft`
+  sends such a node no entries, only answers. A voter with a lease drops its campaign or
+  refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's term. In `raft`
+  alone, the node campaigns. While a voter has a lease, this has no effect. Once no
+  voter has a lease, as after the leader fails, the voters can elect the node: it
+  commits an entry of its term, which commits the leave, and steps down, and the voters
+  follow it until their election timeout. That gap stays in `raft`, pinned by
+  `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In `mesh`, the
+  admission check and the `removed` answer close it for each voter whose log holds the
+  leave; a voter whose log lacks the leave entry admits the request until #1107. #483
+  keeps the stop on applying a committed configuration without itself. Keeping readmit
+  until then lost. The person decided on 2026-10-05 ("(a)"), #482. Readmit in `raft`
+  (#414) lost: it sent the log to a sender that `raft` cannot check. The person decided
+  on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set sends
+  the commit and steps down. A node may campaign when it is a voter, incoming or
   outgoing, of the configuration in force, or, while that configuration is not
-  committed, of the configuration before it. No other node campaigns. The rule is
-  exact: a leader appends a configuration entry only after the last one commits, so
-  by Log Matching only the last configuration entry in a log can be truncated, and
-  the one before it is committed. The fallback keeps two cases: a truncation gives
-  the configuration before back, and a removed leader that lost its lead before the
-  leave reached a peer is the only node that can win the election that commits it. A
-  follower whose commit index lags lets the configuration before campaign for
-  longer, which costs liveness, never safety. The `mesh` admission check stays
-  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
-  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
-  Neither is a second guard for the other. Decided by the coordinator and the
-  advisor on 2026-10-06 (#659). After compaction a snapshot carries the
-  configuration in force at its index, so the configuration before the last entry
-  stays known (#253).
+  committed, of the configuration before it. No other node campaigns. The rule is exact:
+  a leader appends a configuration entry only after the last one commits, so by Log
+  Matching only the last configuration entry in a log can be truncated, and the one
+  before it is committed. The fallback keeps two cases: a truncation gives the
+  configuration before back, and a removed leader that lost its lead before the leave
+  reached a peer is the only node that can win the election that commits it. A follower
+  whose commit index lags lets the configuration before campaign for longer, which costs
+  liveness, never safety. The `mesh` admission check stays beside this rule:
+  `promotable` decides whether an honest node campaigns, and `mesh` checks a sender that
+  may lie, because `raft` never checks senders (RAFT SURFACE). Neither is a second guard
+  for the other. Decided by the coordinator and the advisor on 2026-10-06 (#659). After
+  compaction a snapshot carries the configuration in force at its index, so the
+  configuration before the last entry stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory. A log also holds the file `lock`
   of that directory open for writing, from its open until it drops. A file call of a
@@ -2418,25 +2482,29 @@ How to read this record:
   never crosses a `SECTOR`: a record whose header would cross one starts at the next
   sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
   whole or absent. At a restart, zeros where a record should start, or a good header
-  with a torn body, are the end of the log. Anything else, or a record after a torn one,
-  is `Error::Corrupt`, and the node does not start. Open writes again, whole, the end
-  file that it finds: the records as it read them, then zeros to the end of the file. So
-  a torn record leaves nothing that a later open reads as a header. Each read and each
-  write of the open is whole sectors, so a header gets one write. An open with a pool
-  whose largest block is less than one sector gives `Error::Pool(TooLarge)` before it
-  reads or makes a file. Then it syncs the end file, the directory, and its parent,
-  because `raft` acts on what open gives and a crash can leave any of them with no sync.
-  The write is there because a read sees, from the cache, the writes that a failed sync
-  of this boot lost, and a later sync does not write them (SIM CRASH): an open that only
-  syncs gives records, or keeps zeros, that the disk does not hold (#1066; the ring has
-  the same rule, #698). Each file before the end file is durable, because a failed write
-  poisons the log, and the next open has the file of that write as its end file or
-  removes it. An open of a log that has a file thus writes and syncs 1 MiB or more, for
-  each region. P1 gives a Raspberry Pi 4 under 1 s to start, and no one has measured
-  this cost there (#1140). Lost: zeros only after a torn end (the first shape), which is
-  the defect; and a read with direct I/O, which not each driver can give: macOS does not
-  promise a read that skips the cache (decided by the architect, #1128,
-  2026-10-07T05:37:30Z:
+  with a torn body, are the end of the log. Anything else is `Error::Corrupt`, and the
+  node does not start. So is a record that starts right after a torn one, or at the
+  start of the next file: the error is at the torn record, whatever the version of the
+  record after it. A record of another version that is the first defect in file order
+  is `Error::Version` (#1784, approved by the architect, 2026-10-08T04:26:06Z:
+  https://github.com/synnaxlabs/foundation/pull/1776#issuecomment-6052206016). Open
+  writes again, whole, the end file that it finds: the records as it read them, then
+  zeros to the end of the file. So a torn record leaves nothing that a later open reads
+  as a header. Each read and each write of the open is whole sectors, so a header gets
+  one write. An open with a pool whose largest block is less than one sector gives
+  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
+  the directory, and its parent, because `raft` acts on what open gives and a crash can
+  leave any of them with no sync. The write is there because a read sees, from the
+  cache, the writes that a failed sync of this boot lost, and a later sync does not
+  write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
+  the disk does not hold (#1066; the ring has the same rule, #698). Each file before the
+  end file is durable, because a failed write poisons the log, and the next open has the
+  file of that write as its end file or removes it. An open of a log that has a file
+  thus writes and syncs 1 MiB or more, for each region. P1 gives a Raspberry Pi 4 under
+  1 s to start, and no one has measured this cost there (#1140). Lost: zeros only after
+  a torn end (the first shape), which is the defect; and a read with direct I/O, which
+  not each driver can give: macOS does not promise a read that skips the cache (decided
+  by the architect, #1128, 2026-10-07T05:37:30Z:
   https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
   check over the whole record lost: a damaged length then reads as a torn end, and the
   log drops the good records after it. Zeros over the header of a durable record, which
@@ -2472,7 +2540,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038303084). A message
   that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
   stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
-  a reply half with the same code. A group that stopped gives code 16 on a one-way
+  a reply half with the same code. A request from a node that a committed configuration
+  removed, when `Start.voters` or a committed `Voters` entry held it (RAFT VOTERS), gets
+  code 17 instead (`Error::Removed`). A group that stopped gives code 16 on a one-way
   stream. On a stream that goes both ways it gives no mesh code: it can stop in the
   write of the entry, which then applies after a new open. A `raft` message that finds
   no block in the pool is not a refusal: the receiver drops it, the stream goes on, and
@@ -2522,7 +2592,8 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
+  (`Error::Removed` for a sender that a committed configuration removed, else
+  `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
   `Raft::claims` gives, so a link that the node does not read is not checked. So a
   node with a configuration refuses a leader that is not a voter of that
   configuration, when a change that the node does not hold made that leader a voter.
@@ -2822,19 +2893,19 @@ How to read this record:
   cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
   A `Stopped` that holds a text for each cause lost, because a caller cannot match a
   text. The surface holds types of other crates, among them `raft::Position`,
-  `block::Error`, `env::files::Error`, and `types::node::PublicKey`, which the card of a
-  `Member` holds. A caller whose line of the crate map does not hold the crate of such a
-  type reads it only through `Display` and `Debug`. A caller that must match one gets
-  the crate in its line through an `interface` issue first. `mesh` does not re-export
-  such a type: a re-export makes each change to `raft` a change to the surface of
-  `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index
-  only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and gives
-  it each stream of a peer with `Mesh::serve`. The three are public since the senders
-  (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them, because
-  `open` and `serve` give them. `claim::Error` is the `grant::Error` of the rulings:
-  #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
-  to the types of other crates. `Config` and `serve` add types that the caller builds:
-  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  `block::Error`, `env::files::Error`, and `types::ed25519::PublicKey`, which the card
+  of a `Member` holds. A caller whose line of the crate map does not hold the crate of
+  such a type reads it only through `Display` and `Debug`. A caller that must match one
+  gets the crate in its line through an `interface` issue first. `mesh` does not
+  re-export such a type: a re-export makes each change to `raft` a change to the surface
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
+  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
+  gives it each stream of a peer with `Mesh::serve`. The three are public since the
+  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
+  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
+  rulings: #1460 gave the module its new name. `Error` adds `raft::Error` and
+  `transport::Error` to the types of other crates. `Config` and `serve` add types that
+  the caller builds: `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
@@ -2845,11 +2916,16 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
-  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
-  key that is not the public half of `Config.private_key`. `node` builds both from the
-  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
-  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
-  the architect, 2026-10-07T19:55:13Z:
+  sentence on `Unsynced` and `Status`. The same ruling supersedes the approval of
+  `Unsynced`, `Status`, and `Config.time` in item 2 of that comment. It also supersedes
+  the approval of `Config.time` (a `clock::Reader`) in
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724 (ruled by
+  `laptop.architect`, 2026-10-08T00:46:02Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6049818540). `open`
+  panics when `Config.transport` proves a key that is not the public half of
+  `Config.private_key`. `node` builds both from the one key that it loads, so a mismatch
+  is a defect in `node`, not bad outside input. `Error::WrongKey` stays for a key that
+  is not the key of the member record (ruled by the architect, 2026-10-07T19:55:13Z:
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
   Supersedes the sentence that `open` does not check the key of the transport:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
@@ -2862,12 +2938,13 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
   the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  other calls that change the region and the change records stay private. The surface
-  is approved in the same comment. The surface as built, with the types that the caller
-  builds and the sentence that `open` does not check the key of the transport
-  (superseded above), is approved by the architect, 2026-10-07T19:55:12Z:
-  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
-  is approved by the architect, 2026-10-07T15:17:13Z:
+  other calls that change the region and the change records stay private. The surface is
+  approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
+  above). The architect approved the surface as built at 2026-10-07T19:55:12Z:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. It has the
+  types that the caller builds, `Config.time`, and the sentence that `open` does not
+  check the key of the transport. The last two are superseded above. `member` is
+  approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
   of the PRs is decided by the architect, 2026-10-07T17:18:52Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6043038615. The
@@ -2947,6 +3024,41 @@ How to read this record:
   used until `sync_dir` on its directory ends. A second `Full` is the error of the put.
   Decided by `laptop.architect` (2026-10-07T20:47:57Z):
   https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6046560177.
+- **BLOB WIRE (#1227)** The blob protocol (protocol 4 of the header) runs on one stream
+  from a requester to the server that holds the store. After the header, the requester
+  sends gets and puts, and the server sends replies. Fields are little-endian. A get is
+  kind 1 and then one or more digests of 32 bytes; the message length gives the count,
+  so a get has no count field and no run state, and a requester with more digests than
+  one message holds sends more gets. A put is kind 2, the digest, and the length of the
+  chunk (`u32`), 37 bytes; its body follows. A reply is kind 1 (chunk: the digest and
+  the length, 37 bytes; its body follows), kind 2 (absent: the digest, 33 bytes), or
+  kind 3 (stored: the digest, 33 bytes). A body is the bytes of the chunk as stream
+  messages back to back with no prefix, each at most the peer's `message_bytes_max`, so
+  a chunk larger than one message goes in parts. No message of a body is empty, the body
+  starts a new message, and a chunk of 0 bytes has no body message. Each decoder
+  (`wire::blob::Server` for the requester's messages, `wire::blob::Requester` for the
+  server's) takes from its caller the most bytes a chunk may have, refuses a longer
+  chunk at its length field, and refuses a body message longer than the rest of the
+  body; `body` gives where in the chunk the next body message starts. The receiver, not
+  `wire`, checks the digest over the whole chunk. Stop codes: 16 `MISMATCH` (the bytes
+  do not hash to the digest), 17 `TOO_LARGE` (the chunk is longer than the largest block
+  of the node), 18 `FULL` (a put would leave the disk under the free floor of the
+  store). Each other break is `wire::header::MALFORMED`, and a stop ends each open
+  request of the stream. Order is a rule: the server answers requests in order, the
+  digests of a get in message order and a put after its body. The requester keeps a
+  queue of its open requests, and a reply that does not answer the oldest open request
+  is `MALFORMED`. Each reply names its digest. The check lives in `blob` (#1229), and
+  `wire` keeps no queue. The sides are `Requester` and `Server`, and the decoded
+  messages `FromRequester` and `FromServer`. Lost: a count field in the get (the length
+  gives it); a run state for the get as the hub keys have (a get is one message); a
+  length prefix on each body message (the stream frames it); a digest check in `wire`
+  (the decoder sees parts, and the receiver has the whole chunk). Decided by
+  `laptop.architect` (2026-10-07T20:43:10Z):
+  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057.
+  `wire::blob::Error::code` gives the stop code of each decode error: `TOO_LARGE` for
+  `TooLarge`, and `MALFORMED` for each other, so `blob` holds no copy of the map.
+  Decided by `laptop.architect` (2026-10-08T00:54:19Z):
+  https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -3820,6 +3932,10 @@ How to read this record:
   look-alike shows. The `config-hcl` writer keeps its own rule, because a person edits
   what it writes. Lost: Rust's `Debug` form, which no file reads; `$$` and `%%`, which
   only HCL reads. Decided by the architect (#941).
+  Until `types::text::Quoted` is on `main` (#941), a producer quotes text from a file
+  with `{:?}`, and #941 changes each such quote to `Quoted`. Decided by the architect
+  at 2026-10-08T05:49:29Z
+  (https://github.com/synnaxlabs/foundation/issues/941#issuecomment-6053293087).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -3940,6 +4056,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
+  After a bad `kind`, `check` gives `document.unknown-attribute` for each attribute that
+  no kind knows, and leaves each other attribute, the edges too: each belongs to one
+  kind, so its problem depends on the kind. Decided by `laptop.architect-2`
+  (2026-10-08T05:54:24Z,
+  https://github.com/synnaxlabs/foundation/pull/1806#issuecomment-6053360334).
+  Supersedes clause 1 of the #1758 ruling, "the edges, as now" (2026-10-08T02:41:50Z,
+  https://github.com/synnaxlabs/foundation/issues/1758).
 - **ACCESS BLOCK (2026-10-08)** `access "<name>" { subjects, select, allow, authority }`
   (C8) gives a `spec::access::Policy` at `<name>.@access`. `subjects` and `select` are
   selectors. `allow` is one action or a list of actions, each a string or a bare word,
@@ -3947,12 +4070,19 @@ How to read this record:
   an empty list is `config.empty-allow`. A word that is not an action is
   `config.bad-action`. `authority` is optional, an integer from 0 to 255
   (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
-  the least, as default deny gives the least. Such a writer still takes control when no
-  writer holds it (GATE RULES). Lost: an `authority` that `write` makes required, a
-  rule that C8 does not have. The action words are a table in `config` until a second
-  reader needs them, such as the `plan` output of access; then they move to `spec` as
-  `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  the least, as default deny gives the least. Lost: an `authority` that `write` makes
+  required, a rule that C8 does not have. The action words are a table in `config` until
+  a second reader needs them, such as the `plan` output of access; then they move to
+  `spec` as `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
+  The gate: "The gate gives authority 0 no special meaning: such a writer outranks no
+  writer and follows GATE RULES, so it takes control when it opens on an index that no
+  writer holds." `control` and `home` must not read `Authority(0)` as "may not write" or
+  "may not take control". A change to that is a change to GATE RULES, and it goes to
+  `laptop.architect`. The quoted sentence supersedes the sentence on the gate in
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+  `laptop.architect` decided it and approved the default cap (2026-10-08T05:21:56Z,
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6052936198).
   An `authority` with no `write` in an `allow` that reads is
   `config.authority-without-write`, also `authority = 0`: only a write uses an
   authority, so the value is a mistake. `Policy::new` still sets the authority of a
@@ -4022,6 +4152,28 @@ How to read this record:
   `mesh.changes` record, so every node checks its subject signature and the `secret`
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
+- **FIRST ADMIN (2026-10-08)** A node that starts a new mesh has an empty spec, and
+  under BQ12 only a key that the spec names can sign an apply. So the first `foundation
+  start` of that node, on an empty data directory, creates the spec with one admin
+  subject. It writes the admin's private key into the data directory, and only the user
+  who started the node can read the key. The CLI on the same host signs with that key,
+  so the first `apply` needs no key step. A node that joins by ticket (BQ11a) joins a
+  mesh that has a spec, so it creates none. BQ12 holds as written: each node checks each
+  apply, the first one too, against a key in the spec. Lost: the first apply from any
+  local process, because any local user could then take the node. Also lost: an admin
+  public key given before the first start, a step before the first use. Decided by the
+  person ("Yes, I approve."), relayed by `laptop.monitor` at 2026-10-08T02:43:43Z:
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
+  #1744 plan names the subject, its access policy, and the key file, as
+  `laptop.architect-2` and `laptop.architect` decided (2026-10-08T02:46:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026). The
+  question was about a node whose spec is empty. So `laptop.architect` decided the limit
+  to a node that starts a new mesh, and the sentence on a node that joins
+  (2026-10-08T02:57:01Z,
+  https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051238643). It also
+  decided that the #1744 plan names how a first start tells a new mesh from a join
+  (2026-10-08T02:59:40Z,
+  https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051265693).
 
 ### 1.13 Operations, agents, and the factory
 
@@ -4149,7 +4301,56 @@ How to read this record:
 - **REVIEW CHECK (2026-10-07)** The required status `review` (`cargo xtask review`,
   `.github/workflows/review.yaml`) passes a PR only when its review is done. It reads
   only round comments by the factory bot, in the format of `/review`, "Round comment".
-  Each round names the reviewers REVIEW TIERS requires; `performance` is never required.
+  Each round comment parses, also an earlier one, and has its `Deferred:`,
+  `Public surface:`, and `Hot path:` lines. Each round names the reviewers REVIEW TIERS
+  requires, and `performance` when the first word of its `Hot path:` value is not
+  `none`. Stated by the issue that the director's audits filed,
+  https://github.com/synnaxlabs/foundation/issues/1467 (2026-10-07T15:20:38Z).
+  The end lines are the last paragraph of the comment, in that order, as `/review`,
+  "Round comment", writes them, each at the start of its line, so an indented quote of
+  them or a line in a code block is not them. Each end line may wrap onto the lines
+  after it, and a paragraph after them fails. The first word of a value, with its
+  backticks and one final comma, period, or semicolon removed, is the word that is
+  checked. Decided by the director at 2026-10-08T02:57:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
+  hand rule for code fences, as REVIEW CHECK stated it at `48101724`, meets that
+  ruling. Decided by the director at 2026-10-08T04:01:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239). The
+  check ends a line at `\n`, `\r\n`, or a lone `\r`, as that ruling covers (decided by
+  the director at 2026-10-08T04:42:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062), and
+  reads a code block so: a fence of three or more backticks or tildes, after at most
+  three spaces, opens it, and a like fence closes it, or it runs to the end of the
+  comment. It does not see an HTML block or HTML comment, or a fence after a list marker
+  or a quote mark. In an old round, it does not see a `Hot path:` line, or a
+  `Reviewers:` line of a round that does not parse, with four or more spaces of indent
+  or a tab in its indent, where GitHub shows the line as text: for example, a line
+  that continues a paragraph, or a paragraph in a list item or a footnote. Such a
+  `Hot path:` line does not ask for `performance`. On 2026-10-08, the 58 old rounds of
+  the 12 open PRs that had one (#1245, #1487, #1554, #1561, #1600, #1626, #1636, #1643,
+  #1650, #1691, #1739, #1752) hit none of these cases. Decided by the director at
+  2026-10-08T05:13:45Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147),
+  2026-10-08T05:31:31Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328), and
+  2026-10-08T05:43:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053208426).
+  https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
+  does. A round comment posted before the cutoff `CUTOFF` in
+  `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
+  free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
+  text that names a function still needs `performance`. Decided by the director at
+  2026-10-08T02:44:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051099968).
+  Supersedes the reviewers of a later round in ruling 2 of
+  https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6040439732
+  (2026-10-07T06:32:32Z). For this rule, an old round that parses names
+  `performance` in its `Reviewers:` field, read as before. One that does not parse
+  names it in any `Reviewers:` line of its text. A `Hot path:` line counts anywhere in
+  its text. Each `Reviewers:` line of a round that does not parse, and each `Hot path:`
+  line, has at most three spaces of indent and no tab. Decided by the director at
+  2026-10-08T04:42:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062).
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not
@@ -4773,7 +4974,8 @@ How to read this record:
 - **NODE SPAWN (2026-10-07)** `Node::spawn(task)` calls `task` with the node's one hub,
   on shard 0, once each shard has opened its buffer, then runs its future. It has the
   shape and the rules of `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a
-  panic ends shard 0 and fails the node (`Error::Panicked`). Shard 0 calls the tasks
+  panic ends shard 0 and fails the node (`Error::Panicked`), unless the transport
+  stopped first, which gives `Error::Transport`. Shard 0 calls the tasks
   with the hub in the order of their calls, so their closure bodies run in that order;
   their futures run in no set order. A task that is given before the hub exists waits
   for it. A node that stops or fails before shard 0 calls a task drops it uncalled, and
@@ -4794,7 +4996,11 @@ How to read this record:
   Supersedes the start order of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411. When a
   caller outside the tests of `node` builds a result channel, file an `interface` issue
-  for a result from `spawn`.
+  for a result from `spawn`. `Error::Transport` over a panic after the transport stopped
+  decided by `laptop.architect-2` (2026-10-08T03:21:42Z):
+  https://github.com/synnaxlabs/foundation/pull/1769#issuecomment-6051497737.
+  Supersedes the panic error of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
 - **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
   on `Config::net` before any shard starts; a failed bind starts no shard, and
   `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which
@@ -5749,7 +5955,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -5955,6 +6161,25 @@ minimal `hub` (one writer and one reader session). Access, config files, and fai
 wait until its acceptance scenario passes. The plan and owners are on #462. The person
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
+
+Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps priority.
+ONE NODE is a milestone: one real node reads an OPC UA server through `connector-opcua`
+and pushes the samples to InfluxDB through `connector-influx`. The `foundation` binary
+starts the node from a config, on a real disk and network. Its acceptance runs a
+simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
+with no OPC UA security, so the open choice of the OPC UA crypto plugin (5.1) does not
+block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
+2026-10-08T01:52:14Z:
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
+approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order. FIRST
+SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
+Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
+2026-10-05, which has no link). For ONE NODE work, features, access, and config files do
+not wait until the acceptance scenario of FIRST SLICE passes (#462). The person decided
+("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
+the internals while ONE NODE work should be focused on developer APIs and connectors."),
+relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
 scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut

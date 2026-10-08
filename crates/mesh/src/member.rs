@@ -1,6 +1,6 @@
 //! The region's record of one node.
 
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 use types::time::Span;
 
 use crate::bytes::{put_optional_span, take, take_optional_span};

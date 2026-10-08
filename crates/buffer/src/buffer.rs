@@ -26,7 +26,7 @@ use types::time::Span;
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
-use crate::log::{self, Logs, Mark, Tail};
+use crate::log::{self, Found, Logs, Mark, Tail};
 use crate::read::{Read, Reading};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
@@ -434,16 +434,16 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
-    /// The durable entries of `path` of the index at `slot` from `from`, in
-    /// order, until their blocks take `budget` pool bytes, by
-    /// [`block::footprint`] of each, a skip ahead starts, or the pool has no block
-    /// for the next entry. The last entry may pass the budget. An entry that holds
-    /// `from` comes whole. A read from a mark at or in the seqs a skip ahead left
-    /// out reports them as `gap` and goes on after them. The first read starts at
-    /// `Mark::at(0)`; each read continues at `next`, which a read that gives
-    /// nothing does not move. A read makes one file read for the table of each
-    /// record it visits, two when the record header and table pass 4 KiB, and one
-    /// per entry with bytes.
+    /// The durable entries of `path` of the index at `slot` from `from`, in order,
+    /// until their blocks take `budget` pool bytes, by [`block::footprint`] of each,
+    /// seqs that the path no longer has start, or the pool has no block for the next
+    /// entry. The last entry may pass the budget. An entry that holds `from` comes
+    /// whole. A read from a mark at or in seqs that the path no longer has reports them
+    /// as `gap` and goes on after them. When the path holds no entry after them, the
+    /// read gives the gap and no entry. The first read starts at `Mark::at(0)`; each
+    /// read continues at `next`, which a read that gives no entry and no gap does not
+    /// move. A read makes one file read for the table of each record it visits, two
+    /// when the record header and table pass 4 KiB, and one per entry with bytes.
     ///
     /// # Errors
     ///
@@ -478,12 +478,17 @@ impl Buffer {
         path: Path,
     ) -> Result<(), Error> {
         while let Some(from) = reading.next() {
-            let found = self.shared.state.borrow().logs.run(slot, path, from);
-            let Some((index, run)) = found else {
-                break;
-            };
-            if !reading.record(index, run).await? {
-                break;
+            let found = self.shared.state.borrow().logs.find(slot, path, from);
+            match found {
+                Found::Run(index, run) => {
+                    if !reading.record(index, run).await? {
+                        break;
+                    }
+                }
+                Found::End(end) => {
+                    reading.end(end);
+                    break;
+                }
             }
         }
         Ok(())
@@ -920,6 +925,8 @@ impl Future for Commit {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+    use std::pin::pin;
     use std::sync::{Arc, Mutex};
 
     use block::Heap;
@@ -1073,5 +1080,149 @@ mod tests {
         // is three records of two blocks.
         let tail = tail.lock().expect("no panic held the lock");
         assert_eq!(tail.map(crate::wal::Position::offset), Some(3 * 4096));
+    }
+
+    /// Three commits put [0, 3), [3, 6), and [6, 9) of one path in the records at
+    /// 4096, 8192, and 12288. Gives the slot of the path.
+    async fn create_three_records(
+        buffer: &Buffer,
+        slots: &mut Slots,
+        pool: &Pool,
+    ) -> Slot {
+        let one = slots.assign(channel::Key::from_u128(1));
+        let part = pool.alloc(100).expect("a block").freeze();
+        for commit in 0..3 {
+            let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
+            buffer.append(batch).expect("the ring has room");
+            buffer.committed().await.expect("commits");
+        }
+        one
+    }
+
+    /// The gap, the first seq of each entry, and the next mark of a read of the
+    /// live path at `slot` from `from`.
+    async fn read_from(
+        buffer: &Buffer,
+        slot: Slot,
+        from: u64,
+    ) -> (Option<Range<u64>>, Vec<u64>, Mark) {
+        let read = buffer
+            .read(slot, Path::Live, Mark::at(from), usize::MAX)
+            .await
+            .expect("reads");
+        let firsts = read.entries.iter().map(|entry| entry.first).collect();
+        (read.gap, firsts, read.next)
+    }
+
+    /// No commit trims yet, so the test moves the tail of the logs as a trim will.
+    #[test]
+    fn a_read_gives_the_seqs_of_the_records_that_a_trim_hid_as_its_gap() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let found = Arc::clone(&reads);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = create_three_records(&buffer, &mut slots, &pool).await;
+                let mut reads = Vec::new();
+                buffer.shared.state.borrow_mut().logs.hide(8192);
+                reads.push(read_from(&buffer, one, 0).await);
+                reads.push(read_from(&buffer, one, 1).await);
+                reads.push(read_from(&buffer, one, 3).await);
+                buffer.shared.state.borrow_mut().logs.hide(16384);
+                reads.push(read_from(&buffer, one, 0).await);
+                reads.push(read_from(&buffer, one, 8).await);
+                reads.push(read_from(&buffer, one, 9).await);
+                *found.lock().expect("no panic held the lock") = reads;
+                buffer
+            },
+        );
+        let reads = reads.lock().expect("no panic held the lock");
+        let expected = [
+            (Some(0..3), vec![3, 6], Mark::at(9)),
+            (Some(1..3), vec![3, 6], Mark::at(9)),
+            (None, vec![3, 6], Mark::at(9)),
+            (Some(0..9), vec![], Mark::at(9)),
+            (Some(8..9), vec![], Mark::at(9)),
+            (None, vec![], Mark::at(9)),
+        ];
+        assert_eq!(*reads, expected);
+    }
+
+    /// The durable end counts the entries with no samples at its seq. A read that
+    /// gives only a gap goes on after them. A read from their seq loses no sample:
+    /// it gives no gap and does not move.
+    #[test]
+    fn a_read_goes_on_after_the_hidden_entries_with_no_samples() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let found = Arc::clone(&reads);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.assign(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                let empty = || Entry {
+                    len: 0,
+                    ..entry(1, one, Path::Live, 3, &part)
+                };
+                let batch = [entry(1, one, Path::Live, 0, &part), empty(), empty()];
+                buffer.append(batch).expect("the ring has room");
+                buffer.committed().await.expect("commits");
+                buffer.shared.state.borrow_mut().logs.hide(8192);
+                let reads = vec![
+                    read_from(&buffer, one, 0).await,
+                    read_from(&buffer, one, 3).await,
+                ];
+                *found.lock().expect("no panic held the lock") = reads;
+                buffer
+            },
+        );
+        let reads = reads.lock().expect("no panic held the lock");
+        let end = Mark { seq: 3, given: 2 };
+        let expected = [(Some(0..3), vec![], end), (None, vec![], Mark::at(3))];
+        assert_eq!(*reads, expected);
+    }
+
+    /// The test hides the later records, as a trim will, while a read waits on its
+    /// first record. The read gives the entry it holds, and the next read gives the
+    /// gap.
+    #[test]
+    fn a_read_that_holds_entries_stops_before_the_seqs_that_a_trim_hid() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let found = Arc::clone(&reads);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = create_three_records(&buffer, &mut slots, &pool).await;
+                let mut reads = Vec::new();
+                {
+                    let mut read = pin!(read_from(&buffer, one, 0));
+                    let first = poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+                    assert!(first.is_pending(), "the read waits on a file read");
+                    buffer.shared.state.borrow_mut().logs.hide(16384);
+                    reads.push(read.await);
+                }
+                reads.push(read_from(&buffer, one, 3).await);
+                *found.lock().expect("no panic held the lock") = reads;
+                buffer
+            },
+        );
+        let reads = reads.lock().expect("no panic held the lock");
+        let expected = [
+            (None, vec![0], Mark::at(3)),
+            (Some(3..9), vec![], Mark::at(9)),
+        ];
+        assert_eq!(*reads, expected);
     }
 }
