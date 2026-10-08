@@ -802,7 +802,7 @@ How to read this record:
   default (`node`'s dev-dependency on itself turns it on for the bench), adds
   `#[doc(hidden)] pub mod bench` with `Scope { new, spawn }` over `scope::Scope`. Only
   the bench `benches/scope.rs` (`test = true`) uses it. Its `env::tasks::Driver` keeps
-  each task, and the bench polls that task by hand, so a time holds only
+  each task, `spawn` gives it, and the bench polls it by hand, so a time holds only
   `Spawned::poll` and the future's poll. A `bare` line polls the boxed future directly
   in the same binary, as the control. Lost: a time through `Node::spawn` on `sim` or
   Tokio, which hides a 0.3 ns change in the executor's cost, and a copy of the poll
@@ -810,9 +810,11 @@ How to read this record:
   `same_waker` time and the #715 baseline, taken from the form with `clone_from`,
   guard `clone_from`: an `Arc` waker clone allocates nothing, so no allocation count
   can. Decided by `laptop.architect-2` (2026-10-07 23:56 UTC):
-  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976. The
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976; the
+  surface of `spawn`, in round 1 of #1666 (2026-10-08 00:11 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049426380. The
   bench's `Driver`, beside those of `os` and `sim`, is the #1632 clause:
-  https://github.com/synnaxlabs/foundation/issues/1632#issuecomment-6049245215.
+  https://github.com/synnaxlabs/foundation/issues/1632#issuecomment-6049501422.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
