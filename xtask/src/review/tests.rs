@@ -129,13 +129,35 @@ fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
         check(&record(vec![bot(&swapped)])),
         vec![unended("Public surface")]
     );
-    let trailed = ROUND.to_string() + "\n\nThanks.";
+    let twice = ROUND.to_string() + "\nHot path: `Sender::send`";
     assert_eq!(
-        check(&record(vec![bot(&trailed)])),
-        vec![unended("Hot path")]
+        check(&record(vec![bot(&twice)])),
+        vec![
+            "review round 3 has a second `Hot path:` line after its `Deferred:` line."
+                .to_string()
+        ]
     );
     let spaced = ROUND.replace("\nHot path:", "\n\n  Hot path:") + "\n  \n";
     assert_eq!(check(&record(vec![bot(&spaced)])), Vec::<String>::new());
+}
+
+#[test]
+fn reads_an_end_line_that_wraps() {
+    let wrapped = ROUND
+        .replace(
+            "Deferred: none",
+            "Deferred: the trial, to #1467\n(https://github.com/a/b/issues/1467)",
+        )
+        .replace(
+            "Hot path: none",
+            "Hot path: none, the change\nis in tests only",
+        );
+    assert_eq!(check(&record(vec![bot(&wrapped)])), Vec::<String>::new());
+    let earlier = ROUND.replace(
+        "No bug",
+        "Deferred: none\nPublic surface: none\nHot path: `send`\n\nNo bug",
+    );
+    assert_eq!(check(&record(vec![bot(&earlier)])), Vec::<String>::new());
 }
 
 #[test]

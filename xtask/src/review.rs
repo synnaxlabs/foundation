@@ -277,27 +277,39 @@ fn round(body: &str) -> Option<Result<Round, String>> {
     Some(fields())
 }
 
-/// The value of the `Hot path:` line of round `number`, whose comment `body` must end
-/// with its `Deferred:`, `Public surface:`, and `Hot path:` lines, in that order.
+/// The text after `Hot path:` on its line in round `number`. The comment `body` must
+/// end with its `Deferred:`, `Public surface:`, and `Hot path:` lines, in that order,
+/// each of which may wrap onto the lines after it.
 fn hot_path(body: &str, number: u32) -> Result<&str, String> {
-    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty()).rev();
-    // The value of the next line from the end, which must be the `name:` line.
-    let mut last = |name| {
-        lines
-            .next()
-            .and_then(|l| l.strip_prefix(name)?.strip_prefix(": "))
-            .ok_or_else(|| {
-                format!(
-                    "review round {number} does not end with a `{name}:` line. End each \
+    const END: [&str; 3] = ["Deferred:", "Public surface:", "Hot path:"];
+    let lines: Vec<_> = body.lines().map(str::trim).collect();
+    let start = lines.iter().rposition(|l| l.starts_with(END[0]));
+    let mut found = lines[start.unwrap_or(lines.len())..]
+        .iter()
+        .filter_map(|l| {
+            END.iter()
+                .find_map(|name| Some((*name, l.strip_prefix(name)?.trim())))
+        });
+    let mut hot = "";
+    for name in END {
+        match found.next() {
+            Some((line, value)) if line == name => hot = value,
+            _ => {
+                return Err(format!(
+                    "review round {number} does not end with a `{name}` line. End each \
                      round with its `Deferred:`, `Public surface:`, and `Hot path:` \
                      lines, in that order, in the format of \
                      .claude/skills/review/SKILL.md, \"Round comment\"."
-                )
-            })
-    };
-    let hot = last("Hot path")?;
-    last("Public surface")?;
-    last("Deferred")?;
+                ));
+            }
+        }
+    }
+    if let Some((name, _)) = found.next() {
+        return Err(format!(
+            "review round {number} has a second `{name}` line after its `Deferred:` \
+             line."
+        ));
+    }
     Ok(hot)
 }
 
