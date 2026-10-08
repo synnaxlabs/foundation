@@ -39,10 +39,13 @@ impl fmt::Display for Position {
 pub enum Reader {
     /// A reader without a name. It holds data only while its session is open.
     Unnamed,
-    /// A reader with a name. It has at most one session at a time. After the session
-    /// closes, the reader keeps its position and holds its data for `hold`. A hold of
-    /// zero ends at the close.
+    /// A reader with a name, which belongs to the subject that opens it. It has at most
+    /// one session at a time. After the session closes, the reader keeps its position
+    /// and holds its data for `hold`. A hold of zero ends at the close. Readers of the
+    /// same name and different subjects share nothing.
     Named {
+        /// The subject that opens the reader.
+        subject: Name,
         /// The reader's name.
         name: Name,
         /// How long the reader holds its data after its session closes: zero or more.
@@ -71,6 +74,8 @@ pub enum Start {
 /// ones before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
+    /// The subject whose reader it is.
+    pub subject: Name,
     /// The reader's name.
     pub reader: Name,
     /// The reader's position.
