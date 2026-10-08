@@ -7,7 +7,7 @@ publish.workspace = true
 
 [features]
 # Exposes `Scope` to the `scope` bench. Off by default.
-bench = []
+sim = []
 
 [[bin]]
 name = "foundation"
@@ -29,8 +29,8 @@ types = { path = "../types" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
 divan = { workspace = true }
-# Turns on `bench` for the bench, since the bench host runs no features.
-node = { path = ".", features = ["bench"] }
+# Turns on `sim` for the bench, since the bench host runs no features.
+node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
