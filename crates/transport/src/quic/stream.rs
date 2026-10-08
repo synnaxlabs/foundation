@@ -11,7 +11,7 @@ use std::task::Poll;
 use std::{iter, mem};
 
 use block::{Block, Unique};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use noq_proto::{
     ClosedStream, Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId,
     VarInt, WriteError,
@@ -59,7 +59,7 @@ struct Half {
     header: [u8; 1 + varint::BYTES_MAX],
     /// The bytes of `header` that the stream has not taken.
     unsent: Range<usize>,
-    /// The block of the message in hand. Empty once a write gives its last run.
+    /// The block of the message in hand.
     block: Bytes,
     /// The rest of a chunk of the message in hand that the stream took in part.
     chunk: Bytes,
@@ -422,7 +422,7 @@ impl Half {
             if !left.skip() {
                 return Ok(());
             }
-            let (piece, after) = left.piece(&mut self.block, buffer);
+            let (piece, after) = left.piece(&self.block, buffer);
             match piece {
                 Piece::Chunk(chunk) => (self.chunk, *left) = (chunk, after),
                 Piece::Copied(bytes) => {
@@ -585,10 +585,10 @@ impl<'a> Left<'a> {
     /// [`COPIED_MAX`] bytes, else the stretch of shorter runs and zeros up to the
     /// next long run. A stretch of at most [`COPIED_MAX`] bytes is one range of
     /// `block` when it is one part with no zeros, else a copy in `buffer`. A longer
-    /// one is a copy in a new buffer of its length. The last run takes `block`.
+    /// one is a copy in a new buffer of its length.
     fn piece<'b>(
         &self,
-        block: &'b mut Bytes,
+        block: &'b Bytes,
         buffer: &'b mut Vec<u8>,
     ) -> (Piece<'b>, Self) {
         if self.tail.is_empty() && self.head.zeros == 0 {
@@ -596,15 +596,14 @@ impl<'a> Left<'a> {
             let mut after = self.clone();
             after.head.range.start = range.end;
             if range.len() > COPIED_MAX {
-                return (Piece::Chunk(run(block, range, true)), after);
+                return (Piece::Chunk(block.slice(range)), after);
             }
             return (Piece::Copied(&block[range]), after);
         }
         let (bytes, after) = self.stretch();
         if bytes == 0 {
             let (range, after) = self.run();
-            let last = !after.clone().skip();
-            return (Piece::Chunk(run(block, range, last)), after);
+            return (Piece::Chunk(block.slice(range)), after);
         }
         if bytes <= COPIED_MAX {
             buffer.clear();
@@ -664,17 +663,6 @@ impl<'a> Left<'a> {
             bytes -= part.range.len() + usize::from(part.zeros);
         }
     }
-}
-
-/// `range` of `block`, which takes `block` when `last`: no later write reads it.
-fn run(block: &mut Bytes, range: Range<usize>, last: bool) -> Bytes {
-    if !last {
-        return block.slice(range);
-    }
-    let mut run = mem::take(block);
-    run.truncate(range.end);
-    run.advance(range.start);
-    run
 }
 
 /// The size rule of every send.
@@ -4682,10 +4670,10 @@ mod tests {
     /// into the given buffer.
     fn pieces(block: &Bytes, parts: &[Part]) -> Vec<(&'static str, Vec<u8>)> {
         let (mut left, mut buffer) = (Left::new(parts), Vec::new());
-        let (within, mut block) = (block.as_ptr_range(), block.clone());
+        let within = block.as_ptr_range();
         let mut pieces = Vec::new();
         while left.skip() {
-            let (piece, after) = left.piece(&mut block, &mut buffer);
+            let (piece, after) = left.piece(block, &mut buffer);
             let (kind, bytes) = match piece {
                 Piece::Chunk(chunk) if within.contains(&chunk.as_ptr()) => {
                     ("slice", chunk.to_vec())
