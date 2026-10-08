@@ -585,7 +585,6 @@ fn ends_the_commit_task_once_each_session_that_outlives_the_hub_drops() {
         assert_eq!(write(&mut writer, &[now], &[7]), [applied(0)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [7]);
-        drop(received);
         drop(writer);
         clock.sleep(SETTLE).await;
         assert_eq!(ended.get(), 0, "the reader holds the home");
