@@ -78,7 +78,7 @@ fn reads_a_named_complete_reader_with_a_hold() {
         mode: Mode::Complete,
         hold: "2h".parse().expect("a span"),
     };
-    assert_eq!(read(&config), Ok(expected));
+    assert_eq!(read(&config, &[], &[]), Ok(expected));
 }
 
 #[test]
@@ -90,18 +90,18 @@ fn reads_an_ad_hoc_complete_reader_with_no_reader_block() {
         mode: Mode::Complete,
         hold: Span::ZERO,
     };
-    assert_eq!(read(&config), Ok(expected));
+    assert_eq!(read(&config, &[], &[]), Ok(expected));
 }
 
 #[test]
 fn reads_a_latest_mode_written_as_a_reference() {
     let config = config(&[(70, "mode", Kind::Reference(name("latest")))]);
-    let settings = read(&config).expect("settings");
+    let settings = read(&config, &[], &[]).expect("settings");
     assert_eq!((settings.mode, settings.hold), (Mode::Latest, Span::ZERO));
 }
 
 #[test]
-fn leaves_the_keys_it_does_not_read_to_the_kind() {
+fn leaves_the_keys_of_the_kind_to_the_kind() {
     let mut config = config(&[]);
     config = document(
         &[
@@ -114,13 +114,13 @@ fn leaves_the_keys_it_does_not_read_to_the_kind() {
         .blocks
         .push(block(90, "channel", Document::default()));
     assert_eq!(
-        read(&config).map(|settings| settings.select),
+        read(&config, &["address"], &["channel"]).map(|settings| settings.select),
         Ok(selector("edge.*"))
     );
 }
 
 #[test]
-fn names_what_it_reads_for_the_kind_to_check() {
+fn refuses_a_key_that_neither_it_nor_the_kind_reads() {
     let config = document(
         &[
             (0, "select", string("edge.*")),
@@ -130,23 +130,25 @@ fn names_what_it_reads_for_the_kind_to_check() {
         vec![
             block(30, "reader", Document::default()),
             block(40, "channel", Document::default()),
+            block(45, "inner", Document::default()),
         ],
     );
-    let found: Vec<_> = document::read::unknown(
-        &config,
-        "the connector",
-        &["address", KEYS[0]],
-        &BLOCKS,
-    )
-    .into_iter()
-    .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
-    .collect();
     assert_eq!(
-        found,
-        [
-            ("document.unknown-attribute", at(20)),
-            ("document.unknown-block", at(40)),
-        ]
+        read(&config, &["address"], &["channel"]),
+        Err(vec![
+            refused(
+                "document.unknown-attribute",
+                20,
+                "`port` is not an attribute of the connector",
+                "Use `select` or `address`, or remove it",
+            ),
+            refused(
+                "document.unknown-block",
+                45,
+                "the connector cannot hold the `inner` block",
+                "Use `reader` or `channel`, or remove it",
+            ),
+        ])
     );
 }
 
@@ -160,7 +162,7 @@ fn refuses_a_config_with_no_select() {
         "Add a `select` attribute with the channels it reads, such as \"site_a.**\""
             .into(),
     );
-    assert_eq!(read(&config), Err(vec![expected]));
+    assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
 }
 
 #[test]
@@ -172,7 +174,7 @@ fn refuses_a_select_that_does_not_read() {
         "a pattern is a string or a reference, not an integer",
         "Write a string such as \"site_a.*\"",
     );
-    assert_eq!(read(&config), Err(vec![expected]));
+    assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
 }
 
 #[test]
@@ -184,7 +186,7 @@ fn refuses_a_hold_with_no_name() {
         "the reader has a `hold` and no `name`, and an ad hoc reader holds nothing",
         "Add a `name`, or remove the `hold`",
     );
-    assert_eq!(read(&config), Err(vec![expected]));
+    assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
 }
 
 #[test]
@@ -196,13 +198,16 @@ fn refuses_a_negative_hold_at_its_value() {
         "the reader holds -1s, which is below zero",
         "Write a hold of zero or more",
     );
-    assert_eq!(read(&config), Err(vec![expected]));
+    assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
 }
 
 #[test]
 fn reads_a_zero_hold() {
     let config = config(&[(60, "name", string("influx")), (80, "hold", string("0s"))]);
-    assert_eq!(read(&config).map(|settings| settings.hold), Ok(Span::ZERO));
+    assert_eq!(
+        read(&config, &[], &[]).map(|settings| settings.hold),
+        Ok(Span::ZERO)
+    );
 }
 
 #[test]
@@ -218,7 +223,7 @@ fn refuses_a_hold_in_latest_mode() {
         "the reader has a `hold` in `latest` mode, and only a complete reader holds",
         "Use `mode = \"complete\"`, or remove the `hold`",
     );
-    assert_eq!(read(&config), Err(vec![expected]));
+    assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
 }
 
 #[test]
@@ -226,7 +231,7 @@ fn refuses_an_unknown_mode_and_a_mode_that_is_not_text() {
     let fix = "Write \"complete\" or \"latest\"";
     let config_of = |kind| config(&[(70, "mode", kind)]);
     assert_eq!(
-        read(&config_of(string("all"))),
+        read(&config_of(string("all")), &[], &[]),
         Err(vec![refused(
             "connector.bad-mode",
             71,
@@ -235,27 +240,65 @@ fn refuses_an_unknown_mode_and_a_mode_that_is_not_text() {
         )])
     );
     assert_eq!(
-        read(&config_of(Kind::Bool(true))),
+        read(&config_of(Kind::Bool(true)), &[], &[]),
         Err(vec![refused(
             "connector.bad-mode",
             71,
-            "a mode is a string, not a bool",
+            "a mode is a string or a reference, not a bool",
             fix
         )])
     );
 }
 
+/// The diagnostic of the name "a..b" at offset 61.
+fn bad_name() -> Diagnostic {
+    refused(
+        "document.bad-name",
+        61,
+        "a segment is not valid: \"\" in \"a..b\"",
+        "Use one or more ASCII letters, digits, `_`, and `-` in that segment, after an \
+         optional leading `@`",
+    )
+}
+
 #[test]
 fn refuses_a_name_and_a_hold_that_do_not_read() {
     let config = config(&[(60, "name", string("a..b")), (80, "hold", string("x"))]);
-    let diagnostics = read(&config).expect_err("refused");
-    let found: Vec<_> = diagnostics
-        .iter()
-        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
-        .collect();
     assert_eq!(
-        found,
-        [("document.bad-name", at(61)), ("document.bad-span", at(81))]
+        read(&config, &[], &[]),
+        Err(vec![
+            bad_name(),
+            refused(
+                "document.bad-span",
+                81,
+                "cannot read the span \"x\": a span is not a number and a unit",
+                "Write a span such as \"250us\", \"1.5s\", or \"3d\"",
+            ),
+        ])
+    );
+}
+
+#[test]
+fn refuses_only_a_bad_name_with_a_hold() {
+    let config = config(&[(60, "name", string("a..b")), (80, "hold", string("2h"))]);
+    assert_eq!(read(&config, &[], &[]), Err(vec![bad_name()]));
+}
+
+#[test]
+fn refuses_only_a_bad_mode_with_a_hold() {
+    let config = config(&[
+        (60, "name", string("influx")),
+        (70, "mode", string("all")),
+        (80, "hold", string("2h")),
+    ]);
+    assert_eq!(
+        read(&config, &[], &[]),
+        Err(vec![refused(
+            "connector.bad-mode",
+            71,
+            "the reader has no mode \"all\"",
+            "Write \"complete\" or \"latest\"",
+        )])
     );
 }
 
@@ -264,7 +307,7 @@ fn refuses_a_second_reader_block_after_a_good_one() {
     let mut config = config(&[(60, "name", string("influx"))]);
     config.blocks.push(block(95, "reader", Document::default()));
     assert_eq!(
-        read(&config),
+        read(&config, &[], &[]),
         Err(vec![refused(
             "config.repeated-block",
             95,
@@ -289,7 +332,7 @@ fn refuses_what_the_reader_block_does_not_take() {
         .push(block(90, "inner", Document::default()));
     config.blocks.push(block(95, "reader", Document::default()));
     assert_eq!(
-        read(&config),
+        read(&config, &[], &[]),
         Err(vec![
             refused(
                 "config.repeated-block",
@@ -379,6 +422,6 @@ fn written(settings: &Settings, pattern: &str) -> Document {
 proptest! {
     #[test]
     fn reads_back_the_settings_a_config_writes((settings, pattern) in settings()) {
-        prop_assert_eq!(read(&written(&settings, &pattern)), Ok(settings));
+        prop_assert_eq!(read(&written(&settings, &pattern), &[], &[]), Ok(settings));
     }
 }
