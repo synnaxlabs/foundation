@@ -610,7 +610,7 @@ impl<'a> Left<'a> {
             // Not `Bytes::copy_from_slice`: with a second caller, it stays out of line
             // in noq-proto's `SendStream::write`, and each long run costs about 12 ns
             // more on the release profile.
-            return (Piece::Chunk(Bytes::from(buffer.to_vec())), after);
+            return (Piece::Chunk(Bytes::from(buffer.clone())), after);
         }
         (Piece::Copied(buffer), after)
     }
