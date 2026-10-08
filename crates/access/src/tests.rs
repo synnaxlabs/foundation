@@ -36,17 +36,6 @@ fn connector() -> Definition {
     Definition::Connector(Connector::new(name("modbus"), name("gw_1"), config))
 }
 
-fn index_channel() -> Definition {
-    let kind = ChannelKind::Index {
-        error: None,
-        control: None,
-    };
-    Definition::Channel(Channel {
-        key: channel::Key::from_u128(1),
-        kind,
-    })
-}
-
 type Tree = BTreeMap<Name, Definition>;
 
 /// One tree per region, in the order that each region first comes, with each policy
@@ -220,9 +209,16 @@ fn takes_the_connectors_of_each_region_tree() {
     }
 }
 
-#[test]
-fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
+/// One definition of each kind that is not a connector, each under `site_a`.
+fn other_kinds() -> Tree {
     let all = || Selector::new(["**"]).unwrap();
+    let channel = Channel {
+        key: channel::Key::from_u128(1),
+        kind: ChannelKind::Index {
+            error: None,
+            control: None,
+        },
+    };
     let home = Nodes {
         home: Some(name("node_1")),
         ..Nodes::default()
@@ -231,8 +227,8 @@ fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
         select: all(),
         mode: Mode::Raw,
     };
-    let tree = Tree::from([
-        (name("site_a.daq"), index_channel()),
+    Tree::from([
+        (name("site_a.daq"), Definition::Channel(channel)),
         (
             Kind::Access.key("site_a.k").unwrap(),
             Definition::Access(policy("ops.*", "**", &[Action::Read], 0)),
@@ -263,7 +259,12 @@ fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
             Kind::Retention.key("site_a.k").unwrap(),
             Definition::Retention(retention::Policy::new(all(), Span::SECOND).unwrap()),
         ),
-    ]);
+    ])
+}
+
+#[test]
+fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
+    let tree = other_kinds();
     let rules = Rules::new([(Prefix::ROOT, &tree)]);
     for subject in tree.keys() {
         let on = format!("{subject}.pt_1");
@@ -272,25 +273,26 @@ fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
     }
 }
 
+// Each name of `other_kinds` sorts before the connectors, and they before `z`.
 #[test]
 fn keeps_each_definition_after_another_in_one_tree() {
-    let tree = Tree::from([
-        (name("a.daq"), index_channel()),
-        (name("b.gw"), connector()),
-        (name("c.gw"), connector()),
+    let mut tree = other_kinds();
+    tree.extend([
+        (name("x.gw"), connector()),
+        (name("y.gw"), connector()),
         (
-            Kind::Access.key("d").unwrap(),
-            Definition::Access(policy("ops.*", "**", &[Action::Read], 0)),
+            Kind::Access.key("z").unwrap(),
+            Definition::Access(policy("ops.*", "**", &[Action::Plan], 0)),
         ),
     ]);
     let rules = Rules::new([(Prefix::ROOT, &tree)]);
     let write = [Action::Write].into_iter().collect();
-    for gateway in ["b.gw", "c.gw"] {
+    for gateway in ["x.gw", "y.gw"] {
         let on = format!("{gateway}.ai_0");
         assert_eq!(grant(&rules, gateway, &on).actions(), write, "{gateway}");
     }
-    let read = [Action::Read].into_iter().collect();
-    assert_eq!(grant(&rules, "ops.ana", "x.pt_1").actions(), read);
+    let both = [Action::Read, Action::Plan].into_iter().collect();
+    assert_eq!(grant(&rules, "ops.ana", "x.pt_1").actions(), both);
 }
 
 #[test]
