@@ -253,6 +253,18 @@ fn a_change_with_no_definition_changes_nothing_only_at_a_name_with_none() {
     assert_eq!(found, Err(Error::Mismatch { name: at }));
 }
 
+#[test]
+fn accepts_a_change_whose_new_bytes_equal_the_stored_bytes() {
+    let mut spec = Spec::create_empty();
+    spec.apply(&spec.plan(&[PLANT], &["n"]).expect("no problems"));
+    let applied = spec.definitions();
+    let stored = &applied[&name("a.@placement")];
+    let same = Some(Definition::Spec(stored.clone()));
+    let plan = one("a.@placement", Some(stored), same);
+    let found = plan.definitions(&applied, keys(spec.made));
+    assert_eq!(found, Ok(applied.clone()));
+}
+
 /// The fixture texts that [`plan_then_definitions_never_refuses`] applies and plans.
 const TEXTS: [&str; 4] = [EDGE, INFLUX, EACH, PLANT];
 
