@@ -40,10 +40,7 @@ For each `interface` issue (the proposed signature and the reason):
    design lessons. Each new public item needs a caller on the milestone path.
 2. Inside the locked decisions: approve it on the issue with the exact signature, or
    refuse it with the reason. The crate's builder makes the change.
-3. A change to a locked decision, a contract, or an oracle: ask the person in a comment
-   on the issue (the problem, the fix, its cost, patch or long-term path, your
-   recommendation), then send `laptop.coordinator` the link to that comment at once
-   (`docs/coordination.md`, "Messages"). A comment alone reaches no one.
+3. A change to a locked decision, a contract, or an oracle: ask the person (Records).
 4. After it merges, file an issue for each crate that must follow, and send the links to
    `laptop.coordinator`.
 
@@ -65,7 +62,8 @@ person's:
 
 Two sessions disagree on a contract: read both positions on the issue, decide inside the
 locked decisions, and write the decision on the issue. A disagreement that needs a
-locked decision changed goes to the person, with both positions and your recommendation.
+locked decision changed goes to the person (Records), with both positions and your
+recommendation.
 
 ## Night-ready contracts
 
@@ -79,6 +77,11 @@ the commit you checked:
 
 ## Records
 
+- Ask the person each question in a comment on its issue or PR (the problem, the fix,
+  its cost, patch or long-term path, your recommendation), then send
+  `laptop.coordinator` the link to that comment at once (`docs/coordination.md`,
+  "Messages"). A comment alone reaches no one. This holds for a question in a ruling on
+  any issue, in a contract disagreement, and in a rule proposal.
 - Label `model:fable` only an issue where a subtle mistake is expensive and hard to find
   later: consensus, crash recovery, lock-free code, wake protocols. Never a whole crate.
 - Post each ruling as a comment on its issue at once. The builder acts on it and adds it
@@ -100,4 +103,4 @@ the commit you checked:
    an item of an open issue in its crate when one fits, and each other one as an issue
    with its `crate:` label, one per finding. Send the links to `laptop.coordinator`.
 5. When an agent finds a gap in its own rulebook (`.claude/agents/`), propose the rule
-   to the person. People own the rulebooks.
+   to the person (Records). People own the rulebooks.
