@@ -80,7 +80,8 @@ fn serve(runtime: LocalRuntime, main: Main) -> bool {
         })
         .await;
     });
-    // The drop of a task may panic, also of one that the shard spawned without `tasks`.
+    // Tokio catches a panic in the drop of a task that the shard spawned without
+    // `tasks`, but not each panic in the drops of its payloads.
     let dropped = unwind::catch(|| drop(runtime)).is_some();
     alarm.raised.get() || !dropped
 }

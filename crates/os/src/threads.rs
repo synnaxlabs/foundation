@@ -42,8 +42,9 @@ fn build(cores: &Cores, name: &str) -> Result<Runtime, Error> {
 }
 
 /// Runs `body` to completion, then drops `runtime`. Returns whether a panic happened,
-/// in the call, the poll, or the drop of the body, or in the drop of a task that it
-/// spawned on `runtime`.
+/// in the call, the poll, or the drop of the body, or in the drop of `runtime`. Tokio
+/// catches a panic in the drop of a task that the body spawned on `runtime`, but not
+/// each panic in the drops of its payloads.
 fn serve(runtime: Runtime, body: Body) -> bool {
     let panicked = drive(&runtime, body);
     unwind::catch(|| drop(runtime)).is_none() || panicked
