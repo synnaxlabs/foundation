@@ -54,9 +54,10 @@ pub trait Kind: Send + Sync + 'static {
 /// What a checked connector reads and writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Channels {
-    /// The channels it reads from the device.
+    /// The channels it reads from the mesh: commands for the device, or samples it
+    /// sends out.
     pub reads: Vec<Name>,
-    /// The channels it writes to the device.
+    /// The channels it writes to the mesh: samples from the device.
     pub writes: Vec<Name>,
 }
 
@@ -366,8 +367,8 @@ mod tests {
                 return Err(vec![diagnostic(RANGE, "n is over 8")]);
             }
             Ok(Channels {
-                reads: (0..*n).map(|i| name(&format!("counter.c{i}"))).collect(),
-                writes: Vec::new(),
+                reads: Vec::new(),
+                writes: (0..*n).map(|i| name(&format!("counter.c{i}"))).collect(),
             })
         }
 
@@ -411,12 +412,12 @@ mod tests {
     #[test]
     fn checks_a_config_through_its_kind() {
         let channels = table().check("counter", None, &config(2));
-        let reads = vec![name("counter.c0"), name("counter.c1")];
+        let writes = vec![name("counter.c0"), name("counter.c1")];
         assert_eq!(
             channels,
             Ok(Channels {
-                reads,
-                writes: Vec::new()
+                reads: Vec::new(),
+                writes
             })
         );
     }
