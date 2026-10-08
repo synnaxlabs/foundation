@@ -2043,9 +2043,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
   `types::ed25519::Pair::new` is the one place that derives the public key from the
   private key (`Pair` ruling below). `PrivateKey::public` derives through it, for a
-  caller that needs only the key, or needs it once at an open or a join: `config`,
-  `node`, `transport` and `mesh` at open, `mesh::Ticket`, and tests. A holder that
-  signs for each message or request keeps one `Pair`. No crate keeps a copy. So
+  caller that needs only the key, or needs it once at an open or a join: `transport`
+  and `mesh` at open, `mesh::Ticket`, and tests. A holder that signs for each message
+  or request keeps one `Pair`. No crate keeps a copy. So
   `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
   crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
   Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
