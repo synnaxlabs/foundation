@@ -379,7 +379,11 @@ impl<'a> Layout<'a> {
         }
         let mut end = 0_usize;
         for (descriptor, &(entry, size)) in descriptors.iter_mut().zip(series) {
-            if let Sizes::Lens = sizes {
+            // An empty fill still calls `memset`, which costs about 90 ns on a page
+            // that nothing has written.
+            if let Sizes::Lens = sizes
+                && !end.is_multiple_of(SERIES_ALIGN)
+            {
                 body[end..padded(end)].fill(0);
             }
             end = sizes.end(end, size);
