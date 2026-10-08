@@ -4375,7 +4375,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
 - **CLIENT HELLO (2026-10-08)** A program's session with the node it connects to
   has a hello stream and request streams (`wire::hub::client`, kinds 4 and 5). Hub
-  kinds are one space: the first byte of a hub stream picks its decoder. The
+  kinds are one space: the first byte of a hub stream picks its decoder
+  (`laptop.architect`, 2026-10-08T10:19:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181). The
   hello stream is the first hub stream and lives as long as the session. The node sends
   a `Challenge` (a fresh nonce and its mesh time) first and after each admitted hello;
   the program sends a `Signed` hello that echoes it, first and to renew at half its
