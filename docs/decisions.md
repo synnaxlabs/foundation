@@ -2370,19 +2370,21 @@ How to read this record:
   hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
   give `Error::Homes`, both before the read of the base tree. A node name that no
   member has gives `Error::UnknownNode`, after `Error::NoVote` and before the first
-  put. None of them proposes anything. This order decided by `laptop.architect`,
-  2026-10-08T17:01:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210). It
-  then builds the tree with
-  `spec::region::tree`. The change lists each chunk of the new tree that the tree of the
-  base lacks, or each chunk of the new tree when `Config::store`, the node's
-  `blob::Store`, cannot give the tree of the base. A change that lists more than
-  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A base
-  root whose chunk is not a tree node is a base tree that the store cannot give. The
-  node counts itself as the one holder. When the holders are not a majority of each half
-  of the voters, before the propose or at the apply, the call gives `Error::Quorum {
-  held, voters }` for the first half that lacks one, the incoming half first. The count
-  before the propose costs no entry and no put. The node then puts each chunk of the new
+  put. None of them proposes anything. `Homes` right after `NotIndex` decided by
+  `laptop.architect`, 2026-10-08T17:01:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210), and
+  the order as a whole approved at 2026-10-08T17:15:26Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065202125). It then
+  builds the tree with `spec::region::tree`. The change lists each chunk of the new
+  tree that the tree of the base lacks, or each chunk of the new tree when
+  `Config::store`, the node's `blob::Store`, cannot give the tree of the base. A change
+  that lists more than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and
+  proposes nothing. A base root whose chunk is not a tree node is a base tree that the
+  store cannot give. The node counts itself as the one holder. When the holders are
+  not a majority of each half of the voters, before the propose or at the apply, the
+  call gives `Error::Quorum { held, voters }` for the first half that lacks one, the
+  incoming half first. The count before the propose costs no entry and no put. The
+  node then puts each chunk of the new
   tree in its store, not only the listed ones, because `diff` never reads a chunk that
   the two trees share, so a chunk that the store lost is found only by a put. On `Ok`,
   a put of each chunk of the new tree has returned. BLOB STORE gives what a put holds
@@ -2409,14 +2411,17 @@ How to read this record:
   listed home is a proposal: the entry gives it only to an index with none. On `Ok`,
   the pointer is the call's and each listed index has a home in the state, the listed
   one or the one it had. A call whose entry finds `base.next(root)` returns it when
-  each listed index has a home, and else gives `Stale`; the path of the call's own
-  entry checks nothing, so both paths give the same result. Decided by
+  each listed index has a home, and else gives `Stale`; the path on which the call's
+  entry applies checks nothing, so both paths give the same result. Decided by
   `laptop.architect`, 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
   changed by `laptop.architect` at 2026-10-08T17:34:20Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915), which
   supersedes item 2 of
-  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958. The
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958.
+  Supersedes, in
+  https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107, the `Ok`
+  of an equal change of another call that leaves a listed index with no home. The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
