@@ -104,14 +104,15 @@ where
 
 /// As [`session_with`], where `program` runs on the program's node with the home's
 /// address, and dials it itself.
-pub(super) fn serve_session<P>(
+pub(super) fn serve_session<G, P>(
     seed: u64,
     synced: bool,
     pool: usize,
     rules: Option<access::Rules>,
-    program: impl FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+    program: G,
 ) -> Home
 where
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
     let served = Arc::new(Mutex::new(Vec::new()));
@@ -206,12 +207,11 @@ async fn as_agent<P>(
 
 /// Runs `home` on one simulated node, and `program` on another, with the home's
 /// address.
-pub(super) fn run_program<H, P>(
-    seed: u64,
-    home: impl FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
-    program: impl FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
-) where
+pub(super) fn run_program<F, H, G, P>(seed: u64, home: F, program: G)
+where
+    F: FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
     H: Future<Output = ()> + 'static,
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
     let mut sim = sim::Sim::new(sim::Config {

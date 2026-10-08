@@ -136,13 +136,19 @@ impl fmt::Display for Refusal {
                  signature is not valid"
             }
             Self::Unsynced => "the node has no mesh time yet",
-            Self::Stale => "the hello does not echo the nonce of the node's last challenge",
+            Self::Stale => {
+                "the hello does not echo the nonce of the node's last \
+                 challenge"
+            }
             Self::Via => "the hello names another node as via",
             Self::Expired => "the hello expired",
-            Self::Capped => "the hello expires later than the cap past the earliest mesh time",
+            Self::Capped => {
+                "the hello expires later than the cap past the earliest mesh \
+                 time"
+            }
             Self::Changed => {
-                "a renewal names another subject, key, via, or connection than the hello \
-                 it renews"
+                "a renewal names another subject, key, via, or connection than \
+                 the hello it renews"
             }
         })
     }
