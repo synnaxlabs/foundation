@@ -1129,14 +1129,21 @@ mod tests {
         #[test]
         fn tells_attributes_and_blocks_apart() {
             let body = body(&[(1, "reader")], &[(2, "select")]);
-            let found = unknown(&body, "the connector", &["select"], &["reader"]);
-            let codes: Vec<_> =
-                found.iter().map(|d| (d.code.as_str(), d.span)).collect();
             assert_eq!(
-                codes,
+                unknown(&body, "the connector", &["select"], &["reader"]),
                 [
-                    ("document.unknown-attribute", at(1)),
-                    ("document.unknown-block", at(2)),
+                    diagnostic(
+                        "document.unknown-attribute",
+                        1,
+                        "`reader` is not an attribute of the connector",
+                        "Use `select`, or remove it",
+                    ),
+                    diagnostic(
+                        "document.unknown-block",
+                        2,
+                        "the connector cannot hold the `select` block",
+                        "Use `reader`, or remove it",
+                    ),
                 ]
             );
         }
