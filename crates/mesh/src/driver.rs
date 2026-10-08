@@ -219,6 +219,12 @@ impl Mesh {
         })
     }
 
+    /// This node: [`Config::key`].
+    #[must_use]
+    pub fn key(&self) -> node::Key {
+        self.group.borrow().raft.key()
+    }
+
     /// A watch of the home of `index`.
     #[must_use]
     pub fn watch(&self, index: channel::Key) -> Watch {
@@ -3417,6 +3423,46 @@ mod tests {
             let text = format!("node {} is not a member of the region", key(3));
             assert_eq!(refused.to_string(), text);
             assert_eq!(node.files().list(Path::new("")).await, Ok(Vec::new()));
+        });
+    }
+
+    #[test]
+    fn key_gives_this_node_while_another_node_leads() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            let leader = Some(key(2));
+            let follows = Error::Raft(raft::Error::NotLeader { leader });
+            assert_eq!(mesh.propose(home(3)).await, Err(follows));
+            assert_eq!(mesh.key(), key(1));
+        });
+    }
+
+    #[test]
+    fn key_gives_this_node_after_it_votes_for_another_node() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let grant = common::signature(3, Grant::PreVote, 2);
+            let proof = Proof {
+                grant: Grant::PreVote,
+                candidate: key(2),
+                voters: [(key(2), None), (key(3), Some(grant))].into(),
+            };
+            let last = Position::default();
+            let mut ready = Ready {
+                messages: vec![raft::Message {
+                    proof: Some(proof),
+                    ..message(2, 1, Body::Vote { last })
+                }],
+                ..Ready::default()
+            };
+            common::signer(2).sign(&mut ready);
+            let vote = ready.messages.remove(0);
+            assert_eq!(mesh.receive(public(2), vote), Ok(()));
+            let granted = common::granted(1, Grant::Vote, 2);
+            assert_eq!(mesh.outgoing(key(2)).await, Ok(granted));
+            assert_eq!(mesh.key(), key(1));
         });
     }
 

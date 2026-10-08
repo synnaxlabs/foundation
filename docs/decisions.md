@@ -2579,12 +2579,16 @@ How to read this record:
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
-  `Watch::next`, and `Mesh::member` (#562). `next` gives `Stopped`, which holds the
-  cause types `log::Error` and `change::Unknown`, each public in its own module, so a
-  caller can match the exact cause. `next` gives `Stopped` and not `Error`, because a
-  stop is the only error that it has: the type says what the call gives. For a read of a
-  home, `hub` gets the variant `Error::Mesh(mesh::Stopped)` in #340, which supersedes
-  the `Error::Mesh(mesh::Error)` of its plan
+  `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
+  the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
+  differ (#1664). Approved by `laptop.architect`, 2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `next`
+  gives `Stopped`, which holds the cause types `log::Error` and `change::Unknown`, each
+  public in its own module, so a caller can match the exact cause. `next` gives
+  `Stopped` and not `Error`, because a stop is the only error that it has: the type says
+  what the call gives. For a read of a home, `hub` gets the variant
+  `Error::Mesh(mesh::Stopped)` in #340, which supersedes the `Error::Mesh(mesh::Error)`
+  of its plan
   (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6002776268). The
   cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
   A `Stopped` that holds a text for each cause lost, because a caller cannot match a
