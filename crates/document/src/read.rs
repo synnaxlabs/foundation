@@ -121,7 +121,7 @@ fn span_fix(error: time::Error) -> String {
         time::Error::Span => {
             "Write a span such as \"250us\", \"1.5s\", or \"3d\"".into()
         }
-        time::Error::Long => "Use a span from \"-106751d\" to \"106751d\"".into(),
+        time::Error::Long => "Use a span from \"0s\" to \"106751d\"".into(),
         time::Error::Fraction
         | time::Error::Stamp
         | time::Error::Date
@@ -1057,7 +1057,7 @@ mod tests {
             (
                 "106752d",
                 "a span does not fit in 64-bit nanoseconds",
-                "Use a span from \"-106751d\" to \"106751d\"",
+                "Use a span from \"0s\" to \"106751d\"",
             ),
         ] {
             assert_eq!(
@@ -1065,6 +1065,16 @@ mod tests {
                 refused_span(&format!("cannot read the span {text:?}: {problem}"), fix),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reads_each_span_that_the_fix_of_a_long_span_names() {
+        for text in ["106752d", "-106752d"] {
+            let fix = super::span(&string(text)).unwrap_err().fix;
+            for named in fix.split('"').skip(1).step_by(2) {
+                assert!(super::span(&string(named)).is_ok(), "{text:?}: {named:?}");
+            }
         }
     }
 
@@ -1138,7 +1148,8 @@ mod tests {
             match (super::span(&string(&text)), text.parse::<time::Span>()) {
                 (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
                 (Err(diagnostic), Ok(parsed)) if parsed < time::Span::ZERO => {
-                    prop_assert_eq!(diagnostic.code, Code::new("document.negative-span"));
+                    let negative = Code::new("document.negative-span");
+                    prop_assert_eq!(diagnostic.code, negative);
                 }
                 (Err(diagnostic), Err(error)) => {
                     prop_assert_eq!(diagnostic.code, Code::new("document.bad-span"));
@@ -1147,8 +1158,13 @@ mod tests {
                         diagnostic.message,
                         format!("cannot read the span {text:?}: {error}")
                     );
-                    // The fix is the error's, with each span quoted.
-                    prop_assert_eq!(diagnostic.fix.replace('"', ""), error.fix());
+                    // The fix is the error's, with each span quoted, but a long span
+                    // gets the range of zero or more.
+                    let fix = match error {
+                        time::Error::Long => "Use a span from 0s to 106751d",
+                        error => error.fix(),
+                    };
+                    prop_assert_eq!(diagnostic.fix.replace('"', ""), fix);
                 }
                 (read, parsed) => {
                     prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
@@ -1462,7 +1478,9 @@ mod tests {
             fn gives_labels_only_for_their_count(count in 0..4_usize) {
                 let offsets: Vec<u32> = (1..).take(count).collect();
                 let block = labeled(&offsets);
-                let at = |n: usize| block.labels.get(n).map_or(block.keyword_span, |l| l.span);
+                let at = |n: usize| {
+                    block.labels.get(n).map_or(block.keyword_span, |l| l.span)
+                };
                 prop_assert_eq!(labels::<0>(&block, String::new()).is_ok(), count == 0);
                 prop_assert_eq!(labels::<2>(&block, String::new()).is_ok(), count == 2);
                 if let Err(refused) = labels::<1>(&block, String::new()) {
