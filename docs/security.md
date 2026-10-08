@@ -97,7 +97,8 @@ state on `main`.
   spoofs it, shares the peer's NAT, or is in the peer's IPv6 /64) takes that peer's
   resets, and the peer then ends at its idle timeout; peers that share an address
   share 50 resets a second on each shard. One ID is enough, and a peer whose dial
-  completes gets new IDs with no limit: noq-proto issues one for each ID it retires.
+  completes gets new IDs with no limit: noq-proto issues a new ID each time the peer
+  retires one.
 - Open: #620 (a stop after the peer's reset gives the peer the stream's window twice,
   so a peer grows the connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
